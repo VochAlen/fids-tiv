@@ -834,6 +834,13 @@ const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean)
   console.log(`[FILTER] ===== ${isArrivals ? 'ARRIVALS' : 'DEPARTURES'} at ${now.toLocaleTimeString()} =====`)
   
   const result = flights.filter((flight) => {
+    // 🔥 DODATO: IZBACI LETOVE SA BROJEM "ZZZ" ili "Z"
+    const flightNumber = flight.FlightNumber?.toUpperCase() || ""
+    if (flightNumber === "ZZZ" || flightNumber === "Z" || flightNumber === "ZZ") {
+      console.log(`[FILTER] Skipping ${flight.FlightNumber} (General Aviation / test flight)`)
+      return false
+    }
+    
     const isArrived = checkStatus.isArrived(flight)
     const isDeparted = checkStatus.isDeparted(flight)
 
@@ -860,7 +867,6 @@ const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean)
   console.log(`[FILTER] Result: ${result.length}/${flights.length} kept`)
   return result
 }, [])
-
   // ── Heartbeat monitor ───────────────────────────────────────
   useEffect(() => {
     const update = () => { lastHeartbeat.current = Date.now() }
