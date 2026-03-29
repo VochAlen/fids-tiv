@@ -273,10 +273,10 @@ const parseDepartureTimeLocal = (timeString: string): Date | null => {
     const now = new Date()
     const d = new Date(now)
     d.setHours(hours, minutes, 0, 0)
-    const SIX_HOURS_MS = 6 * 60 * 60 * 1_000
-    if (now.getTime() - d.getTime() > SIX_HOURS_MS) {
-      d.setDate(d.getDate() + 1)
-    }
+    
+    // 🔥 UKLONI SVE LOGIKE ZA DODAVANJE DANA
+    // Vrijeme je uvijek današnje
+    
     return d
   } catch {
     return null
