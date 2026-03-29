@@ -356,7 +356,9 @@ const checkStatus = {
   isOnTime: (f: Flight) => /(on time|na vrijeme)/i.test(f.StatusEN),
   isDiverted: (f: Flight) => /(diverted|preusmjeren)/i.test(f.StatusEN),
   isCheckInOpen: (f: Flight) => /(check.?in)/i.test(f.StatusEN),
-  isArrived: (f: Flight) => /(arrived|landed|sletio)/i.test(f.StatusEN),
+  // 🔥 POPRAVLJENO: prepoznaje "Arrived", "Arrived at 12:47", "Landed", "Sletio", itd.
+  isArrived: (f: Flight) => /arrived|landed|sletio|sletjelo|dolazak|stigao/i.test(f.StatusEN),
+  isDeparted: (f: Flight) => /departed|poletio|take off/i.test(f.StatusEN),
 }
 
 // ============================================================
