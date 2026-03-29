@@ -829,33 +829,37 @@ function FlightBoard(): JSX.Element {
     []
   )
 
-  const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
-    const now = new Date()
-    return flights.filter((flight) => {
-      const status = flight.StatusEN?.toLowerCase() || ""
-      const isArrived = checkStatus.isArrived(flight)
-      const isDeparted =
-        !checkStatus.isDelayed(flight) &&
-        (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
+const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
+  const now = new Date()
+  console.log(`[FILTER] ===== ${isArrivals ? 'ARRIVALS' : 'DEPARTURES'} at ${now.toLocaleTimeString()} =====`)
+  
+  const result = flights.filter((flight) => {
+    const isArrived = checkStatus.isArrived(flight)
+    const isDeparted = checkStatus.isDeparted(flight)
 
-      if (!isArrived && !isDeparted) return true
+    if (!isArrived && !isDeparted) return true
 
-      const timeStr =
-        flight.EstimatedDepartureTime ||
-        flight.ScheduledDepartureTime ||
-        flight.ActualDepartureTime
-      if (!timeStr) return !isArrived && !isDeparted
+    // Za dolaske koristi Aktuelno (ActualDepartureTime)
+    const timeStr = flight.ActualDepartureTime || flight.EstimatedDepartureTime || flight.ScheduledDepartureTime
+    if (!timeStr) return false
 
-      const flightTime = parseDepartureTimeLocal(timeStr)
-      if (!flightTime) return false
+    const flightTime = parseDepartureTimeLocal(timeStr)
+    if (!flightTime) return false
 
-      const minutesDiff = Math.floor((now.getTime() - flightTime.getTime()) / 60_000)
-
-      if (isArrivals && isArrived) return minutesDiff <= 20
-      if (!isArrivals && isDeparted) return minutesDiff <= 20
-      return true
-    })
-  }, [])
+    const minutesDiff = Math.floor((now.getTime() - flightTime.getTime()) / 60_000)
+    
+    let shouldKeep = true
+    if (isArrivals && isArrived) {
+      shouldKeep = minutesDiff <= 20
+      console.log(`[ARRIVAL] ${flight.FlightNumber}: status="${flight.StatusEN}", actual=${timeStr}, diff=${minutesDiff}min, KEEP=${shouldKeep}`)
+    }
+    
+    return shouldKeep
+  })
+  
+  console.log(`[FILTER] Result: ${result.length}/${flights.length} kept`)
+  return result
+}, [])
 
   // ── Heartbeat monitor ───────────────────────────────────────
   useEffect(() => {
