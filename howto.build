@@ -1,0 +1,8 @@
+# 1. Prvo napravite produkcijski build Next.js-a
+npm run build
+
+# 2. Zatim napravite Windows installer
+npm run dist:win
+
+# Ili za 32-bitnu verziju
+npm run dist:win32

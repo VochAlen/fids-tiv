@@ -1,0 +1,920 @@
+'use client';
+
+import { useEffect, useState, useCallback, useMemo, memo } from 'react';
+import type { Flight } from '@/types/flight';
+import { fetchFlightData, getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
+import { AlertCircle, Info, Plane, Clock, MapPin, Users, Luggage, DoorOpen, Cloud } from 'lucide-react';
+import WeatherIcon from '@/components/weather-icon';
+import { useWeather } from '@/hooks/use-weather';
+
+// ============================================================================
+// CONSTANTS & CONFIGURATION
+// ============================================================================
+const COLOR_CONFIG = {
+  arrivals: {
+    background: "bg-gradient-to-br from-blue-950 via-blue-900 to-blue-950",
+    accent: "bg-cyan-400",
+    header: "bg-white",
+    title: "text-white",
+    subtitle: "text-cyan-200",
+    border: "border-cyan-400",
+  },
+  departures: {
+    background: "bg-gradient-to-br from-[#490029] via-[#7D185E] to-[#390018]",
+    accent: "bg-purple-500",
+    header: "bg-yellow-400",
+    title: "text-yellow-400",
+    subtitle: "text-purple-200",
+    border: "border-purple-500",
+  },
+};
+
+const LANGUAGE_CONFIG = {
+  en: {
+    arrivals: "ARRIVALS",
+    departures: "DEPARTURES",
+    realTimeInfo: "Real-time flight information",
+    incomingFlights: "Incoming flights",
+    outgoingFlights: "Outgoing flights",
+    tableHeaders: {
+      scheduled: "Scheduled",
+      estimated: "Estimated",
+      flight: "Flight",
+      from: "From",
+      destination: "Destination",
+      weather: "Weather",
+      terminal: "Ter.",
+      checkIn: "Check-In",
+      gate: "Gate",
+      status: "Status",
+      baggageBelt: "Baggage Belt",
+    },
+  },
+  bs: {
+    arrivals: "DOLASCI",
+    departures: "POLASCI",
+    realTimeInfo: "Informacije o letovima u realnom vremenu",
+    incomingFlights: "Dolazni letovi",
+    outgoingFlights: "Odlazni letovi",
+    tableHeaders: {
+      scheduled: "Planirano",
+      estimated: "Očekivano",
+      flight: "Let",
+      from: "Od",
+      destination: "Destinacija",
+      weather: "Vrijeme",
+      terminal: "Ter.",
+      checkIn: "Check-In",
+      gate: "Izlaz",
+      status: "Status",
+      baggageBelt: "Traka za prtljag",
+    },
+  },
+};
+
+const SECURITY_MESSAGES = [
+  {
+    text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •",
+    language: "en"
+  },
+  {
+    text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •",
+    language: "cnr"
+  }
+];
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+const getFlightawareLogoURL = (icaoCode: string): string => {
+  if (!icaoCode) return "https://via.placeholder.com/180x120?text=No+Logo";
+  return `https://www.flightaware.com/images/airline_logos/180px/${icaoCode}.png`;
+};
+
+const placeholderImage = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo=";
+
+const formatTime = (timeString: string): string => {
+  if (!timeString) return "";
+  const cleanTime = timeString.replace(":", "");
+  if (cleanTime.length === 4) {
+    return `${cleanTime.substring(0, 2)}:${cleanTime.substring(2, 4)}`;
+  }
+  return timeString;
+};
+
+// ============================================================================
+// MEMOIZED COMPONENTS
+// ============================================================================
+const LEDIndicator = memo(({ 
+  color, 
+  isActive,
+  size = "w-3 h-3"
+}: { 
+  color: "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime"; 
+  isActive: boolean;
+  size?: string;
+}) => {
+  const colors = {
+    blue: isActive ? "bg-blue-400 shadow-lg shadow-blue-400/50" : "bg-blue-900",
+    green: isActive ? "bg-green-400 shadow-lg shadow-green-400/50" : "bg-green-900",
+    orange: isActive ? "bg-orange-400 shadow-lg shadow-orange-400/50" : "bg-orange-900",
+    red: isActive ? "bg-red-400 shadow-lg shadow-red-400/50" : "bg-red-900",
+    yellow: isActive ? "bg-yellow-400 shadow-lg shadow-yellow-400/50" : "bg-yellow-900",
+    cyan: isActive ? "bg-cyan-400 shadow-lg shadow-cyan-400/50" : "bg-cyan-900",
+    purple: isActive ? "bg-purple-400 shadow-lg shadow-purple-400/50" : "bg-purple-900",
+    lime: isActive ? "bg-lime-400 shadow-lg shadow-lime-400/50" : "bg-lime-900",
+  };
+  
+  return <div className={`${size} rounded-full ${colors[color]} transition-all duration-200`} />;
+});
+LEDIndicator.displayName = 'LEDIndicator';
+
+const WeatherDisplay = memo(({ flight, isArrival }: { flight: Flight; isArrival: boolean }) => {
+  const destination = useMemo(() => ({
+    cityName: flight.DestinationCityName,
+    airportCode: flight.DestinationAirportCode,
+    airportName: flight.DestinationAirportName,
+  }), [flight.DestinationCityName, flight.DestinationAirportCode, flight.DestinationAirportName]);
+
+  const weather = useWeather(destination, 0);
+
+  if (weather.loading) {
+    return (
+      <div className="flex items-center justify-center w-full h-full">
+        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (weather.error || !weather.weatherCode || weather.temperature == null) {
+    return (
+      <div className="flex items-center justify-center w-full h-full">
+        <Cloud className="w-5 h-5 text-white/30" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-center w-full h-full">
+      <WeatherIcon 
+        code={weather.weatherCode} 
+        temperature={weather.temperature}
+        size={18}
+        textSize={24}
+      />
+    </div>
+  );
+});
+WeatherDisplay.displayName = 'WeatherDisplay';
+
+const CloseButton = memo(({ onClick }: { onClick: () => void }) => (
+  <button
+    onClick={onClick}
+    className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 active:bg-black/80 text-white shadow-2xl cursor-pointer z-50 transition-all duration-200 hover:scale-110 active:scale-95 select-none border-2 border-white/20"
+    title="Close App"
+  >
+    <span className="text-2xl font-bold text-white leading-none flex items-center justify-center w-full h-full pointer-events-none">
+      ×
+    </span>
+  </button>
+));
+CloseButton.displayName = 'CloseButton';
+
+const LoadingSpinner = memo(({ colors }: { colors: typeof COLOR_CONFIG.arrivals }) => (
+  <div className="text-center p-8 h-full flex items-center justify-center">
+    <div className="inline-flex items-center gap-4">
+      <div className={`w-8 h-8 border-4 ${colors.border} border-t-transparent rounded-full animate-spin`} />
+      <span className="text-2xl text-white font-semibold">Loading flight information...</span>
+    </div>
+  </div>
+));
+LoadingSpinner.displayName = 'LoadingSpinner';
+
+const EmptyState = memo(({ title, colors }: { title: string; colors: typeof COLOR_CONFIG.arrivals }) => (
+  <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
+    <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
+    <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
+  </div>
+));
+EmptyState.displayName = 'EmptyState';
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+export default function CombinedPage() {
+  // State management
+  const [arrivals, setArrivals] = useState<Flight[]>([]);
+  const [departures, setDepartures] = useState<Flight[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [showArrivals, setShowArrivals] = useState<boolean>(true);
+  const [lastUpdate, setLastUpdate] = useState<string>("");
+  const [currentTime, setCurrentTime] = useState<string>("");
+  const [ledState, setLedState] = useState<boolean>(false);
+  const [currentLanguageIndex, setCurrentLanguageIndex] = useState<number>(0);
+  const [currentMessageIndex, setCurrentMessageIndex] = useState<number>(0);
+
+  // Memoized values
+  const currentColors = useMemo(() => 
+    showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures, 
+    [showArrivals]
+  );
+
+  const currentLanguage = useMemo(() => {
+    const languages = Object.keys(LANGUAGE_CONFIG);
+    return LANGUAGE_CONFIG[languages[currentLanguageIndex] as keyof typeof LANGUAGE_CONFIG];
+  }, [currentLanguageIndex]);
+
+  const title = useMemo(() => 
+    showArrivals ? currentLanguage.arrivals : currentLanguage.departures, 
+    [showArrivals, currentLanguage]
+  );
+
+  const subtitle = useMemo(() => 
+    showArrivals ? currentLanguage.incomingFlights : currentLanguage.outgoingFlights, 
+    [showArrivals, currentLanguage]
+  );
+
+  // Optimized flight processing
+  const sortFlightsByScheduledTime = useCallback((flights: Flight[]): Flight[] => {
+    return [...flights].sort((a, b) => {
+      const timeA = a.ScheduledDepartureTime || "99:99";
+      const timeB = b.ScheduledDepartureTime || "99:99";
+      return timeA.localeCompare(timeB);
+    });
+  }, []);
+
+  const filterArrivedFlights = useCallback((allFlights: Flight[]): Flight[] => {
+    const now = new Date();
+    const isArrived = (status: string): boolean =>
+      status.toLowerCase().includes("arrived") ||
+      status.toLowerCase().includes("sletio") ||
+      status.toLowerCase().includes("landed");
+
+    const getFlightDateTime = (flight: Flight): Date | null => {
+      const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
+      if (!timeStr) return null;
+      const cleanTime = timeStr.replace(":", "");
+      if (cleanTime.length === 4) {
+        const [hours, minutes] = [cleanTime.substring(0, 2), cleanTime.substring(2, 4)].map(Number);
+        const flightDate = new Date(now);
+        flightDate.setHours(hours, minutes, 0, 0);
+        return flightDate;
+      }
+      return null;
+    };
+
+    const arrivedFlights: Flight[] = [];
+    const activeFlights: Flight[] = [];
+
+    allFlights.forEach((flight) => {
+      if (isArrived(flight.StatusEN)) {
+        arrivedFlights.push(flight);
+      } else {
+        activeFlights.push(flight);
+      }
+    });
+
+    // Only keep recent arrived flights (last 15 minutes)
+    const recentArrivedFlights = arrivedFlights.filter((flight) => {
+      const flightTime = getFlightDateTime(flight);
+      const fifteenMinutesAfter = flightTime ? new Date(flightTime.getTime() + 15 * 60 * 1000) : null;
+      return fifteenMinutesAfter && fifteenMinutesAfter >= now;
+    });
+
+    return sortFlightsByScheduledTime([...activeFlights, ...recentArrivedFlights]);
+  }, [sortFlightsByScheduledTime]);
+
+  // Status check functions
+  const statusChecks = useMemo(() => ({
+    isDelayed: (f: Flight) => f.StatusEN.toLowerCase().includes("delay") || f.StatusEN.toLowerCase().includes("kasni"),
+    isBoarding: (f: Flight) => f.StatusEN.toLowerCase().includes("boarding") || f.StatusEN.toLowerCase().includes("gate open"),
+    isProcessing: (f: Flight) => f.StatusEN.toLowerCase().includes("processing"),
+    isEarly: (f: Flight) => f.StatusEN.toLowerCase().includes("earlier") || f.StatusEN.toLowerCase().includes("ranije"),
+    isCancelled: (f: Flight) => f.StatusEN.toLowerCase().includes("cancelled") || f.StatusEN.toLowerCase().includes("otkazan"),
+    isOnTime: (f: Flight) => f.StatusEN.toLowerCase().includes("on time") || f.StatusEN.toLowerCase().includes("na vrijeme"),
+    isDiverted: (f: Flight) => f.StatusEN.toLowerCase().includes("diverted") || f.StatusEN.toLowerCase().includes("preusmjeren"),
+    isCheckInOpen: (f: Flight) => f.StatusEN.toLowerCase().includes("check in") || f.StatusEN.toLowerCase().includes("check-in"),
+    isArrived: (f: Flight) => f.StatusEN.toLowerCase().includes("arrived") || f.StatusEN.toLowerCase().includes("landed") || f.StatusEN.toLowerCase().includes("sletio"),
+  }), []);
+
+  // Effects
+  useEffect(() => {
+    const updateTime = () => {
+      setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
+    };
+    
+    updateTime();
+    const timeInterval = setInterval(updateTime, 1000);
+    return () => clearInterval(timeInterval);
+  }, []);
+
+  useEffect(() => {
+    const ledInterval = setInterval(() => setLedState(prev => !prev), 500);
+    return () => clearInterval(ledInterval);
+  }, []);
+
+  useEffect(() => {
+    const languageInterval = setInterval(() => {
+      setCurrentLanguageIndex(prev => (prev + 1) % Object.keys(LANGUAGE_CONFIG).length);
+    }, 4000);
+    return () => clearInterval(languageInterval);
+  }, []);
+
+  useEffect(() => {
+    const messageInterval = setInterval(() => {
+      setCurrentMessageIndex(prev => (prev + 1) % SECURITY_MESSAGES.length);
+    }, 20000);
+    return () => clearInterval(messageInterval);
+  }, []);
+
+  // Flight data loading with cleanup
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadFlights = async (): Promise<void> => {
+      if (!isMounted) return;
+
+      try {
+        setLoading(true);
+        const data = await fetchFlightData();
+        
+        if (!isMounted) return;
+
+        const filteredArrivals = filterArrivedFlights(data.arrivals).slice(0, 9);
+        const filteredDepartures = getUniqueDeparturesWithDeparted(data.departures).slice(0, 9);
+        
+        setArrivals(filteredArrivals);
+        setDepartures(filteredDepartures);
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"));
+      } catch (error) {
+        console.error("Failed to load flights:", error);
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadFlights();
+    const fetchInterval = setInterval(loadFlights, 60000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(fetchInterval);
+    };
+  }, [filterArrivedFlights]);
+
+  useEffect(() => {
+    const switchInterval = setInterval(() => setShowArrivals(prev => !prev), 20000);
+    return () => clearInterval(switchInterval);
+  }, []);
+
+  // Table configuration
+  const tableHeaders = useMemo(() => {
+    if (showArrivals) {
+      return [
+        { label: currentLanguage.tableHeaders.scheduled, width: "180px", icon: Clock },
+        { label: currentLanguage.tableHeaders.estimated, width: "180px", icon: Clock },
+        { label: currentLanguage.tableHeaders.flight, width: "240px", icon: Plane },
+        { label: currentLanguage.tableHeaders.from, width: "380px", icon: MapPin },
+        { label: currentLanguage.tableHeaders.weather, width: "120px", icon: Cloud },
+        { label: currentLanguage.tableHeaders.status, width: "380px", icon: Info },
+        { label: currentLanguage.tableHeaders.baggageBelt, width: "200px", icon: Luggage },
+      ];
+    } else {
+      return [
+        { label: currentLanguage.tableHeaders.scheduled, width: "180px", icon: Clock },
+        { label: currentLanguage.tableHeaders.estimated, width: "180px", icon: Clock },
+        { label: currentLanguage.tableHeaders.flight, width: "240px", icon: Plane },
+        { label: currentLanguage.tableHeaders.destination, width: "380px", icon: MapPin },
+        { label: currentLanguage.tableHeaders.terminal, width: "120px", icon: DoorOpen },
+        { label: currentLanguage.tableHeaders.checkIn, width: "280px", icon: Users },
+        { label: currentLanguage.tableHeaders.gate, width: "160px", icon: DoorOpen },
+        { label: currentLanguage.tableHeaders.status, width: "360px", icon: Info },
+      ];
+    }
+  }, [showArrivals, currentLanguage]);
+
+  // Flight data
+  const currentFlights = useMemo(() => 
+    showArrivals ? arrivals : departures, 
+    [showArrivals, arrivals, departures]
+  );
+
+  const sortedCurrentFlights = useMemo(() => 
+    sortFlightsByScheduledTime(currentFlights).slice(0, 9), 
+    [currentFlights, sortFlightsByScheduledTime]
+  );
+
+  // Event handlers
+  const handleImageError = useCallback((e: React.SyntheticEvent<HTMLImageElement>): void => {
+    e.currentTarget.src = placeholderImage;
+  }, []);
+
+  const handleClose = useCallback(() => {
+    if ((window as any).electronAPI?.quitApp) {
+      (window as any).electronAPI.quitApp();
+      return;
+    }
+    if ((window as any).chrome?.webview) {
+      try { 
+        (window as any).chrome.webview.postMessage("APP_QUIT"); 
+        return; 
+      } catch (e) {}
+    }
+    window.postMessage({ type: "ELECTRON_APP_QUIT" }, "*");
+    window.location.reload();
+  }, []);
+
+  const formatTerminal = useCallback((terminal?: string): string => {
+    if (!terminal) return "-";
+    return terminal.replace("T0", "T").replace("T", "T ");
+  }, []);
+
+  return (
+    <div className={`h-screen ${currentColors.background} text-white p-4 transition-colors duration-700 flex flex-col`}>
+      <CloseButton onClick={handleClose} />
+
+      {/* Header */}
+      <div className="w-full mx-auto mb-4 flex-shrink-0">
+        <div className="flex justify-between items-center gap-4">
+          <div className="flex items-center gap-6">
+            <div className={`p-4 ${currentColors.accent} rounded-3xl shadow-2xl`}>
+              <Plane className="w-16 h-16 text-black" />
+            </div>
+            <div>
+              <h1 className={`text-[6rem] font-black ${currentColors.title} leading-none tracking-tight drop-shadow-2xl`}>
+                {title}
+              </h1>
+              <p className={`${currentColors.subtitle} text-2xl mt-2 font-semibold`}>{subtitle}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-right">
+              <div className="text-[7rem] font-black text-white drop-shadow-2xl leading-none">
+                {currentTime || "--:--"}
+              </div>
+            </div>
+            <div className={`w-6 h-6 rounded-full ${currentColors.accent} animate-pulse shadow-2xl`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Flight Board */}
+      <div className="w-full mx-auto flex-1 min-h-0">
+        {loading && sortedCurrentFlights.length === 0 ? (
+          <LoadingSpinner colors={currentColors} />
+        ) : (
+          <div className="bg-black/40 backdrop-blur-xl rounded-3xl border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col">
+            {/* Table Header */}
+            <div className={`flex gap-2 p-2 ${currentColors.header} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
+              {tableHeaders.map((header) => {
+                const IconComponent = header.icon;
+                return (
+                  <div
+                    key={header.label}
+                    className="flex items-stretch justify-center gap-1 px-1 h-full"
+                    style={{ width: header.width }}
+                  >
+                    <IconComponent className="w-5 h-5 self-center" />
+                    <span className="truncate self-center">{header.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Flight Rows */}
+            <div className="flex-1 overflow-y-auto">
+              {sortedCurrentFlights.length === 0 ? (
+                <EmptyState title={title} colors={currentColors} />
+              ) : (
+                <FlightRows 
+                  flights={sortedCurrentFlights}
+                  showArrivals={showArrivals}
+                  ledState={ledState}
+                  statusChecks={statusChecks}
+                  onImageError={handleImageError}
+                  formatTerminal={formatTerminal}
+                />
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="w-full mx-auto mt-4 text-center flex-shrink-0">
+        <div className="text-white/70 text-base py-2">
+          <div className="overflow-hidden relative bg-black/30 rounded-full py-2 border-2 border-white/10">
+            <div className="whitespace-nowrap">
+              <span className={`${currentColors.title} font-bold text-xl mx-4`}>
+                {SECURITY_MESSAGES[currentMessageIndex].text}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Global Styles */}
+      <GlobalStyles />
+    </div>
+  );
+}
+
+// ============================================================================
+// OPTIMIZED SUB-COMPONENTS
+// ============================================================================
+const FlightRows = memo(({
+  flights,
+  showArrivals,
+  ledState,
+  statusChecks,
+  onImageError,
+  formatTerminal
+}: {
+  flights: Flight[];
+  showArrivals: boolean;
+  ledState: boolean;
+  statusChecks: any;
+  onImageError: (e: React.SyntheticEvent<HTMLImageElement>) => void;
+  formatTerminal: (terminal?: string) => string;
+}) => {
+  return (
+    <>
+      {flights.map((flight, index) => (
+        <FlightRow
+          key={`${flight.FlightNumber}-${index}-${flight.ScheduledDepartureTime}`}
+          flight={flight}
+          index={index}
+          showArrivals={showArrivals}
+          ledState={ledState}
+          statusChecks={statusChecks}
+          onImageError={onImageError}
+          formatTerminal={formatTerminal}
+        />
+      ))}
+    </>
+  );
+});
+FlightRows.displayName = 'FlightRows';
+
+const FlightRow = memo(({
+  flight,
+  index,
+  showArrivals,
+  ledState,
+  statusChecks,
+  onImageError,
+  formatTerminal
+}: {
+  flight: Flight;
+  index: number;
+  showArrivals: boolean;
+  ledState: boolean;
+  statusChecks: any;
+  onImageError: (e: React.SyntheticEvent<HTMLImageElement>) => void;
+  formatTerminal: (terminal?: string) => string;
+}) => {
+  const rowColorClass = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
+  const flightawareLogoURL = getFlightawareLogoURL(flight.AirlineICAO);
+  
+  const statusPillStyle = useMemo(() => 
+    getStatusPillStyle(flight, showArrivals, statusChecks, ledState),
+    [flight, showArrivals, statusChecks, ledState]
+  );
+
+  return (
+    <div className={`flex gap-2 p-1 transition-all duration-300 hover:bg-white/20 border-b border-white/10 ${rowColorClass}`}
+         style={{ minHeight: "68px" }}>
+      
+      {/* Scheduled Time */}
+      <div className="flex items-center justify-center" style={{ width: "180px" }}>
+        <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
+          {flight.ScheduledDepartureTime ? formatTime(flight.ScheduledDepartureTime) : "--:--"}
+        </div>
+      </div>
+
+      {/* Estimated Time */}
+      <div className="flex items-center justify-center" style={{ width: "180px" }}>
+        {flight.EstimatedDepartureTime && flight.EstimatedDepartureTime !== flight.ScheduledDepartureTime ? (
+          <div className="text-[2.5rem] font-black text-yellow-400 drop-shadow-lg">
+            {formatTime(flight.EstimatedDepartureTime)}
+          </div>
+        ) : (
+          <div className="text-2xl text-white/30 font-bold">-</div>
+        )}
+      </div>
+
+      {/* Flight Info */}
+      <div className="flex items-center gap-3" style={{ width: "240px" }}>
+        <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl">
+          <img
+            src={flightawareLogoURL}
+            alt={`${flight.AirlineName} logo`}
+            className="object-contain w-full h-full"
+            onError={onImageError}
+          />
+        </div>
+        <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+        {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+          <div className="text-sm text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
+        )}
+      </div>
+
+      {showArrivals ? (
+        <ArrivalFlightContent 
+          flight={flight} 
+          statusPillStyle={statusPillStyle}
+        />
+      ) : (
+        <DepartureFlightContent 
+          flight={flight}
+          statusPillStyle={statusPillStyle}
+          formatTerminal={formatTerminal}
+        />
+      )}
+    </div>
+  );
+});
+FlightRow.displayName = 'FlightRow';
+
+const ArrivalFlightContent = memo(({ 
+  flight, 
+  statusPillStyle 
+}: { 
+  flight: Flight; 
+  statusPillStyle: any;
+}) => (
+  <>
+    {/* From */}
+    <div className="flex items-center" style={{ width: "380px" }}>
+      <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
+        {flight.DestinationCityName || flight.DestinationAirportName}
+      </div>
+    </div>
+
+    {/* Weather */}
+    <div className="flex items-center justify-center" style={{ width: "120px" }}>
+      <WeatherDisplay flight={flight} isArrival={true} />
+    </div>
+
+    {/* Status */}
+    <div className="flex items-center justify-center" style={{ width: "380px" }}>
+      <StatusPill statusPillStyle={statusPillStyle} />
+    </div>
+
+    {/* Baggage */}
+    <div className="flex items-center justify-center" style={{ width: "200px" }}>
+      <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-4 rounded-xl border-2 border-white/20 shadow-xl">
+        {flight.BaggageReclaim || "-"}
+      </div>
+    </div>
+  </>
+));
+ArrivalFlightContent.displayName = 'ArrivalFlightContent';
+
+const DepartureFlightContent = memo(({ 
+  flight, 
+  statusPillStyle,
+  formatTerminal
+}: { 
+  flight: Flight; 
+  statusPillStyle: any;
+  formatTerminal: (terminal?: string) => string;
+}) => (
+  <>
+    {/* Destination */}
+    <div className="flex items-center" style={{ width: "380px" }}>
+      <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
+        {flight.DestinationCityName || flight.DestinationAirportName}
+      </div>
+    </div>
+
+    {/* Terminal */}
+    <div className="flex items-center justify-center" style={{ width: "120px" }}>
+      <TerminalDisplay terminal={flight.Terminal} formatTerminal={formatTerminal} />
+    </div>
+
+    {/* Check-In */}
+    <div className="flex items-center justify-center" style={{ width: "280px" }}>
+      <CheckInDisplay checkInDesk={flight.CheckInDesk} />
+    </div>
+
+    {/* Gate */}
+    <div className="flex items-center justify-center" style={{ width: "160px" }}>
+      <GateDisplay gateNumber={flight.GateNumber} />
+    </div>
+
+    {/* Status */}
+    <div className="flex items-center justify-center" style={{ width: "360px" }}>
+      <StatusPill statusPillStyle={statusPillStyle} />
+    </div>
+  </>
+));
+DepartureFlightContent.displayName = 'DepartureFlightContent';
+
+const TerminalDisplay = memo(({ 
+  terminal, 
+  formatTerminal 
+}: { 
+  terminal?: string; 
+  formatTerminal: (terminal?: string) => string;
+}) => {
+  const terminalClass = terminal === "T1" || terminal === "T01" 
+    ? "bg-cyan-500 text-white border-cyan-300"
+    : terminal === "T2" || terminal === "T02"
+    ? "bg-orange-500 text-white border-orange-300"
+    : "bg-black/40 text-white border-white/20";
+
+  return (
+    <div className={`inline-flex items-center justify-center w-16 h-16 rounded-full font-black text-[1.8rem] shadow-xl border-4 ${terminalClass}`}>
+      {formatTerminal(terminal)}
+    </div>
+  );
+});
+TerminalDisplay.displayName = 'TerminalDisplay';
+
+const CheckInDisplay = memo(({ checkInDesk }: { checkInDesk?: string }) => (
+  checkInDesk && checkInDesk !== "-" ? (
+    <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">
+      {checkInDesk}
+    </div>
+  ) : (
+    <div className="text-[2.5rem] font-black text-white/0 bg-transparent py-2 px-3 rounded-xl border-2 border-transparent">
+      -
+    </div>
+  )
+));
+CheckInDisplay.displayName = 'CheckInDisplay';
+
+const GateDisplay = memo(({ gateNumber }: { gateNumber?: string }) => (
+  gateNumber && gateNumber !== "-" ? (
+    <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">
+      {gateNumber}
+    </div>
+  ) : (
+    <div className="text-[2.5rem] font-black text-white/0 bg-transparent py-2 px-3 rounded-xl border-2 border-transparent">
+      -
+    </div>
+  )
+));
+GateDisplay.displayName = 'GateDisplay';
+
+const StatusPill = memo(({ statusPillStyle }: { statusPillStyle: any }) => (
+  statusPillStyle.hasStatusText ? (
+    <div className={statusPillStyle.className}>
+      {statusPillStyle.showLEDs && (
+        <div className="flex items-center gap-1">
+          <LEDIndicator color={statusPillStyle.ledColor1} isActive={statusPillStyle.ledState} size="w-4 h-4" />
+          <LEDIndicator color={statusPillStyle.ledColor2} isActive={!statusPillStyle.ledState} size="w-4 h-4" />
+        </div>
+      )}
+      {statusPillStyle.statusDisplayText}
+    </div>
+  ) : (
+    <div className="text-[2rem] font-bold text-slate-300">Scheduled</div>
+  )
+));
+StatusPill.displayName = 'StatusPill';
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+function getStatusPillStyle(flight: Flight, isArrival: boolean, statusChecks: any, ledState: boolean) {
+  const {
+    isCancelled,
+    isDelayed,
+    isBoarding,
+    isProcessing,
+    isEarly,
+    isOnTime,
+    isDiverted,
+    isCheckInOpen,
+    isArrived
+  } = statusChecks;
+
+  const isCancelledFlight = isCancelled(flight);
+  const isDelayedFlight = isDelayed(flight);
+  const isBoardingFlight = !isArrival && isBoarding(flight);
+  const isProcessingFlight = isProcessing(flight);
+  const isEarlyFlight = isEarly(flight);
+  const isOnTimeFlight = isOnTime(flight);
+  const isDivertedFlight = isDiverted(flight);
+  const isCheckInOpenFlight = isCheckInOpen(flight);
+  const isArrivedFlight = isArrival && isArrived(flight);
+
+  const shouldBlink = isArrivedFlight || isCancelledFlight || isBoardingFlight;
+  const showLEDs = isBoardingFlight || isProcessingFlight || isCheckInOpenFlight || 
+                  isArrivedFlight || isCancelledFlight || isDivertedFlight || isDelayedFlight;
+
+  let backgroundColor = "bg-white/10";
+  let borderColor = "border-white/30";
+  let textColor = "text-white";
+  let blinkClass = "";
+  let ledColor1: "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime" = "blue";
+  let ledColor2: "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime" = "green";
+
+  if (isCancelledFlight) {
+    backgroundColor = "bg-red-500/20";
+    borderColor = "border-red-500/50";
+    textColor = "text-red-100";
+    ledColor1 = "red";
+    ledColor2 = "orange";
+    blinkClass = shouldBlink ? "animate-pill-blink" : "";
+  } else if (isDelayedFlight) {
+    backgroundColor = "bg-yellow-500/20";
+    borderColor = "border-yellow-500/50";
+    textColor = "text-yellow-100";
+    ledColor1 = "yellow";
+    ledColor2 = "orange";
+  } else if (isBoardingFlight) {
+    backgroundColor = "bg-cyan-500/20";
+    borderColor = "border-cyan-500/50";
+    textColor = "text-cyan-100";
+    ledColor1 = "cyan";
+    ledColor2 = "blue";
+    blinkClass = shouldBlink ? "animate-pill-blink" : "";
+  } else if (isProcessingFlight || isCheckInOpenFlight) {
+    backgroundColor = "bg-green-500/20";
+    borderColor = "border-green-500/50";
+    textColor = "text-green-100";
+    ledColor1 = "green";
+    ledColor2 = "lime";
+  } else if (isEarlyFlight) {
+    backgroundColor = "bg-purple-500/20";
+    borderColor = "border-purple-500/50";
+    textColor = "text-purple-100";
+    ledColor1 = "purple";
+    ledColor2 = "blue";
+  } else if (isDivertedFlight) {
+    backgroundColor = "bg-orange-500/20";
+    borderColor = "border-orange-500/50";
+    textColor = "text-orange-100";
+    ledColor1 = "orange";
+    ledColor2 = "red";
+  } else if (isOnTimeFlight) {
+    backgroundColor = "bg-lime-500/20";
+    borderColor = "border-lime-500/50";
+    textColor = "text-lime-100";
+    ledColor1 = "lime";
+    ledColor2 = "green";
+  } else if (isArrivedFlight) {
+    backgroundColor = "bg-green-500/20";
+    borderColor = "border-green-500/50";
+    textColor = "text-green-100";
+    ledColor1 = "green";
+    ledColor2 = "lime";
+    blinkClass = shouldBlink ? "animate-pill-blink" : "";
+  }
+
+  const statusDisplayText = isProcessingFlight ? "Check-In" :
+                           isArrivedFlight ? `Arrived at ${flight.EstimatedDepartureTime ? formatTime(flight.EstimatedDepartureTime) : formatTime(flight.ScheduledDepartureTime)}` :
+                           flight.StatusEN;
+
+  return {
+    className: `w-[90%] flex items-center justify-center gap-3 text-[2rem] font-bold rounded-2xl border-2 px-3 py-1.5 transition-all duration-300 ${backgroundColor} ${borderColor} ${textColor} ${blinkClass}`,
+    textColor,
+    ledColor1,
+    ledColor2,
+    showLEDs,
+    ledState,
+    hasStatusText: flight.StatusEN && flight.StatusEN.trim() !== "",
+    statusDisplayText
+  };
+}
+
+const GlobalStyles = memo(() => (
+  <style jsx global>{`
+    @keyframes blink { 
+      0%, 50% { opacity: 1; } 
+      51%, 100% { opacity: 0.3; } 
+    }
+    @keyframes pill-blink { 
+      0%, 50% { 
+        opacity: 1;
+        box-shadow: 0 0 15px rgba(255, 255, 255, 0.6);
+      } 
+      51%, 100% { 
+        opacity: 0.8;
+        box-shadow: 0 0 5px rgba(255, 255, 255, 0.3);
+      } 
+    }
+    @keyframes marquee {
+      0% { transform: translateX(100%); }
+      100% { transform: translateX(-100%); }
+    }
+    .animate-blink { animation: blink 800ms infinite; }
+    .animate-pill-blink { animation: pill-blink 800ms infinite; }
+    .animate-marquee {
+      animation: marquee 120s linear infinite;
+      display: inline-block;
+    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.3); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.4); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.6); }
+    html, body { overflow: hidden; margin: 0; padding: 0; height: 100vh; }
+    #__next { height: 100vh; }
+  `}</style>
+));
+GlobalStyles.displayName = 'GlobalStyles';

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="bs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FIDS TIV — Tivat Airport</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --navy:   #040d1a;
+      --deep:   #071428;
+      --mid:    #0a2040;
+      --accent: #00d4ff;
+      --gold:   #f0a500;
+      --muted:  #2a4a6a;
+      --text:   #c8dff0;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--navy);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    /* Animated grid background */
+    .grid-bg {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,212,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,0.04) 1px, transparent 1px);
+      background-size: 60px 60px;
+      animation: gridScroll 20s linear infinite;
+    }
+
+    @keyframes gridScroll {
+      from { background-position: 0 0; }
+      to   { background-position: 60px 60px; }
+    }
+
+    /* Radial glow */
+    .glow {
+      position: absolute;
+      width: 600px;
+      height: 600px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,212,255,0.07) 0%, transparent 70%);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      animation: pulse 4s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; transform: translate(-50%, -50%) scale(1); }
+      50%       { opacity: 1;   transform: translate(-50%, -50%) scale(1.1); }
+    }
+
+    /* Horizon line */
+    .horizon {
+      position: absolute;
+      bottom: 30%;
+      left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      opacity: 0.2;
+    }
+
+    /* Main content */
+    .content {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    /* IATA code */
+    .iata {
+      font-family: 'Orbitron', monospace;
+      font-size: 120px;
+      font-weight: 900;
+      letter-spacing: 24px;
+      color: transparent;
+      background: linear-gradient(180deg, #ffffff 0%, var(--accent) 60%, rgba(0,212,255,0.3) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      line-height: 1;
+      animation: fadeDown 0.8s ease forwards;
+      opacity: 0;
+      text-shadow: none;
+      filter: drop-shadow(0 0 40px rgba(0,212,255,0.4));
+    }
+
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .airport-name {
+      font-family: 'Orbitron', monospace;
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: 10px;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-top: 8px;
+      animation: fadeDown 0.8s 0.2s ease forwards;
+      opacity: 0;
+    }
+
+    .divider {
+      width: 280px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--muted), transparent);
+      margin: 32px 0;
+      animation: fadeDown 0.8s 0.3s ease forwards;
+      opacity: 0;
+    }
+
+    .fids-label {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 6px;
+      color: var(--gold);
+      text-transform: uppercase;
+      animation: fadeDown 0.8s 0.4s ease forwards;
+      opacity: 0;
+    }
+
+    /* Spinner */
+    .spinner-wrap {
+      margin-top: 48px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      animation: fadeDown 0.8s 0.5s ease forwards;
+      opacity: 0;
+    }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 2px solid var(--muted);
+      border-top: 2px solid var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .status-text {
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      letter-spacing: 4px;
+      color: var(--gold);
+      text-transform: uppercase;
+      animation: blink 2s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 0.4; }
+      50%       { opacity: 1; }
+    }
+
+    /* Bottom bar */
+    .bottom-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0; right: 0;
+      padding: 20px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid rgba(0,212,255,0.08);
+      animation: fadeDown 0.8s 0.8s ease forwards;
+      opacity: 0;
+    }
+
+    .powered-by {
+      font-size: 10px;
+      letter-spacing: 3px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .powered-by span {
+      color: var(--gold);
+      font-weight: 500;
+    }
+
+    .version {
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: var(--gold);
+    }
+
+    /* Scan line effect */
+    .scanline {
+      position: absolute;
+      top: -100%;
+      left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(0,212,255,0.3), transparent);
+      animation: scan 6s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    @keyframes scan {
+      0%   { top: -2px; opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+
+    /* Corner decorations */
+    .corner {
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-color: var(--accent);
+      border-style: solid;
+      opacity: 0.3;
+    }
+    .corner.tl { top: 24px; left: 24px; border-width: 1px 0 0 1px; }
+    .corner.tr { top: 24px; right: 24px; border-width: 1px 1px 0 0; }
+    .corner.bl { bottom: 64px; left: 24px; border-width: 0 0 1px 1px; }
+    .corner.br { bottom: 64px; right: 24px; border-width: 0 1px 1px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="grid-bg"></div>
+  <div class="glow"></div>
+  <div class="horizon"></div>
+  <div class="scanline"></div>
+
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <div class="content">
+    <div class="iata">TIV</div>
+    <div class="airport-name">Tivat International Airport</div>
+    <div class="divider"></div>
+    <div class="fids-label">Flight Information Display System</div>
+    <div class="spinner-wrap">
+      <div class="spinner"></div>
+      <div class="status-text">Initializing System..please wait</div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <div class="powered-by">Powered by <span>NAIS</span> — Split aviation data</div>
+    <div class="version">FIDS v1.0 &nbsp;|&nbsp; by Alen</div>
+  </div>
+
+</body>
+</html>
