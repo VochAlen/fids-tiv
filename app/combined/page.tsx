@@ -1179,24 +1179,24 @@ const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean)
           >
             <TableHeaders headers={tableHeaders} headerBg={currentColors.header} />
 
-            <div className="flex-1 overflow-y-auto">
-              {sortedCurrentFlights.length === 0 ? (
-                <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
-                  <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                  <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
-                </div>
-              ) : (
-                sortedCurrentFlights.map((flight, index) => (
-                  <FlightRow
-                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`}
-                    flight={flight}
-                    index={index}
-                    showArrivals={showArrivals}
-                    colorTitle={currentColors.title}
-                  />
-                ))
-              )}
-            </div>
+       <div className="flex-1 overflow-y-auto">
+  {sortedCurrentFlights.length === 0 ? (
+    <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
+      <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
+      <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
+    </div>
+  ) : (
+    sortedCurrentFlights.map((flight, index) => (
+      <FlightRow
+        key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${showArrivals ? arrivals.length : departures.length}-${index}`}
+        flight={flight}
+        index={index}
+        showArrivals={showArrivals}
+        colorTitle={currentColors.title}
+      />
+    ))
+  )}
+</div>
           </div>
         )}
       </div>
