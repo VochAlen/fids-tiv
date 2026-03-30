@@ -32,6 +32,17 @@ const MEMORY_CLEANUP_INTERVAL_MS = 30 * 60 * 1_000
 const MAX_FLIGHTS_DISPLAY = 9
 const MAX_FLIGHTS_MEMORY = 15
 
+// ✅ #5: Hard reset svakih 6 sati za Kiosk/TV aperate
+const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000 
+
+// ✅ #6: Napredni filter za privatne/biznis letove
+const HIDDEN_FLIGHT_PATTERNS = [
+  "ZZZ",   // Biznis avijacija
+  "G00",   // General Aviation
+  "PVT",   // Privatni letovi
+  "TST",   // Test flightovi
+]
+
 const COLOR_CONFIG = {
   arrivals: {
     background: "bg-gradient-to-br from-blue-950 via-blue-900 to-blue-950",
@@ -331,6 +342,7 @@ const checkStatus = {
   isArrived:      (f: Flight) => /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(f.StatusEN),
   isGoToGate:     (f: Flight) => /(go to gate)/i.test(f.StatusEN),
   isClose:        (f: Flight) => /^close$/i.test(f.StatusEN),
+  isFinalCall:    (f: Flight) => /^final call$/i.test(f.StatusEN), // ✅ #4
 }
 
 // ============================================================
@@ -349,13 +361,11 @@ function parseFlightTimeToDate(timeStr: string): Date | null {
   const hours = parseInt(clean.substring(0, 2), 10)
   const minutes = parseInt(clean.substring(2, 4), 10)
   if (isNaN(hours) || isNaN(minutes)) return null
-  
   const now = new Date()
   const d = new Date(now)
   d.setHours(hours, minutes, 0, 0)
-
-  // 🔥 ISPRAVKA: Ako je parsirano vrijeme više od 12 sati u prošlosti,
-  // pretpostavi da je to let za sutra (npr. sada je 00:15, let je bio 23:50)
+  
+  // ✅ #1: Midnight Rollover Fix
   if (d.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
     d.setDate(d.getDate() + 1)
   }
@@ -388,6 +398,10 @@ function getAutoStatus(flight: Flight): string | null {
 
   if (minsToReference < -5) return null
   if (minsToReference <= 5) return "Close"
+  
+  // ✅ #4: Dodan Final Call status
+  if (minsToReference <= 10) return "Final Call"
+  
   if (minsToReference <= 30) return "Go to Gate"
 
   const checkInTime = new Date(scheduled.getTime() - checkInLeadMin * 60 * 1000)
@@ -536,6 +550,7 @@ const getStatusPillStyle = (flight: Flight, isArrival: boolean, formatTime: (t: 
   const isArrivedFlight      = isArrival && checkStatus.isArrived(effectiveFlight)
   const isGoToGateFlight     = !isArrival && checkStatus.isGoToGate(effectiveFlight)
   const isCloseFlight        = !isArrival && checkStatus.isClose(effectiveFlight)
+  const isFinalCallFlight    = !isArrival && checkStatus.isFinalCall(effectiveFlight) // ✅ #4
 
   let statusDisplayText = effectiveFlight.StatusEN || ""
   if (isProcessingFlight) statusDisplayText = "Check-In"
@@ -554,7 +569,8 @@ const getStatusPillStyle = (flight: Flight, isArrival: boolean, formatTime: (t: 
     isCancelledFlight ||
     isBoardingFlight  ||
     isGoToGateFlight  ||
-    isCloseFlight
+    isCloseFlight     ||
+    isFinalCallFlight // ✅ #4
 
   const showLEDs =
     isBoardingFlight    ||
@@ -566,7 +582,8 @@ const getStatusPillStyle = (flight: Flight, isArrival: boolean, formatTime: (t: 
     isDelayedFlight     ||
     isEarlyFlight       ||
     isGoToGateFlight    ||
-    isCloseFlight
+    isCloseFlight       ||
+    isFinalCallFlight   // ✅ #4
 
   type LEDColor = "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime"
   let bg         = "bg-white/10"
@@ -584,6 +601,12 @@ const getStatusPillStyle = (flight: Flight, isArrival: boolean, formatTime: (t: 
   } else if (isCloseFlight) {
     bg = "bg-red-600/30"; border = "border-red-500/70"; text = "text-red-100"
     led1 = "red"; led2 = "orange"
+    blinkClass = "animate-pill-blink-fast"
+
+  // ✅ #4: Final Call stilovi
+  } else if (isFinalCallFlight) {
+    bg = "bg-orange-600/30"; border = "border-orange-500/70"; text = "text-orange-100"
+    led1 = "orange"; led2 = "red"
     blinkClass = "animate-pill-blink-fast"
 
   } else if (isGoToGateFlight) {
@@ -665,6 +688,10 @@ const FlightRow = memo(
     const handleImgError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
       e.currentTarget.src = PLACEHOLDER_IMAGE
     }, [])
+
+    // ✅ #3: Gate Change Highlighting logika
+    const gateChangedAt = (flight as any)._gateChangedAt
+    const isGateChanged = gateChangedAt && (Date.now() - gateChangedAt < 15000)
 
     const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.3rem]"
     const pillClassName = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
@@ -774,10 +801,13 @@ const FlightRow = memo(
               )}
             </div>
 
-            {/* Gate */}
+            {/* Gate — ✅ #3: Sa Gate Change Highlighting */}
             <div className="flex items-center justify-center" style={{ width: "180px" }}>
               {flight.GateNumber && flight.GateNumber !== "-" ? (
-                <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">
+                <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
+                  ${isGateChanged 
+                    ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" 
+                    : "text-white bg-black/40 border-white/20"}`}>
                   {flight.GateNumber}
                 </div>
               ) : (
@@ -811,6 +841,7 @@ const FlightRow = memo(
     prev.flight.FlightNumber            === next.flight.FlightNumber            &&
     prev.flight.StatusEN                === next.flight.StatusEN                &&
     (prev.flight as any)._autoStatusTick === (next.flight as any)._autoStatusTick &&
+    (prev.flight as any)._gateChangedAt === (next.flight as any)._gateChangedAt &&
     prev.flight.EstimatedDepartureTime  === next.flight.EstimatedDepartureTime  &&
     prev.flight.ScheduledDepartureTime  === next.flight.ScheduledDepartureTime  &&
     prev.flight.GateNumber              === next.flight.GateNumber              &&
@@ -846,6 +877,9 @@ function FlightBoard(): JSX.Element {
 
   const isMountedRef   = useRef(true)
   const lastHeartbeat  = useRef(Date.now())
+  
+  // ✅ #3: Ref za praćenje promjene Gate-ova
+  const prevGatesRef = useRef<Record<string, string>>({})
 
   const currentColors = useMemo(
     () => (showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures),
@@ -857,6 +891,19 @@ function FlightBoard(): JSX.Element {
       setAutoStatusTick((t) => t + 1)
     }, 60_000)
     return () => clearInterval(id)
+  }, [])
+
+  // ✅ #5: Hard Reset za Kiosk/TV svakih 6 sati
+  useEffect(() => {
+    const id = setTimeout(() => {
+      console.log("🔄 Scheduled hard reset (6h)...")
+      if ((window as any).electronAPI?.restartApp) {
+        ;(window as any).electronAPI.restartApp()
+      } else {
+        window.location.reload()
+      }
+    }, HARD_RESET_INTERVAL_MS)
+    return () => clearTimeout(id)
   }, [])
 
   const formatTime = useCallback((timeString: string): string => {
@@ -876,8 +923,9 @@ function FlightBoard(): JSX.Element {
   const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
     const now = new Date()
     return flights.filter((flight) => {
-      // ── Sakrij biznis avijaciju (ZZZ) ──────────────────────
-      if ((flight.FlightNumber || "").toUpperCase().includes("ZZZ")) return false
+      // ✅ #6: Napredni filter za skrivanje privatnih letova
+      const flightNum = (flight.FlightNumber || "").toUpperCase()
+      if (HIDDEN_FLIGHT_PATTERNS.some(p => flightNum.includes(p))) return false
 
       const status    = flight.StatusEN?.toLowerCase() || ""
       const isArrived = checkStatus.isArrived(flight)
@@ -1027,12 +1075,29 @@ function FlightBoard(): JSX.Element {
         if (!isMountedRef.current || !data) return
 
         const filteredArrivals   = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
-        const filteredDepartures = getUniqueDeparturesWithDeparted(
+        const rawDepartures = getUniqueDeparturesWithDeparted(
           filterRecentFlights(data.departures, false)
         ).slice(0, MAX_FLIGHTS_DISPLAY)
 
+        // ✅ #3: Detekcija promjene Gate-a
+        const departuresWithGateChange = rawDepartures.map(f => {
+          const flightClone = { ...f }
+          const flightNum = f.FlightNumber ?? ""
+          const prevGate = prevGatesRef.current[flightNum]
+          
+          if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
+            (flightClone as any)._gateChangedAt = Date.now()
+          }
+          
+          if (f.GateNumber && f.GateNumber !== "-") {
+            prevGatesRef.current[flightNum] = f.GateNumber
+          }
+          
+          return flightClone
+        })
+
         setArrivals(filteredArrivals)
-        setDepartures(filteredDepartures)
+        setDepartures(departuresWithGateChange)
         setLastUpdate(new Date().toLocaleTimeString("en-GB"))
 
         if (usedCache) {
@@ -1226,12 +1291,16 @@ function FlightBoard(): JSX.Element {
         )}
       </div>
 
-      <div className="w-full mx-auto mt-4 flex-shrink-0">
-        <div className="overflow-hidden relative bg-black/30 rounded-full py-2 border-2 border-white/10">
-          <div className="whitespace-nowrap text-center">
-            <span className={`${currentColors.title} font-bold text-xl mx-4`}>
-              {SECURITY_MESSAGES[currentMessageIndex].text}
-            </span>
+      {/* ✅ #2: Animirani Ticker za sigurnosne poruke */}
+      <div className="w-full mx-auto mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-10 relative">
+        <div className="ticker-wrap">
+          <div className={`ticker-move ${currentColors.title} font-bold text-xl flex items-center h-full`}>
+            {SECURITY_MESSAGES.map((msg, i) => (
+              <span key={i} className="mx-8 whitespace-nowrap">{msg.text}</span>
+            ))}
+            {SECURITY_MESSAGES.map((msg, i) => (
+              <span key={`dup-${i}`} className="mx-8 whitespace-nowrap">{msg.text}</span>
+            ))}
           </div>
         </div>
       </div>
@@ -1285,13 +1354,19 @@ function FlightBoard(): JSX.Element {
         .animate-pill-blink      { animation: .8s ease-in-out infinite pill-blink;      will-change: opacity }
         .animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; will-change: opacity }
 
+        /* ✅ #2: Ticker CSS */
+        .ticker-wrap { width: 100%; overflow: hidden; position: absolute; top: 0; left: 0; height: 100%; }
+        .ticker-move { display: inline-block; white-space: nowrap; animation: ticker-scroll 45s linear infinite; }
+        @keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+
         @media (prefers-reduced-motion: reduce) {
           .animate-blink,
           .animate-pill-blink,
           .animate-pill-blink-fast,
           .animate-pulse,
           .animate-spin,
-          .led-base { animation: none !important; opacity: 1 !important }
+          .led-base,
+          .ticker-move { animation: none !important; opacity: 1 !important }
         }
 
         ::-webkit-scrollbar       { width: 6px }
