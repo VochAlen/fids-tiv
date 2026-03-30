@@ -1355,9 +1355,27 @@ function FlightBoard(): JSX.Element {
         .animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; will-change: opacity }
 
         /* ✅ #2: Ticker CSS */
-        .ticker-wrap { width: 100%; overflow: hidden; position: absolute; top: 0; left: 0; height: 100%; }
-        .ticker-move { display: inline-block; white-space: nowrap; animation: ticker-scroll 45s linear infinite; }
-        @keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+      /* ✅ Ultra-Safe Ticker za Low-End uređaje (100% GPU) */
+.ticker-wrap { 
+  width: 100%; 
+  overflow: hidden; 
+  position: absolute; 
+  top: 0; 
+  left: 0; 
+  height: 100%; 
+}
+.ticker-move { 
+  display: inline-block; 
+  white-space: nowrap; 
+  will-change: transform; /* Govori browseru unaprijed da rezerviše GPU memoriju */
+  backface-visibility: hidden; /* Sprječava mikro-glitches na jeftinim GPU-ovima */
+  animation: ticker-scroll 45s linear infinite; 
+}
+@keyframes ticker-scroll { 
+  /* translate3d umjesto translateX forsira hardversku akceleraciju na starim chipsetima */
+  0% { transform: translate3d(0, 0, 0); } 
+  100% { transform: translate3d(-50%, 0, 0); } 
+}
 
         @media (prefers-reduced-motion: reduce) {
           .animate-blink,
