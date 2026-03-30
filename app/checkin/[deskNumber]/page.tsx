@@ -336,18 +336,18 @@ const AirlineLogo = memo(function AirlineLogo({
   if (portrait) {
     return (
       <div className="relative w-full max-w-[90vw] h-[220px] bg-white rounded-xl shadow-lg mb-3">
-<Image
-  src={logoUrl}
-  alt={airlineName}
-  fill
-  sizes="(max-width: 768px) 90vw, 800px"
-  className="object-contain p-4"
-  priority          // ✅ Next.js priority - najveći prioritet učitavanja
-  fetchPriority="high"  // ✅ Browser hint - učitaj odmah
-  loading="eager"   // ✅ Učitaj odmah, ne čekaj viewport
-  decoding="async"  // ✅ Ne blokira render
-  onError={handleError}
-/>
+        <Image
+          src={logoUrl}
+          alt={airlineName}
+          fill
+          sizes="(max-width: 768px) 90vw, 800px"
+          className="object-contain p-4"
+          priority
+          fetchPriority="high"
+          loading="eager"
+          decoding="async"
+          onError={handleError}
+        />
       </div>
     );
   }
@@ -429,8 +429,8 @@ const AdBanner = memo(function AdBanner({
           alt="Advertisement"
           fill
           className="object-fill"
-          priority={currentIndex === 0}  // Prva reklama se učitava odmah
-  loading={currentIndex === 0 ? "eager" : "lazy"}
+          priority={currentIndex === 0}
+          loading={currentIndex === 0 ? "eager" : "lazy"}
           quality={80}
           sizes="100vw"
           placeholder="blur"
@@ -520,7 +520,6 @@ function CheckInDisplay() {
   const transitionQueueRef = useRef<(EnhancedFlight | null)[]>([]);
   const isProcessingQueueRef = useRef(false);
   const transitionGuardRef = useRef(false);
-  // Ref za debug panel (izbjegava stale closure)
   const queueLenRef = useRef(0);
 
   const { adImages } = useAdImages();
@@ -530,6 +529,15 @@ function CheckInDisplay() {
   useEffect(() => {
     currentFlightRef.current = flightDisplay.flight;
   }, [flightDisplay.flight]);
+
+  // ── ✅ #4: Kiosk Hard Reset (6h) ──────────────────────────
+  useEffect(() => {
+    const id = setTimeout(() => {
+      console.log("🔄 Check-in kiosk scheduled hard reset (6h)...");
+      window.location.reload();
+    }, 6 * 60 * 60 * 1000);
+    return () => clearTimeout(id);
+  }, []);
 
   // ── CSS injection ───────────────────────────────────────────
   useEffect(() => {
@@ -780,6 +788,12 @@ function CheckInDisplay() {
               const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
               departureTime = new Date(now);
               departureTime.setHours(h, m, 0, 0);
+              
+              // ✅ #1: Midnight Rollover Fix
+              if (departureTime.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
+                departureTime.setDate(departureTime.getDate() + 1);
+              }
+              
               if ((now.getTime() - departureTime.getTime()) / 60_000 > 30) isToday = false;
             }
           }
@@ -832,7 +846,6 @@ function CheckInDisplay() {
   }, [flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
   // ── Main data load interval ─────────────────────────────────
-  // ISPRAVLJENO: jedan jedini scheduler, bez dvostrukog intervala
   useEffect(() => {
     isMountedRef.current = true;
     void loadFlights();
@@ -908,12 +921,7 @@ function CheckInDisplay() {
     }
   }, [flightDisplay.flight, deskNumberParam]);
 
-  // ── DEBUG PANEL (ref-based vrijednosti za tačan prikaz) ────
   const debugCloseHandler = useCallback(() => setShowDebug(false), []);
-
-  // ── Solid pozadina umjesto backdrop-blur ───────────────────
-  // Zamijenjeno: "bg-white/5 backdrop-blur-xl" → "bg-slate-800/80"
-  // Zamijenjeno: "bg-white/10 backdrop-blur-md" → "bg-slate-700/80"
 
   // ============================================================
   // RENDER: Loading
@@ -966,7 +974,6 @@ function CheckInDisplay() {
             sizes="100vw"
             decoding="async"
           />
-          {/* Solidni overlay — bez backdrop-blur */}
           <div className="absolute inset-0 bg-black/50" />
         </div>
 
@@ -1079,7 +1086,6 @@ function CheckInDisplay() {
           />
         )}
 
-        {/* Header — solidno bg umjesto backdrop-blur */}
         <div className="flex-shrink-0 p-2 bg-slate-800/80 border-b border-white/10 mt-[0.3cm] gpu-accelerated">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1099,7 +1105,6 @@ function CheckInDisplay() {
         </div>
 
         <div className="flex-1 flex flex-col px-2 py-1 min-h-0">
-          {/* Flight Info Card — solidno bg */}
           <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
             <div className="flex flex-col items-center mb-4">
               <AirlineLogo logoUrl={flightDisplay.logoUrl} airlineName={flightDisplay.airlineName} portrait />
@@ -1175,7 +1180,6 @@ function CheckInDisplay() {
             </div>
           </div>
 
-          {/* Times Card — solidno bg */}
           <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
             <div className="grid grid-cols-2 gap-4">
               <div className="text-center">
@@ -1271,10 +1275,8 @@ function CheckInDisplay() {
         />
       )}
 
-      {/* Solidna pozadina umjesto backdrop-blur */}
       <div className="h-full grid grid-cols-12 gap-8 p-3 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
 
-        {/* Lijeva kolona */}
         <div className="col-span-7 flex flex-col justify-between">
           <div className="mb-8">
             <div className="flex items-center gap-6 mb-6">
@@ -1351,7 +1353,6 @@ function CheckInDisplay() {
           </div>
         </div>
 
-        {/* Desna kolona */}
         <div className="col-span-5 flex flex-col justify-between border-l-2 border-white/10 pl-8">
           <div className="space-y-8">
             <div className="text-right">
