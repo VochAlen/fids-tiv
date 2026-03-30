@@ -15,7 +15,9 @@ import {
 } from "react"
 import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
-import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
+import { AlertCircle, Info, Plane, Clock, MapPin, Users, Luggage, DoorOpen, Cloud } from "lucide-react"
+import WeatherIcon from "@/components/weather-icon"
+import { useWeather } from "@/hooks/use-weather"
 
 // ============================================================
 // KONSTANTE
@@ -32,15 +34,17 @@ const MEMORY_CLEANUP_INTERVAL_MS = 30 * 60 * 1_000
 const MAX_FLIGHTS_DISPLAY = 9
 const MAX_FLIGHTS_MEMORY = 15
 
+// ⚡ POZADINSKE BOJE — bez backdrop-blur za niski GPU teret
 const COLOR_CONFIG = {
   arrivals: {
+    // Solidna poluprovidna pozadina umjesto backdrop-blur
     background: "bg-gradient-to-br from-blue-950 via-blue-900 to-blue-950",
     accent: "bg-cyan-400",
     header: "bg-white",
     title: "text-white",
     subtitle: "text-cyan-200",
     border: "border-cyan-400",
-    cardBg: "bg-blue-900/80",
+    cardBg: "bg-blue-900/80", // <-- solidno, bez blur
   },
   departures: {
     background: "bg-gradient-to-br from-[#1F0218] via-[#7D185E] to-[#1F0218]",
@@ -49,7 +53,7 @@ const COLOR_CONFIG = {
     title: "text-yellow-400",
     subtitle: "text-purple-200",
     border: "border-purple-500",
-    cardBg: "bg-[#3a0a30]/80",
+    cardBg: "bg-[#3a0a30]/80", // <-- solidno, bez blur
   },
 }
 
@@ -76,9 +80,12 @@ const LANGUAGE_CONFIG = {
       flight: "Flight",
       from: "From",
       destination: "Destination",
+      weather: "Weather",
+      terminal: "Ter.",
       checkIn: "Check-In",
       gate: "Gate",
       status: "Status",
+      baggageBelt: "Baggage Belt",
     },
   },
   bs: {
@@ -93,9 +100,12 @@ const LANGUAGE_CONFIG = {
       flight: "Let",
       from: "Od",
       destination: "Destinacija",
+      weather: "Vrijeme",
+      terminal: "Ter.",
       checkIn: "Check-In",
       gate: "Izlaz",
       status: "Status",
+      baggageBelt: "Traka za prtljag",
     },
   },
   de: {
@@ -110,9 +120,12 @@ const LANGUAGE_CONFIG = {
       flight: "Flug",
       from: "Von",
       destination: "Ziel",
+      weather: "Wetter",
+      terminal: "Ter.",
       checkIn: "Check-In",
       gate: "Gate",
       status: "Status",
+      baggageBelt: "Gepäckband",
     },
   },
   fr: {
@@ -127,9 +140,12 @@ const LANGUAGE_CONFIG = {
       flight: "Vol",
       from: "De",
       destination: "Destination",
+      weather: "Météo",
+      terminal: "Ter.",
       checkIn: "Enregist.",
       gate: "Porte",
       status: "Statut",
+      baggageBelt: "Tapis à bagages",
     },
   },
   he: {
@@ -144,9 +160,12 @@ const LANGUAGE_CONFIG = {
       flight: "טיסה",
       from: "מ",
       destination: "יעד",
+      weather: "מזג אוויר",
+      terminal: "טרמינל",
       checkIn: "צ׳ק-אין",
       gate: "שער",
       status: "סטטוס",
+      baggageBelt: "מסוע מזוודות",
     },
   },
   tr: {
@@ -161,13 +180,17 @@ const LANGUAGE_CONFIG = {
       flight: "Uçuş",
       from: "Kalkış Yeri",
       destination: "Varış Yeri",
+      weather: "Hava Durumu",
+      terminal: "Ter.",
       checkIn: "Check-in",
       gate: "Kapı",
       status: "Durum",
+      baggageBelt: "Bagaj Bandı",
     },
   },
 }
 
+// Poruke za security announcement
 const SECURITY_MESSAGES = [
   {
     text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •",
@@ -180,7 +203,7 @@ const SECURITY_MESSAGES = [
 ]
 
 // ============================================================
-// ERROR BOUNDARY
+// ERROR BOUNDARY — spriječava bijeli/prazan ekran
 // ============================================================
 interface ErrorBoundaryState {
   hasError: boolean
@@ -202,6 +225,7 @@ class FlightBoardErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("🚨 FlightBoard ErrorBoundary caught:", error, info)
+    // Auto-recovery nakon 10 sekundi
     setTimeout(() => {
       this.setState({ hasError: false, errorMessage: "" })
     }, 10_000)
@@ -249,6 +273,10 @@ const parseDepartureTimeLocal = (timeString: string): Date | null => {
     const now = new Date()
     const d = new Date(now)
     d.setHours(hours, minutes, 0, 0)
+    
+    // 🔥 UKLONI SVE LOGIKE ZA DODAVANJE DANA
+    // Vrijeme je uvijek današnje
+    
     return d
   } catch {
     return null
@@ -320,112 +348,21 @@ const fetchWithRetry = async (
 
 // ─── Status checkers ─────────────────────────────────────────
 const checkStatus = {
-  isDelayed:      (f: Flight) => /(delay|kasni)/i.test(f.StatusEN),
-  isBoarding:     (f: Flight) => /(boarding|gate open)/i.test(f.StatusEN),
-  isProcessing:   (f: Flight) => /processing/i.test(f.StatusEN),
-  isEarly:        (f: Flight) => /(earlier|ranije)/i.test(f.StatusEN),
-  isCancelled:    (f: Flight) => /(cancelled|canceled|otkazan)/i.test(f.StatusEN),
-  isOnTime:       (f: Flight) => /(on time|na vrijeme)/i.test(f.StatusEN),
-  isDiverted:     (f: Flight) => /(diverted|preusmjeren)/i.test(f.StatusEN),
-  isCheckInOpen:  (f: Flight) => /(check.?in|check-in)/i.test(f.StatusEN),
-  isArrived:      (f: Flight) => /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(f.StatusEN),
-  isGoToGate:     (f: Flight) => /(go to gate)/i.test(f.StatusEN),
-  isClose:        (f: Flight) => /^close$/i.test(f.StatusEN),
+  isDelayed: (f: Flight) => /(delay|kasni)/i.test(f.StatusEN),
+  isBoarding: (f: Flight) => /(boarding|gate open)/i.test(f.StatusEN),
+  isProcessing: (f: Flight) => /processing/i.test(f.StatusEN),
+  isEarly: (f: Flight) => /(earlier|ranije)/i.test(f.StatusEN),
+  isCancelled: (f: Flight) => /(cancelled|canceled|otkazan)/i.test(f.StatusEN),
+  isOnTime: (f: Flight) => /(on time|na vrijeme)/i.test(f.StatusEN),
+  isDiverted: (f: Flight) => /(diverted|preusmjeren)/i.test(f.StatusEN),
+  isCheckInOpen: (f: Flight) => /(check.?in)/i.test(f.StatusEN),
+  // 🔥 POPRAVLJENO: prepoznaje "Arrived", "Arrived at 12:47", "Landed", "Sletio", itd.
+  isArrived: (f: Flight) => /arrived|landed|sletio|sletjelo|dolazak|stigao/i.test(f.StatusEN),
+  isDeparted: (f: Flight) => /departed|poletio|take off/i.test(f.StatusEN),
 }
 
 // ============================================================
-// AUTO-STATUS LOGIKA
-// ============================================================
-const EARLY_CHECKIN_AIRLINES = new Set(["6H", "FZ"])
-
-function parseFlightTimeToDate(timeStr: string): Date | null {
-  if (!timeStr) return null
-  if (timeStr.includes("T")) {
-    const d = new Date(timeStr)
-    return isNaN(d.getTime()) ? null : d
-  }
-  const clean = timeStr.replace(":", "")
-  if (clean.length !== 4) return null
-  const hours = parseInt(clean.substring(0, 2), 10)
-  const minutes = parseInt(clean.substring(2, 4), 10)
-  if (isNaN(hours) || isNaN(minutes)) return null
-  
-  const now = new Date()
-  const d = new Date(now)
-  d.setHours(hours, minutes, 0, 0)
-
-  // 🔥 ISPRAVKA: Ako je parsirano vrijeme više od 12 sati u prošlosti,
-  // pretpostavi da je to let za sutra (npr. sada je 00:15, let je bio 23:50)
-  if (d.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
-    d.setDate(d.getDate() + 1)
-  }
-  
-  return d
-}
-
-// ── Auto-status za DEPARTURES ────────────────────────────────
-function getAutoStatus(flight: Flight): string | null {
-  const status = (flight.StatusEN || "").trim()
-  if (status && status !== "-") return null
-
-  const scheduledStr = flight.ScheduledDepartureTime
-  const estimatedStr = flight.EstimatedDepartureTime
-
-  if (!scheduledStr) return null
-
-  const scheduled = parseFlightTimeToDate(scheduledStr)
-  if (!scheduled) return null
-
-  const referenceTime = estimatedStr
-    ? (parseFlightTimeToDate(estimatedStr) ?? scheduled)
-    : scheduled
-
-  const now = new Date()
-  const minsToReference = (referenceTime.getTime() - now.getTime()) / 60_000
-
-  const airlineIata = (flight.FlightNumber ?? "").substring(0, 2).toUpperCase()
-  const checkInLeadMin = EARLY_CHECKIN_AIRLINES.has(airlineIata) ? 180 : 120
-
-  if (minsToReference < -5) return null
-  if (minsToReference <= 5) return "Close"
-  if (minsToReference <= 30) return "Go to Gate"
-
-  const checkInTime = new Date(scheduled.getTime() - checkInLeadMin * 60 * 1000)
-  const hh = String(checkInTime.getHours()).padStart(2, "0")
-  const mm = String(checkInTime.getMinutes()).padStart(2, "0")
-  return `Check In at ${hh}:${mm}`
-}
-
-// ── Auto-status za ARRIVALS (Earlier/Delayed) ────────────────
-function getAutoArrivalStatus(flight: Flight, formatTime: (t: string) => string): string | null {
-  const status = (flight.StatusEN || "").trim()
-  if (status && status !== "-") return null
-
-  const scheduledStr = flight.ScheduledDepartureTime
-  const estimatedStr = flight.EstimatedDepartureTime
-
-  if (!scheduledStr || !estimatedStr || scheduledStr === estimatedStr) return null
-
-  const scheduled = parseFlightTimeToDate(scheduledStr)
-  const estimated = parseFlightTimeToDate(estimatedStr)
-
-  if (!scheduled || !estimated) return null
-
-  const diffMins = (scheduled.getTime() - estimated.getTime()) / 60_000
-
-  if (diffMins >= 15) {
-    return `Arriving early – expected at ${formatTime(estimatedStr)}`
-  }
-
-  if (diffMins <= -15) {
-    return `Delayed at ${formatTime(estimatedStr)}`
-  }
-
-  return null
-}
-
-// ============================================================
-// IZOLOVANI SAT
+// IZOLOVANI SAT — rerenderira samo sebe, nikad cijelu stranicu
 // ============================================================
 const ClockDisplay = memo(function ClockDisplay({
   colorClass,
@@ -454,7 +391,7 @@ const ClockDisplay = memo(function ClockDisplay({
 })
 
 // ============================================================
-// LED
+// LED — čisto CSS animacija, NULA JS state-a
 // ============================================================
 const LEDIndicator = memo(function LEDIndicator({
   color,
@@ -462,18 +399,18 @@ const LEDIndicator = memo(function LEDIndicator({
   size = "w-3 h-3",
 }: {
   color: "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime"
-  phase?: "a" | "b"
+  phase?: "a" | "b" // "a" pali na pari, "b" pali na neparnom taktu
   size?: string
 }) {
   const colorMap: Record<typeof color, string> = {
-    blue:   "led-blue",
-    green:  "led-green",
+    blue: "led-blue",
+    green: "led-green",
     orange: "led-orange",
-    red:    "led-red",
+    red: "led-red",
     yellow: "led-yellow",
-    cyan:   "led-cyan",
+    cyan: "led-cyan",
     purple: "led-purple",
-    lime:   "led-lime",
+    lime: "led-lime",
   }
   return (
     <div
@@ -483,7 +420,46 @@ const LEDIndicator = memo(function LEDIndicator({
 })
 
 // ============================================================
-// TABLE HEADERS
+// WEATHER DISPLAY
+// ============================================================
+const WeatherDisplay = memo(function WeatherDisplay({
+  flight,
+}: {
+  flight: Flight
+}) {
+  const destination = useMemo(
+    () => ({
+      cityName: flight.DestinationCityName,
+      airportCode: flight.DestinationAirportCode,
+      airportName: flight.DestinationAirportName,
+    }),
+    [flight.DestinationCityName, flight.DestinationAirportCode, flight.DestinationAirportName]
+  )
+  const weather = useWeather(destination, 0)
+
+  if (weather.loading) {
+    return (
+      <div className="flex items-center justify-center w-full h-full">
+        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+      </div>
+    )
+  }
+  if (weather.error || !weather.weatherCode || weather.temperature == null) {
+    return (
+      <div className="flex items-center justify-center w-full h-full">
+        <Cloud className="w-5 h-5 text-white/30" />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center justify-center w-full h-full">
+      <WeatherIcon code={weather.weatherCode} temperature={weather.temperature} size={18} textSize={24} />
+    </div>
+  )
+})
+
+// ============================================================
+// TABLE HEADERS — memorizovano, ne rerenderuje se bez promjene
 // ============================================================
 const TableHeaders = memo(function TableHeaders({
   headers,
@@ -514,127 +490,82 @@ const TableHeaders = memo(function TableHeaders({
 })
 
 // ============================================================
-// STATUS PILL — helper za stilove
+// STATUS PILL — helper za stilove (čisto računanje, bez side-effecta)
 // ============================================================
 const getStatusPillStyle = (flight: Flight, isArrival: boolean, formatTime: (t: string) => string) => {
-  const autoArrivalStatus = isArrival ? getAutoArrivalStatus(flight, formatTime) : null
-  const autoDepartureStatus = !isArrival ? getAutoStatus(flight) : null
-  const autoStatus = autoArrivalStatus || autoDepartureStatus
+  const isCancelledFlight = checkStatus.isCancelled(flight)
+  const isDelayedFlight = checkStatus.isDelayed(flight)
+  const isBoardingFlight = !isArrival && checkStatus.isBoarding(flight)
+  const isProcessingFlight = checkStatus.isProcessing(flight)
+  const isEarlyFlight = checkStatus.isEarly(flight)
+  const isOnTimeFlight = checkStatus.isOnTime(flight)
+  const isDivertedFlight = checkStatus.isDiverted(flight)
+  const isCheckInOpenFlight = checkStatus.isCheckInOpen(flight)
+  const isArrivedFlight = isArrival && checkStatus.isArrived(flight)
 
-  const effectiveFlight: Flight = autoStatus
-    ? { ...flight, StatusEN: autoStatus }
-    : flight
-
-  const isCancelledFlight    = checkStatus.isCancelled(effectiveFlight)
-  const isDelayedFlight      = checkStatus.isDelayed(effectiveFlight)
-  const isBoardingFlight     = !isArrival && checkStatus.isBoarding(effectiveFlight)
-  const isProcessingFlight   = checkStatus.isProcessing(effectiveFlight)
-  const isEarlyFlight        = checkStatus.isEarly(effectiveFlight)
-  const isOnTimeFlight       = checkStatus.isOnTime(effectiveFlight)
-  const isDivertedFlight     = checkStatus.isDiverted(effectiveFlight)
-  const isCheckInOpenFlight  = checkStatus.isCheckInOpen(effectiveFlight)
-  const isArrivedFlight      = isArrival && checkStatus.isArrived(effectiveFlight)
-  const isGoToGateFlight     = !isArrival && checkStatus.isGoToGate(effectiveFlight)
-  const isCloseFlight        = !isArrival && checkStatus.isClose(effectiveFlight)
-
-  let statusDisplayText = effectiveFlight.StatusEN || ""
+  let statusDisplayText = flight.StatusEN || ""
   if (isProcessingFlight) statusDisplayText = "Check-In"
   if (isArrivedFlight) {
     const t =
-      effectiveFlight.EstimatedDepartureTime ||
-      effectiveFlight.ScheduledDepartureTime  ||
-      effectiveFlight.ActualDepartureTime
+      flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime
     statusDisplayText = `Arrived at ${t ? formatTime(t) : ""}`
   }
 
-  const hasStatusText = !!effectiveFlight.StatusEN?.trim()
+  const hasStatusText = !!flight.StatusEN?.trim()
 
-  const shouldBlink =
-    isArrivedFlight  ||
-    isCancelledFlight ||
-    isBoardingFlight  ||
-    isGoToGateFlight  ||
-    isCloseFlight
-
+  // shouldBlink → CSS klasa, ne JS interval
+  const shouldBlink = isArrivedFlight || isCancelledFlight || isBoardingFlight
   const showLEDs =
-    isBoardingFlight    ||
-    isProcessingFlight  ||
+    isBoardingFlight ||
+    isProcessingFlight ||
     isCheckInOpenFlight ||
-    isArrivedFlight     ||
-    isCancelledFlight   ||
-    isDivertedFlight    ||
-    isDelayedFlight     ||
-    isEarlyFlight       ||
-    isGoToGateFlight    ||
-    isCloseFlight
+    isArrivedFlight ||
+    isCancelledFlight ||
+    isDivertedFlight ||
+    isDelayedFlight
 
   type LEDColor = "blue" | "green" | "orange" | "red" | "yellow" | "cyan" | "purple" | "lime"
-  let bg         = "bg-white/10"
-  let border     = "border-white/30"
-  let text       = "text-white"
+  let bg = "bg-white/10"
+  let border = "border-white/30"
+  let text = "text-white"
   let led1: LEDColor = "blue"
   let led2: LEDColor = "green"
   let blinkClass = ""
 
   if (isCancelledFlight) {
     bg = "bg-red-500/20"; border = "border-red-500/50"; text = "text-red-100"
-    led1 = "red"; led2 = "orange"
-    blinkClass = "animate-pill-blink"
-
-  } else if (isCloseFlight) {
-    bg = "bg-red-600/30"; border = "border-red-500/70"; text = "text-red-100"
-    led1 = "red"; led2 = "orange"
-    blinkClass = "animate-pill-blink-fast"
-
-  } else if (isGoToGateFlight) {
-    bg = "bg-blue-500/20"; border = "border-blue-500/50"; text = "text-blue-100"
-    led1 = "blue"; led2 = "cyan"
-    blinkClass = "animate-pill-blink"
-
+    led1 = "red"; led2 = "orange"; blinkClass = shouldBlink ? "animate-pill-blink" : ""
   } else if (isDelayedFlight) {
     bg = "bg-yellow-500/20"; border = "border-yellow-500/50"; text = "text-yellow-100"
     led1 = "yellow"; led2 = "orange"
-
+  } else if (isBoardingFlight) {
+    bg = "bg-cyan-500/20"; border = "border-cyan-500/50"; text = "text-cyan-100"
+    led1 = "cyan"; led2 = "blue"; blinkClass = shouldBlink ? "animate-pill-blink" : ""
+  } else if (isProcessingFlight || isCheckInOpenFlight) {
+    bg = "bg-green-500/20"; border = "border-green-500/50"; text = "text-green-100"
+    led1 = "green"; led2 = "lime"
   } else if (isEarlyFlight) {
     bg = "bg-purple-500/20"; border = "border-purple-500/50"; text = "text-purple-100"
     led1 = "purple"; led2 = "blue"
-
-  } else if (isBoardingFlight) {
-    bg = "bg-cyan-500/20"; border = "border-cyan-500/50"; text = "text-cyan-100"
-    led1 = "cyan"; led2 = "blue"
-    blinkClass = "animate-pill-blink"
-
-  } else if (isCheckInOpenFlight || isProcessingFlight) {
-    bg = "bg-green-500/20"; border = "border-green-500/50"; text = "text-green-100"
-    led1 = "green"; led2 = "lime"
-
   } else if (isDivertedFlight) {
     bg = "bg-orange-500/20"; border = "border-orange-500/50"; text = "text-orange-100"
     led1 = "orange"; led2 = "red"
-
   } else if (isOnTimeFlight) {
     bg = "bg-lime-500/20"; border = "border-lime-500/50"; text = "text-lime-100"
     led1 = "lime"; led2 = "green"
-
   } else if (isArrivedFlight) {
     bg = "bg-green-500/20"; border = "border-green-500/50"; text = "text-green-100"
-    led1 = "green"; led2 = "lime"
-    blinkClass = "animate-pill-blink"
-
+    led1 = "green"; led2 = "lime"; blinkClass = shouldBlink ? "animate-pill-blink" : ""
   } else if (shouldBlink) {
     bg = "bg-green-500/20"; border = "border-green-500/50"; text = "text-green-100"
-    led1 = "green"; led2 = "lime"
-    blinkClass = "animate-pill-blink"
+    led1 = "green"; led2 = "lime"; blinkClass = "animate-pill-blink"
   }
 
-  return {
-    bg, border, text, led1, led2, blinkClass,
-    showLEDs, hasStatusText, statusDisplayText,
-  }
+  return { bg, border, text, led1, led2, blinkClass, showLEDs, hasStatusText, statusDisplayText }
 }
 
 // ============================================================
-// FLIGHT ROW
+// FLIGHT ROW — memorizovan, rerenderuje se SAMO kad se let promijeni
 // ============================================================
 const FlightRow = memo(
   function FlightRow({
@@ -654,6 +585,11 @@ const FlightRow = memo(
       return c.length === 4 ? `${c.substring(0, 2)}:${c.substring(2, 4)}` : timeString
     }, [])
 
+    const formatTerminal = useCallback((terminal?: string): string => {
+      if (!terminal) return "-"
+      return terminal.replace("T0", "T").replace("T", "T ")
+    }, [])
+
     const pill = useMemo(
       () => getStatusPillStyle(flight, showArrivals, formatTime),
       [flight, showArrivals, formatTime]
@@ -666,8 +602,7 @@ const FlightRow = memo(
       e.currentTarget.src = PLACEHOLDER_IMAGE
     }, [])
 
-    const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.3rem]"
-    const pillClassName = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
+    const pillClassName = `w-[90%] flex items-center justify-center gap-3 text-[2rem] font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
 
     return (
       <div
@@ -698,7 +633,7 @@ const FlightRow = memo(
         </div>
 
         {/* Flight Info */}
-        <div className="flex items-center gap-3" style={{ width: "280px" }}>
+        <div className="flex items-center gap-3" style={{ width: "240px" }}>
           <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
             <img
               src={logoURL || PLACEHOLDER_IMAGE}
@@ -706,8 +641,10 @@ const FlightRow = memo(
               className="object-contain w-full h-full"
               onError={handleImgError}
               decoding="async"
-              loading={index < 9 ? "eager" : "lazy"}
-              fetchPriority={index < 8 ? "high" : "auto"}
+              // loading="lazy"
+              // za prvih 5 letova:
+  loading={index < 9 ? "eager" : "lazy"}
+  fetchPriority={index < 8 ? "high" : "auto"}  // <-- DODAJ OVO
             />
           </div>
           <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
@@ -719,21 +656,26 @@ const FlightRow = memo(
         {showArrivals ? (
           <>
             {/* From */}
-            <div className="flex items-center" style={{ width: "580px" }}>
+            <div className="flex items-center" style={{ width: "380px" }}>
               <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
                 {flight.DestinationCityName || flight.DestinationAirportName}
               </div>
             </div>
 
+            {/* Weather */}
+            <div className="flex items-center justify-center" style={{ width: "120px" }}>
+              <WeatherDisplay flight={flight} />
+            </div>
+
             {/* Status — Arrivals */}
-            <div className="flex items-center justify-center" style={{ width: "650px" }}>
+            <div className="flex items-center justify-center" style={{ width: "380px" }}>
               {pill.hasStatusText ? (
                 <div
                   className={`${pillClassName} overflow-hidden relative`}
                   style={{
-                    paddingLeft:  pill.showLEDs ? "3.5rem" : "1rem",
+                    paddingLeft: pill.showLEDs ? "3.5rem" : "1rem",
                     paddingRight: "1rem",
-                    width:        "95%",
+                    width: "95%",
                   }}
                 >
                   {pill.showLEDs && (
@@ -753,6 +695,13 @@ const FlightRow = memo(
                 <div className="text-[2rem] font-bold text-slate-300">Scheduled</div>
               )}
             </div>
+
+            {/* Baggage */}
+            <div className="flex items-center justify-center" style={{ width: "200px" }}>
+              <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-4 rounded-xl border-2 border-white/20 shadow-xl">
+                {flight.BaggageReclaim || "-"}
+              </div>
+            </div>
           </>
         ) : (
           <>
@@ -763,8 +712,24 @@ const FlightRow = memo(
               </div>
             </div>
 
+            {/* Terminal */}
+            <div className="flex items-center justify-center" style={{ width: "120px" }}>
+              <div
+                className={`inline-flex items-center justify-center w-16 h-16 rounded-full font-black text-[1.8rem] shadow-xl border-4
+                  ${
+                    flight.Terminal === "T1" || flight.Terminal === "T01"
+                      ? "bg-cyan-500 text-white border-cyan-300"
+                      : flight.Terminal === "T2" || flight.Terminal === "T02"
+                        ? "bg-orange-500 text-white border-orange-300"
+                        : "bg-black/40 text-white border-white/20"
+                  }`}
+              >
+                {formatTerminal(flight.Terminal)}
+              </div>
+            </div>
+
             {/* Check-In */}
-            <div className="flex items-center justify-center" style={{ width: "320px" }}>
+            <div className="flex items-center justify-center" style={{ width: "280px" }}>
               {flight.CheckInDesk && flight.CheckInDesk !== "-" ? (
                 <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">
                   {flight.CheckInDesk}
@@ -775,7 +740,7 @@ const FlightRow = memo(
             </div>
 
             {/* Gate */}
-            <div className="flex items-center justify-center" style={{ width: "180px" }}>
+            <div className="flex items-center justify-center" style={{ width: "160px" }}>
               {flight.GateNumber && flight.GateNumber !== "-" ? (
                 <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">
                   {flight.GateNumber}
@@ -786,7 +751,7 @@ const FlightRow = memo(
             </div>
 
             {/* Status — Departures */}
-            <div className="flex items-center justify-center" style={{ width: "420px" }}>
+            <div className="flex items-center justify-center" style={{ width: "360px" }}>
               {pill.hasStatusText ? (
                 <div className={pillClassName}>
                   {pill.showLEDs && (
@@ -798,7 +763,7 @@ const FlightRow = memo(
                   {pill.statusDisplayText}
                 </div>
               ) : (
-                <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
+                <div className="text-[2rem] font-bold text-slate-300">Scheduled</div>
               )}
             </div>
           </>
@@ -806,18 +771,17 @@ const FlightRow = memo(
       </div>
     )
   },
-  // Custom comparator
+  // Custom comparator — rerenderuj SAMO ako su stvarno promijenjeni podaci o letu
   (prev, next) =>
-    prev.flight.FlightNumber            === next.flight.FlightNumber            &&
-    prev.flight.StatusEN                === next.flight.StatusEN                &&
-    (prev.flight as any)._autoStatusTick === (next.flight as any)._autoStatusTick &&
-    prev.flight.EstimatedDepartureTime  === next.flight.EstimatedDepartureTime  &&
-    prev.flight.ScheduledDepartureTime  === next.flight.ScheduledDepartureTime  &&
-    prev.flight.GateNumber              === next.flight.GateNumber              &&
-    prev.flight.CheckInDesk             === next.flight.CheckInDesk             &&
-    prev.showArrivals                   === next.showArrivals                   &&
-    prev.colorTitle                     === next.colorTitle                     &&
-    prev.index                          === next.index
+    prev.flight.FlightNumber === next.flight.FlightNumber &&
+    prev.flight.StatusEN === next.flight.StatusEN &&
+    prev.flight.EstimatedDepartureTime === next.flight.EstimatedDepartureTime &&
+    prev.flight.GateNumber === next.flight.GateNumber &&
+    prev.flight.CheckInDesk === next.flight.CheckInDesk &&
+    prev.flight.BaggageReclaim === next.flight.BaggageReclaim &&
+    prev.showArrivals === next.showArrivals &&
+    prev.colorTitle === next.colorTitle &&
+    prev.index === next.index
 )
 
 // ============================================================
@@ -832,33 +796,25 @@ export default function CombinedPage(): JSX.Element {
 }
 
 function FlightBoard(): JSX.Element {
-  const [arrivals, setArrivals]                   = useState<Flight[]>([])
-  const [departures, setDepartures]               = useState<Flight[]>([])
-  const [loading, setLoading]                     = useState<boolean>(true)
-  const [showArrivals, setShowArrivals]           = useState<boolean>(true)
-  const [lastUpdate, setLastUpdate]               = useState<string>("")
+  const [arrivals, setArrivals] = useState<Flight[]>([])
+  const [departures, setDepartures] = useState<Flight[]>([])
+  const [loading, setLoading] = useState<boolean>(true)
+  const [showArrivals, setShowArrivals] = useState<boolean>(true)
+  const [lastUpdate, setLastUpdate] = useState<string>("")
   const [currentLanguageIndex, setCurrentLanguageIndex] = useState<number>(0)
-  const [currentMessageIndex, setCurrentMessageIndex]   = useState<number>(0)
-  const [errorMessage, setErrorMessage]           = useState<string | null>(null)
-  const [isRecovering, setIsRecovering]           = useState<boolean>(false)
+  const [currentMessageIndex, setCurrentMessageIndex] = useState<number>(0)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [isRecovering, setIsRecovering] = useState<boolean>(false)
 
-  const [autoStatusTick, setAutoStatusTick] = useState<number>(0)
-
-  const isMountedRef   = useRef(true)
-  const lastHeartbeat  = useRef(Date.now())
+  const isMountedRef = useRef(true)
+  const lastHeartbeat = useRef(Date.now())
 
   const currentColors = useMemo(
     () => (showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures),
     [showArrivals]
   )
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      setAutoStatusTick((t) => t + 1)
-    }, 60_000)
-    return () => clearInterval(id)
-  }, [])
-
+  // ── Formatiranje vremena ────────────────────────────────────
   const formatTime = useCallback((timeString: string): string => {
     if (!timeString) return ""
     const clean = timeString.replace(":", "")
@@ -873,62 +829,71 @@ function FlightBoard(): JSX.Element {
     []
   )
 
-  const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
-    const now = new Date()
-    return flights.filter((flight) => {
-      // ── Sakrij biznis avijaciju (ZZZ) ──────────────────────
-      if ((flight.FlightNumber || "").toUpperCase().includes("ZZZ")) return false
+const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
+  const now = new Date()
+  console.log(`[FILTER] ===== ${isArrivals ? 'ARRIVALS' : 'DEPARTURES'} at ${now.toLocaleTimeString()} =====`)
+  
+  const result = flights.filter((flight) => {
+    // 🔥 DODATO: IZBACI LETOVE SA BROJEM "ZZZ" ili "Z"
+    const flightNumber = flight.FlightNumber?.toUpperCase() || ""
+    if (flightNumber === "ZZZ" || flightNumber === "Z" || flightNumber === "ZZ") {
+      console.log(`[FILTER] Skipping ${flight.FlightNumber} (General Aviation / test flight)`)
+      return false
+    }
+    
+    const isArrived = checkStatus.isArrived(flight)
+    const isDeparted = checkStatus.isDeparted(flight)
 
-      const status    = flight.StatusEN?.toLowerCase() || ""
-      const isArrived = checkStatus.isArrived(flight)
-      const isDeparted =
-        !checkStatus.isDelayed(flight) &&
-        (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
+    if (!isArrived && !isDeparted) return true
 
-      if (!isArrived && !isDeparted) return true
+    // Za dolaske koristi Aktuelno (ActualDepartureTime)
+    const timeStr = flight.ActualDepartureTime || flight.EstimatedDepartureTime || flight.ScheduledDepartureTime
+    if (!timeStr) return false
 
-      const timeStr =
-        flight.EstimatedDepartureTime ||
-        flight.ScheduledDepartureTime  ||
-        flight.ActualDepartureTime
-      if (!timeStr) return !isArrived && !isDeparted
+    const flightTime = parseDepartureTimeLocal(timeStr)
+    if (!flightTime) return false
 
-      const flightTime = parseDepartureTimeLocal(timeStr)
-      if (!flightTime) return false
-
-      const minutesDiff = Math.floor((now.getTime() - flightTime.getTime()) / 60_000)
-
-      if (isArrivals  && isArrived)  return minutesDiff <= 20
-      if (!isArrivals && isDeparted) return minutesDiff <= 20
-      return true
-    })
-  }, [])
-
+    const minutesDiff = Math.floor((now.getTime() - flightTime.getTime()) / 60_000)
+    
+    let shouldKeep = true
+    if (isArrivals && isArrived) {
+      shouldKeep = minutesDiff <= 20
+      console.log(`[ARRIVAL] ${flight.FlightNumber}: status="${flight.StatusEN}", actual=${timeStr}, diff=${minutesDiff}min, KEEP=${shouldKeep}`)
+    }
+    
+    return shouldKeep
+  })
+  
+  console.log(`[FILTER] Result: ${result.length}/${flights.length} kept`)
+  return result
+}, [])
+  // ── Heartbeat monitor ───────────────────────────────────────
   useEffect(() => {
     const update = () => { lastHeartbeat.current = Date.now() }
-    const check  = setInterval(() => {
+    const check = setInterval(() => {
       if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) {
         console.warn("⚠️ Heartbeat timeout — reloading")
         window.location.reload()
       }
     }, HEARTBEAT_CHECK_INTERVAL_MS)
-    window.addEventListener("mousemove",  update, { passive: true })
-    window.addEventListener("keypress",   update, { passive: true })
+    window.addEventListener("mousemove", update, { passive: true })
+    window.addEventListener("keypress", update, { passive: true })
     window.addEventListener("touchstart", update, { passive: true })
     return () => {
       clearInterval(check)
-      window.removeEventListener("mousemove",  update)
-      window.removeEventListener("keypress",   update)
+      window.removeEventListener("mousemove", update)
+      window.removeEventListener("keypress", update)
       window.removeEventListener("touchstart", update)
     }
   }, [])
 
+  // ── Global error handler ────────────────────────────────────
   useEffect(() => {
     const onError = (e: ErrorEvent) => {
       console.error("Global error:", e.error)
       const msg = e.error?.message || ""
       if (
-        msg.includes("Out of memory")  ||
+        msg.includes("Out of memory") ||
         msg.includes("stack overflow") ||
         msg.includes("JavaScript heap")
       ) {
@@ -944,23 +909,25 @@ function FlightBoard(): JSX.Element {
         setTimeout(() => setErrorMessage(null), 5_000)
       }
     }
-    window.addEventListener("error",             onError)
+    window.addEventListener("error", onError)
     window.addEventListener("unhandledrejection", onRejection)
     return () => {
-      window.removeEventListener("error",             onError)
+      window.removeEventListener("error", onError)
       window.removeEventListener("unhandledrejection", onRejection)
     }
   }, [])
 
+  // ── Memory cleanup ──────────────────────────────────────────
   useEffect(() => {
     const id = setInterval(() => {
-      setArrivals(  (prev) => (prev.length > 20 ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev))
+      setArrivals((prev) => (prev.length > 20 ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev))
       setDepartures((prev) => (prev.length > 20 ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev))
       if ((window as any).gc) (window as any).gc()
     }, MEMORY_CLEANUP_INTERVAL_MS)
     return () => clearInterval(id)
   }, [])
 
+  // ── Auto-recovery ───────────────────────────────────────────
   useEffect(() => {
     let recoveryTimeout: ReturnType<typeof setTimeout>
     const id = setInterval(() => {
@@ -980,6 +947,7 @@ function FlightBoard(): JSX.Element {
     }
   }, [loading, arrivals.length, departures.length, isRecovering])
 
+  // ── Language rotation ───────────────────────────────────────
   useEffect(() => {
     const id = setInterval(
       () => setCurrentLanguageIndex((p) => (p + 1) % Object.keys(LANGUAGE_CONFIG).length),
@@ -988,6 +956,7 @@ function FlightBoard(): JSX.Element {
     return () => clearInterval(id)
   }, [])
 
+  // ── Security message rotation ───────────────────────────────
   useEffect(() => {
     const id = setInterval(
       () => setCurrentMessageIndex((p) => (p + 1) % SECURITY_MESSAGES.length),
@@ -996,6 +965,7 @@ function FlightBoard(): JSX.Element {
     return () => clearInterval(id)
   }, [])
 
+  // ── Data loading ────────────────────────────────────────────
   useEffect(() => {
     isMountedRef.current = true
     let timeoutId: ReturnType<typeof setTimeout>
@@ -1017,7 +987,7 @@ function FlightBoard(): JSX.Element {
           setErrorMessage("Network error. Using cached data.")
           const cached = loadFromCache()
           if (cached) {
-            data      = cached
+            data = cached
             usedCache = true
           } else {
             throw fetchError
@@ -1026,7 +996,8 @@ function FlightBoard(): JSX.Element {
 
         if (!isMountedRef.current || !data) return
 
-        const filteredArrivals   = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
+        // Hard limit odmah na fetchu — štedi DOM memoriju
+        const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
         const filteredDepartures = getUniqueDeparturesWithDeparted(
           filterRecentFlights(data.departures, false)
         ).slice(0, MAX_FLIGHTS_DISPLAY)
@@ -1059,11 +1030,13 @@ function FlightBoard(): JSX.Element {
     }
   }, [filterRecentFlights])
 
+  // ── Arrivals/Departures switch ──────────────────────────────
   useEffect(() => {
     const id = setInterval(() => setShowArrivals((p) => !p), 20_000)
     return () => clearInterval(id)
   }, [])
 
+  // ── Close handler ───────────────────────────────────────────
   const handleClose = useCallback(() => {
     if ((window as any).electronAPI?.quitApp) {
       ;(window as any).electronAPI.quitApp()
@@ -1082,13 +1055,30 @@ function FlightBoard(): JSX.Element {
     window.location.reload()
   }, [])
 
+  // ── Derived/computed values ─────────────────────────────────
+  const currentFlights = useMemo(
+    () => (showArrivals ? arrivals : departures),
+    [showArrivals, arrivals, departures]
+  )
+
+  const sortedCurrentFlights = useMemo(
+    () => sortFlightsByScheduledTime(currentFlights).slice(0, MAX_FLIGHTS_DISPLAY),
+    [currentFlights, sortFlightsByScheduledTime]
+  )
+
   const currentLanguage = useMemo(() => {
     const langs = Object.keys(LANGUAGE_CONFIG)
     return LANGUAGE_CONFIG[langs[currentLanguageIndex] as keyof typeof LANGUAGE_CONFIG]
   }, [currentLanguageIndex])
 
-  const title    = useMemo(() => (showArrivals ? currentLanguage.arrivals    : currentLanguage.departures),    [showArrivals, currentLanguage])
-  const subtitle = useMemo(() => (showArrivals ? currentLanguage.incomingFlights : currentLanguage.outgoingFlights), [showArrivals, currentLanguage])
+  const title = useMemo(
+    () => (showArrivals ? currentLanguage.arrivals : currentLanguage.departures),
+    [showArrivals, currentLanguage]
+  )
+  const subtitle = useMemo(
+    () => (showArrivals ? currentLanguage.incomingFlights : currentLanguage.outgoingFlights),
+    [showArrivals, currentLanguage]
+  )
 
   const ArrivalIcon = useCallback(
     ({ className = "w-5 h-5" }: { className?: string }) => (
@@ -1107,54 +1097,42 @@ function FlightBoard(): JSX.Element {
     const t = currentLanguage.tableHeaders
     if (showArrivals) {
       return [
-        { label: t.scheduled, width: "180px", icon: Clock      },
-        { label: t.estimated, width: "180px", icon: Clock      },
-        { label: t.flight,    width: "240px", icon: ArrivalIcon },
-        { label: t.from,      width: "480px", icon: MapPin     },
-        { label: t.status,    width: "620px", icon: Info       },
+        { label: t.scheduled, width: "180px", icon: Clock },
+        { label: t.estimated, width: "180px", icon: Clock },
+        { label: t.flight, width: "240px", icon: ArrivalIcon },
+        { label: t.from, width: "380px", icon: MapPin },
+        { label: t.weather, width: "120px", icon: Cloud },
+        { label: t.status, width: "380px", icon: Info },
+        { label: t.baggageBelt, width: "200px", icon: Luggage },
       ]
     }
     return [
-      { label: t.scheduled,   width: "180px", icon: Clock       },
-      { label: t.estimated,   width: "180px", icon: Clock       },
-      { label: t.flight,      width: "240px", icon: DepartureIcon },
-      { label: t.destination, width: "380px", icon: MapPin      },
-      { label: t.checkIn,     width: "320px", icon: Users       },
-      { label: t.gate,        width: "180px", icon: DoorOpen    },
-      { label: t.status,      width: "420px", icon: Info        },
+      { label: t.scheduled, width: "180px", icon: Clock },
+      { label: t.estimated, width: "180px", icon: Clock },
+      { label: t.flight, width: "240px", icon: DepartureIcon },
+      { label: t.destination, width: "380px", icon: MapPin },
+      { label: t.terminal, width: "120px", icon: DoorOpen },
+      { label: t.checkIn, width: "280px", icon: Users },
+      { label: t.gate, width: "160px", icon: DoorOpen },
+      { label: t.status, width: "360px", icon: Info },
     ]
   }, [showArrivals, currentLanguage, ArrivalIcon, DepartureIcon])
-
-  const departuresWithTick = useMemo(
-    () =>
-      departures.map((f) =>
-        ({ ...f, _autoStatusTick: autoStatusTick } as unknown as Flight)
-      ),
-    [departures, autoStatusTick]
-  )
-
-  const currentFlightsWithTick = useMemo(
-    () => (showArrivals ? arrivals : departuresWithTick),
-    [showArrivals, arrivals, departuresWithTick]
-  )
-
-  const sortedCurrentFlightsWithTick = useMemo(
-    () => sortFlightsByScheduledTime(currentFlightsWithTick).slice(0, MAX_FLIGHTS_DISPLAY),
-    [currentFlightsWithTick, sortFlightsByScheduledTime]
-  )
 
   return (
     <div
       className={`h-screen ${currentColors.background} text-white p-4 transition-colors duration-700 flex flex-col select-none`}
+      // Sprječava slučajni drag-and-drop / selekciju u kiosk modu
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => e.preventDefault()}
     >
+      {/* Error toast */}
       {errorMessage && (
         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:bottom-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
           ⚠️ {errorMessage}
         </div>
       )}
 
+      {/* Close button */}
       <button
         onClick={handleClose}
         className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 active:bg-black/80 text-white shadow-2xl cursor-pointer z-50 transition-all duration-200 hover:scale-110 active:scale-95 border-2 border-white/20"
@@ -1166,6 +1144,7 @@ function FlightBoard(): JSX.Element {
         </span>
       </button>
 
+      {/* Header */}
       <div className="w-full mx-auto mb-4 flex-shrink-0">
         <div className="flex justify-between items-center gap-4">
           <div className="flex items-center gap-6">
@@ -1184,14 +1163,16 @@ function FlightBoard(): JSX.Element {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            {/* Izolovani sat — ne uzrokuje rerenderovanje letova */}
             <ClockDisplay colorClass="text-white" />
             <div className={`w-6 h-6 rounded-full ${currentColors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
           </div>
         </div>
       </div>
 
+      {/* Flight board */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {loading && sortedCurrentFlightsWithTick.length === 0 ? (
+        {loading && sortedCurrentFlights.length === 0 ? (
           <div className="text-center p-8 h-full flex items-center justify-center">
             <div className="inline-flex items-center gap-4">
               <div className={`w-8 h-8 border-4 ${currentColors.border} border-t-transparent rounded-full animate-spin`} />
@@ -1204,28 +1185,29 @@ function FlightBoard(): JSX.Element {
           >
             <TableHeaders headers={tableHeaders} headerBg={currentColors.header} />
 
-            <div className="flex-1 overflow-y-auto">
-              {sortedCurrentFlightsWithTick.length === 0 ? (
-                <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
-                  <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                  <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
-                </div>
-              ) : (
-                sortedCurrentFlightsWithTick.map((flight, index) => (
-                  <FlightRow
-                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`}
-                    flight={flight}
-                    index={index}
-                    showArrivals={showArrivals}
-                    colorTitle={currentColors.title}
-                  />
-                ))
-              )}
-            </div>
+       <div className="flex-1 overflow-y-auto">
+  {sortedCurrentFlights.length === 0 ? (
+    <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
+      <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
+      <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
+    </div>
+  ) : (
+    sortedCurrentFlights.map((flight, index) => (
+      <FlightRow
+        key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${showArrivals ? arrivals.length : departures.length}-${index}`}
+        flight={flight}
+        index={index}
+        showArrivals={showArrivals}
+        colorTitle={currentColors.title}
+      />
+    ))
+  )}
+</div>
           </div>
         )}
       </div>
 
+      {/* Security message ticker */}
       <div className="w-full mx-auto mt-4 flex-shrink-0">
         <div className="overflow-hidden relative bg-black/30 rounded-full py-2 border-2 border-white/10">
           <div className="whitespace-nowrap text-center">
@@ -1236,71 +1218,8 @@ function FlightBoard(): JSX.Element {
         </div>
       </div>
 
-      <style jsx global>{`
-        #__next, body, html { height: 100vh }
-        * { -webkit-font-smoothing: antialiased }
-
-        .led-base {
-          will-change: opacity, box-shadow;
-          animation: 1s ease-in-out infinite alternate led-pulse;
-        }
-        .led-phase-b { animation-delay: .5s }
-        .led-blue   { background: #1e3a5f }
-        .led-green  { background: #14532d }
-        .led-orange { background: #7c2d12 }
-        .led-red    { background: #7f1d1d }
-        .led-yellow { background: #713f12 }
-        .led-cyan   { background: #164e63 }
-        .led-purple { background: #4a1d96 }
-        .led-lime   { background: #365314 }
-
-        @keyframes led-pulse { 0% { opacity: .25; box-shadow: none } 100% { opacity: 1 } }
-
-        @keyframes led-pulse-blue   { 100% { background: #60a5fa; box-shadow: 0 0 8px #60a5fa88 } }
-        @keyframes led-pulse-green  { 100% { background: #4ade80; box-shadow: 0 0 8px #4ade8088 } }
-        @keyframes led-pulse-orange { 100% { background: #fb923c; box-shadow: 0 0 8px #fb923c88 } }
-        @keyframes led-pulse-red    { 100% { background: #f87171; box-shadow: 0 0 8px #f8717188 } }
-        @keyframes led-pulse-yellow { 100% { background: #facc15; box-shadow: 0 0 8px #facc1588 } }
-        @keyframes led-pulse-cyan   { 100% { background: #22d3ee; box-shadow: 0 0 8px #22d3ee88 } }
-        @keyframes led-pulse-purple { 100% { background: #a78bfa; box-shadow: 0 0 8px #a78bfa88 } }
-        @keyframes led-pulse-lime   { 100% { background: #a3e635; box-shadow: 0 0 8px #a3e63588 } }
-
-        .led-blue.led-base:not(.led-phase-b)   { animation-name: led-pulse-blue   }
-        .led-green.led-base:not(.led-phase-b)  { animation-name: led-pulse-green  }
-        .led-orange.led-base:not(.led-phase-b) { animation-name: led-pulse-orange }
-        .led-red.led-base:not(.led-phase-b)    { animation-name: led-pulse-red    }
-        .led-yellow.led-base:not(.led-phase-b) { animation-name: led-pulse-yellow }
-        .led-cyan.led-base:not(.led-phase-b)   { animation-name: led-pulse-cyan   }
-        .led-purple.led-base:not(.led-phase-b) { animation-name: led-pulse-purple }
-        .led-lime.led-base:not(.led-phase-b)   { animation-name: led-pulse-lime   }
-
-        @keyframes pill-blink {
-          0%, 50%  { opacity: 1    }
-          51%, 100% { opacity: .75 }
-        }
-        @keyframes pill-blink-fast {
-          0%, 40%  { opacity: 1    }
-          41%, 100% { opacity: .55 }
-        }
-        .animate-pill-blink      { animation: .8s ease-in-out infinite pill-blink;      will-change: opacity }
-        .animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; will-change: opacity }
-
-        @media (prefers-reduced-motion: reduce) {
-          .animate-blink,
-          .animate-pill-blink,
-          .animate-pill-blink-fast,
-          .animate-pulse,
-          .animate-spin,
-          .led-base { animation: none !important; opacity: 1 !important }
-        }
-
-        ::-webkit-scrollbar       { width: 6px }
-        ::-webkit-scrollbar-track { background: rgba(0,0,0,.3); border-radius: 3px }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.4); border-radius: 3px }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.6) }
-
-        body, html { overflow: hidden; margin: 0; padding: 0 }
-        .flight-row-contain { contain: layout style }
+      {/* ── CSS: GPU-only animacije, prefers-reduced-motion, LED ── */}
+      <style jsx global>{`#__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}.led-base{will-change:opacity,box-shadow;animation:1s ease-in-out infinite alternate led-pulse}.led-phase-b{animation-delay:.5s}.led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}.led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}.led-purple{background:#4a1d96}.led-lime{background:#365314}@keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}.led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}.led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}.led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}.led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}.led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}.led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}.led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}.led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}@keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}@keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}@keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}@keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}@keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}@keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}@keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}@keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}@keyframes pill-blink{0%,50%{opacity:1}100%,51%{opacity:.75}}.animate-pill-blink{animation:.8s ease-in-out infinite pill-blink;will-change:opacity}@media (prefers-reduced-motion:reduce){.animate-blink,.animate-pill-blink,.animate-pulse,.animate-spin,.led-base{animation:none!important;opacity:1!important}}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}body,html{overflow:hidden;margin:0;padding:0}.flight-row-contain{contain:layout style}
       `}</style>
     </div>
   )
