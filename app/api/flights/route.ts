@@ -93,6 +93,9 @@ const userAgents = {
             ...flight,
             GateNumber: localOverride.GateNumber || flight.GateNumber,
             CheckInDesk: localOverride.CheckInDesk || flight.CheckInDesk,
+            BaggageReclaim: localOverride.BaggageReclaim || flight.BaggageReclaim, // DODANO!
+            StatusEN: localOverride.StatusEN || flight.StatusEN,                 // DODANO!
+            Terminal: localOverride.Terminal || flight.Terminal,                 // DODANO!
           };
         }
         return flight;
@@ -319,10 +322,29 @@ export async function GET(): Promise<NextResponse> {
     );
 
     // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
+    // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
     [departures, arrivals] = await Promise.all([
       applyKvOverrides(departures),
       applyKvOverrides(arrivals)
     ]);
+
+    // DEFAULT BAGGAGE BELT LOGIKA:
+    // Za sve dolaske koji JOŠ NISU stigli i nemaju traku, automatski dodijeli "2"
+    arrivals = arrivals.map((flight: Flight) => {
+      const statusLower = (flight.StatusEN || "").toLowerCase();
+      const isArrived = statusLower.includes("arrived") || statusLower.includes("sletio") || statusLower.includes("landed");
+      
+      // Ako let nije stigao i nema trake (niti admin ručno nije dodijelio), stavi "2"
+      if (!isArrived && !flight.BaggageReclaim) {
+        return {
+          ...flight,
+          BaggageReclaim: "2"
+        };
+      }
+      return flight;
+    });
+
+
 
     const totalFlights = departures.length + arrivals.length;
     
@@ -412,11 +434,23 @@ export async function GET(): Promise<NextResponse> {
         );
 
         // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
+        // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
         [autoProcessedDepartures, autoProcessedArrivals] = await Promise.all([
           applyKvOverrides(autoProcessedDepartures),
           applyKvOverrides(autoProcessedArrivals)
         ]);
-        
+
+        // DEFAULT BAGGAGE BELT LOGIKA (Backup mode)
+        autoProcessedArrivals = autoProcessedArrivals.map((flight: Flight) => {
+          const statusLower = (flight.StatusEN || "").toLowerCase();
+          const isArrived = statusLower.includes("arrived") || statusLower.includes("sletio") || statusLower.includes("landed");
+          
+          if (!isArrived && !flight.BaggageReclaim) {
+            return { ...flight, BaggageReclaim: "2" };
+          }
+          return flight;
+        });
+
         autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
         source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
         

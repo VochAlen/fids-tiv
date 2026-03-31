@@ -44,8 +44,8 @@ import ChristmasInactiveScreen from '@/components/ChristmasInactiveScreen';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const INTERVAL_ACTIVE = 10_000;
-const INTERVAL_INACTIVE = 30_000;
+const INTERVAL_ACTIVE = 60_000;
+const INTERVAL_INACTIVE = 60_000;
 const AD_SWITCH_INTERVAL = 15_000;
 const CACHE_CLEANUP_INTERVAL = 4 * 60 * 60 * 1_000; // 4h
 const CHECKIN_REFRESH_INTERVAL = 60_000;
@@ -166,7 +166,8 @@ interface FlightDisplayState {
   flight: EnhancedFlight | null;
   logoUrl: string;
   cityUrl: string;
-  classType: 'business' | 'economy' | null;
+  classType: string | null;
+  manualDeskStatus: string | null; // Popravljeno za TypeScript
   airlineName: string;
   destinationCity: string;
   flightNumber: string;
@@ -185,6 +186,7 @@ const EMPTY_DISPLAY: FlightDisplayState = {
   logoUrl: '',
   cityUrl: '',
   classType: null,
+    manualDeskStatus: null, // DODANO
   airlineName: '',
   destinationCity: '',
   flightNumber: '',
@@ -525,6 +527,28 @@ function CheckInDisplay() {
   const { adImages } = useAdImages();
   const currentTheme = useSeasonalTheme();
 
+    // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
+  const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/desk-class/${desk}`);
+      const data = await res.json();
+      return data.classType;
+    } catch {
+      return null;
+    }
+  }, []);
+
+    // ── Helper: dohvati ručni status saltera (Open/Close) ──────
+  const fetchDeskStatusOverride = useCallback(async (desk: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/desk-status/${desk}`);
+      const data = await res.json();
+      return data.status;
+    } catch {
+      return null;
+    }
+  }, []);
+
   // ── Sync currentFlightRef s aktualnim state-om ──────────────
   useEffect(() => {
     currentFlightRef.current = flightDisplay.flight;
@@ -726,15 +750,20 @@ function CheckInDisplay() {
         return;
       }
 
-      const [{ logoUrl, cityUrl }, classType, checkInStatus] = await Promise.all([
+const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] = await Promise.all([
         preloadFlightImages(nextFlight),
         getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
+        fetchDeskClassOverride(deskNumberParam),
+        fetchDeskStatusOverride(deskNumberParam), 
         getEnhancedCheckInStatus(
           nextFlight.FlightNumber,
           nextFlight.ScheduledDepartureTime || '',
           nextFlight.StatusEN || ''
         ),
       ]);
+
+      // Admin override ima apsolutni prioritet nad automatskom klasom
+      const finalClassType = overrideClass || fallbackClass;
 
       const { isCancelled, isDiverted } = checkFlightStatus(nextFlight.StatusEN || '');
 
@@ -744,7 +773,8 @@ function CheckInDisplay() {
         flight: nextFlight,
         logoUrl,
         cityUrl,
-        classType,
+        classType: finalClassType,
+        manualDeskStatus: overrideStatus, 
         airlineName: nextFlight.AirlineName || '',
         destinationCity: nextFlight.DestinationCityName || '',
         flightNumber: nextFlight.FlightNumber || '',
@@ -752,7 +782,7 @@ function CheckInDisplay() {
         scheduledTime: nextFlight.ScheduledDepartureTime || '',
         estimatedTime: nextFlight.EstimatedDepartureTime || '',
         gateNumber: nextFlight.GateNumber || '',
-        checkInStatus,
+        checkInStatus: checkInStatus || EMPTY_DISPLAY.checkInStatus, // Sigurnosni fallback protiv null
         isCancelled,
         isDiverted,
         flightStatus: nextFlight.StatusEN || '',
@@ -873,10 +903,18 @@ function CheckInDisplay() {
   }, [deskNumberParam, queueFlightTransition]);
 
   // ── shouldShowCheckIn ───────────────────────────────────────
+  // ── shouldShowCheckIn ───────────────────────────────────────
   const shouldShowCheckIn = useMemo(() => {
+    // 1. RUČNI OVERRIDE IMA APSOLUTNI PRIORITET
+    if (flightDisplay.manualDeskStatus === 'open') return true;
+    if (flightDisplay.manualDeskStatus === 'closed') return false;
+    
+    // 2. Otkazani/Preusmjereni letovi su uvijek zatvoreni
     if (flightDisplay.isCancelled || flightDisplay.isDiverted) return false;
+    
+    // 3. Ako nema ručnog overridea, koristi automatsku logiku
     return shouldDisplayCheckIn(flightDisplay.checkInStatus);
-  }, [flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
+  }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
   // ── Main data load interval ─────────────────────────────────
   useEffect(() => {
@@ -891,6 +929,29 @@ function CheckInDisplay() {
       clearInterval(id);
     };
   }, [loadFlights, shouldShowCheckIn]);
+
+    // ── Class Override refresh (Dohvata admin promjene uživo) ──
+  // ── Manual Status Override refresh (Dohvata admin promjene uživo) ──
+  useEffect(() => {
+    if (!flightDisplay.flight) return;
+    
+    const refreshStatus = async () => {
+      try {
+        const newStatus = await fetchDeskStatusOverride(deskNumberParam);
+        setFlightDisplay((prev) => {
+          if (prev.manualDeskStatus === newStatus) return prev;
+          return { ...prev, manualDeskStatus: newStatus };
+        });
+      } catch (err) {
+        console.error('Status override refresh error:', err);
+      }
+    };
+    
+    refreshStatus();
+    const id = setInterval(refreshStatus, 30_000); // Proverava svakih 30s
+    return () => clearInterval(id);
+  }, [flightDisplay.flight, deskNumberParam, fetchDeskStatusOverride]);
+
 
   // ── Check-in status refresh svaku minutu ───────────────────
   useEffect(() => {
@@ -1142,17 +1203,21 @@ function CheckInDisplay() {
             <div className="flex flex-col items-center mb-4">
               <AirlineLogo logoUrl={flightDisplay.logoUrl} airlineName={flightDisplay.airlineName} portrait />
 
-              {flightDisplay.classType && (
+                    {flightDisplay.classType && (
                 <div className="w-full max-w-[90vw] mb-3">
                   <div
-                    className={`rounded-xl px-6 py-3 text-center shadow-lg ${
-                      flightDisplay.classType === 'business'
-                        ? 'bg-gradient-to-r from-red-600 to-red-700 border-2 border-red-400'
-                        : 'bg-gradient-to-r from-blue-600 to-blue-700 border-2 border-blue-400'
+                    className={`rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
+                      flightDisplay.classType.toUpperCase().includes('BUSINESS')
+                        ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
+                        : flightDisplay.classType.toUpperCase().includes('PREMIUM')
+                        ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
+                        : flightDisplay.classType.toUpperCase().includes('PRIORITY')
+                        ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
+                        : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
                     }`}
                   >
                     <h1 className="text-7xl font-black text-white tracking-wider">
-                      {flightDisplay.classType === 'business' ? 'BUSINESS CLASS' : 'ECONOMY CLASS'}
+                      {flightDisplay.classType.toUpperCase()}
                     </h1>
                   </div>
                 </div>
@@ -1331,7 +1396,29 @@ function CheckInDisplay() {
                 portrait={false}
               />
               <div className="flex-1">
-                <div className="text-[12rem] font-black text-yellow-500 mb-2 flight-number-transition">
+                
+                {/* DODATO: Klasa saltera za Landscape rezim */}
+                {flightDisplay.classType && (
+                  <div className="mb-4">
+                    <div
+                      className={`inline-block rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
+                        flightDisplay.classType.toUpperCase().includes('BUSINESS')
+                          ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
+                          : flightDisplay.classType.toUpperCase().includes('PREMIUM')
+                          ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
+                          : flightDisplay.classType.toUpperCase().includes('PRIORITY')
+                          ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
+                          : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
+                      }`}
+                    >
+                      <h1 className="text-5xl font-black text-white tracking-wider">
+                        {flightDisplay.classType.toUpperCase()}
+                      </h1>
+                    </div>
+                  </div>
+                )}
+
+                <div className="text-[12rem] font-black text-yellow-500 mb-2 flight-number-transition leading-none">
                   {flightDisplay.flightNumber}
                 </div>
                 <div className="text-lg text-slate-400">{flightDisplay.airlineName}</div>

@@ -38,19 +38,20 @@ const formatTime = (timeString: string): string => {
 const getStatusColor = (status: string): string => {
   if (!status) return 'text-gray-400';
   const s = status.toLowerCase();
-  if (s.includes('on time') || s.includes('na vreme')) return 'text-green-500';
+  if (s.includes('on time') || s.includes('na vrijeme')) return 'text-green-500';
   if (s.includes('delay') || s.includes('kasni')) return 'text-yellow-500';
   if (s.includes('cancel') || s.includes('otkazan')) return 'text-red-500';
   if (s.includes('board') || s.includes('ukrcaj')) return 'text-blue-500';
   if (s.includes('gate') || s.includes('izlaz')) return 'text-purple-500';
   if (s.includes('arriv') || s.includes('sletio')) return 'text-emerald-500';
+  if (s.includes('divert')) return 'text-white';
   return 'text-gray-400';
 };
 
 const getStatusIcon = (status: string) => {
   if (!status) return <Clock className="w-4 h-4 text-gray-400" />;
   const s = status.toLowerCase();
-  if (s.includes('on time') || s.includes('na vreme')) return <CheckCircle className="w-4 h-4 text-green-500" />;
+  if (s.includes('on time') || s.includes('na vrijeme')) return <CheckCircle className="w-4 h-4 text-green-500" />;
   if (s.includes('delay') || s.includes('kasni')) return <AlertCircle className="w-4 h-4 text-yellow-500" />;
   if (s.includes('cancel') || s.includes('otkazan')) return <XCircle className="w-4 h-4 text-red-500" />;
   if (s.includes('board') || s.includes('ukrcaj')) return <Plane className="w-4 h-4 text-blue-500" />;
@@ -58,12 +59,13 @@ const getStatusIcon = (status: string) => {
 };
 
 // ============================================================
-// KOMPONENTA: Override Control (Za Gate i Check-in)
+// KOMPONENTA: Override Control (Za Gate, Check-in, Baggage i Terminal)
 // ============================================================
 interface OverrideControlProps {
   label: string;
   currentValue: string | undefined;
-  fieldName: 'GateNumber' | 'CheckInDesk';
+  // DODATO: 'Terminal'
+  fieldName: 'GateNumber' | 'CheckInDesk' | 'BaggageReclaim' | 'Terminal';
   flightNumber: string;
   onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
 }
@@ -71,6 +73,8 @@ interface OverrideControlProps {
 const OverrideControl: React.FC<OverrideControlProps> = ({ 
   label, currentValue, fieldName, flightNumber, onFlightOverride 
 }) => {
+   // Ako je Baggage Belt i trenutno nema vrijednosti, postavi podrazumijevani "2"
+  const defaultValue = fieldName === 'BaggageReclaim' && !currentValue ? '2' : '';
   const [inputValue, setInputValue] = useState(currentValue || '');
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -97,40 +101,352 @@ const OverrideControl: React.FC<OverrideControlProps> = ({
         Trenutno: {currentValue || <span className="text-white/30">Nije dodijeljeno (API podatak)</span>}
       </div>
       
-<div className="flex flex-col sm:flex-row gap-2 w-full" onClick={(e) => e.stopPropagation()}>
-  <input
-    type="text"
-    value={inputValue}
-    onChange={(e) => setInputValue(e.target.value)}
-    placeholder="npr. 3 ili 4,5"
-    className="w-full sm:w-28 min-w-0 flex-1 px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500"
-    disabled={isUpdating}
-  />
+      <div className="flex flex-col sm:flex-row gap-2 w-full" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="text"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          placeholder="npr. 1, 2 ili 3"
+          className="w-full sm:w-28 min-w-0 flex-1 px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          disabled={isUpdating}
+        />
 
-  <button
-    onClick={() => handleAction('assign')}
-    disabled={isUpdating || !inputValue.trim()}
-    className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg border border-blue-500/30 transition-colors disabled:opacity-50 text-sm"
-    type="button"
-  >
-    <Save className="w-3.5 h-3.5" />
-    {isUpdating ? '...' : 'Promijeni'}
-  </button>
+        <button
+          onClick={() => handleAction('assign')}
+          disabled={isUpdating || !inputValue.trim()}
+          className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg border border-blue-500/30 transition-colors disabled:opacity-50 text-sm"
+          type="button"
+        >
+          <Save className="w-3.5 h-3.5" />
+          {isUpdating ? '...' : 'Promijeni'}
+        </button>
 
-  <button
-    onClick={() => handleAction('clear')}
-    disabled={isUpdating || !currentValue}
-    className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg border border-red-500/30 transition-colors disabled:opacity-50 text-sm"
-    type="button"
-  >
-    <Trash2 className="w-3.5 h-3.5" />
-    Ukloni
-  </button>
-</div>
+        <button
+          onClick={() => handleAction('clear')}
+          disabled={isUpdating || !currentValue}
+          className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg border border-red-500/30 transition-colors disabled:opacity-50 text-sm"
+          type="button"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+          Ukloni
+        </button>
+      </div>
     </div>
   );
 };
 
+// ============================================================
+// KOMPONENTA: Status Control (Brza promjena statusa leta)
+// ============================================================
+interface StatusControlProps {
+  currentStatus: string;
+  flightNumber: string;
+  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+}
+
+// Mapa za sigurne Tailwind klase (zbog purge-a)
+const statusStyles: Record<string, { active: string; inactive: string }> = {
+  green: {
+    active: 'bg-green-600/40 border-green-500 text-green-300 ring-1 ring-green-500/50',
+    inactive: 'bg-green-600/10 border-green-500/30 text-green-400/70 hover:bg-green-600/20'
+  },
+  yellow: {
+    active: 'bg-yellow-600/40 border-yellow-500 text-yellow-300 ring-1 ring-yellow-500/50',
+    inactive: 'bg-yellow-600/10 border-yellow-500/30 text-yellow-400/70 hover:bg-yellow-600/20'
+  },
+  blue: {
+    active: 'bg-blue-600/40 border-blue-500 text-blue-300 ring-1 ring-blue-500/50',
+    inactive: 'bg-blue-600/10 border-blue-500/30 text-blue-400/70 hover:bg-blue-600/20'
+  },
+  purple: {
+    active: 'bg-purple-600/40 border-purple-500 text-purple-300 ring-1 ring-purple-500/50',
+    inactive: 'bg-purple-600/10 border-purple-500/30 text-purple-400/70 hover:bg-purple-600/20'
+  },
+  red: {
+    active: 'bg-red-600/40 border-red-500 text-red-300 ring-1 ring-red-500/50',
+    inactive: 'bg-red-600/10 border-red-500/30 text-red-400/70 hover:bg-red-600/20'
+  },
+  // DODATO: Stil za "Preusmjeren"
+  white: {
+    active: 'bg-white/40 border-white text-white ring-1 ring-white/50',
+    inactive: 'bg-white/10 border-white/30 text-white/70 hover:bg-white/20'
+  }
+};
+
+const StatusControl: React.FC<StatusControlProps> = ({ 
+  currentStatus, flightNumber, onFlightOverride 
+}) => {
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  const quickStatuses = [
+    { value: 'On Time', label: 'Na vrijeme', color: 'green' },
+    { value: 'Delayed', label: 'Kasni', color: 'yellow' },
+    { value: 'Boarding', label: 'Ukrcaj', color: 'blue' },
+    { value: 'Departed', label: 'Poletio', color: 'purple' },
+    { value: 'Cancelled', label: 'Otkazan', color: 'red' },
+    { value: 'Diverted', label: 'Preusmjeren', color: 'white' },
+  ];
+
+  const handleStatusChange = async (newStatus: string) => {
+    setIsUpdating(true);
+    try {
+      await onFlightOverride(flightNumber, 'StatusEN', 'assign', newStatus);
+    } catch (error) {
+      console.error('Status change error:', error);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const isCurrentlyActive = (statusValue: string) => {
+    if (!currentStatus) return false;
+    return currentStatus.toLowerCase() === statusValue.toLowerCase();
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-white/50">Status leta (Quick Change)</div>
+      <div className="text-sm text-white mb-2 font-medium">
+        Trenutno: {currentStatus || <span className="text-white/30">N/A</span>}
+      </div>
+      <div className="flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
+        {quickStatuses.map((status) => {
+          const isActive = isCurrentlyActive(status.value);
+          const styles = statusStyles[status.color] || statusStyles.green;
+          
+          return (
+            <button
+              key={status.value}
+              onClick={() => handleStatusChange(status.value)}
+              disabled={isUpdating || isActive}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                isActive ? styles.active : styles.inactive
+              } disabled:opacity-50`}
+              type="button"
+            >
+              {status.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// KOMPONENTA: Manual Desk Override (Open/Close)
+// ============================================================
+interface DeskManualControlProps {
+  deskNumbers: string | undefined;
+}
+
+const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) => {
+  const [savedStatuses, setSavedStatuses] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!deskNumbers) return;
+    const desks = deskNumbers.split(',').map(d => d.trim());
+    
+    desks.forEach(async (desk) => {
+      try {
+        const res = await fetch(`/api/desk-status/${desk}`);
+        const data = await res.json();
+        if (data.status) {
+          setSavedStatuses(prev => ({ ...prev, [desk]: data.status }));
+        }
+      } catch {}
+    });
+  }, [deskNumbers]);
+
+  const handleAction = async (desk: string, action: string) => {
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/desk-status-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action }),
+      });
+      if (action === 'clear') {
+        setSavedStatuses(prev => {
+          const next = { ...prev };
+          delete next[desk];
+          return next;
+        });
+      } else {
+        setSavedStatuses(prev => ({ ...prev, [desk]: action }));
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!deskNumbers) return null;
+
+  const desks = deskNumbers.split(',').map(d => d.trim());
+
+  return (
+    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
+      <div className="text-xs text-white/50">🚷 Manual Open/Close (FIDS override)</div>
+      <div className="space-y-2">
+        {desks.map(desk => (
+          <div key={desk} className="flex items-center gap-2 bg-white/5 rounded-lg p-2 border border-white/10">
+            <span className="text-xs text-white/70 w-8 font-bold">Š{desk}</span>
+            
+            {!savedStatuses[desk] ? (
+              <div className="flex-1 flex items-center gap-1 flex-wrap">
+                <button
+                  onClick={() => handleAction(desk, 'open')}
+                  disabled={isLoading}
+                  className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50"
+                  type="button"
+                >
+                  FORCE OPEN
+                </button>
+                <button
+                  onClick={() => handleAction(desk, 'closed')}
+                  disabled={isLoading}
+                  className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50"
+                  type="button"
+                >
+                  FORCE CLOSE
+                </button>
+              </div>
+            ) : (
+              <div className="flex-1 flex items-center justify-between">
+                <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                  savedStatuses[desk] === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'
+                }`}>
+                  {savedStatuses[desk].toUpperCase()}
+                </span>
+                <button 
+                  onClick={() => handleAction(desk, 'clear')} 
+                  disabled={isLoading} 
+                  className="text-[10px] text-white/50 hover:text-white bg-white/10 px-2 py-1 rounded transition disabled:opacity-50"
+                  type="button"
+                >
+                  Reset to Auto
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// KOMPONENTA: Desk Class Control (Business, Premium itd.)
+// ============================================================
+interface DeskClassControlProps {
+  deskNumbers: string | undefined;
+}
+
+const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
+  const [savedClasses, setSavedClasses] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Ucitaj postojece klase kad se komponenta mounta
+  useEffect(() => {
+    if (!deskNumbers) return;
+    const desks = deskNumbers.split(',').map(d => d.trim());
+    
+    desks.forEach(async (desk) => {
+      try {
+        const res = await fetch(`/api/desk-class/${desk}`);
+        const data = await res.json();
+        if (data.classType) {
+          setSavedClasses(prev => ({ ...prev, [desk]: data.classType }));
+        }
+      } catch {}
+    });
+  }, [deskNumbers]);
+
+  const handleSave = async (desk: string, type: string) => {
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, classType: type, action: 'assign' }),
+      });
+      setSavedClasses(prev => ({ ...prev, [desk]: type }));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleClear = async (desk: string) => {
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
+      });
+      setSavedClasses(prev => {
+        const next = { ...prev };
+        delete next[desk];
+        return next;
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!deskNumbers) return null;
+
+  const classOptions = [
+    { value: 'BUSINESS CLASS', label: 'BUSINESS', color: 'bg-red-600 hover:bg-red-700' },
+    { value: 'PREMIUM ECONOMY', label: 'PREMIUM', color: 'bg-purple-600 hover:bg-purple-700' },
+    { value: 'ECONOMY CLASS', label: 'ECONOMY', color: 'bg-blue-600 hover:bg-blue-700' },
+    { value: 'PRIORITY', label: 'PRIORITY', color: 'bg-green-600 hover:bg-green-700' },
+  ];
+
+  const desks = deskNumbers.split(',').map(d => d.trim());
+
+  return (
+    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
+      <div className="text-xs text-white/50">🏷️ Klasa saltera (FIDS prikaz ispod loga)</div>
+      <div className="space-y-2">
+        {desks.map(desk => (
+          <div key={desk} className="flex items-center gap-2 bg-white/5 rounded-lg p-2 border border-white/10">
+            <span className="text-xs text-white/70 w-8 font-bold">Š{desk}</span>
+            
+            {savedClasses[desk] ? (
+              <div className="flex-1 flex items-center justify-between">
+                <span className="text-sm font-bold text-amber-300">{savedClasses[desk]}</span>
+                <button 
+                  onClick={() => handleClear(desk)} 
+                  disabled={isLoading} 
+                  className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-500/10 rounded"
+                  type="button"
+                >
+                  Ukloni
+                </button>
+              </div>
+            ) : (
+              <div className="flex-1 flex items-center gap-1 flex-wrap">
+                {classOptions.map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => handleSave(desk, opt.value)}
+                    disabled={isLoading}
+                    className={`px-2 py-1 text-[10px] font-bold rounded text-white transition disabled:opacity-50 ${opt.color}`}
+                    type="button"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 // ============================================================
 // KOMPONENTA: Flight Card
 // ============================================================
@@ -211,11 +527,22 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
             </div>
 
             {isDeparture ? (
-<div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
+              <div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
                 <h3 className="text-sm font-bold text-white/80 uppercase tracking-wider border-b border-white/10 pb-2">
-                  ⚙️ Upravljanje letom (Redis Overrides)
+                  ⚙️ Upravljanje polaskom
                 </h3>
                 
+                <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
+
+                {/* DODATO: Terminal Override za polaske */}
+                <OverrideControl
+                  label="Terminal"
+                  currentValue={flight.Terminal}
+                  fieldName="Terminal"
+                  flightNumber={flight.FlightNumber}
+                  onFlightOverride={onFlightOverride}
+                />
+
                 <OverrideControl
                   label="Check-In Desk"
                   currentValue={flight.CheckInDesk}
@@ -231,10 +558,36 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                   flightNumber={flight.FlightNumber}
                   onFlightOverride={onFlightOverride}
                 />
+                  {/* DODANO: Kontrola klase saltera */}
+                <DeskClassControl deskNumbers={flight.CheckInDesk} />
+                    
+                {/* DODATO: Kontrola ručnog otvaranja/zatvaranja */}
+                <DeskManualControl deskNumbers={flight.CheckInDesk} />
               </div>
             ) : (
-              <div className="bg-white/5 rounded-xl p-4 border border-white/10 flex items-center justify-center h-full">
-                <p className="text-sm text-white/40 italic">Upravljanje je dostupno samo za polaske.</p>
+              <div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
+                <h3 className="text-sm font-bold text-white/80 uppercase tracking-wider border-b border-white/10 pb-2">
+                  ⚙️ Upravljanje dolaskom
+                </h3>
+                
+                <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
+
+                {/* DODATO: Terminal Override za dolaske */}
+                <OverrideControl
+                  label="Terminal"
+                  currentValue={flight.Terminal}
+                  fieldName="Terminal"
+                  flightNumber={flight.FlightNumber}
+                  onFlightOverride={onFlightOverride}
+                />
+
+                <OverrideControl
+                  label="Baggage Belt (Traka za prtljag)"
+                  currentValue={flight.BaggageReclaim}
+                  fieldName="BaggageReclaim"
+                  flightNumber={flight.FlightNumber}
+                  onFlightOverride={onFlightOverride}
+                />
               </div>
             )}
           </div>
@@ -283,6 +636,13 @@ const generateFlightKey = (flight: Flight, index: number): string => {
 
 interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
 
+// POMOĆNA MAPA ZA BOJE KARTICA (Fix za Next.js Tailwind Purge)
+const cardStylesMap: Record<string, { bg: string; text: string }> = {
+  blue: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
+  green: { bg: 'bg-green-500/20', text: 'text-green-400' },
+  yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' }
+};
+
 export default function AdminFlightsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -302,9 +662,7 @@ export default function AdminFlightsPage() {
       setError(null);
      const response = await fetch(`/api/flights?nocache=${Date.now()}`, {
         cache: 'no-store',
-        headers: {
-          'Cache-Control': 'no-cache'
-        }
+        headers: { 'Cache-Control': 'no-cache' }
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: Greška pri učitavanju letova`);
       const data = await response.json();
@@ -349,7 +707,7 @@ export default function AdminFlightsPage() {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Greška pri ažuriranju');
       }
-      await loadFlights(true); // Osvježi listu da pokaže novu vrijednost
+      await loadFlights(true); 
     } catch (error) {
       console.error('Override error:', error);
       alert(error instanceof Error ? error.message : 'Došlo je do greške.');
@@ -408,7 +766,6 @@ export default function AdminFlightsPage() {
   return (
 <div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
         <header className="mb-8">
       <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
             <div>
@@ -434,11 +791,7 @@ export default function AdminFlightsPage() {
         <div className="flex flex-col gap-3 w-full md:w-auto">
         <div className="flex flex-wrap gap-2 justify-end">
                 <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button"><RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} /></button>
-<button
-  onClick={handleLogout}
-  className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors"
-  type="button"
->
+<button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors" type="button">
   <LogOut className="w-4 h-4" />
   <span className="hidden sm:inline">Odjavi se</span>
 </button>              </div>
@@ -447,24 +800,27 @@ export default function AdminFlightsPage() {
           </div>
         </header>
 
-        {/* Stats Cards */}
+        {/* Stats Cards - ISPRAVLJENO ZA TAILWIND PURGE */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
           {[ 
             { label: 'Ukupno letova', count: flights.departures.length + flights.arrivals.length, color: 'blue', icon: Plane },
             { label: 'Polasci', count: flights.departures.length, color: 'blue', icon: ArrowUpRight },
             { label: 'Dolasci', count: flights.arrivals.length, color: 'green', icon: ArrowDownRight },
             { label: 'Aktivni letovi', count: getFilteredFlights.length, color: 'yellow', icon: Clock }
-          ].map((card) => (
-            <div key={card.label} className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10">
-              <div className="flex items-center justify-between">
-                <div><div className="text-sm text-white/60">{card.label}</div><div className="text-2xl font-bold text-white mt-1">{loading ? '...' : card.count}</div></div>
-                <div className={`p-2 bg-${card.color}-500/20 rounded-lg`}><card.icon className={`w-6 h-6 text-${card.color}-400`} /></div>
+          ].map((card) => {
+            const styles = cardStylesMap[card.color] || cardStylesMap.blue;
+            const IconComponent = card.icon;
+            return (
+              <div key={card.label} className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10">
+                <div className="flex items-center justify-between">
+                  <div><div className="text-sm text-white/60">{card.label}</div><div className="text-2xl font-bold text-white mt-1">{loading ? '...' : card.count}</div></div>
+                  <div className={`p-2 ${styles.bg} rounded-lg`}><IconComponent className={`w-6 h-6 ${styles.text}`} /></div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Filters */}
         <div className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10 mb-8">
           <div className="flex flex-col md:flex-row gap-4">
             <div className="flex border-b border-white/10 md:border-none">
@@ -488,7 +844,6 @@ export default function AdminFlightsPage() {
           </div>
         </div>
 
-        {/* Flights List */}
         <div className="space-y-4">
           {loading ? (
             <div className="space-y-4">{[...Array(5)].map((_, i) => (<div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse"><div className="flex items-center justify-between"><div className="flex items-center gap-4"><div className="w-10 h-10 bg-white/10 rounded-lg" /><div><div className="h-6 w-32 bg-white/10 rounded mb-2" /><div className="h-4 w-48 bg-white/10 rounded" /></div></div><div className="flex items-center gap-6"><div className="text-right"><div className="h-6 w-16 bg-white/10 rounded mb-1" /><div className="h-4 w-24 bg-white/10 rounded" /></div><div className="h-4 w-24 bg-white/10 rounded" /></div></div></div>))}</div>
@@ -505,7 +860,6 @@ export default function AdminFlightsPage() {
           )}
         </div>
 
-        {/* Footer */}
         <div className="mt-8 pt-6 border-t border-white/10">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <div className="text-sm text-white/50">{lastUpdated && `Sistem ažuriran: ${formatDate(lastUpdated)}`}</div>
