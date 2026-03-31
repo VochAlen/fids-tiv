@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, memo, Component, type ErrorInfo, type ReactNode } from 'react';
+import { useEffect, useState, useRef, useCallback, memo, Component, type ErrorInfo, type ReactNode, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import Image from 'next/image';
 import type { Flight } from '@/types/flight';
@@ -50,26 +50,50 @@ class GateErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundary
 // MEMO: Logo komponenta — fiksna veličina 200x75
 // Podržava PNG, JPG, JPEG formate
 // ============================================================
+// ============================================================
+// MEMO: Logo komponenta — fiksna veličina 350x100
+// Logika: 1. public/airlines -> 2. FlightAware -> 3. Fallback tekst
+// ============================================================
 const AirlineLogo = memo(function AirlineLogo({ icao, flightNumber, name }: { icao: string; flightNumber: string; name: string }) {
-  const [imgError, setImgError] = useState(false);
-  
   const code = icao || flightNumber?.substring(0, 2).toUpperCase() || '';
-  const formats = ['.png', '.jpg', '.jpeg'];
-  const [currentFormatIndex, setCurrentFormatIndex] = useState(0);
-  const currentSrc = code ? `/airlines/${code}${formats[currentFormatIndex]}` : '';
 
-  const handleError = useCallback(() => {
-    if (currentFormatIndex < formats.length - 1) {
-      setCurrentFormatIndex(prev => prev + 1);
-    } else {
-      setImgError(true);
+  // Utvrđivanje izvora slike bez korišćenja useState (sprečava nepotrebne re-rendere)
+  const src = useMemo(() => {
+    if (!code) return '';
+    
+    // Sinhrona provjera lokalnog fajla (traje ~0.5ms po fajlu)
+    if (typeof window !== 'undefined') {
+      try {
+        const xhr = new XMLHttpRequest();
+        
+        // Provjera .jpg
+        xhr.open('HEAD', `/airlines/${code}.jpg`, false); 
+        xhr.send();
+        if (xhr.status === 200) return `/airlines/${code}.jpg`;
+        
+        // Provjera .png
+        xhr.open('HEAD', `/airlines/${code}.png`, false);
+        xhr.send();
+        if (xhr.status === 200) return `/airlines/${code}.png`;
+      } catch { /* Greška u mreži ne bi trebala da se desi na lokalnom fajlu */ }
     }
-  }, [currentFormatIndex, formats.length]);
+    
+    // Ako nema ničeg lokalno, fallback na FlightAware
+    return `https://www.flightaware.com/images/airline_logos/180px/${code}.png`;
+  }, [code]);
 
-  if (!code || imgError) {
+  // Ako i FlightAware padne (nepoznat ICAO), prebaci u tekstualni prikaz
+  const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const container = e.currentTarget.parentElement;
+    if (container) {
+      container.innerHTML = `<span class="text-slate-500 text-sm font-semibold px-4 text-center w-full h-full flex items-center justify-center">${name || code}</span>`;
+    }
+  }, [code, name]);
+
+  if (!code) {
     return (
-      <div className="w-[300px] h-[100px] bg-slate-700/50 rounded-xl flex items-center justify-center border border-white/10">
-        <span className="text-white/40 text-sm">{name || code}</span>
+      <div className="w-[350px] h-[100px] bg-slate-700/50 rounded-xl flex items-center justify-center border border-white/10">
+        <span className="text-white/40 text-sm">{name || 'N/A'}</span>
       </div>
     );
   }
@@ -77,7 +101,7 @@ const AirlineLogo = memo(function AirlineLogo({ icao, flightNumber, name }: { ic
   return (
     <div className="w-[350px] h-[100px] bg-white rounded-xl p-2 shadow-xl flex items-center justify-center overflow-hidden">
       <img
-        src={currentSrc}
+        src={src}
         alt={name}
         className="object-contain w-full h-full"
         onError={handleError}

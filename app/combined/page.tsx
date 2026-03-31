@@ -522,8 +522,36 @@ const FlightRow = memo(
 
     const logoURL  = useMemo(() => getFlightawareLogoURL(flight.AirlineICAO), [flight.AirlineICAO])
     const rowBg    = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
-    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.src = PLACEHOLDER_IMAGE }, [])
+    //const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.src = PLACEHOLDER_IMAGE }, [])
+    // ICAO kod za trenutni let (izvan callbacka radi performansi)
+    const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
+    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = e.currentTarget;
+      
+      // Ako smo već probali lokalni .png i nije uspjelo, stavi placeholder i zaustavi dalje greške
+      if (img.dataset.fallback === 'png') {
+        img.src = PLACEHOLDER_IMAGE;
+        img.onerror = null; 
+        return;
+      }
+      
+      // Ako smo probali lokalni .jpg i nije uspjelo, probaj .png
+      if (img.dataset.fallback === 'jpg') {
+        img.dataset.fallback = 'png';
+        img.src = `/airlines/${icao}.png`;
+        return;
+      }
+
+      // PRVA greška: FlightAware logo ne postoji (ili je uklonjen) -> probaj lokalni .jpg
+      if (icao) {
+        img.dataset.fallback = 'jpg';
+        img.src = `/airlines/${icao}.jpg`;
+      } else {
+        img.src = PLACEHOLDER_IMAGE;
+        img.onerror = null;
+      }
+    }, [icao])
     // Gate Change Highlighting
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
