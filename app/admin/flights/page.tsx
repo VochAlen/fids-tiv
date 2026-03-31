@@ -513,7 +513,7 @@ export default function AdminFlightsPage() {
               {systemStatus === 'offline' && <div className="px-3 py-1 bg-yellow-900/20 text-yellow-400 rounded-full text-sm">⚠️ Backup mode</div>}
               <div className="text-sm text-white/50">Prikazano: {getFilteredFlights.length} od {flights.departures.length + flights.arrivals.length}</div>
               <button onClick={handleRefresh} disabled={refreshing} className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors disabled:opacity-50" type="button">
-                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? 'Osvežava se...' : 'Osveži'}
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? 'Osvježava se...' : 'Osvježi'}
               </button>
             </div>
           </div>
