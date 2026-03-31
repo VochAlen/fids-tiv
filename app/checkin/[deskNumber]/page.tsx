@@ -597,12 +597,45 @@ function CheckInDisplay() {
   }, []);
 
   // ── Helper: airline logo sa cache-om ───────────────────────
+  // ── Helper: airline logo sa cache-om (Lokalni > FlightAware) ───────────────────────
   const getAirlineLogoUrl = useCallback(async (flight: EnhancedFlight | null): Promise<string> => {
     if (!flight) return '/airlines/placeholder.jpg';
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
     if (!icao) return '/airlines/placeholder.jpg';
+    
+    // Ako je već u cache-u za ovu sesiju, vrati odmah (sprečava ponovno provjeravanje)
     if (logoCacheRef.current.has(icao)) return logoCacheRef.current.get(icao)!;
+    
+    // Pomoćna funkcija koja simulira "file_exists" preko browsera
+    const checkLocalImage = (src: string): Promise<boolean> =>
+      new Promise((resolve) => {
+        if (typeof window === 'undefined') return resolve(false);
+        const img = new window.Image();
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+        // Timeout od 1s: ako Next.js dev server sporo vraća 404, ne blokiramo dalje
+        setTimeout(() => resolve(false), 1000);
+        img.src = src;
+      });
+
     try {
+      // Provjeravamo .jpg i .png ISTOVREMENO da ne gubimo vrijeme
+      const [hasJpg, hasPng] = await Promise.all([
+        checkLocalImage(`/airlines/${icao}.jpg`),
+        checkLocalImage(`/airlines/${icao}.png`),
+      ]);
+
+      // Ako pronađe lokalnu, zapiši u cache i vrati
+      if (hasJpg) {
+        logoCacheRef.current.set(icao, `/airlines/${icao}.jpg`);
+        return `/airlines/${icao}.jpg`;
+      }
+      if (hasPng) {
+        logoCacheRef.current.set(icao, `/airlines/${icao}.png`);
+        return `/airlines/${icao}.png`;
+      }
+
+      // Ako nema lokalno, fallback na FlightAware preko tvog postojećeg helpera
       const url = await getLogoURLWithFallback(icao, flight.AirlineLogoURL);
       logoCacheRef.current.set(icao, url);
       return url;
