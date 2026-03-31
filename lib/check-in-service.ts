@@ -207,6 +207,7 @@ function getAirlineName(iataCode: string): string {
     'AF': 'Air France',
     'EK': 'Emirates',
     'QR': 'Qatar Airways',
+    'D8': 'Norwegian',
   };
   
   return airlineNames[iataCode] || `Unknown (${iataCode})`;

@@ -107,6 +107,9 @@ const LANGUAGE_CONFIG = {
 const SECURITY_MESSAGES = [
   { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
   { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •", language: "cnr" },
+ { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •", language: "en" },
+  { text: "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •", language: "cnr" },
+
 ]
 
 // ============================================================
@@ -309,10 +312,14 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
+// ============================================================
+// AUTO-STATUS ZA DEPARTURES
+// ============================================================
 const EARLY_CHECKIN_AIRLINES = new Set(["6H", "FZ"])
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim()
+  // Ako API šalje svoj status (Cancelled, Boarding, Delayed...), poštujemo ga
   if (status && status !== "-") return null
 
   const scheduled = parseFlightTimeToDate(flight.ScheduledDepartureTime)
@@ -320,27 +327,37 @@ function getAutoStatus(flight: Flight): string | null {
 
   const referenceTime = parseFlightTimeToDate(flight.EstimatedDepartureTime) ?? scheduled
 
-  const now           = Date.now()
-  const minsToRef     = (referenceTime.getTime() - now) / 60_000
-  const minsToSTD     = (scheduled.getTime()     - now) / 60_000
+  const now       = Date.now()
+  const minsToRef = (referenceTime.getTime() - now) / 60_000
+  const minsToSTD = (scheduled.getTime()     - now) / 60_000
 
-  const iata           = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
-  const checkInMinutes = EARLY_CHECKIN_AIRLINES.has(iata) ? 180 : 120
+  // Let je već prošao (na osnovu estimated ili scheduled vremena)
+  if (minsToRef < -5) return null
 
-  if (minsToRef < -5)   return null
+  // Prioritetni statusi blizu polaska (imaju apsolutni prioritet)
   if (minsToRef <= 5)   return "Close"
   if (minsToRef <= 10)  return "Final Call"
   if (minsToRef <= 30)  return "Go to Gate"
 
-  if (minsToSTD <= checkInMinutes && minsToSTD > -5) {
-    const hh = String(scheduled.getHours()).padStart(2, "0")
-    const mm = String(scheduled.getMinutes()).padStart(2, "0")
+  // Za SVE ostale letove koji nisu u "Go to Gate" fazi (minsToSTD > 30)
+  // prikaži tačno vrijeme KADA se check-in otvara
+  if (minsToSTD > 30) {
+    const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
+    
+    // Standardno -120 min, za 6H i FZ -180 min
+    const checkInMinutesOffset = EARLY_CHECKIN_AIRLINES.has(iata) ? 180 : 120
+
+    // Matematički izračunamo tačan datum/vrijeme otvaranja check-ina
+    const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000))
+    
+    const hh = String(checkInDate.getHours()).padStart(2, "0")
+    const mm = String(checkInDate.getMinutes()).padStart(2, "0")
+    
     return `Check In at ${hh}:${mm}`
   }
 
   return null
 }
-
 // ── Auto-status za ARRIVALS ──────────────────────────────────
 // ── Auto-status za ARRIVALS ──────────────────────────────────
 // ── Auto-status za ARRIVALS ──────────────────────────────────
