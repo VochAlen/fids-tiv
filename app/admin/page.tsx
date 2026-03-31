@@ -248,7 +248,7 @@ const handleLogout = useCallback(async () => {
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <header className="mb-8">
-          <div className="flex justify-between items-center">
+         <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
             <div>
               <div className="flex items-center gap-3">
                 <h1 className="text-3xl font-bold text-white">Administracija</h1>
@@ -277,7 +277,7 @@ const handleLogout = useCallback(async () => {
               </div>
             </div>
             
-            <div className="flex items-center gap-4">
+<div className="flex flex-wrap items-center gap-2 justify-end w-full md:w-auto">
               <div className="hidden md:block text-right">
                 <div className="text-sm text-slate-400">Trenutni dan</div>
                 <div className="text-white font-medium">
@@ -620,12 +620,18 @@ const handleLogout = useCallback(async () => {
                 </div>
               )}
               <div className="text-sm text-white/50">
-                © 2024 Tivat Airport Check-in System v1.0
+                © 2026 Tivat Airport Check-in and Gate System v1.0
               </div>
             </div>
           </div>
         </div>
       </div>
+        <style jsx global>{`
+        body, html {
+          overflow: auto !important;
+          height: auto !important;
+        }
+      `}</style>
     </div>
   );
 }

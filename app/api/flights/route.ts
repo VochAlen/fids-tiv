@@ -1,5 +1,6 @@
 // app/api/flights/route.ts
 import { NextResponse } from 'next/server';
+import { getRedisClient } from '@/lib/redis';
 import { FlightBackupService } from '@/lib/backup/flight-backup-service';
 import { FlightAutoProcessor, type AutoProcessedFlight } from '@/lib/backup/flight-auto-processor';
 import type { Flight, FlightData, RawFlightData } from '@/types/flight';
@@ -22,6 +23,87 @@ const userAgents = {
   firefox: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:117.0) Gecko/20100101 Firefox/117.0',
   safari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
 };
+
+// ============================================================
+// POMOĆNA FUNKCIJA: Učitavanje admin override-a iz Redis Labs
+// ============================================================
+  // ============================================================
+  // POMOĆNA FUNKCIJA: Učitavanje admin override-a iz Redis Labs
+  // Koristi SCAN umjesto KEYS kako ne bi zamrzao RAM na free planu
+  // ============================================================
+  async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
+    let client;
+    try {
+      client = getRedisClient();
+      
+      // 1. Pronađi sve ključeve koji počinju sa "override:" (koristi SCAN umjesto KEYS)
+      const keys: string[] = [];
+      let cursor = '0';
+      
+      do {
+        // SCAN je siguran za memoriju - vraća po 100 ključeva po pozivu umjesto svih odjednom
+        const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
+        cursor = scanResult[0];
+        keys.push(...scanResult[1]);
+        
+        // Sigurnosno prekidanje ako ih previše očekivano (zaštita od beskonačne petlje ili bagova)
+        if (keys.length > 200) break; 
+      } while (cursor !== '0');
+
+      if (keys.length === 0) {
+        return flights; 
+      }
+
+      // 2. Uzmi sve podatke paralelno koristeći ioredis pipeline (veoma brzo)
+      const pipeline = client.pipeline();
+      keys.forEach(key => pipeline.hgetall(key));
+      
+      // ioredis pipeline.exec() vraća niz u formatu: [ [greska, rezultat], [greska, rezultat] ]
+      const results = await pipeline.exec();
+
+      // SIGURNOSNA PROVJERA: Ako pipeline vrati null (npr. pukla konekcija), prekini dalje
+      if (!results || results.length === 0) {
+        return flights; 
+      }
+
+      const overridesMap: Record<string, Record<string, string>> = {};
+      
+      keys.forEach((key, index) => {
+        const result = results[index];
+        
+        // Provjera da nema greške i da rezultat postoji
+        if (result && !result[0] && result[1]) {
+          const flightNumber = key.replace('override:', '');
+          
+          // ioredis hgetall vraća čisti JS objekat: { GateNumber: '3', CheckInDesk: '1' }
+          // (Mnogo lakše od Vercel KV-a koji vraća niz!)
+          const parsedData = result[1] as Record<string, string>;
+          
+          if (Object.keys(parsedData).length > 0) {
+            overridesMap[flightNumber] = parsedData;
+          }
+        }
+      });
+
+      // 3. Prepiši spoljne podatke sa lokalnim admin podacima
+      return flights.map(flight => {
+        const localOverride = overridesMap[flight.FlightNumber];
+        if (localOverride) {
+          return {
+            ...flight,
+            GateNumber: localOverride.GateNumber || flight.GateNumber,
+            CheckInDesk: localOverride.CheckInDesk || flight.CheckInDesk,
+          };
+        }
+        return flight;
+      });
+
+    } catch (error) {
+      // KRITIČNO: Ako Redis padne, FIDS nastavlja raditi sa originalnim podacima
+      console.error('⚠️ Redis Override read failed (FIDS continues normally):', error);
+      return flights; 
+    }
+  }
 
 async function fetchWithQuickRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -228,13 +310,19 @@ export async function GET(): Promise<NextResponse> {
     }
 
     // SEPARATE DEPARTURES AND ARRIVALS - CRITICAL PART
-    const departures = sortFlightsByTime(
+       let departures = sortFlightsByTime(
       finalFlights.filter((f: Flight) => f.FlightType === 'departure')
     );
 
-    const arrivals = sortFlightsByTime(
+    let arrivals = sortFlightsByTime(
       finalFlights.filter((f: Flight) => f.FlightType === 'arrival')
     );
+
+    // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
+    [departures, arrivals] = await Promise.all([
+      applyKvOverrides(departures),
+      applyKvOverrides(arrivals)
+    ]);
 
     const totalFlights = departures.length + arrivals.length;
     
@@ -315,13 +403,19 @@ export async function GET(): Promise<NextResponse> {
         const processedFlights = processor.processFlights();
         const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
         
-        const autoProcessedDepartures = sortFlightsByTime(
+        let autoProcessedDepartures = sortFlightsByTime(
           simulatedFlights.filter((f: AutoProcessedFlight) => f.FlightType === 'departure')
         );
         
-        const autoProcessedArrivals = sortFlightsByTime(
+        let autoProcessedArrivals = sortFlightsByTime(
           simulatedFlights.filter((f: AutoProcessedFlight) => f.FlightType === 'arrival')
         );
+
+        // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
+        [autoProcessedDepartures, autoProcessedArrivals] = await Promise.all([
+          applyKvOverrides(autoProcessedDepartures),
+          applyKvOverrides(autoProcessedArrivals)
+        ]);
         
         autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
         source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
@@ -362,14 +456,19 @@ export async function GET(): Promise<NextResponse> {
           const processor = new FlightAutoProcessor(emergencyFlights);
           const processedFlights = processor.processFlights();
           
-          const departures = sortFlightsByTime(
+             let departures = sortFlightsByTime(
             processedFlights.filter((f: AutoProcessedFlight) => f.FlightType === 'departure')
           );
           
-          const arrivals = sortFlightsByTime(
+          let arrivals = sortFlightsByTime(
             processedFlights.filter((f: AutoProcessedFlight) => f.FlightType === 'arrival')
           );
-          
+
+          // ADMIN OVERRIDES: Učitaj iz Vercel KV i nadjacči spoljne podatke
+          [departures, arrivals] = await Promise.all([
+            applyKvOverrides(departures),
+            applyKvOverrides(arrivals)
+          ]);
           const totalFlights = departures.length + arrivals.length;
           
           const flightData: FlightData = {

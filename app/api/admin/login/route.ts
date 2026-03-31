@@ -8,13 +8,8 @@ export async function POST(request: Request) {
   try {
     const { username, password } = await request.json();
 
-    // Proverite kredencijale
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-      // U stvarnoj aplikaciji ovde bi generisali JWT token
-      return NextResponse.json({ 
-        success: true, 
-        message: 'Uspešna prijava' 
-      });
+      return NextResponse.json({ success: true, message: 'Uspešna prijava' });
     }
 
     return NextResponse.json(

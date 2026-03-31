@@ -9,32 +9,15 @@ export default function AdminLoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
   const router = useRouter();
 
   useEffect(() => {
-    // Proverite da li je korisnik već ulogovan
-    const checkAuth = async () => {
-      try {
-        // Proverite localStorage
-        const isLocalAuth = localStorage.getItem('adminAuthenticated') === 'true';
-        
-        // Proverite cookie (možete proveriti i server-side auth ako imate)
-        const hasCookie = document.cookie.includes('admin-authenticated=true');
-        
-        // Ako je korisnik već ulogovan, preusmeri na admin dashboard
-        if (isLocalAuth || hasCookie) {
-          router.push('/admin');
-          return;
-        }
-      } catch (error) {
-        console.error('Auth check error:', error);
-      } finally {
-        setCheckingAuth(false);
-      }
-    };
-
-    checkAuth();
+    // Proverava sesiju u pozadini, ne blokira formu
+    const isLocalAuth = localStorage.getItem('adminAuthenticated') === 'true';
+    const hasCookie = document.cookie.includes('admin-authenticated=true');
+    if (isLocalAuth || hasCookie) {
+      router.push('/admin');
+    }
   }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -45,24 +28,19 @@ export default function AdminLoginPage() {
     try {
       const response = await fetch('/api/admin/login', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
 
       const data = await response.json();
 
       if (data.success) {
-        // Sačuvajte u localStorage za klijentsku proveru
         localStorage.setItem('adminAuthenticated', 'true');
         localStorage.setItem('adminLoginTime', new Date().toISOString());
-        
-        // Setujte cookie za middleware (24h trajanje)
-        const expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+        const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
         document.cookie = `admin-authenticated=true; path=/; expires=${expires.toUTCString()}; SameSite=Strict`;
-        
-        // Preusmerite na admin dashboard
+
         router.push('/admin');
       } else {
         setError(data.message || 'Pogrešno korisničko ime ili lozinka');
@@ -75,18 +53,6 @@ export default function AdminLoginPage() {
     }
   };
 
-  // Pokaži loading dok proveravamo autentikaciju
-  if (checkingAuth) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <div className="text-xl text-slate-300">Provjerava se sesija...</div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800">
       <div className="max-w-md w-full space-y-8 p-8 bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 shadow-2xl">
@@ -95,18 +61,16 @@ export default function AdminLoginPage() {
             <Lock className="w-8 h-8 text-white" />
           </div>
           <h2 className="text-3xl font-bold text-white">Administracija</h2>
-          <p className="mt-2 text-white/80">
-            Tivat Airport Check-in System
-          </p>
+          <p className="mt-2 text-white/80">Tivat Airport Check-in System</p>
         </div>
-        
+
         <form className="mt-8 space-y-6" onSubmit={handleLogin}>
           {error && (
             <div className="bg-red-500/20 border border-red-500/50 text-red-200 px-4 py-3 rounded-lg">
               {error}
             </div>
           )}
-          
+
           <div className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-white/90 mb-1">
@@ -124,7 +88,7 @@ export default function AdminLoginPage() {
                 disabled={loading}
               />
             </div>
-            
+
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-white/90 mb-1">
                 Lozinka
@@ -167,7 +131,7 @@ export default function AdminLoginPage() {
             )}
           </button>
         </form>
-        
+
         <div className="text-center text-white/60 text-sm">
           <p>© 2025 Tivat Airport. Sva prava zadržana.</p>
         </div>

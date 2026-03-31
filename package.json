@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "npm run db:init && next dev",
     "build": "next build",
-"postbuild": "node scripts/postbuild.js",
+    "postbuild": "node scripts/postbuild.js",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:init": "node scripts/init-db.js",
@@ -62,22 +62,30 @@
       {
         "from": "node.exe",
         "to": "../node.exe",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": ".next/standalone/",
         "to": "app",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": ".next/standalone/public/",
         "to": "app/public",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "data/",
         "to": "data",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ]
   },
@@ -112,8 +120,8 @@
     "@radix-ui/react-tooltip": "^1.1.2",
     "@supabase/supabase-js": "^2.58.0",
     "@types/node": "20.6.2",
-   "@types/react": "^18.3.0",
-"@types/react-dom": "^18.3.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
@@ -122,6 +130,7 @@
     "eslint": "8.49.0",
     "eslint-config-next": "13.5.1",
     "ini": "^6.0.0",
+    "ioredis": "^5.10.1",
     "lucide-react": "^0.446.0",
     "next": "14.2.0",
     "react": "^18.2.0",
