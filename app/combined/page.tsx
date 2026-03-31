@@ -105,8 +105,11 @@ const LANGUAGE_CONFIG = {
 }
 
 const SECURITY_MESSAGES = [
-  { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
-  { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •", language: "cnr" },
+  { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED...", language: "en" },
+  { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG...", language: "cnr" },
+  // DODAJ OVO:
+  // { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required •", language: "en" },
+  // { text: "📶 BESPLATAN WIFI AERODROM: Mreža: \"One Crna Gora\" | Bez lozinke •", language: "cnr" },
 ]
 
 // ============================================================
@@ -342,27 +345,40 @@ function getAutoStatus(flight: Flight): string | null {
 }
 
 // ── Auto-status za ARRIVALS ──────────────────────────────────
+// ── Auto-status za ARRIVALS ──────────────────────────────────
+// ── Auto-status za ARRIVALS ──────────────────────────────────
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()
+  
+  // Ako API već šalje status (Cancelled, Diverted, Delayed...), poštujemo ga i ne generišemo auto-status
   if (status && status !== "-") return null
 
   const scheduledStr = flight.ScheduledDepartureTime
   const estimatedStr = flight.EstimatedDepartureTime
 
-  if (!scheduledStr || !estimatedStr) return null
-  if (!isValidDisplayTime(estimatedStr)) return null
-  if (scheduledStr === estimatedStr) return null
+  // Ako nema ni scheduled vremena, ne možemo ništa
+  if (!scheduledStr) return null
+
+  // Ako NEMA estimated vremena, ili je nevalidno (npr. "0000", null), ili je potpuno isto kao scheduled -> "Scheduled"
+  if (!estimatedStr || !isValidDisplayTime(estimatedStr) || scheduledStr === estimatedStr) {
+    return "Scheduled"
+  }
 
   const scheduled = parseFlightTimeToDate(scheduledStr)
   const estimated  = parseFlightTimeToDate(estimatedStr)
-  if (!scheduled || !estimated) return null
+  
+  // Sigurnosni fallback u slučaju da parsiranje neočekivano padne
+  if (!scheduled || !estimated) return "Scheduled"
 
   const diffMins = (scheduled.getTime() - estimated.getTime()) / 60_000
 
-  if (diffMins >= 15)  return `Arriving early – expected at ${fmtTime(estimatedStr)}`
-  if (diffMins <= -15) return `Delayed – expected at ${fmtTime(estimatedStr)}`
+  // Ranije više od 15 min
+  if (diffMins > 15)  return `Arriving early – expected at ${fmtTime(estimatedStr)}`
+  // Kasnije više od 15 min
+  if (diffMins < -15) return `Delayed – expected at ${fmtTime(estimatedStr)}`
 
-  return null
+  // Unutar ±15 minuta → On time
+  return "On time"
 }
 
 // ============================================================
