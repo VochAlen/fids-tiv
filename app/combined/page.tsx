@@ -556,7 +556,7 @@ const FlightRow = memo(
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
 
-    const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.3rem]"
+    const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.5rem]"
     const pillCls = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
 
     // ── Provjeri da li je estimated validan i različit od scheduled ──
