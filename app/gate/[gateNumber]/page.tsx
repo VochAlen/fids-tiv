@@ -75,7 +75,7 @@ const AirlineLogo = memo(function AirlineLogo({ icao, flightNumber, name }: { ic
   }
 
   return (
-    <div className="w-[300px] h-[100px] bg-white rounded-xl p-2 shadow-xl flex items-center justify-center overflow-hidden">
+    <div className="w-[350px] h-[100px] bg-white rounded-xl p-2 shadow-xl flex items-center justify-center overflow-hidden">
       <img
         src={currentSrc}
         alt={name}
