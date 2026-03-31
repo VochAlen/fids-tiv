@@ -105,11 +105,8 @@ const LANGUAGE_CONFIG = {
 }
 
 const SECURITY_MESSAGES = [
-  { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED...", language: "en" },
-  { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG...", language: "cnr" },
-  // DODAJ OVO:
-  // { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required •", language: "en" },
-  // { text: "📶 BESPLATAN WIFI AERODROM: Mreža: \"One Crna Gora\" | Bez lozinke •", language: "cnr" },
+  { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
+  { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •", language: "cnr" },
 ]
 
 // ============================================================
