@@ -10,6 +10,7 @@ import {
   sortFlightsByTime,
   filterTodayFlights
 } from '@/lib/flight-api-helpers';
+import Redis from 'ioredis';
 
 // KORISTIMO PRAVI URL ZA MONTENEGRO AIRPORTS
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
@@ -32,7 +33,7 @@ const userAgents = {
   // Koristi SCAN umjesto KEYS kako ne bi zamrzao RAM na free planu
   // ============================================================
   async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
-    let client;
+    let client: Redis;
     try {
       client = getRedisClient();
       
@@ -85,17 +86,35 @@ const userAgents = {
         }
       });
 
-      // 3. Prepiši spoljne podatke sa lokalnim admin podacima
+      // 3. Prepiši spoljne podatke sa lokalnim admin podacima + AUTO-CLEANUP
       return flights.map(flight => {
         const localOverride = overridesMap[flight.FlightNumber];
         if (localOverride) {
+          // 🧹 AUTO-CLEANUP LOGIKA
+          const statusLower = (flight.StatusEN || '').toLowerCase();
+          
+          // Ako je let POLETIO, OTKAZAN ili PREUSMJEREN, obriši override iz Redis-a
+          // da ne bi "zagadio" budući let koji dobije isti broj leta (npr. YM101 sutra)
+          if (
+            statusLower.includes('departed') || 
+            statusLower.includes('cancelled') || 
+            statusLower.includes('diverted')
+          ) {
+            // Brišemo asinhrono (fire-and-forget) da ne usporava API odgovor FIDS-u
+            client.del(`override:${flight.FlightNumber}`).catch(() => {});
+            
+            // Vraćamo ORIGINALAN podatak sa API-ja, potpuno ignorišemo stare override podatke
+            return flight; 
+          }
+
+          // Ako let AKTIVAN (nije poletio/otkazan), primijeni override podataka
           return {
             ...flight,
             GateNumber: localOverride.GateNumber || flight.GateNumber,
             CheckInDesk: localOverride.CheckInDesk || flight.CheckInDesk,
-            BaggageReclaim: localOverride.BaggageReclaim || flight.BaggageReclaim, // DODANO!
-            StatusEN: localOverride.StatusEN || flight.StatusEN,                 // DODANO!
-            Terminal: localOverride.Terminal || flight.Terminal,                 // DODANO!
+            BaggageReclaim: localOverride.BaggageReclaim || flight.BaggageReclaim,
+            StatusEN: localOverride.StatusEN || flight.StatusEN,
+            Terminal: localOverride.Terminal || flight.Terminal,
           };
         }
         return flight;

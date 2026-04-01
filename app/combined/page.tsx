@@ -107,9 +107,8 @@ const LANGUAGE_CONFIG = {
 const SECURITY_MESSAGES = [
   { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
   { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •", language: "cnr" },
- { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •", language: "en" },
+  { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •", language: "en" },
   { text: "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •", language: "cnr" },
-
 ]
 
 // ============================================================
@@ -155,21 +154,17 @@ const getFlightawareLogoURL = (icaoCode: string): string =>
 const PLACEHOLDER_IMAGE =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo="
 
-// ─── Centralni parser za sva vremena ──────────────────────────
-// Rješava: midnight rollover, "00:00" zamka, sve formate
 function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null {
   if (!timeStr) return null
   const s = timeStr.trim()
   if (!s || s === "-" || s === "--:--") return null
 
   try {
-    // ISO format
     if (s.includes("T") || (s.includes("-") && s.length > 5)) {
       const d = new Date(s)
       return isNaN(d.getTime()) ? null : d
     }
 
-    // "2:35 PM" / "2:35 AM"
     const ampm = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
     if (ampm) {
       let h = parseInt(ampm[1], 10)
@@ -181,19 +176,16 @@ function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null 
       return d
     }
 
-    // "HH:MM" ili "HH.MM"
     const sep = s.match(/^(\d{1,2})[:.](\d{2})$/)
     if (sep) {
       const h = parseInt(sep[1], 10)
       const m = parseInt(sep[2], 10)
       if (h > 23 || m > 59) return null
       const d = new Date(); d.setHours(h, m, 0, 0)
-      // Midnight rollover: ako je let prošao više od 12h, prebaci na sutra
       if (Date.now() - d.getTime() > 12 * 60 * 60 * 1_000) d.setDate(d.getDate() + 1)
       return d
     }
 
-    // "HHMM" — 4 cifre bez separatora
     const digits = s.replace(/\D/g, "")
     if (digits.length === 4) {
       const h = parseInt(digits.substring(0, 2), 10)
@@ -208,35 +200,27 @@ function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null 
   } catch { return null }
 }
 
-// Alias za kompatibilnost s postojećim kodom
 const parseDepartureTimeLocal = parseFlightTimeToDate
 
-// ─── formatTime: samo string → "HH:MM" ───────────────────────
-// NE koristi Date — samo formata string koji je već validan
 function formatTimeString(timeStr: string | null | undefined): string {
   if (!timeStr) return ""
   const s = timeStr.trim()
   if (!s || s === "-" || s === "--:--") return ""
 
-  // ISO → uzmi HH:MM dio
   if (s.includes("T")) {
     const d = new Date(s)
     if (!isNaN(d.getTime())) return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
   }
 
-  // "HH:MM" već formatiran
   if (/^\d{2}:\d{2}$/.test(s)) return s
 
-  // "HHMM" → "HH:MM"
   const digits = s.replace(/\D/g, "")
   if (digits.length === 4) {
     const h = digits.substring(0, 2)
     const m = digits.substring(2, 4)
     const hi = parseInt(h, 10)
     const mi = parseInt(m, 10)
-    // Odbaci nevalidne vrijednosti — spriječava prikaz "00:00" za null-like podatke
     if (hi > 23 || mi > 59) return ""
-    // Odbaci potpunu nulu — API šalje "0000" kad nema estimateda
     if (hi === 0 && mi === 0) return ""
     return `${h}:${m}`
   }
@@ -244,15 +228,12 @@ function formatTimeString(timeStr: string | null | undefined): string {
   return ""
 }
 
-// ─── isValidTime: da li je vrijednost smisleno vrijeme ────────
-// Koristi se u FlightRow da ne prikazuje "00:00" estimated
 function isValidDisplayTime(timeStr: string | null | undefined): boolean {
   if (!timeStr) return false
   const formatted = formatTimeString(timeStr)
   return formatted !== "" && formatted !== "00:00"
 }
 
-// ─── Cache ────────────────────────────────────────────────────
 const saveToCache = (data: FlightDataResponse) => {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) }
   catch (e) { console.warn("Failed to save to cache:", e) }
@@ -266,7 +247,6 @@ const loadFromCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
-// ─── Fetch ────────────────────────────────────────────────────
 const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
   const ctrl = new AbortController()
   const id   = setTimeout(() => ctrl.abort(), ms)
@@ -293,7 +273,6 @@ const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_
   throw last || new Error("All retries failed")
 }
 
-// ─── Status checkers ──────────────────────────────────────────
 const checkStatus = {
   isDelayed:     (f: Flight) => /(delay|kasni)/i.test(f.StatusEN ?? ""),
   isBoarding:    (f: Flight) => /(boarding|gate open)/i.test(f.StatusEN ?? ""),
@@ -312,14 +291,10 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
-// ============================================================
-// AUTO-STATUS ZA DEPARTURES
-// ============================================================
 const EARLY_CHECKIN_AIRLINES = new Set(["6H", "FZ"])
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim()
-  // Ako API šalje svoj status (Cancelled, Boarding, Delayed...), poštujemo ga
   if (status && status !== "-") return null
 
   const scheduled = parseFlightTimeToDate(flight.ScheduledDepartureTime)
@@ -331,67 +306,47 @@ function getAutoStatus(flight: Flight): string | null {
   const minsToRef = (referenceTime.getTime() - now) / 60_000
   const minsToSTD = (scheduled.getTime()     - now) / 60_000
 
-  // Let je već prošao (na osnovu estimated ili scheduled vremena)
   if (minsToRef < -5) return null
-
-  // Prioritetni statusi blizu polaska (imaju apsolutni prioritet)
   if (minsToRef <= 5)   return "Close"
   if (minsToRef <= 10)  return "Final Call"
   if (minsToRef <= 30)  return "Go to Gate"
 
-  // Za SVE ostale letove koji nisu u "Go to Gate" fazi (minsToSTD > 30)
-  // prikaži tačno vrijeme KADA se check-in otvara
   if (minsToSTD > 30) {
     const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
-    
-    // Standardno -120 min, za 6H i FZ -180 min
     const checkInMinutesOffset = EARLY_CHECKIN_AIRLINES.has(iata) ? 180 : 120
-
-    // Matematički izračunamo tačan datum/vrijeme otvaranja check-ina
     const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000))
-    
     const hh = String(checkInDate.getHours()).padStart(2, "0")
     const mm = String(checkInDate.getMinutes()).padStart(2, "0")
-    
     return `Check In at ${hh}:${mm}`
   }
 
   return null
 }
-// ── Auto-status za ARRIVALS ──────────────────────────────────
-// ── Auto-status za ARRIVALS ──────────────────────────────────
+
 // ── Auto-status za ARRIVALS ──────────────────────────────────
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()
-  
-  // Ako API već šalje status (Cancelled, Diverted, Delayed...), poštujemo ga i ne generišemo auto-status
   if (status && status !== "-") return null
 
   const scheduledStr = flight.ScheduledDepartureTime
   const estimatedStr = flight.EstimatedDepartureTime
 
-  // Ako nema ni scheduled vremena, ne možemo ništa
   if (!scheduledStr) return null
 
-  // Ako NEMA estimated vremena, ili je nevalidno (npr. "0000", null), ili je potpuno isto kao scheduled -> "Scheduled"
   if (!estimatedStr || !isValidDisplayTime(estimatedStr) || scheduledStr === estimatedStr) {
     return "Scheduled"
   }
 
   const scheduled = parseFlightTimeToDate(scheduledStr)
   const estimated  = parseFlightTimeToDate(estimatedStr)
-  
-  // Sigurnosni fallback u slučaju da parsiranje neočekivano padne
+
   if (!scheduled || !estimated) return "Scheduled"
 
   const diffMins = (scheduled.getTime() - estimated.getTime()) / 60_000
 
-  // Ranije više od 15 min
   if (diffMins > 15)  return `Arriving early – expected at ${fmtTime(estimatedStr)}`
-  // Kasnije više od 15 min
   if (diffMins < -15) return `Delayed – expected at ${fmtTime(estimatedStr)}`
 
-  // Unutar ±15 minuta → On time
   return "On time"
 }
 
@@ -406,8 +361,8 @@ const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: st
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
     tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
   }, [])
-  if (!mounted) return <div className="text-[7rem] font-black text-white leading-none">--:--</div>
-  return <div className={`text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time}</div>
+  if (!mounted) return <div className="text-[3rem] sm:text-[7rem] font-black text-white leading-none">--:--</div>
+  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time}</div>
 })
 
 // ============================================================
@@ -427,7 +382,7 @@ const LEDIndicator = memo(function LEDIndicator({
 })
 
 // ============================================================
-// TABLE HEADERS
+// TABLE HEADERS — sakriveni na mobilnom
 // ============================================================
 const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
@@ -436,7 +391,8 @@ const TableHeaders = memo(function TableHeaders({
   headerBg: string
 }) {
   return (
-    <div className={`flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
+    // hidden na mobilnom (ispod sm=640px), flex na desktopu
+    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
       {headers.map(h => {
         const Icon = h.icon
         return (
@@ -503,7 +459,7 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
 }
 
 // ============================================================
-// FLIGHT ROW
+// FLIGHT ROW — desktop tablica + mobilna kartica
 // ============================================================
 const FlightRow = memo(
   function FlightRow({
@@ -511,7 +467,6 @@ const FlightRow = memo(
   }: {
     flight: Flight; index: number; showArrivals: boolean; colorTitle: string; autoStatusTick: number
   }) {
-    // formatTime koristi centralnu funkciju — nikad ne prikazuje "00:00"
     const formatTime = useCallback((t: string) => formatTimeString(t), [])
 
     const pill = useMemo(
@@ -522,28 +477,20 @@ const FlightRow = memo(
 
     const logoURL  = useMemo(() => getFlightawareLogoURL(flight.AirlineICAO), [flight.AirlineICAO])
     const rowBg    = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
-    //const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.src = PLACEHOLDER_IMAGE }, [])
-    // ICAO kod za trenutni let (izvan callbacka radi performansi)
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
     const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
       const img = e.currentTarget;
-      
-      // Ako smo već probali lokalni .png i nije uspjelo, stavi placeholder i zaustavi dalje greške
       if (img.dataset.fallback === 'png') {
         img.src = PLACEHOLDER_IMAGE;
-        img.onerror = null; 
+        img.onerror = null;
         return;
       }
-      
-      // Ako smo probali lokalni .jpg i nije uspjelo, probaj .png
       if (img.dataset.fallback === 'jpg') {
         img.dataset.fallback = 'png';
         img.src = `/airlines/${icao}.png`;
         return;
       }
-
-      // PRVA greška: FlightAware logo ne postoji (ili je uklonjen) -> probaj lokalni .jpg
       if (icao) {
         img.dataset.fallback = 'jpg';
         img.src = `/airlines/${icao}.jpg`;
@@ -552,125 +499,219 @@ const FlightRow = memo(
         img.onerror = null;
       }
     }, [icao])
-    // Gate Change Highlighting
+
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
 
     const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.5rem]"
     const pillCls = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
 
-    // ── Provjeri da li je estimated validan i različit od scheduled ──
-    // Ovo je ključna provjera — odbacuje "0000", "00:00", null, "-", ""
     const estimatedDisplay = useMemo(() => {
       const est = flight.EstimatedDepartureTime
       const sch = flight.ScheduledDepartureTime
-      if (!isValidDisplayTime(est)) return null           // "0000", "", null, "00:00" → sakrij
+      if (!isValidDisplayTime(est)) return null
       const estFmt = formatTimeString(est)
       const schFmt = formatTimeString(sch)
-      if (estFmt === schFmt) return null                  // isti kao scheduled → sakrij
+      if (estFmt === schFmt) return null
       return estFmt
     }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime])
 
+    // Mobilni pill (manji)
+    const mobilePillCls = `flex items-center gap-1.5 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
+
     return (
-      <div className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight:"68px", contain:"layout style" }}>
-
-        {/* Scheduled */}
-        <div className="flex items-center justify-center" style={{ width:"180px" }}>
-          <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
-            {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
+      <>
+        {/* ════════════════════════════════════════
+            DESKTOP LAYOUT (sm: 640px i više)
+            Identičan originalnom kodu — ništa nije promijenjeno
+            ════════════════════════════════════════ */}
+        <div
+          className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
+          style={{ minHeight: "68px", contain: "layout style" }}
+        >
+          {/* Scheduled */}
+          <div className="flex items-center justify-center" style={{ width: "180px" }}>
+            <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
+              {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
+            </div>
           </div>
-        </div>
 
-        {/* Estimated — prikazuje se SAMO ako je validan i različit od scheduled */}
-        <div className="flex items-center justify-center" style={{ width:"180px" }}>
-          {estimatedDisplay
-            ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg`}>{estimatedDisplay}</div>
-            : <div className="text-2xl text-white/30 font-bold">-</div>
-          }
-        </div>
-
-        {/* Flight Info */}
-        <div className="flex items-center gap-3" style={{ width:"280px" }}>
-          <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-            <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`}
-              className="object-contain w-full h-full" onError={onImgErr}
-              decoding="async" loading={index<9?"eager":"lazy"} fetchPriority={index<8?"high":"auto"} />
+          {/* Estimated */}
+          <div className="flex items-center justify-center" style={{ width: "180px" }}>
+            {estimatedDisplay
+              ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg`}>{estimatedDisplay}</div>
+              : <div className="text-2xl text-white/30 font-bold">-</div>
+            }
           </div>
-          <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
-          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-            <div className="text-sm text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
+
+          {/* Flight Info */}
+          <div className="flex items-center gap-3" style={{ width: "280px" }}>
+            <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
+              <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`}
+                className="object-contain w-full h-full" onError={onImgErr}
+                decoding="async" loading={index < 9 ? "eager" : "lazy"} fetchPriority={index < 8 ? "high" : "auto"} />
+            </div>
+            <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+            {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+              <div className="text-sm text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
+            )}
+          </div>
+
+          {showArrivals ? (
+            <>
+              <div className="flex items-center" style={{ width: "580px" }}>
+                <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
+                  {flight.DestinationCityName || flight.DestinationAirportName}
+                </div>
+              </div>
+              <div className="flex items-center justify-center" style={{ width: "650px" }}>
+                {pill.hasStatusText ? (
+                  <div className={`${pillCls} overflow-hidden relative`}
+                    style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>
+                    {pill.showLEDs && (
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10">
+                        <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
+                        <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
+                      </div>
+                    )}
+                    <div className="overflow-hidden text-center whitespace-nowrap"
+                      style={{ marginLeft: pill.showLEDs ? "2.5rem" : "0", width: "100%" }}>
+                      {pill.displayText}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[2rem] font-bold text-slate-300">Scheduled</div>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center" style={{ width: "380px" }}>
+                <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
+                  {flight.DestinationCityName || flight.DestinationAirportName}
+                </div>
+              </div>
+              <div className="flex items-center justify-center" style={{ width: "320px" }}>
+                {flight.CheckInDesk && flight.CheckInDesk !== "-"
+                  ? <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">{flight.CheckInDesk}</div>
+                  : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+              </div>
+              <div className="flex items-center justify-center" style={{ width: "180px" }}>
+                {flight.GateNumber && flight.GateNumber !== "-"
+                  ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
+                      ${isGateChanged
+                        ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast"
+                        : "text-white bg-black/40 border-white/20"}`}>
+                      {flight.GateNumber}
+                    </div>
+                  : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+              </div>
+              <div className="flex items-center justify-center" style={{ width: "420px" }}>
+                {pill.hasStatusText ? (
+                  <div className={pillCls}>
+                    {pill.showLEDs && (
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
+                        <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
+                      </div>
+                    )}
+                    {pill.displayText}
+                  </div>
+                ) : (
+                  <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
+                )}
+              </div>
+            </>
           )}
         </div>
 
-        {showArrivals ? (
-          <>
-            <div className="flex items-center" style={{ width:"580px" }}>
-              <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
-                {flight.DestinationCityName || flight.DestinationAirportName}
-              </div>
+        {/* ════════════════════════════════════════
+            MOBILNI LAYOUT (ispod sm: 640px)
+            Card layout — svaki let je kompaktna kartica
+            ════════════════════════════════════════ */}
+        <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}>
+
+          {/* Red 1: Logo + broj leta | Scheduled → Estimated */}
+          <div className="flex items-center gap-2.5">
+            {/* Logo */}
+            <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
+              <img
+                src={logoURL || PLACEHOLDER_IMAGE}
+                alt={`${flight.AirlineName} logo`}
+                className="object-contain w-full h-full"
+                onError={onImgErr}
+                decoding="async"
+              />
             </div>
-            <div className="flex items-center justify-center" style={{ width:"650px" }}>
-              {pill.hasStatusText ? (
-                <div className={`${pillCls} overflow-hidden relative`}
-                  style={{ paddingLeft:pill.showLEDs?"3.5rem":"1rem", paddingRight:"1rem", width:"95%" }}>
-                  {pill.showLEDs && (
-                    <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10">
-                      <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
-                      <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
-                    </div>
-                  )}
-                  <div className="overflow-hidden text-center whitespace-nowrap"
-                    style={{ marginLeft:pill.showLEDs?"2.5rem":"0", width:"100%" }}>
-                    {pill.displayText}
-                  </div>
-                </div>
-              ) : (
-                <div className="text-[2rem] font-bold text-slate-300">Scheduled</div>
+
+            {/* Broj leta */}
+            <span className="text-base font-black text-white tracking-wide">
+              {flight.FlightNumber}
+            </span>
+            {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+              <span className="text-xs text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>
+            )}
+
+            {/* Scheduled i Estimated — desno poravnato */}
+            <div className="ml-auto flex items-center gap-1.5">
+              <span className="text-lg font-black text-white tabular-nums">
+                {formatTimeString(flight.ScheduledDepartureTime) || "--:--"}
+              </span>
+              {estimatedDisplay && (
+                <>
+                  <span className="text-white/30 text-xs">›</span>
+                  <span className={`text-lg font-black ${colorTitle} tabular-nums`}>
+                    {estimatedDisplay}
+                  </span>
+                </>
               )}
             </div>
-          </>
-        ) : (
-          <>
-            <div className="flex items-center" style={{ width:"380px" }}>
-              <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
-                {flight.DestinationCityName || flight.DestinationAirportName}
+          </div>
+
+          {/* Red 2: Destinacija (grad) */}
+          <div className="text-[1.25rem] font-black text-white truncate leading-tight">
+            {flight.DestinationCityName || flight.DestinationAirportName}
+          </div>
+
+          {/* Red 3: Check-in badge + Gate badge + Status pill */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Check-In (samo za departures) */}
+            {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
+              <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
+                <Users className="w-3 h-3 opacity-70" />
+                {flight.CheckInDesk}
+              </span>
+            )}
+
+            {/* Gate (samo za departures) */}
+            {!showArrivals && flight.GateNumber && flight.GateNumber !== "-" && (
+              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${
+                isGateChanged
+                  ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast"
+                  : "text-white bg-black/40 border-white/20"
+              }`}>
+                <DoorOpen className="w-3 h-3 opacity-70" />
+                {flight.GateNumber}
+              </span>
+            )}
+
+            {/* Status pill — isti vizualni jezik kao desktop, samo manji */}
+            {pill.hasStatusText ? (
+              <div className={mobilePillCls}>
+                {pill.showLEDs && (
+                  <>
+                    <LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" />
+                    <LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" />
+                  </>
+                )}
+                <span className="truncate max-w-[200px]">{pill.displayText}</span>
               </div>
-            </div>
-            <div className="flex items-center justify-center" style={{ width:"320px" }}>
-              {flight.CheckInDesk && flight.CheckInDesk !== "-"
-                ? <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">{flight.CheckInDesk}</div>
-                : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
-            </div>
-            {/* Gate sa Gate Change Highlighting */}
-            <div className="flex items-center justify-center" style={{ width:"180px" }}>
-              {flight.GateNumber && flight.GateNumber !== "-"
-                ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
-                    ${isGateChanged
-                      ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast"
-                      : "text-white bg-black/40 border-white/20"}`}>
-                    {flight.GateNumber}
-                  </div>
-                : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
-            </div>
-            {/* Status — Departures */}
-            <div className="flex items-center justify-center" style={{ width:"420px" }}>
-              {pill.hasStatusText ? (
-                <div className={pillCls}>
-                  {pill.showLEDs && (
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
-                      <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
-                    </div>
-                  )}
-                  {pill.displayText}
-                </div>
-              ) : (
-                <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
-              )}
-            </div>
-          </>
-        )}
-      </div>
+            ) : (
+              <span className="text-xs text-white/40 font-semibold">Scheduled</span>
+            )}
+          </div>
+        </div>
+      </>
     )
   },
   (prev, next) =>
@@ -709,19 +750,18 @@ function FlightBoard(): JSX.Element {
   const isMountedRef   = useRef(true)
   const lastHeartbeat  = useRef(Date.now())
   const prevGatesRef   = useRef<Record<string, string>>({})
+  const isInitialLoad  = useRef(true)
 
   const currentColors = useMemo(
     () => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures,
     [showArrivals]
   )
 
-  // Auto-status ticker — svake minute
   useEffect(() => {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000)
     return () => clearInterval(id)
   }, [])
 
-  // Hard reset svakih 6 sati
   useEffect(() => {
     const id = setTimeout(() => {
       if ((window as any).electronAPI?.restartApp) (window as any).electronAPI.restartApp()
@@ -773,7 +813,7 @@ function FlightBoard(): JSX.Element {
     window.addEventListener("mousemove",  upd, { passive: true })
     window.addEventListener("keypress",   upd, { passive: true })
     window.addEventListener("touchstart", upd, { passive: true })
-    return () => { clearInterval(chk); window.removeEventListener("mousemove",upd); window.removeEventListener("keypress",upd); window.removeEventListener("touchstart",upd) }
+    return () => { clearInterval(chk); window.removeEventListener("mousemove", upd); window.removeEventListener("keypress", upd); window.removeEventListener("touchstart", upd) }
   }, [])
 
   // Global errors
@@ -789,14 +829,14 @@ function FlightBoard(): JSX.Element {
       if (m.includes("network") || m.includes("fetch")) { setErrorMessage("Network error. Retrying..."); setTimeout(() => setErrorMessage(null), 5_000) }
     }
     window.addEventListener("error", onErr); window.addEventListener("unhandledrejection", onRej)
-    return () => { window.removeEventListener("error",onErr); window.removeEventListener("unhandledrejection",onRej) }
+    return () => { window.removeEventListener("error", onErr); window.removeEventListener("unhandledrejection", onRej) }
   }, [])
 
   // Memory cleanup
   useEffect(() => {
     const id = setInterval(() => {
-      setArrivals(  p => p.length>20 ? p.slice(0,MAX_FLIGHTS_MEMORY) : p)
-      setDepartures(p => p.length>20 ? p.slice(0,MAX_FLIGHTS_MEMORY) : p)
+      setArrivals(  p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
+      setDepartures(p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
       if ((window as any).gc) (window as any).gc()
     }, MEMORY_CLEANUP_INTERVAL_MS)
     return () => clearInterval(id)
@@ -806,9 +846,9 @@ function FlightBoard(): JSX.Element {
   useEffect(() => {
     let t: ReturnType<typeof setTimeout>
     const id = setInterval(() => {
-      if (!loading && arrivals.length===0 && departures.length===0 && !isRecovering) {
+      if (!loading && arrivals.length === 0 && departures.length === 0 && !isRecovering) {
         setIsRecovering(true)
-        t = setTimeout(() => { if (arrivals.length===0&&departures.length===0) window.location.reload(); setIsRecovering(false) }, 30_000)
+        t = setTimeout(() => { if (arrivals.length === 0 && departures.length === 0) window.location.reload(); setIsRecovering(false) }, 30_000)
       }
     }, 10_000)
     return () => { clearInterval(id); clearTimeout(t) }
@@ -816,13 +856,13 @@ function FlightBoard(): JSX.Element {
 
   // Language rotation
   useEffect(() => {
-    const id = setInterval(() => setCurrentLanguageIndex(p => (p+1)%Object.keys(LANGUAGE_CONFIG).length), 4_000)
+    const id = setInterval(() => setCurrentLanguageIndex(p => (p + 1) % Object.keys(LANGUAGE_CONFIG).length), 4_000)
     return () => clearInterval(id)
   }, [])
 
   // Security message rotation
   useEffect(() => {
-    const id = setInterval(() => setCurrentMessageIndex(p => (p+1)%SECURITY_MESSAGES.length), 20_000)
+    const id = setInterval(() => setCurrentMessageIndex(p => (p + 1) % SECURITY_MESSAGES.length), 20_000)
     return () => clearInterval(id)
   }, [])
 
@@ -836,7 +876,8 @@ function FlightBoard(): JSX.Element {
       let data: FlightDataResponse | null = null
       let usedCache = false
       try {
-        setLoading(true); setErrorMessage(null)
+        if (isInitialLoad.current) setLoading(true)
+        setErrorMessage(null)
         try {
           data = await fetchWithRetry("/api/flights")
           if (data && isMountedRef.current) saveToCache(data)
@@ -852,11 +893,10 @@ function FlightBoard(): JSX.Element {
           filterRecentFlights(data.departures, false)
         ).slice(0, MAX_FLIGHTS_DISPLAY)
 
-        // Gate change detection
         const departuresWithMeta = rawDepartures.map(f => {
-          const clone     = { ...f }
-          const num       = f.FlightNumber ?? ""
-          const prevGate  = prevGatesRef.current[num]
+          const clone    = { ...f }
+          const num      = f.FlightNumber ?? ""
+          const prevGate = prevGatesRef.current[num]
           if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
             (clone as any)._gateChangedAt = Date.now()
           }
@@ -872,6 +912,7 @@ function FlightBoard(): JSX.Element {
       } catch (e) {
         console.error("Critical:", e); setErrorMessage("Unable to load flight data. Check connection.")
       } finally {
+        isInitialLoad.current = false
         if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS) }
       }
     }
@@ -886,43 +927,41 @@ function FlightBoard(): JSX.Element {
     return () => clearInterval(id)
   }, [])
 
-  // Close
   const handleClose = useCallback(() => {
     if ((window as any).electronAPI?.quitApp) { ;(window as any).electronAPI.quitApp(); return }
     try { if ((window as any).chrome?.webview) { ;(window as any).chrome.webview.postMessage("APP_QUIT"); return } } catch {}
-    window.postMessage({ type:"ELECTRON_APP_QUIT" }, "*")
-    try { if (window.parent!==window) window.parent.postMessage({ type:"ELECTRON_APP_QUIT" }, "*") } catch {}
+    window.postMessage({ type: "ELECTRON_APP_QUIT" }, "*")
+    try { if (window.parent !== window) window.parent.postMessage({ type: "ELECTRON_APP_QUIT" }, "*") } catch {}
     window.location.reload()
   }, [])
 
-  const lang     = useMemo(() => { const k=Object.keys(LANGUAGE_CONFIG); return LANGUAGE_CONFIG[k[currentLanguageIndex] as keyof typeof LANGUAGE_CONFIG] }, [currentLanguageIndex])
+  const lang     = useMemo(() => { const k = Object.keys(LANGUAGE_CONFIG); return LANGUAGE_CONFIG[k[currentLanguageIndex] as keyof typeof LANGUAGE_CONFIG] }, [currentLanguageIndex])
   const title    = useMemo(() => showArrivals ? lang.arrivals    : lang.departures,    [showArrivals, lang])
   const subtitle = useMemo(() => showArrivals ? lang.incomingFlights : lang.outgoingFlights, [showArrivals, lang])
 
-  const ArrivalIcon   = useCallback(({ className="w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500 rotate-90`} />, [])
-  const DepartureIcon = useCallback(({ className="w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500`} />, [])
+  const ArrivalIcon   = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500 rotate-90`} />, [])
+  const DepartureIcon = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500`} />, [])
 
   const tableHeaders = useMemo(() => {
     const t = lang.tableHeaders
     if (showArrivals) return [
-      { label:t.scheduled, width:"180px", icon:Clock      },
-      { label:t.estimated, width:"180px", icon:Clock      },
-      { label:t.flight,    width:"280px", icon:ArrivalIcon },
-      { label:t.from,      width:"480px", icon:MapPin     },
-      { label:t.status,    width:"620px", icon:Info       },
+      { label: t.scheduled, width: "180px", icon: Clock       },
+      { label: t.estimated, width: "180px", icon: Clock       },
+      { label: t.flight,    width: "280px", icon: ArrivalIcon  },
+      { label: t.from,      width: "480px", icon: MapPin      },
+      { label: t.status,    width: "620px", icon: Info        },
     ]
     return [
-      { label:t.scheduled,   width:"180px", icon:Clock        },
-      { label:t.estimated,   width:"180px", icon:Clock        },
-      { label:t.flight,      width:"280px", icon:DepartureIcon },
-      { label:t.destination, width:"380px", icon:MapPin       },
-      { label:t.checkIn,     width:"320px", icon:Users        },
-      { label:t.gate,        width:"180px", icon:DoorOpen     },
-      { label:t.status,      width:"420px", icon:Info         },
+      { label: t.scheduled,   width: "180px", icon: Clock        },
+      { label: t.estimated,   width: "180px", icon: Clock        },
+      { label: t.flight,      width: "280px", icon: DepartureIcon },
+      { label: t.destination, width: "380px", icon: MapPin       },
+      { label: t.checkIn,     width: "320px", icon: Users        },
+      { label: t.gate,        width: "180px", icon: DoorOpen     },
+      { label: t.status,      width: "420px", icon: Info         },
     ]
   }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
-  // Departures s tickom za auto-status re-render
   const departuresWithTick = useMemo(
     () => departures.map(f => ({ ...f, _autoStatusTick: autoStatusTick } as unknown as Flight)),
     [departures, autoStatusTick]
@@ -939,57 +978,88 @@ function FlightBoard(): JSX.Element {
   )
 
   return (
-    <div className={`h-screen ${currentColors.background} text-white p-4 transition-colors duration-700 flex flex-col select-none`}
-      onDragOver={e => e.preventDefault()} onDrop={e => e.preventDefault()}>
-
+    <div
+      className={`h-screen ${currentColors.background} text-white p-2 sm:p-4 transition-colors duration-700 flex flex-col select-none`}
+      onDragOver={e => e.preventDefault()}
+      onDrop={e => e.preventDefault()}
+    >
       {errorMessage && (
         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:bottom-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
           ⚠️ {errorMessage}
         </div>
       )}
 
-      <button onClick={handleClose}
-        className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 active:bg-black/80 text-white shadow-2xl cursor-pointer z-50 transition-all duration-200 hover:scale-110 active:scale-95 border-2 border-white/20"
-        title="Close App" type="button">
-        <span className="text-2xl font-bold leading-none flex items-center justify-center w-full h-full pointer-events-none">×</span>
+      <button
+        onClick={handleClose}
+        className="absolute top-3 right-3 sm:top-6 sm:right-6 w-8 h-8 sm:w-10 sm:h-10 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 active:bg-black/80 text-white shadow-2xl cursor-pointer z-50 transition-all duration-200 hover:scale-110 active:scale-95 border-2 border-white/20"
+        title="Close App"
+        type="button"
+      >
+        <span className="text-xl sm:text-2xl font-bold leading-none flex items-center justify-center w-full h-full pointer-events-none">×</span>
       </button>
 
-      {/* Header */}
-      <div className="w-full mx-auto mb-4 flex-shrink-0">
-        <div className="flex justify-between items-center gap-4">
-          <div className="flex items-center gap-6">
-            <div className="p-4 bg-transparent rounded-2xl shadow-2xl border-2 border-orange-500">
-              {showArrivals ? <Plane className="w-16 h-16 text-orange-500 rotate-90" /> : <Plane className="w-16 h-16 text-orange-500" />}
+      {/* ── Header ─────────────────────────────────────────────
+          Desktop: veliki font, sat desno
+          Mobilni: kompaktan, sat sakriven
+          ──────────────────────────────────────────────────── */}
+      <div className="w-full mx-auto mb-2 sm:mb-4 flex-shrink-0">
+        <div className="flex justify-between items-center gap-2 sm:gap-4">
+
+          {/* Lijeva strana: ikona + naslov */}
+          <div className="flex items-center gap-3 sm:gap-6 min-w-0">
+            {/* Ikona aviona */}
+            <div className="p-2 sm:p-4 bg-transparent rounded-xl sm:rounded-2xl shadow-2xl border-2 border-orange-500 flex-shrink-0">
+              {showArrivals
+                ? <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500 rotate-90" />
+                : <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500" />
+              }
             </div>
-            <div>
-              <h1 className={`text-[6rem] font-black ${currentColors.title} leading-none tracking-tight drop-shadow-2xl`}>{title}</h1>
-              <p className={`${currentColors.subtitle} text-2xl mt-2 font-semibold`}>{subtitle}</p>
+
+            {/* Naslov + subtitle */}
+            <div className="min-w-0">
+              <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${currentColors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
+                {title}
+              </h1>
+              <p className={`${currentColors.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate`}>
+                {subtitle}
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
-            <ClockDisplay colorClass="text-white" />
-            <div className={`w-6 h-6 rounded-full ${currentColors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
+
+          {/* Desna strana: sat (sakriven na mobilnom) + LED dot */}
+          <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
+            {/* Sat — vidljiv samo na desktopu */}
+            <div className="hidden sm:block">
+              <ClockDisplay colorClass="text-white" />
+            </div>
+            {/* Mali sat na mobilnom */}
+            <div className="block sm:hidden">
+              <ClockDisplay colorClass="text-white" />
+            </div>
+            <div className={`w-3 h-3 sm:w-6 sm:h-6 rounded-full ${currentColors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
           </div>
         </div>
       </div>
 
-      {/* Flight board */}
+      {/* ── Tabla s letovima ───────────────────────────────── */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {loading && sortedFlights.length === 0 ? (
+        {isInitialLoad.current && loading && sortedFlights.length === 0 ? (
           <div className="text-center p-8 h-full flex items-center justify-center">
             <div className="inline-flex items-center gap-4">
               <div className={`w-8 h-8 border-4 ${currentColors.border} border-t-transparent rounded-full animate-spin`} />
-              <span className="text-2xl text-white font-semibold">Loading flight information...</span>
+              <span className="text-xl sm:text-2xl text-white font-semibold">Loading flight information...</span>
             </div>
           </div>
         ) : (
-          <div className={`${currentColors.cardBg} rounded-3xl border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
+          <div className={`${currentColors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
+            {/* TableHeaders: hidden na mobilnom, vidljiv na sm+ */}
             <TableHeaders headers={tableHeaders} headerBg={currentColors.header} />
+
             <div className="flex-1 overflow-y-auto">
               {sortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
-                  <Plane className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                  <div className="text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
+                  <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
+                  <div className="text-xl sm:text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
                 </div>
               ) : (
                 sortedFlights.map((flight, index) => (
@@ -1008,12 +1078,12 @@ function FlightBoard(): JSX.Element {
         )}
       </div>
 
-      {/* Animirani ticker */}
-      <div className="w-full mx-auto mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-10 relative">
+      {/* ── Ticker ─────────────────────────────────────────── */}
+      <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
         <div className="ticker-wrap">
-          <div className={`ticker-move ${currentColors.title} font-bold text-xl flex items-center h-full`}>
-            {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-8 whitespace-nowrap">{msg.text}</span>)}
-            {SECURITY_MESSAGES.map((msg, i) => <span key={`dup-${i}`} className="mx-8 whitespace-nowrap">{msg.text}</span>)}
+          <div className={`ticker-move ${currentColors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
+            {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
+            {SECURITY_MESSAGES.map((msg, i) => <span key={`dup-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
           </div>
         </div>
       </div>
@@ -1049,6 +1119,7 @@ function FlightBoard(): JSX.Element {
         .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
         .ticker-move{display:inline-block;white-space:nowrap;will-change:transform;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
         @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+        @media(max-width:639px){.ticker-move{animation-duration:35s}}
         @media(prefers-reduced-motion:reduce){.animate-blink,.animate-pill-blink,.animate-pill-blink-fast,.animate-pulse,.animate-spin,.led-base,.ticker-move{animation:none!important;opacity:1!important}}
         ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}

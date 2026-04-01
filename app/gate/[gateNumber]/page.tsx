@@ -171,11 +171,13 @@ interface FlightDisplayState {
   checkInStatus: CheckInStatus | null;
   nextFlight: Flight | null;
   gateChangedAt: number | undefined;
+    manualGateStatus: string | null; // DODANO
 }
 
 const EMPTY_STATE: FlightDisplayState = {
   flight: null, checkInStatus: null, nextFlight: null,
-  gateChangedAt: undefined
+  gateChangedAt: undefined,
+  manualGateStatus: null // DODANO
 };
 
 // ============================================================
@@ -203,6 +205,18 @@ function GateDisplay() {
   const currentFlightRef = useRef<Flight | null>(null);
   const currentStatusRef = useRef<CheckInStatus | null>(null);
   const prevGateRef = useRef<string | undefined>(undefined);
+
+  
+  const manualGateStatusRef = useRef<string | null>(null); // DODATO
+
+  // DODATO: Hook za dohvaćanje statusa iz Redisa
+  const fetchGateStatusOverride = useCallback(async (gate: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/gate-status/${gate}`);
+      const data = await res.json();
+      return data.status;
+    } catch { return null; }
+  }, []);
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -264,11 +278,29 @@ function GateDisplay() {
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
       const now = new Date();
 
+      // RUČNI OVERRIDE LOGIKA
+      if (manualGateStatusRef.current === 'closed') {
+        // Ako je ručno zatvoren, prikaži prazan ekran čak iako ima letova
+        if (!isMountedRef.current) return;
+        currentFlightRef.current = null;
+        currentStatusRef.current = null;
+        setDisplay({ flight: null, checkInStatus: null, nextFlight: null, gateChangedAt: undefined, manualGateStatus: 'closed' });
+        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+        setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+        setLoading(false);
+        return;
+      }
+
       let current: (typeof sorted)[number] | null = null;
       for (const f of sorted) {
+        if (manualGateStatusRef.current === 'open') {
+          // FORCE OPEN: Prikaži let čak i ako je status "Departed" ili "Cancelled"
+          current = f; 
+          break;
+        }
         if (shouldDisplayFlight(f, f.checkInStatus || undefined)) { current = f; break; }
       }
-      if (!current) {
+      if (!current && manualGateStatusRef.current !== 'open') {
         current = sorted.find((f) => f.departureTime > now && !isFlightTerminated(f.StatusEN || '')) ?? null;
       }
 
@@ -289,7 +321,7 @@ function GateDisplay() {
         currentFlightRef.current = current;
         currentStatusRef.current = current?.checkInStatus ?? null;
         prevGateRef.current = current?.GateNumber;
-        setDisplay({ flight: current, checkInStatus: current?.checkInStatus ?? null, nextFlight, gateChangedAt });
+        setDisplay({ flight: current, checkInStatus: current?.checkInStatus ?? null, nextFlight, gateChangedAt, manualGateStatus: null });
         updateCountdown(current);
       }
 
@@ -313,6 +345,30 @@ function GateDisplay() {
     loadFlights().then(schedule);
     return () => { isMountedRef.current = false; clearTimeout(timeoutId); };
   }, [loadFlights]);
+
+    // ── Manual Gate Status Polling ──
+  useEffect(() => {
+    const refreshStatus = async () => {
+      try {
+        const newStatus = await fetchGateStatusOverride(gateNumber);
+        if (manualGateStatusRef.current !== newStatus) {
+          manualGateStatusRef.current = newStatus;
+          // Ako je status promijenjen, odmah pokreni reload da primijeni promjenu
+          loadFlights();
+        }
+      } catch (err) {
+        console.error('Gate status poll error:', err);
+      }
+    };
+    refreshStatus();
+    const id = setInterval(refreshStatus, 30_000); // Proverava svakih 30s
+    return () => clearInterval(id);
+  }, [gateNumber, fetchGateStatusOverride, loadFlights]);
+
+  useEffect(() => {
+    const id = setInterval(() => updateCountdown(currentFlightRef.current), REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [updateCountdown]);
 
   useEffect(() => {
     const id = setInterval(() => updateCountdown(currentFlightRef.current), REFRESH_INTERVAL_MS);
@@ -347,13 +403,20 @@ function GateDisplay() {
   }
 
   if (!display.flight) {
+    const isManuallyClosed = display.manualGateStatus === 'closed';
     return (
       <div className="w-screen h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white flex items-center justify-center">
         <div className="text-center">
-          <DoorOpen className="w-32 h-32 text-slate-400 mx-auto mb-8 opacity-50" />
+          <DoorOpen className={`w-32 h-32 mx-auto mb-8 ${isManuallyClosed ? 'text-red-500 opacity-80' : 'text-slate-400 opacity-50'}`} />
           <div className="text-8xl font-bold text-slate-400 mb-2">Gate</div>
           <div className="text-[32rem] font-black text-orange-500 leading-none mb-6">{gateNumber}</div>
-          <div className="text-4xl text-slate-500 mb-4">No flights scheduled</div>
+          
+          {isManuallyClosed ? (
+            <div className="text-6xl font-black text-red-500 mb-4">GATE CLOSED</div>
+          ) : (
+            <div className="text-4xl text-slate-500 mb-4">No flights scheduled</div>
+          )}
+          
           <div className="text-lg text-slate-700">Last updated: {lastUpdate} | Next: {nextUpdate}</div>
         </div>
       </div>

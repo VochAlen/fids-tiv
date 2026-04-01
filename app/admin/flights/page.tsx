@@ -337,6 +337,70 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) =>
 };
 
 // ============================================================
+// KOMPONENTA: Manual Gate Override (Open/Close)
+// ============================================================
+interface GateManualControlProps {
+  gateNumber: string | undefined;
+}
+
+const GateManualControl: React.FC<GateManualControlProps> = ({ gateNumber }) => {
+  const [savedStatus, setSavedStatus] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!gateNumber) return;
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(`/api/gate-status/${gateNumber}`);
+        const data = await res.json();
+        if (data.status) setSavedStatus(data.status);
+      } catch {}
+    };
+    fetchStatus();
+  }, [gateNumber]);
+
+  const handleAction = async (action: string) => {
+    if (!gateNumber) return;
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/gate-status-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gateNumber, action }),
+      });
+      setSavedStatus(action === 'clear' ? null : action);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!gateNumber) return null;
+
+  return (
+    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
+      <div className="text-xs text-white/50">🚪 Manual Gate Override (FIDS TV)</div>
+      <div className="flex items-center gap-2 bg-white/5 rounded-lg p-2 border border-white/10">
+        <span className="text-xs text-white/70 w-8 font-bold">G{gateNumber}</span>
+        
+        {!savedStatus ? (
+          <div className="flex-1 flex items-center gap-1 flex-wrap">
+            <button onClick={() => handleAction('open')} disabled={isLoading} className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50" type="button">FORCE OPEN</button>
+            <button onClick={() => handleAction('closed')} disabled={isLoading} className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50" type="button">FORCE CLOSE</button>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-between">
+            <span className={`text-xs font-bold px-2 py-0.5 rounded ${savedStatus === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
+              {savedStatus.toUpperCase()}
+            </span>
+            <button onClick={() => handleAction('clear')} disabled={isLoading} className="text-[10px] text-white/50 hover:text-white bg-white/10 px-2 py-1 rounded transition disabled:opacity-50" type="button">Reset to Auto</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
 // KOMPONENTA: Desk Class Control (Business, Premium itd.)
 // ============================================================
 interface DeskClassControlProps {
@@ -558,6 +622,7 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                   flightNumber={flight.FlightNumber}
                   onFlightOverride={onFlightOverride}
                 />
+                 <GateManualControl gateNumber={flight.GateNumber} />
                   {/* DODANO: Kontrola klase saltera */}
                 <DeskClassControl deskNumbers={flight.CheckInDesk} />
                     
