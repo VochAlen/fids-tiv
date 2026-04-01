@@ -503,7 +503,7 @@ const FlightRow = memo(
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
 
-    const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.5rem]"
+  const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.42rem]"
     const pillCls = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
 
     const estimatedDisplay = useMemo(() => {
@@ -608,14 +608,14 @@ const FlightRow = memo(
               </div>
               <div className="flex items-center justify-center" style={{ width: "420px" }}>
                 {pill.hasStatusText ? (
-                  <div className={pillCls}>
+                  <div className={`${pillCls} overflow-hidden`}>
                     {pill.showLEDs && (
                       <div className="flex items-center gap-1 flex-shrink-0">
                         <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
                         <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
                       </div>
                     )}
-                    {pill.displayText}
+                    <span className="truncate whitespace-nowrap">{pill.displayText}</span>
                   </div>
                 ) : (
                   <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
