@@ -21,6 +21,7 @@ export interface Flight {
   BaggageReclaim: string;
   CodeShareFlights: string[];
   AirlineLogoURL: string;
+  
   FlightType: 'departure' | 'arrival';
   DestinationCityName: string;
   

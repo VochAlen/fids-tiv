@@ -140,7 +140,22 @@ function computeStatusPill(flight: Flight, fmtTime: (t: string) => string) {
   const isEarly = /(earlier|ranije)/i.test(effectiveStatus);
   const isOnTime = /(on time|na vrijeme)/i.test(effectiveStatus);
   const isDiverted = /(diverted|preusmjeren)/i.test(effectiveStatus);
-  const isArrived = /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(effectiveStatus);
+const isArrivedRaw = /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(effectiveStatus);
+const isArrived = (() => {
+  if (!isArrivedRaw) return false;
+  
+  // Ako je "actual" time 00:00 ili prazan — let sigurno nije stigao
+  const actual = flight.ActualDepartureTime || '';
+  const actualDigits = actual.replace(/\D/g, '');
+  if (actualDigits === '0000' || actualDigits === '') return false;
+  
+  // Vremenska provjera — scheduled mora biti u prošlosti
+  const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
+  if (!timeStr) return true;
+  const flightTime = parseFlightTimeToDate(timeStr);
+  if (!flightTime) return true;
+  return flightTime.getTime() - Date.now() <= 5 * 60 * 1000;
+})();
 
   let displayText = effectiveStatus;
   if (isArrived) { const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime; displayText = `Arrived at ${t ? fmtTime(t) : ""}`; }

@@ -221,6 +221,46 @@ function removeDuplicateFlights(flights: Flight[]): Flight[] {
   
   return Array.from(seen.values());
 }
+// ============================================================
+// SANITIZACIJA: Ukloni lažne "Arrived" statuse
+// Ako je Aktuelno="0000" ili scheduled još u budućnosti (>10 min),
+// API greškom šalje Arrived — ignorišemo taj status
+// ============================================================
+function sanitizeArrivedStatus(flights: Flight[]): Flight[] {
+  const now = new Date();
+  return flights.map(flight => {
+    if (flight.FlightType !== 'arrival') return flight;
+
+    const isArrivedStatus = /(arrived|sletio|landed)/i.test(flight.StatusEN || '');
+    if (!isArrivedStatus) return flight;
+
+    // Signal 1: Aktuelno je "0000" — let definitivno nije stigao
+    const actualDigits = (flight.ActualDepartureTime || '').replace(/\D/g, '');
+    if (actualDigits === '0000' || actualDigits === '') {
+      console.log(`🧹 sanitize: clearing false Arrived for ${flight.FlightNumber} (Aktuelno=0000)`);
+      return { ...flight, StatusEN: '', StatusMN: '' };
+    }
+
+    // Signal 2: Scheduled/Estimated još >10 minuta u budućnosti
+    const timeStr = flight.ScheduledDepartureTime;
+    if (timeStr) {
+      const match = timeStr.match(/^(\d{2}):(\d{2})$/);
+      if (match) {
+        const scheduled = new Date();
+        scheduled.setHours(parseInt(match[1]), parseInt(match[2]), 0, 0);
+        const diffMinutes = (scheduled.getTime() - now.getTime()) / 60_000;
+        if (diffMinutes > 10) {
+          console.log(`🧹 sanitize: clearing false Arrived for ${flight.FlightNumber} (scheduled in ${diffMinutes.toFixed(0)} min)`);
+          return { ...flight, StatusEN: '', StatusMN: '' };
+        }
+      }
+    }
+
+    return flight;
+  });
+}
+
+
 
 export async function GET(): Promise<NextResponse> {
   const backupService = FlightBackupService.getInstance();
@@ -273,9 +313,16 @@ export async function GET(): Promise<NextResponse> {
     );
 
     // Process live data - map to Flight objects
-    const mappedFlights = await Promise.all(
-      rawData.map((raw: RawFlightData) => mapRawFlight(raw))
-    );
+const mappedFlights = await Promise.all(
+  rawData.map((raw: RawFlightData) => mapRawFlight(raw))
+)
+
+// Dodaj HasOperatorEstimate na osnovu SIROVOG Aktuelno polja
+rawData.forEach((raw, i) => {
+  if (mappedFlights[i]) {
+    (mappedFlights[i] as any).HasOperatorEstimate = raw.Aktuelno === "0000"
+  }
+})
 
     console.log(`📊 AFTER MAPPING: ${mappedFlights.length} total flights`);
     console.log(`📊 Mapped: ${mappedFlights.filter(f => f.FlightType === 'departure').length} departures, ${mappedFlights.filter(f => f.FlightType === 'arrival').length} arrivals`);
@@ -346,6 +393,11 @@ export async function GET(): Promise<NextResponse> {
       applyKvOverrides(departures),
       applyKvOverrides(arrivals)
     ]);
+
+    // SANITIZACIJA: Ukloni lažne Arrived statuse (Aktuelno=0000 ili let još u budućnosti)
+    arrivals = sanitizeArrivedStatus(arrivals);
+
+
 
     // DEFAULT BAGGAGE BELT LOGIKA:
     // Za sve dolaske koji JOŠ NISU stigli i nemaju traku, automatski dodijeli "2"
@@ -458,7 +510,7 @@ export async function GET(): Promise<NextResponse> {
           applyKvOverrides(autoProcessedDepartures),
           applyKvOverrides(autoProcessedArrivals)
         ]);
-
+   autoProcessedArrivals = sanitizeArrivedStatus(autoProcessedArrivals);
         // DEFAULT BAGGAGE BELT LOGIKA (Backup mode)
         autoProcessedArrivals = autoProcessedArrivals.map((flight: Flight) => {
           const statusLower = (flight.StatusEN || "").toLowerCase();
