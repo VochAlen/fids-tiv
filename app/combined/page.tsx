@@ -350,8 +350,11 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
   return "On time"
 }
 
+
+
+
 // ============================================================
-// IZOLOVANI SAT
+// IZOLOVANI SAT sat
 // ============================================================
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
   const [time, setTime]       = useState("")
