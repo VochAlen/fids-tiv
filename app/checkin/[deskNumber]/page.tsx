@@ -1247,11 +1247,23 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
                 destinationCity={flightDisplay.destinationCity}
                 portrait
               />
-              <div className="flex-1 text-right">
-                <div className="text-[9rem] font-bold text-white mb-1 leading-tight city-name-transition">
-                  {flightDisplay.destinationCity}
-                </div>
-                <div className="text-8xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
+  <div className="flex-1 text-right min-w-0 overflow-hidden">
+  <div
+    className="font-bold text-white mb-1 leading-tight city-name-transition break-words"
+    style={{
+      fontSize:
+        flightDisplay.destinationCity.length > 14
+          ? '4.5rem'
+          : flightDisplay.destinationCity.length > 11
+          ? '6rem'
+          : flightDisplay.destinationCity.length > 8
+          ? '7.5rem'
+          : '9rem',
+    }}
+  >
+    {flightDisplay.destinationCity}
+  </div>
+<div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
                   <span className="text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold">
                     Airport IATA code:
                   </span>
