@@ -353,7 +353,7 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
 
 
 
-// ============================================================
+// =======================hhhhhh=====================================
 // IZOLOVANI SAT sat
 // ============================================================
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
