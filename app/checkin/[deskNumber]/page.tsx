@@ -1261,22 +1261,27 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
                 destinationCity={flightDisplay.destinationCity}
                 portrait
               />
-  <div className="flex-1 text-right min-w-0 overflow-hidden">
+<div className="flex-1 text-right min-w-0">
   <div
-    className="font-bold text-white mb-1 leading-tight city-name-transition break-words"
+    className="font-bold text-white mb-1 leading-tight city-name-transition"
     style={{
       fontSize:
         flightDisplay.destinationCity.length > 14
-          ? '4.5rem'
+          ? '4rem'
           : flightDisplay.destinationCity.length > 11
-          ? '6rem'
+          ? '5.5rem'
           : flightDisplay.destinationCity.length > 8
-          ? '7.5rem'
-          : '9rem',
+          ? '7rem'
+          : '8.5rem',
+      wordBreak: 'break-word',
+      overflowWrap: 'anywhere',
+      hyphens: 'auto',
     }}
   >
     {flightDisplay.destinationCity}
   </div>
+
+
 <div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
                   <span className="text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold">
                     Airport IATA code:
