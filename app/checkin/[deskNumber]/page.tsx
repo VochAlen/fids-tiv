@@ -1224,9 +1224,23 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
               )}
 
               <div className="text-center w-full">
-                <div className="text-[13rem] font-black text-yellow-500 leading-tight flight-number-transition">
-                  {flightDisplay.flightNumber}
-                </div>
+                {/* PORTRAIT BOJA BROJA LETA + DESTINACIJA */}
+       <div className="text-[13rem] font-black leading-tight flight-number-transition">
+  {(() => {
+    const flightNum = flightDisplay.flightNumber || '';
+    const iataCode = flightNum.substring(0, 2);
+    const restNumber = flightNum.substring(2);
+    
+    return (
+      <>
+        <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
+          {iataCode}
+        </span>
+        <span className="text-yellow-500">{restNumber}</span>
+      </>
+    );
+  })()}
+</div>
               </div>
             </div>
 
