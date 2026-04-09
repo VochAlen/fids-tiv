@@ -76,6 +76,10 @@ async function getFlightScheduledTime(flightNumber: string): Promise<string | nu
 // FUNKCIJA ZA AUTO-RESET POSTOJEĆIH OVERRIDE-OVA
 // ============================================================
 
+// ============================================================
+// FUNKCIJA ZA AUTO-RESET POSTOJEĆIH OVERRIDE-OVA
+// ============================================================
+
 export async function resetExpiredCheckInOverrides() {
   console.log('🔄 Provjeravam override-ove za auto-reset...');
   
@@ -86,19 +90,63 @@ export async function resetExpiredCheckInOverrides() {
     
     for (const key of keys) {
       const overrides = await client.hgetall(key);
+      const flightNumber = key.replace('override:', '');
       
-      // Provjeri samo ako postoji CheckInDesk override
+      // Dohvati trenutni status leta
+      const flightStatus = await getFlightStatus(flightNumber);
+      const statusLower = (flightStatus || '').toLowerCase();
+      
+      // Provjeri da li je let završen (Departed, Cancelled, Diverted)
+      const isTerminated = 
+        statusLower.includes('departed') || 
+        statusLower.includes('poletio') ||
+        statusLower.includes('cancelled') || 
+        statusLower.includes('canceled') || 
+        statusLower.includes('otkazan') ||
+        statusLower.includes('diverted') || 
+        statusLower.includes('preusmjeren');
+      
+      // Ako je let završen, resetuj SVE override-ove (CheckInDesk i GateNumber)
+      if (isTerminated) {
+        let flightResetCount = 0;
+        
+        // Resetuj CheckInDesk ako postoji
+        if (overrides.CheckInDesk) {
+          await client.hdel(key, 'CheckInDesk');
+          resetCount++;
+          flightResetCount++;
+          console.log(`✅ Auto-resetovan CheckInDesk za let ${flightNumber} (status: ${flightStatus})`);
+        }
+        
+        // Resetuj GateNumber ako postoji
+        if (overrides.GateNumber) {
+          await client.hdel(key, 'GateNumber');
+          resetCount++;
+          flightResetCount++;
+          console.log(`✅ Auto-resetovan GateNumber za let ${flightNumber} (status: ${flightStatus})`);
+        }
+        
+        // Ako nema više polja, obriši cijeli ključ
+        const remaining = await client.hlen(key);
+        if (remaining === 0) {
+          await client.del(key);
+        }
+        
+        if (flightResetCount > 0) {
+          console.log(`   Resetovano ${flightResetCount} override-ova za let ${flightNumber}`);
+        }
+        continue;
+      }
+      
+      // Originalna logika za CheckInDesk (30 minuta prije polijetanja)
       if (overrides.CheckInDesk) {
-        const flightNumber = key.replace('override:', '');
         const scheduledTime = await getFlightScheduledTime(flightNumber);
         
-        // Ako je manje od 30 minuta do polijetanja, resetuj!
         if (scheduledTime && shouldAutoResetCheckIn(scheduledTime)) {
           await client.hdel(key, 'CheckInDesk');
           resetCount++;
           console.log(`✅ Auto-resetovan CheckInDesk za let ${flightNumber} (polijetanje u ${scheduledTime})`);
           
-          // Ako nema više polja, obriši cijeli ključ
           const remaining = await client.hlen(key);
           if (remaining === 0) {
             await client.del(key);
@@ -108,13 +156,37 @@ export async function resetExpiredCheckInOverrides() {
     }
     
     if (resetCount > 0) {
-      console.log(`✅ Auto-resetovano ${resetCount} override-ova`);
+      console.log(`✅ Auto-resetovano ukupno ${resetCount} override-ova`);
     }
     
     return resetCount;
   } catch (error) {
     console.error('Auto-reset error:', error);
     return 0;
+  }
+}
+
+// Nova helper funkcija za dohvatanje statusa leta
+async function getFlightStatus(flightNumber: string): Promise<string | null> {
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    const response = await fetch(`${baseUrl}/api/flights?flightNumber=${flightNumber}`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' }
+    });
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    const data = await response.json();
+    const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+    const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
+    
+    return flight?.StatusEN || null;
+  } catch (error) {
+    console.error(`Error fetching status for ${flightNumber}:`, error);
+    return null;
   }
 }
 
@@ -140,6 +212,10 @@ export function stopAutoResetTimer() {
     resetTimer = null;
   }
 }
+
+// ============================================================
+// GLAVNA POST FUNKCIJA
+// ============================================================
 
 // ============================================================
 // GLAVNA POST FUNKCIJA
@@ -222,10 +298,71 @@ export async function POST(request: Request) {
               message: `Ne možete otvoriti check-in za let ${flightNumber} jer je otkazan` 
             }, { status: 400 });
           }
+          if (status.includes('diverted') || status.includes('preusmjeren')) {
+            return NextResponse.json({ 
+              message: `Ne možete otvoriti check-in za let ${flightNumber} jer je preusmjeren` 
+            }, { status: 400 });
+          }
         }
       } catch (error) {
         console.error('Error checking flight status:', error);
         // Nastavi sa izvršavanjem čak i ako ne možemo provjeriti status
+      }
+    }
+
+    // ============================================================
+    // 6. AUTO-RESET LOGIKA ZA GATE NUMBER
+    // ============================================================
+    if (field === 'GateNumber' && action === 'assign') {
+      // Provjeri status leta
+      const flightStatus = await getFlightStatus(flightNumber);
+      const statusLower = (flightStatus || '').toLowerCase();
+      
+      const isTerminated = 
+        statusLower.includes('departed') || 
+        statusLower.includes('poletio') ||
+        statusLower.includes('cancelled') || 
+        statusLower.includes('canceled') || 
+        statusLower.includes('otkazan') ||
+        statusLower.includes('diverted') || 
+        statusLower.includes('preusmjeren');
+      
+      if (isTerminated) {
+        return NextResponse.json({ 
+          message: `Ne možete promijeniti Gate za let ${flightNumber} jer je let ${flightStatus}` 
+        }, { status: 400 });
+      }
+      
+      // Dodatna provjera: da li je let već poletio (double-check)
+      try {
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+        const response = await fetch(`${baseUrl}/api/flights?flightNumber=${flightNumber}`, {
+          cache: 'no-store'
+        });
+        const data = await response.json();
+        const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+        const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
+        
+        if (flight) {
+          const status = (flight.StatusEN || '').toLowerCase();
+          if (status.includes('departed') || status.includes('poletio')) {
+            return NextResponse.json({ 
+              message: `Ne možete promijeniti Gate za let ${flightNumber} jer je već poletio` 
+            }, { status: 400 });
+          }
+          if (status.includes('cancelled') || status.includes('otkazan')) {
+            return NextResponse.json({ 
+              message: `Ne možete promijeniti Gate za let ${flightNumber} jer je otkazan` 
+            }, { status: 400 });
+          }
+          if (status.includes('diverted') || status.includes('preusmjeren')) {
+            return NextResponse.json({ 
+              message: `Ne možete promijeniti Gate za let ${flightNumber} jer je preusmjeren` 
+            }, { status: 400 });
+          }
+        }
+      } catch (error) {
+        console.error('Error checking flight status for Gate:', error);
       }
     }
 
@@ -266,9 +403,37 @@ export async function POST(request: Request) {
 // GET endpoint za provjeru auto-reset statusa
 // ============================================================
 
+// ============================================================
+// GET endpoint za provjeru auto-reset statusa
+// ============================================================
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
+  
+  // ═══════════════════════════════════════════════════════════
+  // SPECIJALNA AKCIJA ZA DOHVAT SVIH OVERRIDE-OVA
+  // ═══════════════════════════════════════════════════════════
+  if (action === 'getAllOverrides') {
+    try {
+      const client = getRedisClient();
+      const keys = await client.keys('override:*');
+      const overrides: Record<string, any> = {};
+      
+      for (const key of keys) {
+        const flightNumber = key.replace('override:', '');
+        const data = await client.hgetall(key);
+        if (Object.keys(data).length > 0) {
+          overrides[flightNumber] = data;
+        }
+      }
+      
+      return NextResponse.json(overrides);
+    } catch (error) {
+      console.error('Error getting overrides:', error);
+      return NextResponse.json({ error: 'Failed to get overrides' }, { status: 500 });
+    }
+  }
   
   // Specijalna akcija za status timer-a
   if (action === 'timerStatus') {
@@ -309,7 +474,6 @@ export async function GET(request: Request) {
     console.error('Error checking auto-reset status:', error);
     return NextResponse.json({ message: 'Greška pri provjeri' }, { status: 500 });
   }
-
 }
   // ============================================================
 // AUTO-START TIMERA PRI UČITAVANJU MODULA
@@ -323,3 +487,4 @@ if (typeof window === 'undefined') {
     startAutoResetTimer();
   }, 2000);
 }
+

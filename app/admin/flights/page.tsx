@@ -19,7 +19,8 @@ import {
   LogOut,
   Home,
   Save,
-  Trash2
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import type { Flight } from '@/types/flight';
 
@@ -59,12 +60,11 @@ const getStatusIcon = (status: string) => {
 };
 
 // ============================================================
-// KOMPONENTA: Override Control (Za Gate, Check-in, Baggage i Terminal)
+// KOMPONENTA: Override Control
 // ============================================================
 interface OverrideControlProps {
   label: string;
   currentValue: string | undefined;
-  // DODATO: 'Terminal'
   fieldName: 'GateNumber' | 'CheckInDesk' | 'BaggageReclaim' | 'Terminal';
   flightNumber: string;
   onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
@@ -73,8 +73,6 @@ interface OverrideControlProps {
 const OverrideControl: React.FC<OverrideControlProps> = ({ 
   label, currentValue, fieldName, flightNumber, onFlightOverride 
 }) => {
-   // Ako je Baggage Belt i trenutno nema vrijednosti, postavi podrazumijevani "2"
-  const defaultValue = fieldName === 'BaggageReclaim' && !currentValue ? '2' : '';
   const [inputValue, setInputValue] = useState(currentValue || '');
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -96,9 +94,40 @@ const OverrideControl: React.FC<OverrideControlProps> = ({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-xs text-white/50">{label}</div>
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-white/50 flex items-center gap-1">
+          {label}
+          {currentValue && (
+            <span className="text-[10px] text-orange-300">(Override)</span>
+          )}
+        </div>
+        {currentValue && (
+          <div className="flex items-center gap-1">
+            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">
+              ✏️
+            </span>
+            <button
+              onClick={() => handleAction('clear')}
+              className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-colors"
+              title="Ukloni override za ovo polje"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+      </div>
       <div className="text-sm text-white mb-1 font-medium break-all">
         Trenutno: {currentValue || <span className="text-white/30">Nije dodijeljeno (API podatak)</span>}
+        {fieldName === 'CheckInDesk' && currentValue && (
+          <span className="ml-2 text-[10px] text-yellow-400/70 bg-yellow-500/10 px-1.5 py-0.5 rounded-full">
+            ⏰ Auto-reset - 30 min prije STD
+          </span>
+        )}
+        {fieldName === 'CheckInDesk' && !currentValue && (
+          <span className="ml-2 text-[10px] text-green-400/70 bg-green-500/10 px-1.5 py-0.5 rounded-full">
+            ✅ Auto-reset aktivan
+          </span>
+        )}
       </div>
       
       <div className="flex flex-col sm:flex-row gap-2 w-full" onClick={(e) => e.stopPropagation()}>
@@ -136,7 +165,7 @@ const OverrideControl: React.FC<OverrideControlProps> = ({
 };
 
 // ============================================================
-// KOMPONENTA: Status Control (Brza promjena statusa leta)
+// KOMPONENTA: Status Control
 // ============================================================
 interface StatusControlProps {
   currentStatus: string;
@@ -144,7 +173,6 @@ interface StatusControlProps {
   onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
 }
 
-// Mapa za sigurne Tailwind klase (zbog purge-a)
 const statusStyles: Record<string, { active: string; inactive: string }> = {
   green: {
     active: 'bg-green-600/40 border-green-500 text-green-300 ring-1 ring-green-500/50',
@@ -166,7 +194,6 @@ const statusStyles: Record<string, { active: string; inactive: string }> = {
     active: 'bg-red-600/40 border-red-500 text-red-300 ring-1 ring-red-500/50',
     inactive: 'bg-red-600/10 border-red-500/30 text-red-400/70 hover:bg-red-600/20'
   },
-  // DODATO: Stil za "Preusmjeren"
   white: {
     active: 'bg-white/40 border-white text-white ring-1 ring-white/50',
     inactive: 'bg-white/10 border-white/30 text-white/70 hover:bg-white/20'
@@ -234,7 +261,7 @@ const StatusControl: React.FC<StatusControlProps> = ({
 };
 
 // ============================================================
-// KOMPONENTA: Manual Desk Override (Open/Close)
+// KOMPONENTA: Manual Desk Override
 // ============================================================
 interface DeskManualControlProps {
   deskNumbers: string | undefined;
@@ -337,7 +364,7 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) =>
 };
 
 // ============================================================
-// KOMPONENTA: Manual Gate Override (Open/Close)
+// KOMPONENTA: Manual Gate Override
 // ============================================================
 interface GateManualControlProps {
   gateNumber: string | undefined;
@@ -401,7 +428,7 @@ const GateManualControl: React.FC<GateManualControlProps> = ({ gateNumber }) => 
 };
 
 // ============================================================
-// KOMPONENTA: Desk Class Control (Business, Premium itd.)
+// KOMPONENTA: Desk Class Control
 // ============================================================
 interface DeskClassControlProps {
   deskNumbers: string | undefined;
@@ -411,7 +438,6 @@ const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
   const [savedClasses, setSavedClasses] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
 
-  // Ucitaj postojece klase kad se komponenta mounta
   useEffect(() => {
     if (!deskNumbers) return;
     const desks = deskNumbers.split(',').map(d => d.trim());
@@ -511,26 +537,83 @@ const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
     </div>
   );
 };
+
 // ============================================================
-// KOMPONENTA: Flight Card
+// FUNKCIJE ZA OBRADU LETOVA
+// ============================================================
+const removeDuplicates = (arr: string[]): string[] => {
+  const seen: Record<string, boolean> = {};
+  return arr.filter((item) => { if (seen[item]) return false; seen[item] = true; return true; });
+};
+
+const consolidateFlights = (flights: Flight[]): Flight[] => {
+  const flightMap = new Map<string, Flight>();
+  flights.forEach((flight) => {
+    const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}`;
+    if (flightMap.has(baseKey)) {
+      const existingFlight = flightMap.get(baseKey)!;
+      if (flight.GateNumber && existingFlight.GateNumber) {
+        existingFlight.GateNumber = removeDuplicates([...existingFlight.GateNumber.split(',').map(g => g.trim()), ...flight.GateNumber.split(',').map(g => g.trim())]).join(', ');
+      } else if (flight.GateNumber) { existingFlight.GateNumber = flight.GateNumber; }
+      
+      if (flight.CheckInDesk && existingFlight.CheckInDesk) {
+        existingFlight.CheckInDesk = removeDuplicates([...existingFlight.CheckInDesk.split(',').map(d => d.trim()), ...flight.CheckInDesk.split(',').map(d => d.trim())]).join(', ');
+      } else if (flight.CheckInDesk) { existingFlight.CheckInDesk = flight.CheckInDesk; }
+      
+      if (!existingFlight.AirlineName && flight.AirlineName) existingFlight.AirlineName = flight.AirlineName;
+      if (!existingFlight.AirlineCode && flight.AirlineCode) existingFlight.AirlineCode = flight.AirlineCode;
+      if (!existingFlight.StatusEN && flight.StatusEN) existingFlight.StatusEN = flight.StatusEN;
+      if (!existingFlight.StatusMN && flight.StatusMN) existingFlight.StatusMN = flight.StatusMN;
+    } else {
+      flightMap.set(baseKey, { ...flight });
+    }
+  });
+  return Array.from(flightMap.values());
+};
+
+const generateFlightKey = (flight: Flight, index: number): string => {
+  const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime || 'no-time'}`;
+  const additionalKeys = [flight.GateNumber, flight.CheckInDesk, flight.Terminal, flight.AirlineCode, index.toString()].filter(Boolean).join('-');
+  return `${baseKey}-${additionalKeys}`.replace(/\s+/g, '-');
+};
+
+interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
+
+// POMOĆNA MAPA ZA BOJE KARTICA
+const cardStylesMap: Record<string, { bg: string; text: string }> = {
+  blue: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
+  green: { bg: 'bg-green-500/20', text: 'text-green-400' },
+  yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' }
+};
+
+// ============================================================
+// KOMPONENTA: Flight Card (sa override indikatorom i clear dugmetom)
 // ============================================================
 interface FlightCardProps {
-  flight: Flight;
+  flight: Flight & { _hasOverride?: boolean; _overrideFields?: Record<string, string> };
   flightKey: string;
   onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+  onClearOverrides: (flightNumber: string) => Promise<void>;
 }
 
-const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOverride }) => {
+const FlightCard: React.FC<FlightCardProps> = ({ 
+  flight, 
+  flightKey, 
+  onFlightOverride,
+  onClearOverrides 
+}) => {
   const [expanded, setExpanded] = useState(false);
   const isDeparture = flight.FlightType === 'departure';
   const statusColor = getStatusColor(flight.StatusEN);
   const StatusIcon = getStatusIcon(flight.StatusEN);
+  const hasOverride = (flight as any)._hasOverride === true;
+  const overrideFields = (flight as any)._overrideFields || {};
 
   return (
     <div
       className={`bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer ${
         expanded ? 'bg-white/10' : ''
-      }`}
+      } ${hasOverride ? 'border-orange-500/50 ring-1 ring-orange-500/30' : ''}`}
       onClick={() => setExpanded(!expanded)}
       role="button"
       tabIndex={0}
@@ -542,8 +625,29 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
             {isDeparture ? <ArrowUpRight className="w-5 h-5 text-blue-400" /> : <ArrowDownRight className="w-5 h-5 text-green-400" />}
           </div>
           <div>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <span className="text-xl font-bold text-white">{flight.FlightNumber}</span>
+            <div className="flex flex-col sm:flex-row gap-2 items-center">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xl font-bold text-white">{flight.FlightNumber}</span>
+                {hasOverride && (
+                  <>
+                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 flex items-center gap-1">
+                      <AlertTriangle className="w-2.5 h-2.5" />
+                      Override
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onClearOverrides(flight.FlightNumber);
+                      }}
+                      className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 transition-colors flex items-center gap-1"
+                      title="Ukloni sve override-ove za ovaj let"
+                    >
+                      <XCircle className="w-2.5 h-2.5" />
+                      Clear all
+                    </button>
+                  </>
+                )}
+              </div>
               <span className="text-sm text-white/60">{flight.AirlineName}</span>
             </div>
             <div className="flex items-center gap-2 mt-1">
@@ -555,6 +659,19 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                 {isDeparture ? flight.DestinationAirportCode : 'TIV'}
               </span>
             </div>
+            {hasOverride && Object.keys(overrideFields).length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {Object.keys(overrideFields).map(field => (
+                  <span key={field} className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/10 text-orange-400">
+                    {field === 'CheckInDesk' ? 'Check-In' : 
+                     field === 'GateNumber' ? 'Gate' : 
+                     field === 'StatusEN' ? 'Status' : 
+                     field === 'Terminal' ? 'Terminal' : 
+                     field === 'BaggageReclaim' ? 'Baggage' : field}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-6">
@@ -598,7 +715,6 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                 
                 <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
 
-                {/* DODATO: Terminal Override za polaske */}
                 <OverrideControl
                   label="Terminal"
                   currentValue={flight.Terminal}
@@ -622,11 +738,8 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                   flightNumber={flight.FlightNumber}
                   onFlightOverride={onFlightOverride}
                 />
-                 <GateManualControl gateNumber={flight.GateNumber} />
-                  {/* DODANO: Kontrola klase saltera */}
+                <GateManualControl gateNumber={flight.GateNumber} />
                 <DeskClassControl deskNumbers={flight.CheckInDesk} />
-                    
-                {/* DODATO: Kontrola ručnog otvaranja/zatvaranja */}
                 <DeskManualControl deskNumbers={flight.CheckInDesk} />
               </div>
             ) : (
@@ -637,7 +750,6 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
                 
                 <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
 
-                {/* DODATO: Terminal Override za dolaske */}
                 <OverrideControl
                   label="Terminal"
                   currentValue={flight.Terminal}
@@ -662,52 +774,9 @@ const FlightCard: React.FC<FlightCardProps> = ({ flight, flightKey, onFlightOver
   );
 };
 
-// Funkcije za obradu letova
-const removeDuplicates = (arr: string[]): string[] => {
-  const seen: Record<string, boolean> = {};
-  return arr.filter((item) => { if (seen[item]) return false; seen[item] = true; return true; });
-};
-
-const consolidateFlights = (flights: Flight[]): Flight[] => {
-  const flightMap = new Map<string, Flight>();
-  flights.forEach((flight) => {
-    const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}`;
-    if (flightMap.has(baseKey)) {
-      const existingFlight = flightMap.get(baseKey)!;
-      if (flight.GateNumber && existingFlight.GateNumber) {
-        existingFlight.GateNumber = removeDuplicates([...existingFlight.GateNumber.split(',').map(g => g.trim()), ...flight.GateNumber.split(',').map(g => g.trim())]).join(', ');
-      } else if (flight.GateNumber) { existingFlight.GateNumber = flight.GateNumber; }
-      
-      if (flight.CheckInDesk && existingFlight.CheckInDesk) {
-        existingFlight.CheckInDesk = removeDuplicates([...existingFlight.CheckInDesk.split(',').map(d => d.trim()), ...flight.CheckInDesk.split(',').map(d => d.trim())]).join(', ');
-      } else if (flight.CheckInDesk) { existingFlight.CheckInDesk = flight.CheckInDesk; }
-      
-      if (!existingFlight.AirlineName && flight.AirlineName) existingFlight.AirlineName = flight.AirlineName;
-      if (!existingFlight.AirlineCode && flight.AirlineCode) existingFlight.AirlineCode = flight.AirlineCode;
-      if (!existingFlight.StatusEN && flight.StatusEN) existingFlight.StatusEN = flight.StatusEN;
-      if (!existingFlight.StatusMN && flight.StatusMN) existingFlight.StatusMN = flight.StatusMN;
-    } else {
-      flightMap.set(baseKey, { ...flight });
-    }
-  });
-  return Array.from(flightMap.values());
-};
-
-const generateFlightKey = (flight: Flight, index: number): string => {
-  const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime || 'no-time'}`;
-  const additionalKeys = [flight.GateNumber, flight.CheckInDesk, flight.Terminal, flight.AirlineCode, index.toString()].filter(Boolean).join('-');
-  return `${baseKey}-${additionalKeys}`.replace(/\s+/g, '-');
-};
-
-interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
-
-// POMOĆNA MAPA ZA BOJE KARTICA (Fix za Next.js Tailwind Purge)
-const cardStylesMap: Record<string, { bg: string; text: string }> = {
-  blue: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
-  green: { bg: 'bg-green-500/20', text: 'text-green-400' },
-  yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' }
-};
-
+// ============================================================
+// GLAVNA ADMIN KOMPONENTA
+// ============================================================
 export default function AdminFlightsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -720,17 +789,35 @@ export default function AdminFlightsPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [airlineFilter, setAirlineFilter] = useState<string>('all');
 
-  const loadFlights = useCallback(async (silent = false) => {
+  // Funkcija za dohvatanje svih override-ova
+  const loadOverrides = useCallback(async (): Promise<Record<string, any>> => {
+    try {
+      const response = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const data = await response.json();
+      console.log('Aktivni override-ovi:', data);
+      return data;
+    } catch (error) {
+      console.error('Error loading overrides:', error);
+      return {};
+    }
+  }, []);
+    const loadFlights = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
       setRefreshing(true);
       setError(null);
-     const response = await fetch(`/api/flights?nocache=${Date.now()}`, {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' }
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}: Greška pri učitavanju letova`);
-      const data = await response.json();
+      
+      // Učitaj letove i override-ove paralelno
+      const [flightsResponse, overridesData] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        }),
+        loadOverrides()
+      ]);
+      
+      if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
+      const data = await flightsResponse.json();
 
       const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
         const consolidated = consolidateFlights(flightArray);
@@ -743,9 +830,22 @@ export default function AdminFlightsPage() {
         });
       };
 
+      // Dodaj flag za override u svaki let
+      const departuresWithOverride = (data.departures || []).map((flight: Flight) => ({
+        ...flight,
+        _hasOverride: !!overridesData[flight.FlightNumber] && Object.keys(overridesData[flight.FlightNumber] || {}).length > 0,
+        _overrideFields: overridesData[flight.FlightNumber] || {}
+      }));
+
+      const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => ({
+        ...flight,
+        _hasOverride: !!overridesData[flight.FlightNumber] && Object.keys(overridesData[flight.FlightNumber] || {}).length > 0,
+        _overrideFields: overridesData[flight.FlightNumber] || {}
+      }));
+
       setFlights({
-        departures: removeDuplicatesAndConsolidate(data.departures || []),
-        arrivals: removeDuplicatesAndConsolidate(data.arrivals || [])
+        departures: removeDuplicatesAndConsolidate(departuresWithOverride),
+        arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
       });
       setLastUpdated(data.lastUpdated || new Date().toISOString());
       setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
@@ -759,7 +859,46 @@ export default function AdminFlightsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [loadOverrides]);
+
+  // Funkcija za brisanje svih override-ova za jedan let
+  const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
+    if (!confirm(`Da li ste sigurni da želite ukloniti SVE override-ove za let ${flightNumber}?`)) {
+      return;
+    }
+    
+    try {
+      // Prvo dohvati sve aktivne override-ove za ovaj let
+      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const allOverrides = await overridesRes.json();
+      const flightOverrides = allOverrides[flightNumber] || {};
+      
+      // Za svaki field koji ima override, pošalji clear akciju
+      const clearPromises = Object.keys(flightOverrides).map(field =>
+        fetch('/api/admin/flight-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            flightNumber, 
+            field, 
+            action: 'clear' 
+          }),
+        })
+      );
+      
+      await Promise.all(clearPromises);
+      
+      // Osvježi podatke
+      await loadFlights(true);
+      
+      alert(`Svi override-ovi za let ${flightNumber} su uklonjeni`);
+    } catch (error) {
+      console.error('Error clearing overrides:', error);
+      alert('Greška pri uklanjanju override-ova');
+    }
+  }, [loadFlights]);
+
+
 
   const handleFlightOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
     try {
@@ -772,7 +911,8 @@ export default function AdminFlightsPage() {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Greška pri ažuriranju');
       }
-      await loadFlights(true); 
+      // Nakon override-a, ponovo učitaj letove i override-ove
+      await loadFlights(true);
     } catch (error) {
       console.error('Override error:', error);
       alert(error instanceof Error ? error.message : 'Došlo je do greške.');
@@ -780,8 +920,13 @@ export default function AdminFlightsPage() {
     }
   }, [loadFlights]);
 
-  useEffect(() => { loadFlights(); }, [loadFlights]);
-  const handleRefresh = useCallback(() => { loadFlights(true); }, [loadFlights]);
+  useEffect(() => { 
+    loadFlights(); 
+  }, [loadFlights]);
+  
+  const handleRefresh = useCallback(() => { 
+    loadFlights(true);
+  }, [loadFlights]);
 
   const handleLogout = useCallback(async () => {
     try { await fetch('/api/admin/logout', { method: 'POST' }); } catch (error) { console.error('Logout error:', error); }
@@ -829,43 +974,46 @@ export default function AdminFlightsPage() {
   const today = useMemo(() => new Date().toLocaleDateString('sr-Latn-RS', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), []);
 
   return (
-<div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
+    <div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
         <header className="mb-8">
-      <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
+          <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
             <div>
               <div className="flex items-center gap-4 mb-2">
                 <Link href="/admin" className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Nazad na dashboard"><Home className="w-5 h-5" /></Link>
-             <h1 className="text-3xl font-bold text-white flex items-center gap-3">
-  Red letenja
-  <span className="bg-red-500 text-white text-sm px-3 py-1 rounded-full">
-    by Alen
-  </span>
-</h1>
+                <h1 className="text-3xl font-bold text-white flex items-center gap-3">
+                  Red letenja
+                  <span className="bg-red-500 text-white text-sm px-3 py-1 rounded-full">
+                    by Alen
+                  </span>
+                </h1>
                 <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${systemStatus === 'online' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}`}>
                   <div className={`w-2 h-2 rounded-full ${systemStatus === 'online' ? 'bg-green-500' : 'bg-yellow-500'}`} />
                   {systemStatus === 'online' ? 'LIVE' : 'BACKUP'}
                 </div>
               </div>
-           <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:gap-4 text-sm text-slate-300">
+              <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:gap-4 text-sm text-slate-300">
                 <div className="flex flex-col sm:flex-row gap-2"><Calendar className="w-4 h-4" /><span>{today}</span></div>
                 <div className="flex flex-col sm:flex-row gap-2"><Clock className="w-4 h-4" /><span>Poslednje ažuriranje: {getTimeSinceUpdate()}</span></div>
                 <div className="flex flex-col sm:flex-row gap-2"><Plane className="w-4 h-4" /><span>{flights.departures.length} polazaka • {flights.arrivals.length} dolazaka</span></div>
               </div>
             </div>
-        <div className="flex flex-col gap-3 w-full md:w-auto">
-        <div className="flex flex-wrap gap-2 justify-end">
-                <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button"><RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} /></button>
-<button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors" type="button">
-  <LogOut className="w-4 h-4" />
-  <span className="hidden sm:inline">Odjavi se</span>
-</button>              </div>
+            <div className="flex flex-col gap-3 w-full md:w-auto">
+              <div className="flex flex-wrap gap-2 justify-end">
+                <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button">
+                  <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+                </button>
+                <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors" type="button">
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden sm:inline">Odjavi se</span>
+                </button>
+              </div>
               {error && <div className="text-right"><div className="text-sm text-red-400">⚠️ {error}</div></div>}
             </div>
           </div>
         </header>
 
-        {/* Stats Cards - ISPRAVLJENO ZA TAILWIND PURGE */}
+        {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
           {[ 
             { label: 'Ukupno letova', count: flights.departures.length + flights.arrivals.length, color: 'blue', icon: Plane },
@@ -886,6 +1034,7 @@ export default function AdminFlightsPage() {
           })}
         </div>
 
+        {/* Filteri */}
         <div className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10 mb-8">
           <div className="flex flex-col md:flex-row gap-4">
             <div className="flex border-b border-white/10 md:border-none">
@@ -909,6 +1058,7 @@ export default function AdminFlightsPage() {
           </div>
         </div>
 
+        {/* Lista letova */}
         <div className="space-y-4">
           {loading ? (
             <div className="space-y-4">{[...Array(5)].map((_, i) => (<div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse"><div className="flex items-center justify-between"><div className="flex items-center gap-4"><div className="w-10 h-10 bg-white/10 rounded-lg" /><div><div className="h-6 w-32 bg-white/10 rounded mb-2" /><div className="h-4 w-48 bg-white/10 rounded" /></div></div><div className="flex items-center gap-6"><div className="text-right"><div className="h-6 w-16 bg-white/10 rounded mb-1" /><div className="h-4 w-24 bg-white/10 rounded" /></div><div className="h-4 w-24 bg-white/10 rounded" /></div></div></div>))}</div>
@@ -920,7 +1070,13 @@ export default function AdminFlightsPage() {
             </div>
           ) : (
             getFilteredFlights.map((flight, index) => (
-              <FlightCard key={generateFlightKey(flight, index)} flight={flight} flightKey={generateFlightKey(flight, index)} onFlightOverride={handleFlightOverride} />
+              <FlightCard 
+                key={generateFlightKey(flight, index)} 
+                flight={flight as any} 
+                flightKey={generateFlightKey(flight, index)} 
+                onFlightOverride={handleFlightOverride}
+                onClearOverrides={handleClearAllOverrides}
+              />
             ))
           )}
         </div>
@@ -937,12 +1093,12 @@ export default function AdminFlightsPage() {
             </div>
           </div>
         </div>
-          <style jsx global>{`
-        body, html {
-          overflow: auto !important;
-          height: auto !important;
-        }
-      `}</style>
+        <style jsx global>{`
+          body, html {
+            overflow: auto !important;
+            height: auto !important;
+          }
+        `}</style>
       </div>
     </div>
   );
