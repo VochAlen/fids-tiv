@@ -183,6 +183,45 @@ function createFallbackConfig() {
       minCloseBeforeDeparture: 30,
       daysOfWeek: [],
     },
+    // ═══════════════════════════════════════════════════════════
+    // NOVE KOMPANIJE SA 150 MINUTA
+    // ═══════════════════════════════════════════════════════════
+    {
+      airlineIata: 'LS',
+      airlineName: 'Jet2.com',
+      checkInOpenMinutes: 150,
+      useAutoCheckIn: true,
+      maxAutoOpenMinutes: 150,
+      minCloseBeforeDeparture: 30,
+      daysOfWeek: [],
+    },
+    {
+      airlineIata: 'U2',
+      airlineName: 'easyJet',
+      checkInOpenMinutes: 150,
+      useAutoCheckIn: true,
+      maxAutoOpenMinutes: 150,
+      minCloseBeforeDeparture: 30,
+      daysOfWeek: [],
+    },
+    {
+      airlineIata: 'EC',
+      airlineName: 'Eurowings',
+      checkInOpenMinutes: 150,
+      useAutoCheckIn: true,
+      maxAutoOpenMinutes: 150,
+      minCloseBeforeDeparture: 30,
+      daysOfWeek: [],
+    },
+    {
+      airlineIata: 'DS',
+      airlineName: 'easyJet Switzerland',
+      checkInOpenMinutes: 150,
+      useAutoCheckIn: true,
+      maxAutoOpenMinutes: 150,
+      minCloseBeforeDeparture: 30,
+      daysOfWeek: [],
+    },
   ];
   
   airlineConfigs = fallbackConfigs;
@@ -208,6 +247,13 @@ function getAirlineName(iataCode: string): string {
     'EK': 'Emirates',
     'QR': 'Qatar Airways',
     'D8': 'Norwegian',
+    // ═══════════════════════════════════════════════════════════
+    // NOVE KOMPANIJE
+    // ═══════════════════════════════════════════════════════════
+    'LS': 'Jet2.com',
+    'U2': 'easyJet',
+    'EC': 'Eurowings',
+    'DS': 'easyJet Switzerland',
   };
   
   return airlineNames[iataCode] || `Unknown (${iataCode})`;
@@ -256,10 +302,19 @@ export function checkFlightStatus(status: string): {
 function parseDepartureTime(timeString: string): Date | null {
   if (!timeString) return null;
 
+  // Provjeri keš
+  const cacheKey = timeString;
+  if (timeParseCache.has(cacheKey)) {
+    return timeParseCache.get(cacheKey) || null;
+  }
+
   try {
     if (timeString.includes('T')) {
       const date = new Date(timeString);
-      if (!isNaN(date.getTime())) return date;
+      if (!isNaN(date.getTime())) {
+        timeParseCache.set(cacheKey, date);
+        return date;
+      }
     }
 
     const [hours, minutes] = timeString.split(':').map(Number);
@@ -269,18 +324,12 @@ function parseDepartureTime(timeString: string): Date | null {
     const d = new Date(now);
     d.setHours(hours, minutes, 0, 0);
 
-    // Originalni kod: if (d < now) d.setDate(d.getDate() + 1);
-    // Problem: u 00:02, let 23:55 postaje "sutra 23:55"
-    //
-    // Fix: "sutra" samo ako je let više od 6 sati u prošlosti.
-    // Obrazloženje: nijedan aerodrom nema let koji čeka 6+ sati na check-in.
-    // Ako API vrati HH:MM bez datuma, a razlika je > 6h, siguran je znak
-    // da se radi o letu koji je zaista sutra (npr. noćni let oko ponoći).
     const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
     if (now.getTime() - d.getTime() > SIX_HOURS_MS) {
       d.setDate(d.getDate() + 1);
     }
 
+    timeParseCache.set(cacheKey, d);
     return d;
   } catch {
     return null;
@@ -601,6 +650,22 @@ export async function debugCheckInLogic(
       configLoaded,
     },
   };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FUNKCIJA ZA RELOAD KONFIGURACIJE
+// ═══════════════════════════════════════════════════════════════
+export async function reloadCheckInConfig(): Promise<void> {
+  console.log('🔄 Reloading check-in configuration...');
+  configLoaded = false;
+  configLoadPromise = null;
+  AIRLINE_CONFIG_MAP.clear();
+  
+  // Opciono: očisti i ručno otvorene check-in-ove
+  // Object.keys(manuallyOpenedCheckIns).forEach(key => delete manuallyOpenedCheckIns[key]);
+  
+  await loadCheckInConfig();
+  console.log('✅ Check-in configuration reloaded');
 }
 
 // Čisti cache svaki sat — spriječava beskonačan rast
