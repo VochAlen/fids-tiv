@@ -383,17 +383,38 @@ const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: st
 // ============================================================
 // LED
 // ============================================================
+// ============================================================
+// LED - MINIMAL CPU VERZIJA SA INVERTOVANOM ANIMACIJOM
+// ============================================================
 const LEDIndicator = memo(function LEDIndicator({
   color, phase = "a", size = "w-3 h-3",
 }: {
   color: "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
   phase?: "a"|"b"; size?: string
 }) {
-  const map: Record<typeof color, string> = {
-    blue:"led-blue", green:"led-green", orange:"led-orange", red:"led-red",
-    yellow:"led-yellow", cyan:"led-cyan", purple:"led-purple", lime:"led-lime",
+  const colorMap: Record<typeof color, string> = {
+    blue: "bg-blue-500",
+    green: "bg-green-500",
+    orange: "bg-orange-500",
+    red: "bg-red-500",
+    yellow: "bg-yellow-400",
+    cyan: "bg-cyan-400",
+    purple: "bg-purple-500",
+    lime: "bg-lime-500",
   }
-  return <div className={`${size} rounded-full led-base ${map[color]} ${phase==="b"?"led-phase-b":""}`} />
+
+  // Faza "a" koristi normalnu animaciju (pali se)
+  // Faza "b" koristi invertovanu animaciju (gasi se)
+  const animationName = phase === "a" ? "ledBlinkA" : "ledBlinkB"
+
+  return (
+    <div
+      className={`${size} rounded-full ${colorMap[color]}`}
+      style={{
+        animation: `${animationName} 0.8s ease-in-out infinite alternate`,
+      }}
+    />
+  )
 })
 
 // ============================================================
@@ -1190,6 +1211,16 @@ useEffect(() => {
         ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
         body,html{overflow:hidden;margin:0;padding:0}.flight-row-contain{contain:layout style}
+        @keyframes ledBlinkA {
+  0% { opacity: 0.2; }
+  100% { opacity: 1; }
+}
+
+/* Druga LED - invertovana animacija (0% svijetla, 100% tamna) */
+@keyframes ledBlinkB {
+  0% { opacity: 1; }
+  100% { opacity: 0.2; }
+}
       `}</style>
     </div>
   )
