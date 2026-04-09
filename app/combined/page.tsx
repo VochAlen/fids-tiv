@@ -247,6 +247,8 @@ const loadFromCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
+
+
 const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
   const ctrl = new AbortController()
   const id   = setTimeout(() => ctrl.abort(), ms)
@@ -744,6 +746,9 @@ const FlightRow = memo(
 // ============================================================
 // GLAVNA KOMPONENTA
 // ============================================================
+// ============================================================
+// GLAVNA KOMPONENTA (IZMIJENJENA)
+// ============================================================
 export default function CombinedPage(): JSX.Element {
   return <FlightBoardErrorBoundary><FlightBoard /></FlightBoardErrorBoundary>
 }
@@ -783,6 +788,10 @@ function FlightBoard(): JSX.Element {
     return () => clearTimeout(id)
   }, [])
 
+  // ============================================================
+  // POMOĆNE FUNKCIJE (USECALLBACK) - POMERENE NAZAD
+  // ============================================================
+  
   const sortFlightsByScheduledTime = useCallback(
     (flights: Flight[]): Flight[] =>
       [...flights].sort((a, b) =>
@@ -816,6 +825,36 @@ function FlightBoard(): JSX.Element {
       return true
     })
   }, [])
+
+  // ============================================================
+  // NOVI EFEKAT: UČITAVANJE IZ KEŠA
+  // (Sada je siguran jer su funkcije gore definisane)
+  // ============================================================
+  useEffect(() => {
+    const cached = loadFromCache()
+    if (cached) {
+      const filteredArrivals = filterRecentFlights(cached.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
+      const rawDepartures = getUniqueDeparturesWithDeparted(filterRecentFlights(cached.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
+
+      const departuresWithMeta = rawDepartures.map(f => {
+        const clone    = { ...f }
+        const num      = f.FlightNumber ?? ""
+        const prevGate = prevGatesRef.current[num]
+        if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
+          (clone as any)._gateChangedAt = Date.now()
+        }
+        if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
+        return clone
+      })
+
+      setArrivals(filteredArrivals)
+      setDepartures(departuresWithMeta)
+      setLastUpdate(cached.lastUpdated || new Date().toLocaleTimeString("en-GB"))
+      
+      // Ako ima keša, ukloni loader odmah
+      setLoading(false)
+    }
+  }, [filterRecentFlights])
 
   // Heartbeat
   useEffect(() => {
@@ -880,59 +919,83 @@ function FlightBoard(): JSX.Element {
   }, [])
 
   // Data loading
-  useEffect(() => {
-    isMountedRef.current = true
-    let tid: ReturnType<typeof setTimeout>
+useEffect(() => {
+  isMountedRef.current = true
+  const controller = new AbortController()
+  let tid: ReturnType<typeof setTimeout>
 
-    const load = async () => {
-      if (!isMountedRef.current) return
-      let data: FlightDataResponse | null = null
-      let usedCache = false
+  const load = async () => {
+    if (!isMountedRef.current) return
+    let data: FlightDataResponse | null = null
+    let usedCache = false
+
+    try {
+      // Prikaži loading samo ako nemamo nikakve podatke
+      if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0) {
+        setLoading(true)
+      }
+      setErrorMessage(null)
+
       try {
-        if (isInitialLoad.current) setLoading(true)
-        setErrorMessage(null)
-        try {
-          data = await fetchWithRetry("/api/flights")
-          if (data && isMountedRef.current) saveToCache(data)
-        } catch (fe) {
-          setErrorMessage("Network error. Using cached data.")
-          const c = loadFromCache()
-          if (c) { data = c; usedCache = true } else throw fe
+        // fetch sa AbortSignal
+        const res = await fetch("/api/flights", { signal: controller.signal })
+        if (!res.ok) throw new Error("Network error")
+        data = await res.json() as FlightDataResponse
+        if (isMountedRef.current) saveToCache(data)
+      } catch (fe) {
+        setErrorMessage("Network error. Using cached data.")
+        const c = loadFromCache()
+        if (c) { data = c; usedCache = true } else throw fe
+      }
+
+      if (!isMountedRef.current || !data) return
+
+      // filtriranje i priprema podataka
+      const filteredArrivals = filterRecentFlights(data.arrivals, true)
+        .slice(0, MAX_FLIGHTS_DISPLAY)
+
+      const rawDepartures = getUniqueDeparturesWithDeparted(
+        filterRecentFlights(data.departures, false)
+      ).slice(0, MAX_FLIGHTS_DISPLAY)
+
+      const departuresWithMeta = rawDepartures.map(f => {
+        const clone = { ...f }
+        const num = f.FlightNumber ?? ""
+        const prevGate = prevGatesRef.current[num]
+        if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
+          (clone as any)._gateChangedAt = Date.now()
         }
-        if (!isMountedRef.current || !data) return
+        if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
+        return clone
+      })
 
-        const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
-        const rawDepartures    = getUniqueDeparturesWithDeparted(
-          filterRecentFlights(data.departures, false)
-        ).slice(0, MAX_FLIGHTS_DISPLAY)
+      setArrivals(filteredArrivals)
+      setDepartures(departuresWithMeta)
+      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
 
-        const departuresWithMeta = rawDepartures.map(f => {
-          const clone    = { ...f }
-          const num      = f.FlightNumber ?? ""
-          const prevGate = prevGatesRef.current[num]
-          if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
-            (clone as any)._gateChangedAt = Date.now()
-          }
-          if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
-          return clone
-        })
+      if (!usedCache) setErrorMessage(null)
+      else setTimeout(() => setErrorMessage(null), 5_000)
 
-        setArrivals(filteredArrivals)
-        setDepartures(departuresWithMeta)
-        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-        if (!usedCache) setErrorMessage(null)
-        else setTimeout(() => setErrorMessage(null), 5_000)
-      } catch (e) {
-        console.error("Critical:", e); setErrorMessage("Unable to load flight data. Check connection.")
-      } finally {
-        isInitialLoad.current = false
-        if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS) }
+    } catch (e) {
+      console.error("Critical:", e)
+      setErrorMessage("Unable to load flight data. Check connection.")
+    } finally {
+      isInitialLoad.current = false
+      if (isMountedRef.current) {
+        setLoading(false)
+        tid = setTimeout(load, REFRESH_INTERVAL_MS)
       }
     }
+  }
 
-    load()
-    return () => { isMountedRef.current = false; clearTimeout(tid) }
-  }, [filterRecentFlights])
+  load()
+  return () => {
+    isMountedRef.current = false
+    clearTimeout(tid)
+    controller.abort() // prekini fetch ako se komponenta unmount-a
+  }
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [filterRecentFlights]) // samo filterRecentFlights u dependency array
 
   // Switch arrivals/departures
   useEffect(() => {
@@ -1011,16 +1074,11 @@ function FlightBoard(): JSX.Element {
         <span className="text-xl sm:text-2xl font-bold leading-none flex items-center justify-center w-full h-full pointer-events-none">×</span>
       </button>
 
-      {/* ── Header ─────────────────────────────────────────────
-          Desktop: veliki font, sat desno
-          Mobilni: kompaktan, sat sakriven
-          ──────────────────────────────────────────────────── */}
+      {/* Header */}
       <div className="w-full mx-auto mb-2 sm:mb-4 flex-shrink-0">
         <div className="flex justify-between items-center gap-2 sm:gap-4">
 
-          {/* Lijeva strana: ikona + naslov */}
           <div className="flex items-center gap-3 sm:gap-6 min-w-0">
-            {/* Ikona aviona */}
             <div className="p-2 sm:p-4 bg-transparent rounded-xl sm:rounded-2xl shadow-2xl border-2 border-orange-500 flex-shrink-0">
               {showArrivals
                 ? <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500 rotate-90" />
@@ -1028,7 +1086,6 @@ function FlightBoard(): JSX.Element {
               }
             </div>
 
-            {/* Naslov + subtitle */}
             <div className="min-w-0">
               <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${currentColors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
                 {title}
@@ -1039,13 +1096,10 @@ function FlightBoard(): JSX.Element {
             </div>
           </div>
 
-          {/* Desna strana: sat (sakriven na mobilnom) + LED dot */}
           <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
-            {/* Sat — vidljiv samo na desktopu */}
             <div className="hidden sm:block">
               <ClockDisplay colorClass="text-white" />
             </div>
-            {/* Mali sat na mobilnom */}
             <div className="block sm:hidden">
               <ClockDisplay colorClass="text-white" />
             </div>
@@ -1054,18 +1108,17 @@ function FlightBoard(): JSX.Element {
         </div>
       </div>
 
-      {/* ── Tabla s letovima ───────────────────────────────── */}
+      {/* Tabla */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {isInitialLoad.current && loading && sortedFlights.length === 0 ? (
+  {arrivals.length === 0 && departures.length === 0 ? (
           <div className="text-center p-8 h-full flex items-center justify-center">
             <div className="inline-flex items-center gap-4">
               <div className={`w-8 h-8 border-4 ${currentColors.border} border-t-transparent rounded-full animate-spin`} />
-              <span className="text-xl sm:text-2xl text-white font-semibold">Loading flight information...</span>
+              <span className="text-xl sm:text-2xl text-white font-semibold">Awaiting flight data...</span>
             </div>
           </div>
         ) : (
           <div className={`${currentColors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
-            {/* TableHeaders: hidden na mobilnom, vidljiv na sm+ */}
             <TableHeaders headers={tableHeaders} headerBg={currentColors.header} />
 
             <div className="flex-1 overflow-y-auto">
@@ -1091,7 +1144,7 @@ function FlightBoard(): JSX.Element {
         )}
       </div>
 
-      {/* ── Ticker ─────────────────────────────────────────── */}
+      {/* Ticker */}
       <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
         <div className="ticker-wrap">
           <div className={`ticker-move ${currentColors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
