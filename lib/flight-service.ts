@@ -159,45 +159,50 @@ export function filterActiveFlights(flights: Flight[]): Flight[] {
   return flights.filter(flight => shouldDisplayFlight(flight));
 }
 
+// lib/flight-service.ts
+
 export function shouldDisplayFlight(flight: Flight): boolean {
   if (!flight || !flight.StatusEN) return false;
   
   const status = flight.StatusEN.toLowerCase().trim();
   
-  // Lista statusa koji se NE prikazuju
-  const excludedStatuses = [
-    'departed',
-    'cancelled', 
-    'canceled',
-    'diverted',
-    'completed',
-    'arrived',
-    'landed',
-    'poletio',
-    'otkazan',
-    'preusmjeren'
-  ];
+  // ═══════════════════════════════════════════════════════════════
+  // NOVA LOGIKA: Samo "Departed" zatvara gate
+  // "Cancelled" i "Diverted" također zatvaraju gate
+  // ═══════════════════════════════════════════════════════════════
   
-  // Provjeri da li status sadrži bilo koju od zabranjenih riječi
-  const hasExcludedStatus = excludedStatuses.some(excluded => {
-    const regex = new RegExp(`\\b${excluded}\\b`, 'i');
-    return regex.test(status);
-  });
+  // PRVO: Provjeri cancelled i diverted - uvijek zatvoreno
+  const isCancelled = status.includes('cancelled') || status.includes('canceled') || status.includes('otkazan');
+  const isDiverted = status.includes('diverted') || status.includes('preusmjeren');
   
-  return !hasExcludedStatus;
+  if (isCancelled || isDiverted) {
+    return false; // Gate zatvoren
+  }
+  
+  // DRUGO: Samo "departed" zatvara gate - sve ostalo je otvoreno
+  const isDeparted = status.includes('departed') || status.includes('poletio');
+  
+  if (isDeparted) {
+    return false; // Gate zatvoren - let je poletio
+  }
+  
+  // TREĆE: Svi ostali statusi znače da je gate otvoren
+  // To uključuje: boarding, final call, delay, scheduled, processing, itd.
+  return true;
 }
 
+// Ažurirana funkcija za provjeru da li je let završen
 export function isFlightCompleted(flight: Flight): boolean {
   if (!flight || !flight.StatusEN) return false;
   
   const status = flight.StatusEN.toLowerCase().trim();
   
+  // Samo ovi statusi znače da je let završen za gate
   const completedStatuses = [
     'departed',
     'cancelled', 
     'canceled',
     'diverted',
-    'completed',
     'arrived',
     'landed',
     'poletio',

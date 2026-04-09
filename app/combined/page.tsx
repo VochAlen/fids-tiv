@@ -291,7 +291,12 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
-const EARLY_CHECKIN_AIRLINES = new Set(["6H", "FZ"])
+
+const CHECKIN_OFFSETS: Record<string, number> = {
+  "6H": 180,
+  "FZ": 180,
+  "LS": 150, // <-- dodato
+}
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim()
@@ -312,17 +317,25 @@ function getAutoStatus(flight: Flight): string | null {
   if (minsToRef <= 30)  return "Go to Gate"
 
   if (minsToSTD > 30) {
-    const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
-    const checkInMinutesOffset = EARLY_CHECKIN_AIRLINES.has(iata) ? 180 : 120
-    const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000))
+    const iata = (flight.FlightNumber ?? "")
+      .replace(/\s/g, "")
+      .substring(0, 2)
+      .toUpperCase()
+
+    const checkInMinutesOffset = CHECKIN_OFFSETS[iata] ?? 120
+
+    const checkInDate = new Date(
+      scheduled.getTime() - (checkInMinutesOffset * 60 * 1000)
+    )
+
     const hh = String(checkInDate.getHours()).padStart(2, "0")
     const mm = String(checkInDate.getMinutes()).padStart(2, "0")
+
     return `Check In at ${hh}:${mm}`
   }
 
   return null
 }
-
 // ── Auto-status za ARRIVALS ──────────────────────────────────
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()

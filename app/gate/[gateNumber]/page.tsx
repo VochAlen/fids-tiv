@@ -47,42 +47,31 @@ class GateErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundary
 }
 
 // ============================================================
-// MEMO: Logo komponenta — fiksna veličina 200x75
-// Podržava PNG, JPG, JPEG formate
-// ============================================================
-// ============================================================
-// MEMO: Logo komponenta — fiksna veličina 350x100
-// Logika: 1. public/airlines -> 2. FlightAware -> 3. Fallback tekst
+// MEMO: Logo komponenta
 // ============================================================
 const AirlineLogo = memo(function AirlineLogo({ icao, flightNumber, name }: { icao: string; flightNumber: string; name: string }) {
   const code = icao || flightNumber?.substring(0, 2).toUpperCase() || '';
 
-  // Utvrđivanje izvora slike bez korišćenja useState (sprečava nepotrebne re-rendere)
   const src = useMemo(() => {
     if (!code) return '';
     
-    // Sinhrona provjera lokalnog fajla (traje ~0.5ms po fajlu)
     if (typeof window !== 'undefined') {
       try {
         const xhr = new XMLHttpRequest();
         
-        // Provjera .jpg
         xhr.open('HEAD', `/airlines/${code}.jpg`, false); 
         xhr.send();
         if (xhr.status === 200) return `/airlines/${code}.jpg`;
         
-        // Provjera .png
         xhr.open('HEAD', `/airlines/${code}.png`, false);
         xhr.send();
         if (xhr.status === 200) return `/airlines/${code}.png`;
-      } catch { /* Greška u mreži ne bi trebala da se desi na lokalnom fajlu */ }
+      } catch { }
     }
     
-    // Ako nema ničeg lokalno, fallback na FlightAware
     return `https://www.flightaware.com/images/airline_logos/180px/${code}.png`;
   }, [code]);
 
-  // Ako i FlightAware padne (nepoznat ICAO), prebaci u tekstualni prikaz
   const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const container = e.currentTarget.parentElement;
     if (container) {
@@ -142,22 +131,6 @@ const formatTimeRemaining = (minutes: number): string => {
   return `in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
 };
 
-const isFlightTerminated = (statusEN: string): boolean => {
-  const s = (statusEN || '').toLowerCase().trim();
-  return (
-    s.includes('departed') || s.includes('cancelled') || s.includes('canceled') ||
-    s.includes('diverted') || s.includes('arrived') || s.includes('completed')
-  );
-};
-
-const shouldDisplayFlight = (flight: Flight, status?: CheckInStatus): boolean => {
-  if (isFlightTerminated(flight.StatusEN || '')) return false;
-  if (status) return status.shouldBeOpen || status.status === 'scheduled';
-  const dep = parseDepartureTime(flight.ScheduledDepartureTime || '');
-  if (!dep) return false;
-  return Math.floor((dep.getTime() - Date.now()) / 60_000) > -30;
-};
-
 const flightChanged = (a: Flight | null, b: Flight | null): boolean =>
   a?.FlightNumber !== b?.FlightNumber ||
   a?.ScheduledDepartureTime !== b?.ScheduledDepartureTime ||
@@ -171,13 +144,13 @@ interface FlightDisplayState {
   checkInStatus: CheckInStatus | null;
   nextFlight: Flight | null;
   gateChangedAt: number | undefined;
-    manualGateStatus: string | null; // DODANO
+  manualGateStatus: string | null;
 }
 
 const EMPTY_STATE: FlightDisplayState = {
   flight: null, checkInStatus: null, nextFlight: null,
   gateChangedAt: undefined,
-  manualGateStatus: null // DODANO
+  manualGateStatus: null
 };
 
 // ============================================================
@@ -205,17 +178,46 @@ function GateDisplay() {
   const currentFlightRef = useRef<Flight | null>(null);
   const currentStatusRef = useRef<CheckInStatus | null>(null);
   const prevGateRef = useRef<string | undefined>(undefined);
-
   
-  const manualGateStatusRef = useRef<string | null>(null); // DODATO
+  // ═══════════════════════════════════════════════════════════════
+  // DEFINICIJA manualGateStatusRef (OVAJ DIO JE NEDOSTAJAO)
+  // ═══════════════════════════════════════════════════════════════
+  const manualGateStatusRef = useRef<string | null>(null);
 
-  // DODATO: Hook za dohvaćanje statusa iz Redisa
+  // Funkcija za dohvaćanje statusa iz Redisa
   const fetchGateStatusOverride = useCallback(async (gate: string): Promise<string | null> => {
     try {
       const res = await fetch(`/api/gate-status/${gate}`);
       const data = await res.json();
       return data.status;
     } catch { return null; }
+  }, []);
+
+  // Funkcija za provjeru da li treba prikazati let (nova logika)
+  const shouldDisplayFlight = useCallback((flight: Flight): boolean => {
+    // Ako je ručno otvoren, prikaži bez obzira na sve
+    if (manualGateStatusRef.current === 'open') {
+      return true;
+    }
+    
+    const flightStatus = (flight.StatusEN || '').toLowerCase().trim();
+    
+    // PRVO: Cancelled i Diverted - NE prikazujemo
+    if (flightStatus.includes('cancelled') || 
+        flightStatus.includes('canceled') || 
+        flightStatus.includes('otkazan') ||
+        flightStatus.includes('diverted') || 
+        flightStatus.includes('preusmjeren')) {
+      return false;
+    }
+    
+    // DRUGO: Departed - NE prikazujemo (gate se zatvara)
+    if (flightStatus.includes('departed') || flightStatus.includes('poletio')) {
+      return false;
+    }
+    
+    // TREĆE: Svi ostali statusi - prikazujemo (gate je otvoren)
+    return true;
   }, []);
 
   useEffect(() => {
@@ -280,7 +282,6 @@ function GateDisplay() {
 
       // RUČNI OVERRIDE LOGIKA
       if (manualGateStatusRef.current === 'closed') {
-        // Ako je ručno zatvoren, prikaži prazan ekran čak iako ima letova
         if (!isMountedRef.current) return;
         currentFlightRef.current = null;
         currentStatusRef.current = null;
@@ -291,17 +292,27 @@ function GateDisplay() {
         return;
       }
 
+      // ═══════════════════════════════════════════════════════════════
+      // LOGIKA ZA ODABIR TRENUTNOG LETA
+      // ═══════════════════════════════════════════════════════════════
       let current: (typeof sorted)[number] | null = null;
-      for (const f of sorted) {
-        if (manualGateStatusRef.current === 'open') {
-          // FORCE OPEN: Prikaži let čak i ako je status "Departed" ili "Cancelled"
-          current = f; 
-          break;
+      
+      if (manualGateStatusRef.current === 'open') {
+        // FORCE OPEN: Prikaži prvi let
+        current = sorted[0] || null;
+      } else {
+        // Normalna logika: traži prvi let koji NIJE završen
+        for (const f of sorted) {
+          if (shouldDisplayFlight(f)) {
+            current = f;
+            break;
+          }
         }
-        if (shouldDisplayFlight(f, f.checkInStatus || undefined)) { current = f; break; }
-      }
-      if (!current && manualGateStatusRef.current !== 'open') {
-        current = sorted.find((f) => f.departureTime > now && !isFlightTerminated(f.StatusEN || '')) ?? null;
+        
+        // Ako nema aktivnog leta, uzmi prvi budući let
+        if (!current) {
+          current = sorted.find((f) => f.departureTime > now) ?? null;
+        }
       }
 
       const idx = sorted.findIndex((f) => f.FlightNumber === current?.FlightNumber);
@@ -332,7 +343,7 @@ function GateDisplay() {
       console.error('Gate load error:', err);
       if (isMountedRef.current) setLoading(false);
     }
-  }, [gateNumber, getFlightCheckInStatus, updateCountdown]);
+  }, [gateNumber, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -346,14 +357,13 @@ function GateDisplay() {
     return () => { isMountedRef.current = false; clearTimeout(timeoutId); };
   }, [loadFlights]);
 
-    // ── Manual Gate Status Polling ──
+  // Manual Gate Status Polling
   useEffect(() => {
     const refreshStatus = async () => {
       try {
         const newStatus = await fetchGateStatusOverride(gateNumber);
         if (manualGateStatusRef.current !== newStatus) {
           manualGateStatusRef.current = newStatus;
-          // Ako je status promijenjen, odmah pokreni reload da primijeni promjenu
           loadFlights();
         }
       } catch (err) {
@@ -361,7 +371,7 @@ function GateDisplay() {
       }
     };
     refreshStatus();
-    const id = setInterval(refreshStatus, 30_000); // Proverava svakih 30s
+    const id = setInterval(refreshStatus, 30_000);
     return () => clearInterval(id);
   }, [gateNumber, fetchGateStatusOverride, loadFlights]);
 
@@ -370,18 +380,22 @@ function GateDisplay() {
     return () => clearInterval(id);
   }, [updateCountdown]);
 
-  useEffect(() => {
-    const id = setInterval(() => updateCountdown(currentFlightRef.current), REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [updateCountdown]);
-
   const getStatusColor = (status: string): string => {
-    const s = status.toLowerCase().trim();
+    const s = (status || '').toLowerCase().trim();
+    
+    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan') ||
+        s.includes('diverted') || s.includes('preusmjeren')) {
+      return 'text-red-600 line-through';
+    }
+    
+    if (s.includes('departed') || s.includes('poletio')) {
+      return 'text-gray-500 line-through';
+    }
+    
     if (s.includes('boarding') || s.includes('gate open')) return 'text-green-400';
-    if (s.includes('final call')) return 'text-red-400';
-    if (s.includes('delay')) return 'text-red-400';
-    if (s.includes('cancelled') || s.includes('canceled')) return 'text-red-600 line-through';
-    if (s.includes('departed') || s.includes('diverted')) return 'text-gray-500 line-through';
+    if (s.includes('final call')) return 'text-red-400 animate-pulse';
+    if (s.includes('delay') || s.includes('kasni')) return 'text-red-400';
+    
     return 'text-yellow-400';
   };
 
@@ -453,17 +467,16 @@ function GateDisplay() {
           </div>
 
           <div className="space-y-8 flex-1">
-
-<div className="flex items-center gap-8">
-  <AirlineLogo
-    icao={display.flight.AirlineICAO}
-    flightNumber={display.flight.FlightNumber}
-    name={display.flight.AirlineName}
-  />
-  <div className="text-[11rem] font-black text-white mb-4 leading-tight">
-    {display.flight.FlightNumber}
-  </div>
-</div>
+            <div className="flex items-center gap-8">
+              <AirlineLogo
+                icao={display.flight.AirlineICAO}
+                flightNumber={display.flight.FlightNumber}
+                name={display.flight.AirlineName}
+              />
+              <div className="text-[11rem] font-black text-white mb-4 leading-tight">
+                {display.flight.FlightNumber}
+              </div>
+            </div>
 
             {display.flight.CodeShareFlights && display.flight.CodeShareFlights.length > 0 && (
               <div className="flex items-center gap-4 bg-blue-500/20 px-6 py-3 rounded-2xl border border-blue-500/30">
