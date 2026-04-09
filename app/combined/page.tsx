@@ -350,11 +350,8 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
   return "On time"
 }
 
-
-
-
-// =======================hhhhhh=====================================
-// IZOLOVANI SAT sat
+// ============================================================
+// IZOLOVANI SAT
 // ============================================================
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
   const [time, setTime]       = useState("")
@@ -428,22 +425,7 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
   const isGoToGate    = !isArrival && /(go to gate)/i.test(effectiveStatus)
   const isClose       = !isArrival && /^close$/i.test(effectiveStatus.trim())
   const isFinalCall   = !isArrival && /^final call$/i.test(effectiveStatus.trim())
-const isArrivedRaw = /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(effectiveStatus);
-const isArrived = (() => {
-  if (!isArrivedRaw) return false;
-  
-  // Ako je "actual" time 00:00 ili prazan — let sigurno nije stigao
-  const actual = flight.ActualDepartureTime || '';
-  const actualDigits = actual.replace(/\D/g, '');
-  if (actualDigits === '0000' || actualDigits === '') return false;
-  
-  // Vremenska provjera — scheduled mora biti u prošlosti
-  const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
-  if (!timeStr) return true;
-  const flightTime = parseFlightTimeToDate(timeStr);
-  if (!flightTime) return true;
-  return flightTime.getTime() - Date.now() <= 5 * 60 * 1000;
-})();
+  const isArrived     = isArrival  && /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(effectiveStatus)
 
   let displayText = effectiveStatus
   if (isProcessing) displayText = "Check-In"
