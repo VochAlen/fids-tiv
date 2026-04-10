@@ -32,100 +32,73 @@ const userAgents = {
   // POMOĆNA FUNKCIJA: Učitavanje admin override-a iz Redis Labs
   // Koristi SCAN umjesto KEYS kako ne bi zamrzao RAM na free planu
   // ============================================================
-  async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
-    let client: Redis;
-    try {
-      client = getRedisClient();
-      
-      // 1. Pronađi sve ključeve koji počinju sa "override:" (koristi SCAN umjesto KEYS)
-      const keys: string[] = [];
-      let cursor = '0';
-      
-      do {
-        // SCAN je siguran za memoriju - vraća po 100 ključeva po pozivu umjesto svih odjednom
-        const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
-        cursor = scanResult[0];
-        keys.push(...scanResult[1]);
-        
-        // Sigurnosno prekidanje ako ih previše očekivano (zaštita od beskonačne petlje ili bagova)
-        if (keys.length > 200) break; 
-      } while (cursor !== '0');
+async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
+  let client: Redis;
+  try {
+    client = getRedisClient();
+    
+    const keys: string[] = [];
+    let cursor = '0';
+    
+    do {
+      const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
+      cursor = scanResult[0];
+      keys.push(...scanResult[1]);
+      if (keys.length > 200) break; 
+    } while (cursor !== '0');
 
-      if (keys.length === 0) {
-        return flights; 
-      }
+    if (keys.length === 0) return flights;
 
-      // 2. Uzmi sve podatke paralelno koristeći ioredis pipeline (veoma brzo)
-      const pipeline = client.pipeline();
-      keys.forEach(key => pipeline.hgetall(key));
-      
-      // ioredis pipeline.exec() vraća niz u formatu: [ [greska, rezultat], [greska, rezultat] ]
-      const results = await pipeline.exec();
+    const pipeline = client.pipeline();
+    keys.forEach(key => pipeline.hgetall(key));
+    const results = await pipeline.exec();
 
-      // SIGURNOSNA PROVJERA: Ako pipeline vrati null (npr. pukla konekcija), prekini dalje
-      if (!results || results.length === 0) {
-        return flights; 
-      }
+    if (!results || results.length === 0) return flights;
 
-      const overridesMap: Record<string, Record<string, string>> = {};
-      
-      keys.forEach((key, index) => {
-        const result = results[index];
-        
-        // Provjera da nema greške i da rezultat postoji
-        if (result && !result[0] && result[1]) {
-          const flightNumber = key.replace('override:', '');
-          
-          // ioredis hgetall vraća čisti JS objekat: { GateNumber: '3', CheckInDesk: '1' }
-          // (Mnogo lakše od Vercel KV-a koji vraća niz!)
-          const parsedData = result[1] as Record<string, string>;
-          
-          if (Object.keys(parsedData).length > 0) {
-            overridesMap[flightNumber] = parsedData;
-          }
+    const overridesMap: Record<string, Record<string, string>> = {};
+    
+    keys.forEach((key, index) => {
+      const result = results[index];
+      if (result && !result[0] && result[1]) {
+        const flightNumber = key.replace('override:', '');
+        const parsedData = result[1] as Record<string, string>;
+        if (Object.keys(parsedData).length > 0) {
+          overridesMap[flightNumber] = parsedData;
         }
-      });
+      }
+    });
 
-      // 3. Prepiši spoljne podatke sa lokalnim admin podacima + AUTO-CLEANUP
-      return flights.map(flight => {
-        const localOverride = overridesMap[flight.FlightNumber];
-        if (localOverride) {
-          // 🧹 AUTO-CLEANUP LOGIKA
-          const statusLower = (flight.StatusEN || '').toLowerCase();
-          
-          // Ako je let POLETIO, OTKAZAN ili PREUSMJEREN, obriši override iz Redis-a
-          // da ne bi "zagadio" budući let koji dobije isti broj leta (npr. YM101 sutra)
-          if (
-            statusLower.includes('departed') || 
-            statusLower.includes('cancelled') || 
-            statusLower.includes('diverted')
-          ) {
-            // Brišemo asinhrono (fire-and-forget) da ne usporava API odgovor FIDS-u
-            client.del(`override:${flight.FlightNumber}`).catch(() => {});
-            
-            // Vraćamo ORIGINALAN podatak sa API-ja, potpuno ignorišemo stare override podatke
-            return flight; 
-          }
+    // Helper: __EMPTY__ → '' (slobodan šalter/gate)
+    // undefined → nema overridea, vrati API vrijednost
+    // string → normalan override
+    const resolveField = (
+      overrideVal: string | undefined,
+      apiVal: string | undefined
+    ): string => {
+      if (overrideVal === undefined) return apiVal ?? '';
+      if (overrideVal === '__EMPTY__') return '';
+      return overrideVal;
+    };
 
-          // Ako let AKTIVAN (nije poletio/otkazan), primijeni override podataka
-          return {
-            ...flight,
-            GateNumber: localOverride.GateNumber || flight.GateNumber,
-            CheckInDesk: localOverride.CheckInDesk || flight.CheckInDesk,
-            BaggageReclaim: localOverride.BaggageReclaim || flight.BaggageReclaim,
-            StatusEN: localOverride.StatusEN || flight.StatusEN,
-            Terminal: localOverride.Terminal || flight.Terminal,
-          };
-        }
-        return flight;
-      });
+    return flights.map(flight => {
+      const localOverride = overridesMap[flight.FlightNumber];
+      if (!localOverride) return flight;
 
-    } catch (error) {
-      // KRITIČNO: Ako Redis padne, FIDS nastavlja raditi sa originalnim podacima
-      console.error('⚠️ Redis Override read failed (FIDS continues normally):', error);
-      return flights; 
-    }
+      return {
+        ...flight,
+        GateNumber:     resolveField(localOverride.GateNumber,     flight.GateNumber),
+        CheckInDesk:    resolveField(localOverride.CheckInDesk,    flight.CheckInDesk),
+        BaggageReclaim: resolveField(localOverride.BaggageReclaim, flight.BaggageReclaim),
+        StatusEN:       resolveField(localOverride.StatusEN,       flight.StatusEN),
+        Terminal:       resolveField(localOverride.Terminal,       flight.Terminal),
+      };
+    });
+
+  } catch (error) {
+    console.error('⚠️ Redis Override read failed (FIDS continues normally):', error);
+    return flights;
   }
+}
 
 async function fetchWithQuickRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
   for (let attempt = 1; attempt <= retries; attempt++) {

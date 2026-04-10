@@ -142,7 +142,7 @@ const OverrideControl: React.FC<OverrideControlProps> = ({
 
         <button
           onClick={() => handleAction('assign')}
-          disabled={isUpdating || !inputValue.trim()}
+         disabled={isUpdating}
           className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg border border-blue-500/30 transition-colors disabled:opacity-50 text-sm"
           type="button"
         >
@@ -801,65 +801,81 @@ export default function AdminFlightsPage() {
       return {};
     }
   }, []);
-    const loadFlights = useCallback(async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
-      setRefreshing(true);
-      setError(null);
-      
-      // Učitaj letove i override-ove paralelno
-      const [flightsResponse, overridesData] = await Promise.all([
-        fetch(`/api/flights?nocache=${Date.now()}`, {
-          cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' }
-        }),
-        loadOverrides()
-      ]);
-      
-      if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
-      const data = await flightsResponse.json();
+const mapOverrideValue = (val: string) => val === '__EMPTY__' ? '' : val;
 
-      const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
-        const consolidated = consolidateFlights(flightArray);
-        const seen: Record<string, boolean> = {};
-        return consolidated.filter((flight) => {
-          const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
-          if (seen[uniqueId]) return false;
-          seen[uniqueId] = true;
-          return true;
-        });
-      };
+const loadFlights = useCallback(async (silent = false) => {
+  try {
+    if (!silent) setLoading(true);
+    setRefreshing(true);
+    setError(null);
+    
+    // Učitaj letove i override-ove paralelno
+    const [flightsResponse, overridesData] = await Promise.all([
+      fetch(`/api/flights?nocache=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' }
+      }),
+      loadOverrides()
+    ]);
+    
+    if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
+    const data = await flightsResponse.json();
 
-      // Dodaj flag za override u svaki let
-      const departuresWithOverride = (data.departures || []).map((flight: Flight) => ({
-        ...flight,
-        _hasOverride: !!overridesData[flight.FlightNumber] && Object.keys(overridesData[flight.FlightNumber] || {}).length > 0,
-        _overrideFields: overridesData[flight.FlightNumber] || {}
-      }));
-
-      const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => ({
-        ...flight,
-        _hasOverride: !!overridesData[flight.FlightNumber] && Object.keys(overridesData[flight.FlightNumber] || {}).length > 0,
-        _overrideFields: overridesData[flight.FlightNumber] || {}
-      }));
-
-      setFlights({
-        departures: removeDuplicatesAndConsolidate(departuresWithOverride),
-        arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
+    const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
+      const consolidated = consolidateFlights(flightArray);
+      const seen: Record<string, boolean> = {};
+      return consolidated.filter((flight) => {
+        const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
+        if (seen[uniqueId]) return false;
+        seen[uniqueId] = true;
+        return true;
       });
-      setLastUpdated(data.lastUpdated || new Date().toISOString());
-      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
-    } catch (error) {
-      console.error('Error loading flights:', error);
-      setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
-      setFlights({ departures: [], arrivals: [] });
-      setSystemStatus('offline');
-      setLastUpdated(new Date().toISOString());
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [loadOverrides]);
+    };
+
+    // Dodaj flag za override u svaki let
+    const departuresWithOverride = (data.departures || []).map((flight: Flight) => {
+      const flightOverrides = overridesData[flight.FlightNumber] || {};
+      const mappedOverrides: Record<string, string> = {};
+      Object.entries(flightOverrides).forEach(([k, v]) => {
+        mappedOverrides[k] = mapOverrideValue(v as string);
+      });
+      return {
+        ...flight,
+        _hasOverride: Object.keys(mappedOverrides).length > 0,
+        _overrideFields: mappedOverrides,
+      };
+    });
+
+    const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => {
+      const flightOverrides = overridesData[flight.FlightNumber] || {};
+      const mappedOverrides: Record<string, string> = {};
+      Object.entries(flightOverrides).forEach(([k, v]) => {
+        mappedOverrides[k] = mapOverrideValue(v as string);
+      });
+      return {
+        ...flight,
+        _hasOverride: Object.keys(mappedOverrides).length > 0,
+        _overrideFields: mappedOverrides,
+      };
+    });
+
+    setFlights({
+      departures: removeDuplicatesAndConsolidate(departuresWithOverride),
+      arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
+    });
+    setLastUpdated(data.lastUpdated || new Date().toISOString());
+    setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
+  } catch (error) {
+    console.error('Error loading flights:', error);
+    setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
+    setFlights({ departures: [], arrivals: [] });
+    setSystemStatus('offline');
+    setLastUpdated(new Date().toISOString());
+  } finally {
+    setLoading(false);
+    setRefreshing(false);
+  }
+}, [loadOverrides]);
 
   // Funkcija za brisanje svih override-ova za jedan let
   const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
@@ -897,6 +913,32 @@ export default function AdminFlightsPage() {
       alert('Greška pri uklanjanju override-ova');
     }
   }, [loadFlights]);
+
+  const handleClearAllFlightsOverrides = useCallback(async () => {
+  if (!confirm('Da li ste sigurni da želite ukloniti SVE override-ove za SVE letove?')) return;
+  
+  try {
+    const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+    const allOverrides = await overridesRes.json();
+    
+    const clearPromises = Object.entries(allOverrides).flatMap(([flightNumber, fields]) =>
+      Object.keys(fields as Record<string, string>).map(field =>
+        fetch('/api/admin/flight-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+        })
+      )
+    );
+    
+    await Promise.all(clearPromises);
+    await loadFlights(true);
+    alert('Svi override-ovi su uspješno obrisani!');
+  } catch (error) {
+    console.error('Error clearing all overrides:', error);
+    alert('Greška pri brisanju svih override-ova');
+  }
+}, [loadFlights]);
 
 
 
@@ -1003,6 +1045,15 @@ export default function AdminFlightsPage() {
                 <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button">
                   <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
+                <button
+  onClick={handleClearAllFlightsOverrides}
+  className="flex items-center gap-2 px-3 py-2 md:px-4 bg-orange-600/20 hover:bg-orange-600/30 text-orange-300 rounded-lg border border-orange-500/30 transition-colors"
+  type="button"
+  title="Obriši sve override-ove za sve letove"
+>
+  <XCircle className="w-4 h-4" />
+  <span className="hidden sm:inline">Clear all overrides</span>
+</button>
                 <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors" type="button">
                   <LogOut className="w-4 h-4" />
                   <span className="hidden sm:inline">Odjavi se</span>

@@ -127,9 +127,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: 'Nepoznata akcija. Koristite "assign" ili "clear".' }, { status: 400 });
     }
 
-    if (action === 'assign' && (!value || value.toString().trim() === '')) {
-      return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
-    }
+    // if (action === 'assign' && (!value || value.toString().trim() === '')) {
+    //   return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
+    // }
+
+    if (action === 'assign' && value === undefined) {
+  return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
+}
 
     // CheckInDesk logika
     if (field === 'CheckInDesk' && action === 'assign') {
@@ -185,9 +189,9 @@ export async function POST(request: Request) {
     client = getRedisClient();
     const redisKey = `override:${flightNumber}`;
 
-    if (action === 'assign') {
-      const cleanValue = value.toString().trim();
-      await client.hset(redisKey, { [field]: cleanValue });
+if (action === 'assign') {
+  const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
+  await client.hset(redisKey, { [field]: cleanValue });
       await client.expire(redisKey, 21600); 
     } else if (action === 'clear') {
       await client.hdel(redisKey, field);
