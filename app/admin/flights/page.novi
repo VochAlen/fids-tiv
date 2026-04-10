@@ -1,0 +1,908 @@
+'use client';
+
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  Plane, ArrowUpRight, ArrowDownRight, Clock, CheckCircle, XCircle,
+  AlertCircle, RefreshCw, Calendar, Search, ChevronDown, LogOut,
+  Home, Edit3, Trash2, AlertTriangle, DoorOpen, ConciergeBell,
+  Luggage, CheckCheck, Ban, Timer, Navigation
+} from 'lucide-react';
+import type { Flight } from '@/types/flight';
+
+// ============================================================
+// HELPERS
+// ============================================================
+const formatTime = (t: string): string => {
+  if (!t?.trim()) return '--:--';
+  try {
+    const [h, m] = t.split(':').map(Number);
+    if (isNaN(h) || isNaN(m)) return '--:--';
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  } catch { return '--:--'; }
+};
+
+const getStatusMeta = (status: string): { color: string; bg: string; border: string; icon: React.ReactNode; label: string } => {
+  const s = (status || '').toLowerCase();
+  if (s.includes('on time') || s.includes('na vrijeme'))
+    return { color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30', icon: <CheckCircle className="w-4 h-4" />, label: status || 'Na vrijeme' };
+  if (s.includes('delay') || s.includes('kasni'))
+    return { color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', icon: <Timer className="w-4 h-4" />, label: status || 'Kasni' };
+  if (s.includes('cancel') || s.includes('otkazan'))
+    return { color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', icon: <Ban className="w-4 h-4" />, label: status || 'Otkazan' };
+  if (s.includes('board') || s.includes('ukrcaj'))
+    return { color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30', icon: <Navigation className="w-4 h-4" />, label: status || 'Ukrcaj' };
+  if (s.includes('depart') || s.includes('poletio'))
+    return { color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30', icon: <Plane className="w-4 h-4" />, label: status || 'Poletio' };
+  if (s.includes('arriv') || s.includes('sletio'))
+    return { color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', icon: <CheckCheck className="w-4 h-4" />, label: status || 'Sletio' };
+  if (s.includes('divert'))
+    return { color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30', icon: <AlertCircle className="w-4 h-4" />, label: status || 'Preusmjeren' };
+  return { color: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30', icon: <Clock className="w-4 h-4" />, label: status || 'Nepoznato' };
+};
+
+// ============================================================
+// KOMPONENTA: Inline Field Editor
+// Jednostavan input sa labelom i dugmadima Sačuvaj / Obriši
+// ============================================================
+interface FieldEditorProps {
+  icon: React.ReactNode;
+  label: string;
+  sublabel?: string;
+  value: string | undefined;
+  placeholder: string;
+  fieldName: 'GateNumber' | 'CheckInDesk' | 'BaggageReclaim' | 'Terminal';
+  flightNumber: string;
+  onOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+  warning?: string;
+}
+
+const FieldEditor: React.FC<FieldEditorProps> = ({
+  icon, label, sublabel, value, placeholder, fieldName, flightNumber, onOverride, warning
+}) => {
+  const [input, setInput] = useState(value || '');
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (!busy) setInput(value || ''); }, [value, busy]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await onOverride(flightNumber, fieldName, 'assign', input);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      await onOverride(flightNumber, fieldName, 'clear');
+      setInput('');
+    } finally { setBusy(false); }
+  };
+
+  const isModified = value !== undefined && value !== '';
+
+  return (
+    <div className="space-y-2" onClick={e => e.stopPropagation()}>
+      <div className="flex items-center gap-2">
+        <span className="text-slate-400">{icon}</span>
+        <span className="text-sm font-semibold text-white">{label}</span>
+        {sublabel && <span className="text-xs text-slate-500">{sublabel}</span>}
+        {isModified && (
+          <span className="ml-auto text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+            <Edit3 className="w-2.5 h-2.5" /> Ručno postavljeno
+          </span>
+        )}
+      </div>
+
+      {warning && (
+        <div className="text-xs text-amber-400/80 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 flex items-center gap-2">
+          <Timer className="w-3 h-3 flex-shrink-0" />
+          {warning}
+        </div>
+      )}
+
+      <div className="flex gap-2 items-center">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); }}
+            placeholder={placeholder}
+            disabled={busy}
+            className="w-full px-3 py-2.5 bg-slate-800 border border-slate-600 rounded-xl text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 transition"
+          />
+          {isModified && (
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-amber-400" title="Ručno postavljeno" />
+          )}
+        </div>
+
+        <button
+          onClick={save}
+          disabled={busy}
+          className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 flex items-center gap-1.5 ${
+            saved
+              ? 'bg-green-600 text-white'
+              : 'bg-blue-600 hover:bg-blue-500 text-white'
+          }`}
+          type="button"
+        >
+          {busy ? (
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          ) : saved ? (
+            <><CheckCheck className="w-3.5 h-3.5" /> Sačuvano!</>
+          ) : (
+            'Postavi'
+          )}
+        </button>
+
+        {isModified && (
+          <button
+            onClick={clear}
+            disabled={busy}
+            className="p-2.5 rounded-xl bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/30 transition disabled:opacity-50"
+            type="button"
+            title="Ukloni ručno postavljenu vrijednost"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+
+      {isModified && (
+        <div className="text-xs text-slate-500 flex items-center gap-1">
+          <span>Trenutna vrijednost:</span>
+          <span className="text-amber-300 font-mono">{value}</span>
+          <span className="text-slate-600">— klikni</span>
+          <Trash2 className="w-3 h-3 text-red-400" />
+          <span className="text-slate-600">da vratiš na automatski podatak</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// KOMPONENTA: Status Selector
+// Velika, obojana dugmad — intuitivna za non-tech korisnike
+// ============================================================
+const STATUS_OPTIONS = [
+  { value: 'On Time',   label: 'Na vrijeme',  emoji: '✅', cls: 'border-green-500/50 text-green-300 hover:bg-green-500/20 data-[active]:bg-green-500/30 data-[active]:border-green-400' },
+  { value: 'Delayed',   label: 'Kasni',        emoji: '⏳', cls: 'border-amber-500/50 text-amber-300 hover:bg-amber-500/20 data-[active]:bg-amber-500/30 data-[active]:border-amber-400' },
+  { value: 'Boarding',  label: 'Ukrcaj',       emoji: '🚶', cls: 'border-blue-500/50 text-blue-300 hover:bg-blue-500/20 data-[active]:bg-blue-500/30 data-[active]:border-blue-400' },
+  { value: 'Departed',  label: 'Poletio',      emoji: '✈️', cls: 'border-purple-500/50 text-purple-300 hover:bg-purple-500/20 data-[active]:bg-purple-500/30 data-[active]:border-purple-400' },
+  { value: 'Cancelled', label: 'Otkazan',      emoji: '❌', cls: 'border-red-500/50 text-red-300 hover:bg-red-500/20 data-[active]:bg-red-500/30 data-[active]:border-red-400' },
+  { value: 'Diverted',  label: 'Preusmjeren',  emoji: '↩️', cls: 'border-orange-500/50 text-orange-300 hover:bg-orange-500/20 data-[active]:bg-orange-500/30 data-[active]:border-orange-400' },
+];
+
+interface StatusSelectorProps {
+  current: string;
+  flightNumber: string;
+  onOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+}
+
+const StatusSelector: React.FC<StatusSelectorProps> = ({ current, flightNumber, onOverride }) => {
+  const [busy, setBusy] = useState(false);
+
+  const change = async (val: string) => {
+    if (busy) return;
+    setBusy(true);
+    try { await onOverride(flightNumber, 'StatusEN', 'assign', val); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-2" onClick={e => e.stopPropagation()}>
+      <div className="flex items-center gap-2">
+        <CheckCircle className="w-4 h-4 text-slate-400" />
+        <span className="text-sm font-semibold text-white">Status leta</span>
+        {busy && <RefreshCw className="w-3 h-3 text-slate-400 animate-spin ml-auto" />}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {STATUS_OPTIONS.map(opt => {
+          const isActive = current?.toLowerCase() === opt.value.toLowerCase();
+          return (
+            <button
+              key={opt.value}
+              onClick={() => change(opt.value)}
+              disabled={busy || isActive}
+              data-active={isActive ? '' : undefined}
+              className={`px-3 py-2.5 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1 ${opt.cls} ${isActive ? 'ring-2 ring-white/20 scale-[1.02]' : ''} disabled:cursor-default`}
+              type="button"
+            >
+              <span className="text-lg leading-none">{opt.emoji}</span>
+              <span>{opt.label}</span>
+              {isActive && <span className="text-[9px] opacity-60">← trenutno</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// KOMPONENTA: Gate/Desk Manual Toggle
+// ============================================================
+interface ManualToggleProps {
+  type: 'gate' | 'desk';
+  number: string;
+}
+
+const ManualToggle: React.FC<ManualToggleProps> = ({ type, number }) => {
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const apiPath = type === 'gate' ? `/api/admin/gate-status-override` : `/api/admin/desk-status-override`;
+  const readPath = type === 'gate' ? `/api/gate-status/${number}` : `/api/desk-status/${number}`;
+
+  useEffect(() => {
+    fetch(readPath).then(r => r.json()).then(d => setStatus(d.status || null)).catch(() => {});
+  }, [readPath]);
+
+  const act = async (action: string) => {
+    setBusy(true);
+    try {
+      await fetch(apiPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(type === 'gate' ? { gateNumber: number, action } : { deskNumber: number, action }),
+      });
+      setStatus(action === 'clear' ? null : action);
+    } finally { setBusy(false); }
+  };
+
+  const label = type === 'gate' ? `Gate ${number}` : `Šalter ${number}`;
+
+  return (
+    <div className="flex items-center justify-between bg-slate-800/60 rounded-xl px-4 py-3 border border-slate-700">
+      <span className="text-sm font-semibold text-slate-300">{label}</span>
+      <div className="flex items-center gap-2">
+        {status ? (
+          <>
+            <span className={`text-xs font-bold px-3 py-1 rounded-full ${status === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
+              {status === 'open' ? '🟢 Otvoren' : '🔴 Zatvoren'}
+            </span>
+            <button onClick={() => act('clear')} disabled={busy} className="text-xs text-slate-500 hover:text-white bg-slate-700 px-2 py-1 rounded-lg transition" type="button">
+              Auto
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => act('open')} disabled={busy} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-white transition disabled:opacity-50" type="button">
+              🟢 Otvori
+            </button>
+            <button onClick={() => act('closed')} disabled={busy} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white transition disabled:opacity-50" type="button">
+              🔴 Zatvori
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// KOMPONENTA: Desk Class Selector
+// ============================================================
+const CLASS_OPTIONS = [
+  { value: 'BUSINESS CLASS',  label: 'Business',  color: 'bg-red-600 hover:bg-red-500' },
+  { value: 'PREMIUM ECONOMY', label: 'Premium',   color: 'bg-purple-600 hover:bg-purple-500' },
+  { value: 'ECONOMY CLASS',   label: 'Economy',   color: 'bg-blue-600 hover:bg-blue-500' },
+  { value: 'PRIORITY',        label: 'Priority',  color: 'bg-green-600 hover:bg-green-500' },
+];
+
+const DeskClassSelector: React.FC<{ desk: string }> = ({ desk }) => {
+  const [cls, setCls] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/desk-class/${desk}`).then(r => r.json()).then(d => setCls(d.classType || null)).catch(() => {});
+  }, [desk]);
+
+  const save = async (val: string) => {
+    setBusy(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, classType: val, action: 'assign' }),
+      });
+      setCls(val);
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
+      });
+      setCls(null);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl px-4 py-3 border border-slate-700 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold text-slate-300">Šalter {desk} — klasa</span>
+        {cls && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-amber-300">{cls}</span>
+            <button onClick={clear} disabled={busy} className="text-xs text-slate-500 hover:text-white bg-slate-700 px-2 py-1 rounded-lg transition" type="button">Ukloni</button>
+          </div>
+        )}
+      </div>
+      {!cls && (
+        <div className="flex flex-wrap gap-1.5">
+          {CLASS_OPTIONS.map(o => (
+            <button key={o.value} onClick={() => save(o.value)} disabled={busy} className={`px-3 py-1 text-xs font-bold rounded-lg text-white transition disabled:opacity-50 ${o.color}`} type="button">
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================
+// FLIGHT UTILS
+// ============================================================
+const removeDuplicates = (arr: string[]) => [...new Set(arr)];
+
+const consolidateFlights = (flights: Flight[]): Flight[] => {
+  const map = new Map<string, Flight>();
+  flights.forEach(f => {
+    const key = `${f.FlightNumber}-${f.ScheduledDepartureTime}`;
+    if (map.has(key)) {
+      const e = map.get(key)!;
+      if (f.GateNumber && e.GateNumber)
+        e.GateNumber = removeDuplicates([...e.GateNumber.split(','), ...f.GateNumber.split(',')].map(g => g.trim())).join(', ');
+      else if (f.GateNumber) e.GateNumber = f.GateNumber;
+      if (f.CheckInDesk && e.CheckInDesk)
+        e.CheckInDesk = removeDuplicates([...e.CheckInDesk.split(','), ...f.CheckInDesk.split(',')].map(d => d.trim())).join(', ');
+      else if (f.CheckInDesk) e.CheckInDesk = f.CheckInDesk;
+      if (!e.AirlineName && f.AirlineName) e.AirlineName = f.AirlineName;
+      if (!e.StatusEN && f.StatusEN) e.StatusEN = f.StatusEN;
+    } else {
+      map.set(key, { ...f });
+    }
+  });
+  return Array.from(map.values());
+};
+
+const flightKey = (f: Flight, i: number) =>
+  `${f.FlightNumber}-${f.ScheduledDepartureTime || 'nt'}-${f.GateNumber || ''}-${f.CheckInDesk || ''}-${i}`.replace(/\s+/g, '-');
+
+// ============================================================
+// KOMPONENTA: Flight Card — Simplified
+// ============================================================
+interface FlightCardProps {
+  flight: Flight & { _hasOverride?: boolean; _overrideFields?: Record<string, string> };
+  onOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+  onClearAll: (flightNumber: string) => Promise<void>;
+}
+
+const FlightCard: React.FC<FlightCardProps> = ({ flight, onOverride, onClearAll }) => {
+  const [open, setOpen] = useState(false);
+  const isDep = flight.FlightType === 'departure';
+  const hasOverride = (flight as any)._hasOverride === true;
+  const overrideFields: Record<string, string> = (flight as any)._overrideFields || {};
+  const meta = getStatusMeta(flight.StatusEN);
+
+  const desks = flight.CheckInDesk ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean) : [];
+  const gates = flight.GateNumber ? flight.GateNumber.split(',').map(g => g.trim()).filter(Boolean) : [];
+
+  return (
+    <div className={`rounded-2xl border transition-all duration-200 overflow-hidden ${
+      hasOverride
+        ? 'border-amber-500/40 bg-amber-500/5 shadow-amber-500/10 shadow-lg'
+        : 'border-slate-700/60 bg-slate-800/40 hover:bg-slate-800/70'
+    }`}>
+      {/* HEADER — uvijek vidljiv */}
+      <div
+        className="flex items-center gap-4 p-4 cursor-pointer select-none"
+        onClick={() => setOpen(!open)}
+      >
+        {/* Ikona tipa leta */}
+        <div className={`p-2.5 rounded-xl flex-shrink-0 ${isDep ? 'bg-blue-500/20' : 'bg-emerald-500/20'}`}>
+          {isDep
+            ? <ArrowUpRight className="w-5 h-5 text-blue-400" />
+            : <ArrowDownRight className="w-5 h-5 text-emerald-400" />}
+        </div>
+
+        {/* Broj leta + destinacija */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xl font-black text-white tracking-tight">{flight.FlightNumber}</span>
+            <span className="text-sm text-slate-400 truncate">{flight.AirlineName}</span>
+            {hasOverride && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 flex-shrink-0">
+                <Edit3 className="w-2.5 h-2.5" /> Izmijenjeno
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            <span className="text-sm font-semibold text-slate-300">
+              {isDep ? `→ ${flight.DestinationCityName || flight.DestinationAirportCode}` : '← Tivat (TIV)'}
+            </span>
+            {flight.GateNumber && (
+              <span className="text-xs px-2 py-0.5 bg-slate-700 rounded-lg text-slate-300">
+                <DoorOpen className="w-3 h-3 inline mr-1" />Gate {flight.GateNumber}
+              </span>
+            )}
+            {flight.CheckInDesk && isDep && (
+              <span className="text-xs px-2 py-0.5 bg-slate-700 rounded-lg text-slate-300">
+                <ConciergeBell className="w-3 h-3 inline mr-1" />Šalter {flight.CheckInDesk}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Vrijeme + status */}
+        <div className="text-right flex-shrink-0">
+          <div className="text-2xl font-mono font-bold text-white">{formatTime(flight.ScheduledDepartureTime || '')}</div>
+          <div className={`inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full border mt-1 ${meta.color} ${meta.bg} ${meta.border}`}>
+            {meta.icon}
+            <span className="font-semibold">{meta.label}</span>
+          </div>
+        </div>
+
+        {/* Chevron */}
+        <ChevronDown className={`w-5 h-5 text-slate-500 flex-shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+      </div>
+
+      {/* EXPANDOVANI PANEL */}
+      {open && (
+        <div className="border-t border-slate-700/60 p-5 space-y-6 bg-slate-900/40" onClick={e => e.stopPropagation()}>
+
+          {/* SEKCIJA 1: Status */}
+          <div className="space-y-3">
+            <SectionLabel step="1" label="Promijeni status leta" />
+            <StatusSelector current={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onOverride={onOverride} />
+          </div>
+
+          <Divider />
+
+          {/* SEKCIJA 2: Šalter / Gate / Traka */}
+          <div className="space-y-4">
+            <SectionLabel step="2" label={isDep ? 'Šalter za check-in i gate' : 'Terminal i traka za prtljag'} />
+
+            {isDep && (
+              <>
+                <FieldEditor
+                  icon={<ConciergeBell className="w-4 h-4" />}
+                  label="Šalter za check-in"
+                  sublabel="(npr. 03 ili 03,04 ili obrisi)"
+                  value={flight.CheckInDesk}
+                  placeholder="Upiši broj šaltera..."
+                  fieldName="CheckInDesk"
+                  flightNumber={flight.FlightNumber}
+                  onOverride={onOverride}
+                  warning="Automatski se briše 30 min prije polijetanja"
+                />
+                <FieldEditor
+                  icon={<DoorOpen className="w-4 h-4" />}
+                  label="Gate (izlaz)"
+                  sublabel="(npr. 02 ili 02,03 ili obrisi)"
+                  value={flight.GateNumber}
+                  placeholder="Upiši broj gatea..."
+                  fieldName="GateNumber"
+                  flightNumber={flight.FlightNumber}
+                  onOverride={onOverride}
+                />
+              </>
+            )}
+
+            <FieldEditor
+              icon={<Navigation className="w-4 h-4" />}
+              label="Terminal"
+              value={flight.Terminal}
+              placeholder="npr. T1"
+              fieldName="Terminal"
+              flightNumber={flight.FlightNumber}
+              onOverride={onOverride}
+            />
+
+            {!isDep && (
+              <FieldEditor
+                icon={<Luggage className="w-4 h-4" />}
+                label="Traka za prtljag"
+                sublabel="(baggage belt)"
+                value={flight.BaggageReclaim}
+                placeholder="npr. 1 ili 2"
+                fieldName="BaggageReclaim"
+                flightNumber={flight.FlightNumber}
+                onOverride={onOverride}
+              />
+            )}
+          </div>
+
+          {/* SEKCIJA 3: Ručno otvaranje/zatvaranje gatea/šaltera */}
+          {(gates.length > 0 || desks.length > 0) && (
+            <>
+              <Divider />
+              <div className="space-y-3">
+                <SectionLabel step="3" label="Ručno otvaranje / zatvaranje" />
+                <p className="text-xs text-slate-500">
+                  Ove opcije direktno upravljaju prikazom na FIDS ekranima — bez obzira na automatiku.
+                </p>
+                <div className="space-y-2">
+                  {gates.map(g => <ManualToggle key={`gate-${g}`} type="gate" number={g} />)}
+                  {isDep && desks.map(d => (
+                    <div key={`desk-${d}`} className="space-y-2">
+                      <ManualToggle type="desk" number={d} />
+                      <DeskClassSelector desk={d} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* FOOTER: Obriši sve izmjene */}
+          {hasOverride && (
+            <>
+              <Divider />
+              <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl p-4">
+                <div>
+                  <div className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                    <Edit3 className="w-4 h-4" /> Ručne izmjene aktivne
+                  </div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Izmijenjeno: {Object.keys(overrideFields).map(f =>
+                      f === 'CheckInDesk' ? 'Šalter' :
+                      f === 'GateNumber' ? 'Gate' :
+                      f === 'StatusEN' ? 'Status' :
+                      f === 'Terminal' ? 'Terminal' :
+                      f === 'BaggageReclaim' ? 'Traka' : f
+                    ).join(', ')}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onClearAll(flight.FlightNumber)}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-xl border border-red-500/30 text-sm font-semibold transition"
+                  type="button"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Poništi sve izmjene
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// UI helpers
+const SectionLabel: React.FC<{ step: string; label: string }> = ({ step, label }) => (
+  <div className="flex items-center gap-2">
+    <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-black flex items-center justify-center flex-shrink-0">
+      {step}
+    </span>
+    <span className="text-sm font-bold text-slate-300">{label}</span>
+  </div>
+);
+
+const Divider = () => <div className="border-t border-slate-700/60" />;
+
+// ============================================================
+// HELPER DATA
+// ============================================================
+interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
+const cardStyles = { blue: { bg: 'bg-blue-500/20', text: 'text-blue-400' }, green: { bg: 'bg-emerald-500/20', text: 'text-emerald-400' }, yellow: { bg: 'bg-amber-500/20', text: 'text-amber-400' } };
+
+// ============================================================
+// GLAVNA STRANICA
+// ============================================================
+export default function AdminFlightsPage() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [flights, setFlights] = useState<FlightsData>({ departures: [], arrivals: [] });
+  const [lastUpdated, setLastUpdated] = useState('');
+  const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<'all' | 'departures' | 'arrivals'>('all');
+  const [search, setSearch] = useState('');
+  const [airlineFilter, setAirlineFilter] = useState('all');
+
+  const mapOverrideValue = useCallback((val: string) => val === '__EMPTY__' ? '' : val, []);
+
+  const loadOverrides = useCallback(async (): Promise<Record<string, any>> => {
+    try {
+      const r = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      return await r.json();
+    } catch { return {}; }
+  }, []);
+
+  const loadFlights = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      setRefreshing(true);
+      setError(null);
+      const [flightsRes, overridesData] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }),
+        loadOverrides()
+      ]);
+      if (!flightsRes.ok) throw new Error(`HTTP ${flightsRes.status}`);
+      const data = await flightsRes.json();
+
+      const dedup = (arr: Flight[]): Flight[] => {
+        const consolidated = consolidateFlights(arr);
+        const seen: Record<string, boolean> = {};
+        return consolidated.filter(f => {
+          const id = `${f.FlightNumber}-${f.ScheduledDepartureTime}-${f.GateNumber || ''}-${f.CheckInDesk || ''}`;
+          if (seen[id]) return false;
+          seen[id] = true;
+          return true;
+        });
+      };
+
+      const withOverride = (arr: Flight[]) => arr.map((f: Flight) => {
+        const raw = overridesData[f.FlightNumber] || {};
+        const mapped: Record<string, string> = {};
+        Object.entries(raw).forEach(([k, v]) => { mapped[k] = mapOverrideValue(v as string); });
+        return { ...f, _hasOverride: Object.keys(mapped).length > 0, _overrideFields: mapped };
+      });
+
+      setFlights({ departures: dedup(withOverride(data.departures || [])), arrivals: dedup(withOverride(data.arrivals || [])) });
+      setLastUpdated(data.lastUpdated || new Date().toISOString());
+      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Greška');
+      setFlights({ departures: [], arrivals: [] });
+      setSystemStatus('offline');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [loadOverrides, mapOverrideValue]);
+
+  const handleOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
+    const r = await fetch('/api/admin/flight-override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flightNumber, field, action, value }),
+    });
+    if (!r.ok) {
+      const err = await r.json();
+      throw new Error(err.message || 'Greška');
+    }
+    await loadFlights(true);
+  }, [loadFlights]);
+
+  const handleClearFlight = useCallback(async (flightNumber: string) => {
+    if (!confirm(`Poništiti sve ručne izmjene za let ${flightNumber}?`)) return;
+    try {
+      const r = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const all = await r.json();
+      await Promise.all(Object.keys(all[flightNumber] || {}).map(field =>
+        fetch('/api/admin/flight-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+        })
+      ));
+      await loadFlights(true);
+    } catch { alert('Greška pri brisanju'); }
+  }, [loadFlights]);
+
+  const handleClearAll = useCallback(async () => {
+    if (!confirm('Poništiti SVE ručne izmjene za SVE letove?')) return;
+    try {
+      const r = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const all = await r.json();
+      await Promise.all(
+        Object.entries(all).flatMap(([fn, fields]) =>
+          Object.keys(fields as object).map(field =>
+            fetch('/api/admin/flight-override', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ flightNumber: fn, field, action: 'clear' }),
+            })
+          )
+        )
+      );
+      await loadFlights(true);
+      alert('Sve izmjene su poništene!');
+    } catch { alert('Greška'); }
+  }, [loadFlights]);
+
+  useEffect(() => { loadFlights(); }, [loadFlights]);
+
+  const filtered = useMemo(() => {
+    let list: Flight[] = tab === 'all' ? [...flights.departures, ...flights.arrivals] : tab === 'departures' ? flights.departures : flights.arrivals;
+    if (search) {
+      const t = search.toLowerCase();
+      list = list.filter(f =>
+        f.FlightNumber?.toLowerCase().includes(t) ||
+        f.AirlineName?.toLowerCase().includes(t) ||
+        f.DestinationCityName?.toLowerCase().includes(t) ||
+        f.DestinationAirportCode?.toLowerCase().includes(t)
+      );
+    }
+    if (airlineFilter !== 'all') list = list.filter(f => f.AirlineName?.toLowerCase() === airlineFilter.toLowerCase());
+    return list.sort((a, b) => (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || ''));
+  }, [tab, flights, search, airlineFilter]);
+
+  const airlines = useMemo(() => {
+    const seen = new Set<string>();
+    return [...flights.departures, ...flights.arrivals]
+      .map(f => f.AirlineName).filter((n): n is string => !!n && !seen.has(n) && !!seen.add(n))
+      .sort();
+  }, [flights]);
+
+  const today = useMemo(() =>
+    new Date().toLocaleDateString('sr-Latn-RS', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), []);
+
+  const timeSince = useCallback(() => {
+    if (!lastUpdated) return '';
+    const m = Math.floor((Date.now() - new Date(lastUpdated).getTime()) / 60000);
+    if (m < 1) return 'upravo sada';
+    if (m < 60) return `prije ${m} min`;
+    const h = Math.floor(m / 60);
+    return `prije ${h}h`;
+  }, [lastUpdated]);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-4 md:p-6 overflow-x-hidden">
+      <div className="max-w-5xl mx-auto space-y-6">
+
+        {/* HEADER */}
+        <header className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <div className="flex items-center gap-3 flex-1">
+            <Link href="/admin" className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition" title="Nazad">
+              <Home className="w-5 h-5" />
+            </Link>
+            <div>
+<h1 className="text-2xl font-black text-white flex items-center gap-2">
+  ✈️ Red letenja
+  <span className="bg-red-500 text-white text-sm px-3 py-1 rounded-full font-bold">
+    by Alen
+  </span>
+  <span className={`text-xs px-2 py-1 rounded-full font-semibold ${systemStatus === 'online' ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
+    {systemStatus === 'online' ? '🟢 LIVE' : '🟡 BACKUP'}
+  </span>
+</h1>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {today} · Ažurirano {timeSince()} · {flights.departures.length} polazaka · {flights.arrivals.length} dolazaka
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button onClick={() => loadFlights(true)} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition disabled:opacity-50" title="Osvježi">
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={handleClearAll}
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 rounded-xl border border-amber-500/30 text-sm transition"
+              type="button"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Poništi sve izmjene</span>
+            </button>
+            <button onClick={async () => { await fetch('/api/admin/logout', { method: 'POST' }); router.push('/admin/login'); }} className="flex items-center gap-1.5 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-xl border border-red-500/30 text-sm transition">
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Odjavi se</span>
+            </button>
+          </div>
+        </header>
+
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" /> {error}
+          </div>
+        )}
+
+        {/* STATS */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: 'Ukupno', count: flights.departures.length + flights.arrivals.length, color: 'blue', Icon: Plane },
+            { label: 'Polasci', count: flights.departures.length, color: 'blue', Icon: ArrowUpRight },
+            { label: 'Dolasci', count: flights.arrivals.length, color: 'green', Icon: ArrowDownRight },
+            { label: 'Prikazano', count: filtered.length, color: 'yellow', Icon: Clock },
+          ].map(({ label, count, color, Icon }) => {
+            const s = cardStyles[color as keyof typeof cardStyles] || cardStyles.blue;
+            return (
+              <div key={label} className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700/50 flex items-center gap-3">
+                <div className={`p-2 ${s.bg} rounded-xl`}><Icon className={`w-5 h-5 ${s.text}`} /></div>
+                <div>
+                  <div className="text-xs text-slate-500">{label}</div>
+                  <div className="text-2xl font-black text-white">{loading ? '—' : count}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* FILTERI */}
+        <div className="bg-slate-800/50 rounded-2xl border border-slate-700/50 p-4 space-y-3">
+          {/* Tab dugmad */}
+          <div className="flex gap-2">
+            {([['all', 'Svi'], ['departures', 'Polasci'], ['arrivals', 'Dolasci']] as const).map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setTab(val)}
+                className={`px-4 py-2 rounded-xl text-sm font-semibold transition ${tab === val ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Pretraži po broju leta, kompaniji, destinaciji..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="w-full pl-10 pr-4 py-2.5 bg-slate-900/60 border border-slate-600 rounded-xl text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+              />
+            </div>
+            <div className="relative">
+              <select
+                value={airlineFilter}
+                onChange={e => setAirlineFilter(e.target.value)}
+                className="w-full px-4 py-2.5 bg-slate-900/60 border border-slate-600 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none pr-9 transition"
+              >
+                <option value="all">Sve kompanije</option>
+                {airlines.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+
+        {/* LISTA LETOVA */}
+        <div className="space-y-3">
+          {loading ? (
+            [...Array(4)].map((_, i) => (
+              <div key={i} className="h-24 bg-slate-800/40 rounded-2xl border border-slate-700/50 animate-pulse" />
+            ))
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 text-slate-500">
+              <Plane className="w-12 h-12 mx-auto mb-3 opacity-20" />
+              <p className="font-semibold">Nema letova</p>
+              <p className="text-sm mt-1">{search || airlineFilter !== 'all' ? 'Promijeni filtere' : 'Nema letova za danas'}</p>
+            </div>
+          ) : (
+            filtered.map((f, i) => (
+              <FlightCard
+                key={flightKey(f, i)}
+                flight={f as any}
+                onOverride={handleOverride}
+                onClearAll={handleClearFlight}
+              />
+            ))
+          )}
+        </div>
+
+        {/* FOOTER */}
+        {!loading && filtered.length > 0 && (
+          <div className="text-center text-xs text-slate-600 pb-4">
+            Prikazano {filtered.length} od {flights.departures.length + flights.arrivals.length} letova
+          </div>
+        )}
+
+      </div>
+
+      <style jsx global>{`
+        body, html { overflow: auto !important; height: auto !important; }
+      `}</style>
+    </div>
+  );
+}

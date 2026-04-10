@@ -540,8 +540,7 @@ const FlightRow = memo(
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
 
   const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.42rem]"
-    const pillCls = `w-[90%] flex items-center justify-center gap-3 ${statusFontSize} font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
-
+const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] font-extrabold rounded-2xl border-2 px-4 py-2 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
     const estimatedDisplay = useMemo(() => {
       const est = flight.EstimatedDepartureTime
       const sch = flight.ScheduledDepartureTime
@@ -642,21 +641,21 @@ const FlightRow = memo(
                     </div>
                   : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
               </div>
-              <div className="flex items-center justify-center" style={{ width: "420px" }}>
-                {pill.hasStatusText ? (
-                  <div className={`${pillCls} overflow-hidden`}>
-                    {pill.showLEDs && (
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
-                        <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
-                      </div>
-                    )}
-                    <span className="truncate whitespace-nowrap">{pill.displayText}</span>
-                  </div>
-                ) : (
-                  <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
-                )}
-              </div>
+      <div className="flex items-center justify-center" style={{ width: "500px" }}>
+  {pill.hasStatusText ? (
+    <div className={`${pillCls} overflow-hidden text-[1.8rem]`}>
+      {pill.showLEDs && (
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
+          <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
+        </div>
+      )}
+      <span className="truncate whitespace-nowrap font-extrabold tracking-wide">{pill.displayText}</span>
+    </div>
+  ) : (
+    <div className="text-[1.6rem] font-bold text-slate-300">Scheduled</div>
+  )}
+</div>
             </>
           )}
         </div>
@@ -1039,25 +1038,25 @@ useEffect(() => {
   const ArrivalIcon   = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500 rotate-90`} />, [])
   const DepartureIcon = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500`} />, [])
 
-  const tableHeaders = useMemo(() => {
-    const t = lang.tableHeaders
-    if (showArrivals) return [
-      { label: t.scheduled, width: "180px", icon: Clock       },
-      { label: t.estimated, width: "180px", icon: Clock       },
-      { label: t.flight,    width: "280px", icon: ArrivalIcon  },
-      { label: t.from,      width: "480px", icon: MapPin      },
-      { label: t.status,    width: "620px", icon: Info        },
-    ]
-    return [
-      { label: t.scheduled,   width: "180px", icon: Clock        },
-      { label: t.estimated,   width: "180px", icon: Clock        },
-      { label: t.flight,      width: "280px", icon: DepartureIcon },
-      { label: t.destination, width: "380px", icon: MapPin       },
-      { label: t.checkIn,     width: "320px", icon: Users        },
-      { label: t.gate,        width: "180px", icon: DoorOpen     },
-      { label: t.status,      width: "420px", icon: Info         },
-    ]
-  }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
+const tableHeaders = useMemo(() => {
+  const t = lang.tableHeaders
+  if (showArrivals) return [
+    { label: t.scheduled, width: "180px", icon: Clock       },
+    { label: t.estimated, width: "180px", icon: Clock       },
+    { label: t.flight,    width: "280px", icon: ArrivalIcon  },
+    { label: t.from,      width: "580px", icon: MapPin      },  // Smanjeno sa 580px na 480px
+    { label: t.status,    width: "720px", icon: Info        },  // Povećano sa 620px na 720px
+  ]
+  return [
+    { label: t.scheduled,   width: "180px", icon: Clock        },
+    { label: t.estimated,   width: "180px", icon: Clock        },
+    { label: t.flight,      width: "280px", icon: DepartureIcon },
+    { label: t.destination, width: "380px", icon: MapPin       },
+    { label: t.checkIn,     width: "340px", icon: Users        },  // Povećano sa 320px na 340px (približeno Gate koloni)
+    { label: t.gate,        width: "220px", icon: DoorOpen     },  // Povećano sa 180px na 220px
+    { label: t.status,      width: "500px", icon: Info         },  // Povećano sa 420px na 500px
+  ]
+}, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
   const departuresWithTick = useMemo(
     () => departures.map(f => ({ ...f, _autoStatusTick: autoStatusTick } as unknown as Flight)),
