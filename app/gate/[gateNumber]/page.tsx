@@ -82,6 +82,8 @@ const AirlineLogo = memo(function AirlineLogo(
   );
 });
 
+
+
 // ============================================================
 // HELPERS
 // ============================================================
@@ -485,7 +487,7 @@ function GateDisplay() {
           {/* Check-in closing */}
           {display.checkInStatus?.checkInCloseTime && timeUntilDeparture !== null && timeUntilDeparture <= 30 && timeUntilDeparture > 0 && (
             <div style={styles.checkInBanner}>
-              CHECK-IN CLOSES IN {formatTimeRemaining(timeUntilDeparture)}
+             FLIGHT CLOSES IN {formatTimeRemaining(Math.max(0, timeUntilDeparture - 5))}
             </div>
           )}
         </div>
