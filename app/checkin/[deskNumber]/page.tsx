@@ -821,6 +821,16 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
   );
 
   // ── loadFlights ─────────────────────────────────────────────
+// ── loadFlights ─────────────────────────────────────────────
+  // Zamijeni cijelu loadFlights funkciju u CheckInDisplay komponenti.
+  //
+  // KLJUČNA PROMJENA:
+  //   Stara verzija je uvijek uzimala future[0] kao currentFlight.
+  //   Nova verzija dohvata SVE Redis override-e jednim pozivom,
+  //   pa iterira kroz future listu i preskače letove čiji je
+  //   CheckInDesk override = '__EMPTY__' (admin ih ugasio).
+  //   Tako se automatski prelazi na sljedeći let (npr. YM152).
+  // ─────────────────────────────────────────────────────────────
   const loadFlights = useCallback(async () => {
     if (!isMountedRef.current || transitionGuardRef.current) return;
 
@@ -828,6 +838,16 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
       const data = await fetchFlightData();
       const now = new Date();
       const today = now.toDateString();
+
+      // ── Dohvati sve Redis override-e jednim pozivom ──────────
+      let allOverrides: Record<string, Record<string, string>> = {};
+      try {
+        const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
+        if (res.ok) allOverrides = await res.json();
+      } catch {
+        // Redis nedostupan — nastavljamo bez override provjere,
+        // prikazat će se future[0] kao fallback
+      }
 
       const allForDesk = data.departures.filter((f) => {
         if (!f.CheckInDesk) return false;
@@ -851,12 +871,9 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
               const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
               departureTime = new Date(now);
               departureTime.setHours(h, m, 0, 0);
-              
-              // ✅ #1: Midnight Rollover Fix
               if (departureTime.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
                 departureTime.setDate(departureTime.getDate() + 1);
               }
-              
               if ((now.getTime() - departureTime.getTime()) / 60_000 > 30) isToday = false;
             }
           }
@@ -868,14 +885,37 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         })[];
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
+
       const future = sorted.filter(
         (f) =>
           f.isToday &&
           f.departureTime > now &&
-          !f.StatusEN?.toLowerCase().includes('cancelled')
+          !f.StatusEN?.toLowerCase().includes('cancelled') &&
+          !f.StatusEN?.toLowerCase().includes('departed') &&
+          !f.StatusEN?.toLowerCase().includes('poletio')
       );
 
-      const currentFlight: EnhancedFlight | null = future[0] ?? null;
+      // ── Pronađi prvi let koji NIJE blokiran ─────────────────
+      // Let je blokiran ako mu Redis override ima CheckInDesk = '__EMPTY__'
+      // To znači da je admin ručno ugasio check-in za taj let.
+      // U tom slučaju preskočimo ga i gledamo sljedeći u listi.
+      let currentFlight: EnhancedFlight | null = null;
+
+      for (const f of future) {
+        const override = allOverrides[f.FlightNumber];
+        if (override?.CheckInDesk === '__EMPTY__') {
+          if (DEVELOPMENT) {
+            console.log(
+              `[CheckIn ${deskNumberParam}] Preskačem ${f.FlightNumber} ` +
+              `(STD: ${f.ScheduledDepartureTime}) — CheckInDesk = __EMPTY__`
+            );
+          }
+          continue;
+        }
+        // Ovaj let nije blokiran — uzimamo ga kao trenutni
+        currentFlight = f;
+        break;
+      }
 
       if (!isMountedRef.current) return;
 
@@ -890,9 +930,12 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
 
       if (changed) await queueFlightTransition(currentFlight);
 
+      // nextScheduledFlight = sljedeći let u future listi nakon currentFlight
+      // (koristimo future listu, ne filtriranu — da bi se prikazao i sljedeći blokiran)
       const idx = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
       const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
       if (isMountedRef.current) setNextScheduledFlight(next);
+
     } catch (err) {
       if (DEVELOPMENT) console.error('❌ loadFlights error:', err);
       if (isMountedRef.current) {

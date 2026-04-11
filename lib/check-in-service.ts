@@ -303,7 +303,9 @@ function parseDepartureTime(timeString: string): Date | null {
   if (!timeString) return null;
 
   // Provjeri keš
-  const cacheKey = timeString;
+  // const cacheKey = timeString;
+  const cacheKey = `${timeString}_${new Date().toDateString()}`;
+
   if (timeParseCache.has(cacheKey)) {
     return timeParseCache.get(cacheKey) || null;
   }

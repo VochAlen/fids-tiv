@@ -15,6 +15,20 @@ const ALLOWED_FIELDS = [
   'Terminal'
 ];
 
+// ============================================================
+// BASE URL — osigurava da uvijek ima https://
+// ============================================================
+function getBaseUrl(): string {
+  const raw = process.env.NEXT_PUBLIC_BASE_URL || '';
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    return raw.replace(/\/$/, '');
+  }
+  if (raw) {
+    return `https://${raw.replace(/\/$/, '')}`;
+  }
+  return 'http://localhost:3000';
+}
+
 // Helper za parsiranje vremena (samo za provjeru u POST)
 function parseTimeToMinutes(timeStr: string): number {
   if (!timeStr) return 0;
@@ -36,20 +50,17 @@ function shouldAutoResetCheckIn(scheduledTime: string): boolean {
   return minutesUntilDeparture <= 30 && minutesUntilDeparture > -120;
 }
 
+// ─── PROMJENA: const baseUrl = ... zamijenjeno sa getBaseUrl() ───
 async function getFlightScheduledTime(flightNumber: string): Promise<string | null> {
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-    const response = await fetch(`${baseUrl}/api/flights?flightNumber=${flightNumber}`, {
+    const response = await fetch(`${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' }
     });
-    
     if (!response.ok) return null;
-    
     const data = await response.json();
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
     const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    
     return flight?.ScheduledDepartureTime || null;
   } catch (error) {
     console.error(`Error fetching scheduled time for ${flightNumber}:`, error);
@@ -59,18 +70,14 @@ async function getFlightScheduledTime(flightNumber: string): Promise<string | nu
 
 async function getFlightStatus(flightNumber: string): Promise<string | null> {
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-    const response = await fetch(`${baseUrl}/api/flights?flightNumber=${flightNumber}`, {
+    const response = await fetch(`${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' }
     });
-    
     if (!response.ok) return null;
-    
     const data = await response.json();
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
     const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    
     return flight?.StatusEN || null;
   } catch (error) {
     console.error(`Error fetching status for ${flightNumber}:`, error);
@@ -127,13 +134,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: 'Nepoznata akcija. Koristite "assign" ili "clear".' }, { status: 400 });
     }
 
-    // if (action === 'assign' && (!value || value.toString().trim() === '')) {
-    //   return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
-    // }
-
     if (action === 'assign' && value === undefined) {
-  return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
-}
+      return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
+    }
 
     // CheckInDesk logika
     if (field === 'CheckInDesk' && action === 'assign') {
@@ -189,9 +192,9 @@ export async function POST(request: Request) {
     client = getRedisClient();
     const redisKey = `override:${flightNumber}`;
 
-if (action === 'assign') {
-  const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
-  await client.hset(redisKey, { [field]: cleanValue });
+    if (action === 'assign') {
+      const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
+      await client.hset(redisKey, { [field]: cleanValue });
       await client.expire(redisKey, 21600); 
     } else if (action === 'clear') {
       await client.hdel(redisKey, field);

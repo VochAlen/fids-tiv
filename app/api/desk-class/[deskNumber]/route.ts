@@ -1,16 +1,12 @@
+// app/api/desk-class/[deskNumber]/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
-
+import { safeRedisGet } from '@/lib/redis';
+ 
 export async function GET(
-  request: Request,
+  _request: Request,
   { params }: { params: { deskNumber: string } }
 ) {
-  try {
-    const client = getRedisClient();
-    const classType = await client.get(`desk-class:${params.deskNumber}`);
-    
-    return NextResponse.json({ classType: classType || null });
-  } catch (error) {
-    return NextResponse.json({ classType: null });
-  }
+  const classType = await safeRedisGet(`desk-class:${params.deskNumber}`);
+  return NextResponse.json({ classType });
 }
+ 

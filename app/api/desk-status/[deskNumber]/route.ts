@@ -1,16 +1,19 @@
-import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
+ 
+// ─────────────────────────────────────────────────────────────
+// app/api/desk-status/[deskNumber]/route.ts
+// ─────────────────────────────────────────────────────────────
+// import { NextResponse } from 'next/server';
+// import { safeRedisGet } from '@/lib/redis';
 
-export async function GET(
-  request: Request,
+import { safeRedisGet } from "@/lib/redis";
+import { NextResponse } from "next/server";
+
+ 
+export async function GET_deskStatus(
+  _request: Request,
   { params }: { params: { deskNumber: string } }
 ) {
-  try {
-    const client = getRedisClient();
-    const status = await client.get(`desk-status:${params.deskNumber}`);
-    
-    return NextResponse.json({ status: status || null });
-  } catch (error) {
-    return NextResponse.json({ status: null });
-  }
+  const status = await safeRedisGet(`desk-status:${params.deskNumber}`);
+  return NextResponse.json({ status });
 }
+ 

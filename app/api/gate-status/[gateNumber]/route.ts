@@ -1,15 +1,12 @@
+// app/api/gate-status/[gate]/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
+import { safeRedisGet } from '@/lib/redis';
 
 export async function GET(
-  request: Request,
-  { params }: { params: { gateNumber: string } }
+  _request: Request,
+  { params }: { params: { gate: string } }
 ) {
-  try {
-    const client = getRedisClient();
-    const status = await client.get(`gate-status:${params.gateNumber}`);
-    return NextResponse.json({ status: status || null });
-  } catch (error) {
-    return NextResponse.json({ status: null });
-  }
+  const status = await safeRedisGet(`gate-status:${params.gate}`);
+  // Uvijek vraća 200 — null znači "nema overridea", page.tsx to razumije
+  return NextResponse.json({ status });
 }
