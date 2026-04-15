@@ -1223,10 +1223,10 @@ useEffect(() => {
               </div>
             ) : flightDisplay.flight && !flightDisplay.isCancelled && !flightDisplay.isDiverted ? (
               <div className={`text-white/80 mb-6 ${isPortrait ? 'text-2xl' : 'text-xl'}`}>
-                <div>Current flight: {flightDisplay.flightNumber} to {flightDisplay.destinationCity}</div>
+                <div>Upcoming flight: {flightDisplay.flightNumber} to {flightDisplay.destinationCity}</div>
                 <br />
                 <span className="text-yellow-300">Scheduled: {flightDisplay.scheduledTime}</span>
-                <div className="text-sm text-white/50 mt-2">(Check-in closed, waiting for departure)</div>
+                {/* <div className="text-sm text-white/50 mt-2">(Check-in closed, waiting for departure)</div> */}
               </div>
             ) : null}
 
@@ -1455,6 +1455,34 @@ useEffect(() => {
             nextIndex={nextAdIndex}
             isTransitioning={isAdTransitioning}
           />
+          {/* ── NEXT FLIGHT INFO (GATE style) ── */}
+<div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
+  <div className="flex items-center justify-between">
+    <div className="flex items-center gap-4">
+      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">NEXT FLIGHT</span>
+      {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
+        <>
+          <span className="text-2xl font-bold text-yellow-400">{nextScheduledFlight.FlightNumber}</span>
+          <span className="text-lg text-white/60">
+            {nextScheduledFlight.DestinationAirportCode} — {nextScheduledFlight.DestinationCityName}
+          </span>
+          <div className="flex items-center gap-1">
+            <Clock className="w-4 h-4 text-slate-400" />
+            <span className="text-xl font-mono font-bold text-cyan-400">{nextScheduledFlight.ScheduledDepartureTime}</span>
+          </div>
+        </>
+      ) : (
+        <span className="text-sm text-white/40">No upcoming flights</span>
+      )}
+    </div>
+    <div className="flex items-center gap-3 text-xs text-slate-500">
+      <span>LAST UPDATE {lastUpdate}</span>
+      <span className="opacity-35">|</span>
+      <span>NEXT UPDATE ...</span>
+    </div>
+  </div>
+</div>
+
 
           <div className="flex-shrink-0 flex justify-center items-center space-x-2 text-xs font-inter py-1">
             <Image

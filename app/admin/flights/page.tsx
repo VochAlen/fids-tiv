@@ -266,13 +266,14 @@ const StatusControl: React.FC<StatusControlProps> = ({
 };
 
 // ============================================================
-// KOMPONENTA: Manual Desk Override (poboljšana)
+// KOMPONENTA: Manual Desk Override (sa flightNumber prop)
 // ============================================================
 interface DeskManualControlProps {
   deskNumbers: string | undefined;
+  flightNumber?: string;
 }
 
-const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) => {
+const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flightNumber }) => {
   const [savedStatuses, setSavedStatuses] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
 
@@ -294,10 +295,15 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) =>
   const handleAction = async (desk: string, action: string) => {
     setIsLoading(true);
     try {
+      const body: any = { deskNumber: desk, action };
+      if (flightNumber) {
+        body.flightNumber = flightNumber;
+      }
+      
       await fetch('/api/admin/desk-status-override', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: desk, action }),
+        body: JSON.stringify(body),
       });
       if (action === 'clear') {
         setSavedStatuses(prev => {
@@ -308,6 +314,8 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers }) =>
       } else {
         setSavedStatuses(prev => ({ ...prev, [desk]: action }));
       }
+    } catch (error) {
+      console.error('Desk status override error:', error);
     } finally {
       setIsLoading(false);
     }
@@ -648,9 +656,9 @@ const FlightCard: React.FC<FlightCardProps> = ({
 
   return (
     <div
-      className={`bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer ${
+      className={`bg-white/5 border rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer ${
         expanded ? 'bg-white/10' : ''
-      } ${hasOverride ? 'border-orange-500/50 ring-1 ring-orange-500/30' : ''}`}
+      } ${hasOverride ? 'border-orange-500/50 ring-1 ring-orange-500/30 shadow-lg shadow-orange-500/10' : 'border-white/10'}`}
       onClick={() => setExpanded(!expanded)}
       role="button"
       tabIndex={0}
@@ -666,10 +674,13 @@ const FlightCard: React.FC<FlightCardProps> = ({
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xl font-bold text-white">{flight.FlightNumber}</span>
                 {hasOverride && (
+                  <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" title="Aktivan override" />
+                )}
+                {hasOverride && (
                   <div className="flex flex-wrap gap-1">
                     <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 flex items-center gap-1">
                       <AlertTriangle className="w-2.5 h-2.5" />
-                      Override
+                      Override Active
                     </span>
                     {hasCheckInOverride && (
                       <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
@@ -781,7 +792,7 @@ const FlightCard: React.FC<FlightCardProps> = ({
                 />
                 <GateManualControl gateNumber={flight.GateNumber} />
                 <DeskClassControl deskNumbers={flight.CheckInDesk} />
-                <DeskManualControl deskNumbers={flight.CheckInDesk} />
+                <DeskManualControl deskNumbers={flight.CheckInDesk} flightNumber={flight.FlightNumber} />
               </div>
             ) : (
               <div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
@@ -842,125 +853,126 @@ export default function AdminFlightsPage() {
       return {};
     }
   }, []);
-const mapOverrideValue = (val: string) => val === '__EMPTY__' ? '' : val;
+  
+  const mapOverrideValue = (val: string) => val === '__EMPTY__' ? '' : val;
 
-const loadFlights = useCallback(async (silent = false) => {
-  try {
-    if (!silent) setLoading(true);
-    setRefreshing(true);
-    setError(null);
-    
-    // Učitaj letove i override-ove paralelno
-    const [flightsResponse, overridesData] = await Promise.all([
-      fetch(`/api/flights?nocache=${Date.now()}`, {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' }
-      }),
-      loadOverrides()
-    ]);
-    
-    if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
-    const data = await flightsResponse.json();
-
-    const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
-      const consolidated = consolidateFlights(flightArray);
-      const seen: Record<string, boolean> = {};
-      return consolidated.filter((flight) => {
-        const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
-        if (seen[uniqueId]) return false;
-        seen[uniqueId] = true;
-        return true;
-      });
-    };
-
-    // Dodaj flag za override u svaki let
-    const departuresWithOverride = (data.departures || []).map((flight: Flight) => {
-      const flightOverrides = overridesData[flight.FlightNumber] || {};
-      const mappedOverrides: Record<string, string> = {};
-      Object.entries(flightOverrides).forEach(([k, v]) => {
-        mappedOverrides[k] = mapOverrideValue(v as string);
-      });
-      return {
-        ...flight,
-        _hasOverride: Object.keys(mappedOverrides).length > 0,
-        _overrideFields: mappedOverrides,
-      };
-    });
-
-    const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => {
-      const flightOverrides = overridesData[flight.FlightNumber] || {};
-      const mappedOverrides: Record<string, string> = {};
-      Object.entries(flightOverrides).forEach(([k, v]) => {
-        mappedOverrides[k] = mapOverrideValue(v as string);
-      });
-      return {
-        ...flight,
-        _hasOverride: Object.keys(mappedOverrides).length > 0,
-        _overrideFields: mappedOverrides,
-      };
-    });
-
-    // 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
-    const departedFlights = [...departuresWithOverride, ...arrivalsWithOverride].filter(flight => {
-      const status = (flight.StatusEN || '').toLowerCase();
-      return (status.includes('departed') || status.includes('poletio')) && (flight as any)._hasOverride;
-    });
-    
-    // Izvrši resetovanje asinhrono, ne blokiraj prikaz
-    if (departedFlights.length > 0) {
-      console.log(`🔄 Pronađeno ${departedFlights.length} departed letova sa override-om, resetujem...`);
+  const loadFlights = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      setRefreshing(true);
+      setError(null);
       
-      for (const flight of departedFlights) {
-        const overrideFields = (flight as any)._overrideFields || {};
-        const deskNumber = overrideFields.CheckInDesk || flight.CheckInDesk;
+      // Učitaj letove i override-ove paralelno
+      const [flightsResponse, overridesData] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        }),
+        loadOverrides()
+      ]);
+      
+      if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
+      const data = await flightsResponse.json();
+
+      const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
+        const consolidated = consolidateFlights(flightArray);
+        const seen: Record<string, boolean> = {};
+        return consolidated.filter((flight) => {
+          const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
+          if (seen[uniqueId]) return false;
+          seen[uniqueId] = true;
+          return true;
+        });
+      };
+
+      // Dodaj flag za override u svaki let
+      const departuresWithOverride = (data.departures || []).map((flight: Flight) => {
+        const flightOverrides = overridesData[flight.FlightNumber] || {};
+        const mappedOverrides: Record<string, string> = {};
+        Object.entries(flightOverrides).forEach(([k, v]) => {
+          mappedOverrides[k] = mapOverrideValue(v as string);
+        });
+        return {
+          ...flight,
+          _hasOverride: Object.keys(mappedOverrides).length > 0,
+          _overrideFields: mappedOverrides,
+        };
+      });
+
+      const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => {
+        const flightOverrides = overridesData[flight.FlightNumber] || {};
+        const mappedOverrides: Record<string, string> = {};
+        Object.entries(flightOverrides).forEach(([k, v]) => {
+          mappedOverrides[k] = mapOverrideValue(v as string);
+        });
+        return {
+          ...flight,
+          _hasOverride: Object.keys(mappedOverrides).length > 0,
+          _overrideFields: mappedOverrides,
+        };
+      });
+
+      // 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
+      const departedFlights = [...departuresWithOverride, ...arrivalsWithOverride].filter(flight => {
+        const status = (flight.StatusEN || '').toLowerCase();
+        return (status.includes('departed') || status.includes('poletio')) && (flight as any)._hasOverride;
+      });
+      
+      // Izvrši resetovanje asinhrono, ne blokiraj prikaz
+      if (departedFlights.length > 0) {
+        console.log(`🔄 Pronađeno ${departedFlights.length} departed letova sa override-om, resetujem...`);
         
-        fetch('/api/admin/auto-reset-departed', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            flightNumber: flight.FlightNumber,
-            deskNumber: deskNumber?.split(',')[0]
-          }),
-        }).catch(err => console.error(`Failed to reset ${flight.FlightNumber}:`, err));
+        for (const flight of departedFlights) {
+          const overrideFields = (flight as any)._overrideFields || {};
+          const deskNumber = overrideFields.CheckInDesk || flight.CheckInDesk;
+          
+          fetch('/api/admin/auto-reset-departed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              flightNumber: flight.FlightNumber,
+              deskNumber: deskNumber?.split(',')[0]
+            }),
+          }).catch(err => console.error(`Failed to reset ${flight.FlightNumber}:`, err));
+        }
+        
+        // Ukloni override flag iz prikaza za ove letove (ne čekamo Redis)
+        const removeOverrideFromDeparted = (flight: any) => {
+          const status = (flight.StatusEN || '').toLowerCase();
+          const isDeparted = status.includes('departed') || status.includes('poletio');
+          if (isDeparted && flight._hasOverride) {
+            return { ...flight, _hasOverride: false, _overrideFields: {} };
+          }
+          return flight;
+        };
+        
+        // Postavi state sa očišćenim departed letovima
+        setFlights({
+          departures: removeDuplicatesAndConsolidate(departuresWithOverride.map(removeOverrideFromDeparted)),
+          arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride.map(removeOverrideFromDeparted))
+        });
+      } else {
+        // Nema departed letova, normalno postavi state
+        setFlights({
+          departures: removeDuplicatesAndConsolidate(departuresWithOverride),
+          arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
+        });
       }
       
-      // Ukloni override flag iz prikaza za ove letove (ne čekamo Redis)
-      const removeOverrideFromDeparted = (flight: any) => {
-        const status = (flight.StatusEN || '').toLowerCase();
-        const isDeparted = status.includes('departed') || status.includes('poletio');
-        if (isDeparted && flight._hasOverride) {
-          return { ...flight, _hasOverride: false, _overrideFields: {} };
-        }
-        return flight;
-      };
+      setLastUpdated(data.lastUpdated || new Date().toISOString());
+      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
       
-      // Postavi state sa očišćenim departed letovima
-      setFlights({
-        departures: removeDuplicatesAndConsolidate(departuresWithOverride.map(removeOverrideFromDeparted)),
-        arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride.map(removeOverrideFromDeparted))
-      });
-    } else {
-      // Nema departed letova, normalno postavi state
-      setFlights({
-        departures: removeDuplicatesAndConsolidate(departuresWithOverride),
-        arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
-      });
+    } catch (error) {
+      console.error('Error loading flights:', error);
+      setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
+      setFlights({ departures: [], arrivals: [] });
+      setSystemStatus('offline');
+      setLastUpdated(new Date().toISOString());
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-    
-    setLastUpdated(data.lastUpdated || new Date().toISOString());
-    setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
-    
-  } catch (error) {
-    console.error('Error loading flights:', error);
-    setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
-    setFlights({ departures: [], arrivals: [] });
-    setSystemStatus('offline');
-    setLastUpdated(new Date().toISOString());
-  } finally {
-    setLoading(false);
-    setRefreshing(false);
-  }
-}, [loadOverrides]);
+  }, [loadOverrides]);
 
   // Funkcija za brisanje svih override-ova za jedan let
   const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
@@ -969,12 +981,10 @@ const loadFlights = useCallback(async (silent = false) => {
     }
     
     try {
-      // Prvo dohvati sve aktivne override-ove za ovaj let
       const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
       const allOverrides = await overridesRes.json();
       const flightOverrides = allOverrides[flightNumber] || {};
       
-      // Za svaki field koji ima override, pošalji clear akciju
       const clearPromises = Object.keys(flightOverrides).map(field =>
         fetch('/api/admin/flight-override', {
           method: 'POST',
@@ -988,10 +998,7 @@ const loadFlights = useCallback(async (silent = false) => {
       );
       
       await Promise.all(clearPromises);
-      
-      // Osvježi podatke
       await loadFlights(true);
-      
       alert(`Svi override-ovi za let ${flightNumber} su uklonjeni`);
     } catch (error) {
       console.error('Error clearing overrides:', error);
@@ -1000,32 +1007,30 @@ const loadFlights = useCallback(async (silent = false) => {
   }, [loadFlights]);
 
   const handleClearAllFlightsOverrides = useCallback(async () => {
-  if (!confirm('Da li ste sigurni da želite ukloniti SVE override-ove za SVE letove?')) return;
-  
-  try {
-    const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
-    const allOverrides = await overridesRes.json();
+    if (!confirm('Da li ste sigurni da želite ukloniti SVE override-ove za SVE letove?')) return;
     
-    const clearPromises = Object.entries(allOverrides).flatMap(([flightNumber, fields]) =>
-      Object.keys(fields as Record<string, string>).map(field =>
-        fetch('/api/admin/flight-override', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ flightNumber, field, action: 'clear' }),
-        })
-      )
-    );
-    
-    await Promise.all(clearPromises);
-    await loadFlights(true);
-    alert('Svi override-ovi su uspješno obrisani!');
-  } catch (error) {
-    console.error('Error clearing all overrides:', error);
-    alert('Greška pri brisanju svih override-ova');
-  }
-}, [loadFlights]);
-
-
+    try {
+      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const allOverrides = await overridesRes.json();
+      
+      const clearPromises = Object.entries(allOverrides).flatMap(([flightNumber, fields]) =>
+        Object.keys(fields as Record<string, string>).map(field =>
+          fetch('/api/admin/flight-override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+          })
+        )
+      );
+      
+      await Promise.all(clearPromises);
+      await loadFlights(true);
+      alert('Svi override-ovi su uspješno obrisani!');
+    } catch (error) {
+      console.error('Error clearing all overrides:', error);
+      alert('Greška pri brisanju svih override-ova');
+    }
+  }, [loadFlights]);
 
   const handleFlightOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
     try {
@@ -1038,7 +1043,6 @@ const loadFlights = useCallback(async (silent = false) => {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Greška pri ažuriranju');
       }
-      // Nakon override-a, ponovo učitaj letove i override-ove
       await loadFlights(true);
     } catch (error) {
       console.error('Override error:', error);
