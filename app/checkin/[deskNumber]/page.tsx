@@ -834,7 +834,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
   //   CheckInDesk override = '__EMPTY__' (admin ih ugasio).
   //   Tako se automatski prelazi na sljedeći let (npr. YM152).
   // ─────────────────────────────────────────────────────────────
-  const loadFlights = useCallback(async () => {
+const loadFlights = useCallback(async () => {
     if (!isMountedRef.current || transitionGuardRef.current) return;
 
     try {
@@ -850,6 +850,40 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
       } catch {
         // Redis nedostupan — nastavljamo bez override provjere,
         // prikazat će se future[0] kao fallback
+      }
+
+      // ── NOVA PROVJERA: odbaci override-e od juče ili starije ─
+      // Redis override-i nemaju automatski TTL pa zaostaju i otvaraju
+      // check-in 5+ sati prerano jer parseDepartureTime dobija stari ISO timestamp
+      const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
+
+      for (const flightNum in allOverrides) {
+        const ov = allOverrides[flightNum];
+        if (ov.ScheduledDepartureTime) {
+          let ovDate: Date | null = null;
+
+          if (ov.ScheduledDepartureTime.includes('T')) {
+            ovDate = new Date(ov.ScheduledDepartureTime);
+          } else {
+            // HH:MM format — konstruiši datum za danas
+            const [h, m] = ov.ScheduledDepartureTime.split(':').map(Number);
+            if (!isNaN(h) && !isNaN(m)) {
+              const d = new Date();
+              d.setHours(h, m, 0, 0);
+              ovDate = d;
+            }
+          }
+
+          if (ovDate && ovDate.getTime() < twelveHoursAgo) {
+            if (DEVELOPMENT) {
+              console.log(
+                `[Override cleanup] Preskačem zaostali override za ${flightNum} ` +
+                `(STD: ${ov.ScheduledDepartureTime}, datum: ${ovDate.toLocaleString()})`
+              );
+            }
+            delete allOverrides[flightNum];
+          }
+        }
       }
 
       const allForDesk = data.departures.filter((f) => {

@@ -302,8 +302,6 @@ export function checkFlightStatus(status: string): {
 function parseDepartureTime(timeString: string): Date | null {
   if (!timeString) return null;
 
-  // Provjeri keš
-  // const cacheKey = timeString;
   const cacheKey = `${timeString}_${new Date().toDateString()}`;
 
   if (timeParseCache.has(cacheKey)) {
@@ -314,6 +312,13 @@ function parseDepartureTime(timeString: string): Date | null {
     if (timeString.includes('T')) {
       const date = new Date(timeString);
       if (!isNaN(date.getTime())) {
+        // NOVA PROVJERA: odbaci ISO timestamp koji je stariji od 12 sati unazad
+        // Ovo sprječava Redis override-e od juče da otvaraju check-in prerano
+        const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
+        if (date < twelveHoursAgo) {
+          console.warn(`⚠️ parseDepartureTime: odbačen stari ISO timestamp: ${timeString}`);
+          return null;
+        }
         timeParseCache.set(cacheKey, date);
         return date;
       }
