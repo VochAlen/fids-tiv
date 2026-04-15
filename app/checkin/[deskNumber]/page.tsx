@@ -705,23 +705,26 @@ function CheckInDisplay() {
   );
 
   // ── Countdown ───────────────────────────────────────────────
-  const updateCountdowns = useCallback((status: CheckInStatus) => {
-    const now = new Date();
-    if (status.status === 'scheduled' && status.checkInOpenTime) {
-      setTimeUntilCheckIn(
-        Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
-      );
-    } else {
-      setTimeUntilCheckIn(null);
-    }
-    if (status.shouldBeOpen && status.checkInCloseTime) {
-      setTimeUntilClose(
-        Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
-      );
-    } else {
-      setTimeUntilClose(null);
-    }
-  }, []);
+// Ova funkcija samo računa i postavlja countdowne — bez loadFlights
+const updateCountdowns = useCallback((status: CheckInStatus) => {
+  const now = new Date();
+
+  if (status.status === 'scheduled' && status.checkInOpenTime) {
+    setTimeUntilCheckIn(
+      Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
+    );
+  } else {
+    setTimeUntilCheckIn(null);
+  }
+
+  if (status.shouldBeOpen && status.checkInCloseTime) {
+    setTimeUntilClose(
+      Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
+    );
+  } else {
+    setTimeUntilClose(null);
+  }
+}, []);
 
   // ── Transition queue processor ──────────────────────────────
   const processTransitionQueue = useCallback(async () => {
@@ -1023,6 +1026,31 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
     const id = setInterval(() => updateCountdowns(flightDisplay.checkInStatus), COUNTDOWN_REFRESH_INTERVAL);
     return () => clearInterval(id);
   }, [flightDisplay.checkInStatus, flightDisplay.flight, updateCountdowns]);
+
+  // ── Auto-close timer: osvježi tačno kad istekne STD-30min ──
+useEffect(() => {
+  if (!flightDisplay.flight) return;
+  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+  if (!closeTime) return;
+
+  const msUntilClose = closeTime.getTime() - Date.now();
+  if (msUntilClose <= 0) {
+    // Već je prošlo — odmah refreshaj
+    void loadFlights();
+    return;
+  }
+
+  // Postavi timer koji će se okinuti tačno u trenutku zatvaranja
+  const tid = setTimeout(() => {
+    if (isMountedRef.current) void loadFlights();
+  }, msUntilClose);
+
+  return () => clearTimeout(tid);
+}, [
+  flightDisplay.flight?.FlightNumber,
+  flightDisplay.checkInStatus.checkInCloseTime,
+  loadFlights,
+]);
 
   // ── checkin-status-updated event ───────────────────────────
   useEffect(() => {

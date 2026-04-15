@@ -12,6 +12,45 @@ import {
 } from '@/lib/flight-api-helpers';
 import Redis from 'ioredis';
 
+// ── LIGHTWEIGHT REDIS CLEANUP (umjesto cron-a) ───────────────
+let lastRedisCleanup = 0;
+const REDIS_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+async function runRedisCleanupIfNeeded(): Promise<void> {
+  if (Date.now() - lastRedisCleanup < REDIS_CLEANUP_INTERVAL_MS) return;
+  lastRedisCleanup = Date.now();
+
+  try {
+    const client = getRedisClient();
+    const TTL_RULES: Record<string, number> = {
+      'cache:flights':  180,
+      'override:':      21_600,
+      'gate-status:':   21_600,
+      'desk-status:':   21_600,
+      'desk-class:':    21_600,
+    };
+
+    let cursor = '0';
+    let fixed = 0;
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 100);
+      cursor = nextCursor;
+      for (const key of keys) {
+        const ttl = await client.ttl(key);
+        if (ttl === -1) {
+          const rule = Object.entries(TTL_RULES).find(([prefix]) => key.startsWith(prefix));
+          await client.expire(key, rule ? rule[1] : 3_600);
+          fixed++;
+        }
+      }
+    } while (cursor !== '0');
+
+    if (fixed > 0) console.log(`🧹 Redis cleanup: ${fixed} ključeva dobilo TTL`);
+  } catch (e) {
+    console.error('⚠️ Redis cleanup failed (non-critical):', e);
+  }
+}
+
 // KORISTIMO PRAVI URL ZA MONTENEGRO AIRPORTS
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
 
@@ -196,11 +235,13 @@ function removeDuplicateFlights(flights: Flight[]): Flight[] {
 }
 
 export async function GET(): Promise<NextResponse> {
+   runRedisCleanupIfNeeded().catch(() => {});
   const backupService = FlightBackupService.getInstance();
   let source: 'live' | 'backup' | 'auto-processed' | 'emergency' = 'live';
   let backupTimestamp: string | undefined;
   let autoProcessedCount = 0;
   let isOfflineMode = false;
+  
 
   try {
     console.log('🔄 Attempting LIVE API fetch from Montenegro Airports...');
