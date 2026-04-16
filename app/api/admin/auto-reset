@@ -1,0 +1,28 @@
+/**
+ * /api/admin/auto-reset
+ *
+ * Poziva se svakih 60s (cron ili client-side interval).
+ * Delegira svu logiku na /api/admin/cleanup-overrides.
+ */
+
+import { NextResponse } from 'next/server';
+
+const BASE_URL = (() => {
+  const raw = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+  if (raw.startsWith('http')) return raw.replace(/\/$/, '');
+  return `https://${raw.replace(/\/$/, '')}`;
+})();
+
+export async function GET() {
+  try {
+    const res = await fetch(`${BASE_URL}/api/admin/cleanup-overrides`, {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    const data = await res.json();
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error('[auto-reset] Greška:', err);
+    return NextResponse.json({ error: 'Greška pri auto-resetu' }, { status: 500 });
+  }
+}

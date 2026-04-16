@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/admin/auto-reset-departed",
+      "path": "/api/admin/auto-reset",
       "schedule": "* * * * *"
     }
   ]

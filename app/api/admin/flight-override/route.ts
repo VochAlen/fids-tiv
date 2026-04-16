@@ -296,6 +296,8 @@ export async function GET(request: Request) {
 
         overrides[flightNumber] = data;
       }
+      // Tiho pokreni cleanup u pozadini (ne čeka odgovor)
+    fetch(`${getBaseUrl()}/api/admin/cleanup-overrides`, { method: 'POST' }).catch(() => {});
 
       return NextResponse.json(overrides);
     } catch (error) {
