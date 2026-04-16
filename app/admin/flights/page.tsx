@@ -767,6 +767,75 @@ const FlightCard: React.FC<FlightCardProps> = ({
                 
                 <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
 
+{isDeparture && (
+  <div className="space-y-2">
+    <div className="flex items-center justify-between">
+      <div className="text-xs text-white/50">🚮 Brisanje check-in countera</div>
+      <button
+        onClick={async (e) => {
+          e.stopPropagation();
+          if (confirm(`Da li ste sigurni da želite OBRISATI SVE check-in countere za let ${flight.FlightNumber}? Ova akcija će ukloniti sve override-ove i vratiti na API podatke.`)) {
+            try {
+              // Prvo dohvatimo sve override-ove za ovaj let
+              const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+              const allOverrides = await overridesRes.json();
+              const flightOverrides = allOverrides[flight.FlightNumber] || {};
+              
+              // Ako postoji override za CheckInDesk, obrišemo ga
+              if (flightOverrides['CheckInDesk']) {
+                await fetch('/api/admin/flight-override', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ 
+                    flightNumber: flight.FlightNumber, 
+                    field: 'CheckInDesk', 
+                    action: 'clear' 
+                  }),
+                });
+              }
+              
+              // Također resetujemo status svih deskova za ovaj let
+              const deskNumbers = flight.CheckInDesk;
+              if (deskNumbers) {
+                const desks = deskNumbers.split(',').map(d => d.trim());
+                for (const desk of desks) {
+                  await fetch('/api/admin/desk-status-override', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ deskNumber: desk, action: 'clear', flightNumber: flight.FlightNumber }),
+                  }).catch(() => {});
+                  
+                  await fetch('/api/admin/desk-class-override', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
+                  }).catch(() => {});
+                }
+              }
+              
+              await onFlightOverride(flight.FlightNumber, 'CheckInDesk', 'clear');
+              alert(`Svi check-in counteri za let ${flight.FlightNumber} su obrisani!`);
+            } catch (error) {
+              console.error('Error clearing check-in desks:', error);
+              alert('Greška pri brisanju check-in countera');
+            }
+          }
+        }}
+        className="flex items-center gap-1 px-3 py-1.5 bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-lg border border-red-500/40 transition-colors text-sm"
+        type="button"
+        title="Obriši sve check-in countere za ovaj let (bez vremenskog ograničenja)"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+        Obriši sve check-in countere
+      </button>
+    </div>
+    <div className="text-[10px] text-yellow-400/60 bg-yellow-500/10 p-2 rounded-lg">
+      ⚠️ Ova akcija briše SVE override-ove za check-in countere, bez obzira na vrijeme do polijetanja. 
+      Sistem će se vratiti na originalne API podatke.
+    </div>
+  </div>
+)}
+
                 <OverrideControl
                   label="Terminal"
                   currentValue={flight.Terminal}
@@ -913,51 +982,67 @@ export default function AdminFlightsPage() {
       });
 
       // 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
-      const departedFlights = [...departuresWithOverride, ...arrivalsWithOverride].filter(flight => {
-        const status = (flight.StatusEN || '').toLowerCase();
-        return (status.includes('departed') || status.includes('poletio')) && (flight as any)._hasOverride;
-      });
-      
-      // Izvrši resetovanje asinhrono, ne blokiraj prikaz
-      if (departedFlights.length > 0) {
-        console.log(`🔄 Pronađeno ${departedFlights.length} departed letova sa override-om, resetujem...`);
-        
-        for (const flight of departedFlights) {
-          const overrideFields = (flight as any)._overrideFields || {};
-          const deskNumber = overrideFields.CheckInDesk || flight.CheckInDesk;
-          
-          fetch('/api/admin/auto-reset-departed', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              flightNumber: flight.FlightNumber,
-              deskNumber: deskNumber?.split(',')[0]
-            }),
-          }).catch(err => console.error(`Failed to reset ${flight.FlightNumber}:`, err));
-        }
-        
-        // Ukloni override flag iz prikaza za ove letove (ne čekamo Redis)
-        const removeOverrideFromDeparted = (flight: any) => {
-          const status = (flight.StatusEN || '').toLowerCase();
-          const isDeparted = status.includes('departed') || status.includes('poletio');
-          if (isDeparted && flight._hasOverride) {
-            return { ...flight, _hasOverride: false, _overrideFields: {} };
-          }
-          return flight;
-        };
-        
-        // Postavi state sa očišćenim departed letovima
-        setFlights({
-          departures: removeDuplicatesAndConsolidate(departuresWithOverride.map(removeOverrideFromDeparted)),
-          arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride.map(removeOverrideFromDeparted))
-        });
-      } else {
-        // Nema departed letova, normalno postavi state
-        setFlights({
-          departures: removeDuplicatesAndConsolidate(departuresWithOverride),
-          arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
-        });
+// 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
+const departedFlights = [...departuresWithOverride, ...arrivalsWithOverride].filter(flight => {
+  const status = (flight.StatusEN || '').toLowerCase();
+  return (status.includes('departed') || status.includes('poletio')) && (flight as any)._hasOverride;
+});
+
+// Izvrši resetovanje asinhrono, ne blokiraj prikaz
+if (departedFlights.length > 0) {
+  console.log(`🔄 Pronađeno ${departedFlights.length} departed letova sa override-om, resetujem...`);
+  
+  for (const flight of departedFlights) {
+    const overrideFields = (flight as any)._overrideFields || {};
+    const deskNumber = overrideFields.CheckInDesk || flight.CheckInDesk;
+    const gateNumber = overrideFields.GateNumber || flight.GateNumber;
+    
+    // Pozovi API za resetovanje svih override-ova za ovaj let
+    fetch('/api/admin/auto-reset-departed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        flightNumber: flight.FlightNumber,
+        deskNumber: deskNumber?.split(',')[0],
+        gateNumber: gateNumber?.split(',')[0]  // Dodato: šaljemo i gate
+      }),
+    }).catch(err => console.error(`Failed to reset ${flight.FlightNumber}:`, err));
+    
+    // Također direktno resetuj gate status preko API-ja
+    if (gateNumber) {
+      const gates = gateNumber.split(',').map((g: string) => g.trim());
+      for (const gate of gates) {
+        fetch('/api/admin/gate-status-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gateNumber: gate, action: 'clear' }),
+        }).catch(err => console.error(`Failed to reset gate ${gate}:`, err));
       }
+    }
+  }
+  
+  // Ukloni override flag iz prikaza za ove letove (ne čekamo Redis)
+  const removeOverrideFromDeparted = (flight: any) => {
+    const status = (flight.StatusEN || '').toLowerCase();
+    const isDeparted = status.includes('departed') || status.includes('poletio');
+    if (isDeparted && flight._hasOverride) {
+      return { ...flight, _hasOverride: false, _overrideFields: {} };
+    }
+    return flight;
+  };
+  
+  // Postavi state sa očišćenim departed letovima
+  setFlights({
+    departures: removeDuplicatesAndConsolidate(departuresWithOverride.map(removeOverrideFromDeparted)),
+    arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride.map(removeOverrideFromDeparted))
+  });
+} else {
+  // Nema departed letova, normalno postavi state
+  setFlights({
+    departures: removeDuplicatesAndConsolidate(departuresWithOverride),
+    arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
+  });
+}
       
       setLastUpdated(data.lastUpdated || new Date().toISOString());
       setSystemStatus(data.isOfflineMode ? 'offline' : 'online');

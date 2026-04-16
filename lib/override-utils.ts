@@ -1,251 +1,359 @@
-// lib/override-utils.ts
+/**
+ * lib/override-utils.ts
+ *
+ * Centralna logika za auto-reset override-ova:
+ *
+ * CheckInDesk  → resetuje se na STD - 30 minuta
+ * GateNumber   → resetuje se na STD (ili ETD ako postoji i bliže je)
+ *
+ * Funkcije se pozivaju:
+ *  1. Iz GET /api/admin/flight-override?action=getAllOverrides
+ *  2. Iz GET /api/admin/auto-reset (cron / interval poziv svakih 60s)
+ */
+
 import { getRedisClient } from '@/lib/redis';
 
-// ─────────────────────────────────────────────────────────────
-// BASE URL — isti helper kao u flight-override/route.ts
-// Osigurava da uvijek ima https:// prefix
-// ─────────────────────────────────────────────────────────────
-function getBaseUrl(): string {
-  const raw = process.env.NEXT_PUBLIC_BASE_URL || '';
-  if (raw.startsWith('http://') || raw.startsWith('https://')) {
-    return raw.replace(/\/$/, '');
-  }
-  if (raw) {
-    return `https://${raw.replace(/\/$/, '')}`;
-  }
-  return 'http://localhost:3000';
+// ─────────────────────────────────────────────
+// Tipovi
+// ─────────────────────────────────────────────
+
+export interface AutoResetResult {
+  flightNumber: string;
+  field: 'CheckInDesk' | 'GateNumber';
+  reason: string;
 }
 
-// Helper za parsiranje vremena
-function parseTimeToMinutes(timeStr: string): number {
-  if (!timeStr) return 0;
-  const [hours, minutes] = timeStr.split(':').map(Number);
-  if (isNaN(hours) || isNaN(minutes)) return 0;
-  return hours * 60 + minutes;
+// ─────────────────────────────────────────────
+// Pomoćne funkcije za rad s vremenom
+// ─────────────────────────────────────────────
+
+/** Konvertuje "HH:MM" string u ukupan broj minuta od ponoći */
+export function parseTimeToMinutes(timeStr: string): number {
+  if (!timeStr || !timeStr.includes(':')) return -1;
+  const [h, m] = timeStr.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return -1;
+  return h * 60 + m;
 }
 
-function getCurrentMinutes(): number {
+/** Vraća trenutno vrijeme u minutama od ponoći (lokalno) */
+export function getCurrentMinutes(): number {
   const now = new Date();
   return now.getHours() * 60 + now.getMinutes();
 }
 
-function shouldAutoResetCheckIn(scheduledTime: string): boolean {
-  if (!scheduledTime) return false;
-  const currentMinutes = getCurrentMinutes();
-  const scheduledMinutes = parseTimeToMinutes(scheduledTime);
-  const minutesUntilDeparture = scheduledMinutes - currentMinutes;
-  return minutesUntilDeparture <= 30 && minutesUntilDeparture > -120;
+/**
+ * Koliko minuta do određenog vremena (može biti negativno = prošlo je).
+ * Uzima u obzir prelazak ponoći.
+ */
+export function minutesUntil(targetTimeStr: string): number {
+  const target = parseTimeToMinutes(targetTimeStr);
+  if (target < 0) return Infinity;
+  const current = getCurrentMinutes();
+  let diff = target - current;
+  if (diff < -720) diff += 1440;
+  return diff;
 }
 
-function isFlightActive(scheduledTime: string): boolean {
-  if (!scheduledTime) return false;
-  const currentMinutes = getCurrentMinutes();
-  const scheduledMinutes = parseTimeToMinutes(scheduledTime);
-  const minutesSinceDeparture = currentMinutes - scheduledMinutes;
-  return minutesSinceDeparture < 120;
-}
+/**
+ * Koliko minuta do "STD - 30 minuta" (kada treba resetovati check-in).
+ * Pozitivna vrijednost = još toliko minuta do reset-a.
+ * Negativna vrijednost = reset je trebao biti prije toliko minuta.
+ */
+export function minutesUntilCheckInReset(scheduledTime: string): number {
+  if (!scheduledTime || !scheduledTime.includes(':')) return Infinity;
 
-// ─────────────────────────────────────────────────────────────
-// Svi fetch pozivi koriste getBaseUrl() umjesto hardcoded URL-a
-// ─────────────────────────────────────────────────────────────
-async function getAllActiveFlights(): Promise<Array<{
-  FlightNumber: string;
-  ScheduledDepartureTime: string;
-  CheckInDesk?: string;
-  GateNumber?: string;
-  StatusEN?: string;
-}>> {
-  try {
-    const response = await fetch(`${getBaseUrl()}/api/flights`, {
-      cache: 'no-store',
-      headers: { 'Cache-Control': 'no-cache' },
-    });
-    if (!response.ok) return [];
-    const data = await response.json();
-    return [...(data.departures || []), ...(data.arrivals || [])];
-  } catch (error) {
-    console.error('Error fetching all flights:', error);
-    return [];
+  const [h, m] = scheduledTime.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return Infinity;
+
+  // Vrijeme reset-a = STD - 30 minuta
+  let resetHour = h;
+  let resetMinute = m - 30;
+
+  if (resetMinute < 0) {
+    resetHour--;
+    resetMinute += 60;
   }
+  if (resetHour < 0) {
+    resetHour += 24;
+  }
+
+  const resetTotalMinutes = resetHour * 60 + resetMinute;
+  const currentTotalMinutes = getCurrentMinutes();
+
+  let diff = resetTotalMinutes - currentTotalMinutes;
+
+  if (diff < -720) diff += 1440;
+  if (diff > 720) diff -= 1440;
+
+  return diff;
 }
 
-async function getFlightScheduledTime(flightNumber: string): Promise<string | null> {
+// ─────────────────────────────────────────────
+// Logika za reset pojedinih polja
+// ─────────────────────────────────────────────
+
+/**
+ * CheckInDesk se resetuje kada je trenutno vrijeme >= STD - 30 minuta.
+ *
+ * Primjer: STD = 09:05
+ *  - U 08:34 → NE resetuje (još 1 minuta do praga)
+ *  - U 08:35 → resetuje (tačno na pragu)
+ *  - U 09:10 → resetuje (5 min nakon STD)
+ *  - U 12:00 → NE resetuje (prošlo više od 3h od praga)
+ */
+export function shouldResetCheckIn(
+  scheduledTime: string,
+  statusEN: string
+): { reset: boolean; reason: string } {
+  if (!scheduledTime) return { reset: false, reason: 'nema scheduled time' };
+
+  const s = (statusEN || '').toLowerCase();
+  const isTerminated =
+    s.includes('departed') || s.includes('poletio') ||
+    s.includes('cancelled') || s.includes('otkazan') ||
+    s.includes('diverted') || s.includes('preusmjeren');
+
+  if (isTerminated) {
+    return { reset: false, reason: 'let je terminiran' };
+  }
+
+  const minsToReset = minutesUntilCheckInReset(scheduledTime);
+
+  // Resetuj ako je prag dostignut (<=0) ali nije prošlo više od 3h (-180 min)
+  if (minsToReset <= 0 && minsToReset > -180) {
+    return {
+      reset: true,
+      reason: `STD ${scheduledTime} — check-in reset (${Math.abs(minsToReset)} min nakon praga STD-30min)`
+    };
+  }
+
+  return {
+    reset: false,
+    reason: minsToReset > 0
+      ? `Još ${minsToReset} min do reset praga (STD ${scheduledTime} - 30min)`
+      : `Prošlo više od 3h od praga, preskačem`
+  };
+}
+
+/**
+ * GateNumber se resetuje kada ETD (ili STD ako ETD ne postoji) prođe.
+ * Prozor: od 0 do -4h.
+ */
+export function shouldResetGate(
+  scheduledTime: string,
+  estimatedTime: string | undefined,
+  statusEN: string
+): { reset: boolean; reason: string; usedTime: string } {
+  const referenceTime =
+    estimatedTime && parseTimeToMinutes(estimatedTime) >= 0
+      ? estimatedTime
+      : scheduledTime;
+
+  const mins = minutesUntil(referenceTime);
+  const usedTime = referenceTime;
+
+  const s = (statusEN || '').toLowerCase();
+  const isTerminated =
+    s.includes('departed') || s.includes('poletio') ||
+    s.includes('cancelled') || s.includes('otkazan') ||
+    s.includes('diverted') || s.includes('preusmjeren');
+
+  if (isTerminated) {
+    return { reset: false, reason: 'let je terminiran', usedTime };
+  }
+
+  if (mins <= 0 && mins > -240) {
+    return {
+      reset: true,
+      reason: `${estimatedTime ? 'ETD' : 'STD'} ${referenceTime} je dostignut (${Math.abs(mins)} min prošlo)`,
+      usedTime
+    };
+  }
+
+  return {
+    reset: false,
+    reason: `${mins} min do ${estimatedTime ? 'ETD' : 'STD'}, previše rano`,
+    usedTime
+  };
+}
+
+// ─────────────────────────────────────────────
+// Glavna funkcija
+// ─────────────────────────────────────────────
+
+/**
+ * Prolazi kroz sve Redis override ključeve, provjerava svaki let
+ * i resetuje CheckInDesk i/ili GateNumber gdje je potrebno.
+ */
+export async function runAutoReset(allFlights: any[]): Promise<AutoResetResult[]> {
+  const redis = getRedisClient();
+  const results: AutoResetResult[] = [];
+
+  console.log(`[auto-reset] Pokrenuto u ${new Date().toLocaleTimeString('sr-Latn-RS')}, letova: ${allFlights.length}`);
+
+  let keys: string[] = [];
   try {
-    const response = await fetch(
-      `${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`,
-      { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
-    );
-    if (!response.ok) return null;
-    const data = await response.json();
-    const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+    keys = await redis.keys('override:*');
+    console.log(`[auto-reset] Redis ključevi (${keys.length}):`, keys);
+  } catch (err) {
+    console.error('[auto-reset] Redis keys() greška:', err);
+    return results;
+  }
+
+  for (const key of keys) {
+    const flightNumber = key.replace('override:', '');
+    let data: Record<string, string> = {};
+
+    try {
+      data = await redis.hgetall(key);
+    } catch {
+      continue;
+    }
+
+    if (!data || Object.keys(data).length === 0) continue;
+
+    // Pronađi let iz live podataka
     const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    return flight?.ScheduledDepartureTime || null;
-  } catch (error) {
-    console.error(`Error fetching scheduled time for ${flightNumber}:`, error);
-    return null;
-  }
-}
+    if (!flight) {
+      console.warn(`[auto-reset] ⚠️ Let "${flightNumber}" nije pronađen u live podacima!`);
+      console.warn(`[auto-reset] Dostupni letovi: ${allFlights.map((f: any) => f.FlightNumber).join(', ')}`);
+      continue;
+    }
 
-async function getFlightStatus(flightNumber: string): Promise<string | null> {
-  try {
-    const response = await fetch(
-      `${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`,
-      { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }
-    );
-    if (!response.ok) return null;
-    const data = await response.json();
-    const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
-    const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    return flight?.StatusEN || null;
-  } catch (error) {
-    console.error(`Error fetching status for ${flightNumber}:`, error);
-    return null;
-  }
-}
+    const std = flight.ScheduledDepartureTime || '';
+    const etd = flight.EstimatedDepartureTime || '';
+    const status = flight.StatusEN || '';
 
-async function resolveCheckInReset(
-  client: ReturnType<typeof getRedisClient>,
-  key: string,
-  flightNumber: string,
-  currentSTD: string | null,
-  allFlights: Array<{ FlightNumber: string; ScheduledDepartureTime: string; CheckInDesk?: string }>
-): Promise<'deleted' | 'emptied' | 'skipped'> {
-  const sameFlight = allFlights.filter(f => f.FlightNumber === flightNumber);
+    // ── Desk status reset (ako je let departed) ────────────────
+const s = (status || '').toLowerCase();
+const isDeparted =
+  s.includes('departed') || s.includes('poletio') ||
+  s.includes('cancelled') || s.includes('otkazan') ||
+  s.includes('diverted') || s.includes('preusmjeren');
 
-  if (sameFlight.length > 1 && currentSTD) {
-    const newFlight = sameFlight.find(f =>
-      f.ScheduledDepartureTime !== currentSTD &&
-      f.CheckInDesk &&
-      isFlightActive(f.ScheduledDepartureTime)
-    );
-
-    if (newFlight) {
-      await client.del(key);
-      console.log(`🔄 Override OBRISAN za ${flightNumber} — novi let (STD: ${newFlight.ScheduledDepartureTime}) ima šalter ${newFlight.CheckInDesk} iz API-ja`);
-      return 'deleted';
+if (isDeparted) {
+  // Reset desk-status override-ova za sve deskove ovog leta
+  const deskValue = data.CheckInDesk || '';
+  if (deskValue) {
+    const desks = deskValue.split(',').map((d: string) => d.trim());
+    for (const desk of desks) {
+      if (desk) {
+        try {
+          await redis.del(`desk-status:${desk}`);
+          console.log(`[auto-reset] ✅ desk-status:${desk} obrisan za departed let ${flightNumber}`);
+        } catch (err) {
+          console.error(`[auto-reset] ❌ desk-status redis greška za ${desk}:`, err);
+        }
+      }
     }
   }
 
-  await client.hset(key, { CheckInDesk: '__EMPTY__' });
-  await client.expire(key, 21600);
-  console.log(`✅ CheckInDesk → __EMPTY__ za let ${flightNumber} (STD: ${currentSTD ?? 'N/A'})`);
-  return 'emptied';
+  // Reset cijelog override ključa za departed let
+  try {
+    await redis.del(key);
+    console.log(`[auto-reset] ✅ Svi override-ovi obrisani za departed let ${flightNumber}`);
+    results.push({ flightNumber, field: 'CheckInDesk', reason: 'let je departed — full reset' });
+  } catch (err) {
+    console.error(`[auto-reset] ❌ Full reset greška za ${flightNumber}:`, err);
+  }
+  
+  continue; // Preskači dalju obradu ovog leta
 }
 
-export async function resetExpiredCheckInOverrides() {
-  console.log('🔄 Provjeravam override-ove za auto-reset...');
+    console.log(`[auto-reset] Provjera ${flightNumber}: STD=${std}, ETD=${etd}, status="${status}", minsToReset=${minutesUntilCheckInReset(std)}`);
 
-  try {
-    const client = getRedisClient();
-    const keys = await client.keys('override:*');
-    let resetCount = 0;
+    // ── CheckInDesk reset ──────────────────────────────────
+    if (data.CheckInDesk !== undefined) {
+      const { reset, reason } = shouldResetCheckIn(std, status);
+      if (reset) {
+        try {
+          await redis.hdel(key, 'CheckInDesk');
+          console.log(`[auto-reset] ✅ CheckInDesk reset za ${flightNumber}: ${reason}`);
+          results.push({ flightNumber, field: 'CheckInDesk', reason });
 
-    const allFlights = await getAllActiveFlights();
-
-    // PROLAZ 1: Postojeći Redis override ključevi
-    for (const key of keys) {
-      const overrides = await client.hgetall(key);
-      const flightNumber = key.replace('override:', '');
-
-      const flightStatus = await getFlightStatus(flightNumber);
-      const statusLower = (flightStatus || '').toLowerCase();
-
-      const isTerminated =
-        statusLower.includes('departed') || statusLower.includes('poletio') ||
-        statusLower.includes('cancelled') || statusLower.includes('canceled') ||
-        statusLower.includes('otkazan') ||
-        statusLower.includes('diverted') || statusLower.includes('preusmjeren');
-
-      let flightResetCount = 0;
-
-      if (isTerminated) {
-        if (overrides.CheckInDesk !== '__EMPTY__') {
-          const currentSTD = await getFlightScheduledTime(flightNumber);
-          const result = await resolveCheckInReset(client, key, flightNumber, currentSTD, allFlights);
-          if (result !== 'skipped') { resetCount++; flightResetCount++; }
-          if (result === 'deleted') continue;
+          const rem = await redis.hlen(key);
+          if (rem === 0) await redis.del(key);
+        } catch (err) {
+          console.error(`[auto-reset] ❌ CheckInDesk redis greška za ${flightNumber}:`, err);
         }
+      } else {
+        console.log(`[auto-reset] ⏳ CheckInDesk NE resetuje za ${flightNumber}: ${reason}`);
+      }
+    }
 
-        if (overrides.GateNumber && overrides.GateNumber !== '__EMPTY__') {
-          await client.hset(key, { GateNumber: '__EMPTY__' });
-          await client.expire(key, 21600);
-          resetCount++; flightResetCount++;
-          console.log(`✅ GateNumber → __EMPTY__ za let ${flightNumber} (status: ${flightStatus})`);
-        }
-
-        for (const field of ['Terminal', 'StatusEN', 'BaggageReclaim'] as const) {
-          if (overrides[field]) {
-            await client.hdel(key, field);
-            resetCount++; flightResetCount++;
-            console.log(`✅ Auto-resetovan ${field} za let ${flightNumber} (status: ${flightStatus})`);
-          }
-        }
-
-        if (flightResetCount > 0) console.log(`   Resetovano ${flightResetCount} polja za let ${flightNumber}`);
+    // ── GateNumber reset ───────────────────────────────────
+    if (data.GateNumber !== undefined) {
+      let freshData: Record<string, string> = {};
+      try {
+        freshData = await redis.hgetall(key);
+      } catch {
         continue;
       }
+      if (!freshData || freshData.GateNumber === undefined) continue;
 
-      if (overrides.CheckInDesk !== '__EMPTY__') {
-        const scheduledTime = await getFlightScheduledTime(flightNumber);
-        if (scheduledTime && shouldAutoResetCheckIn(scheduledTime)) {
-          const result = await resolveCheckInReset(client, key, flightNumber, scheduledTime, allFlights);
-          if (result !== 'skipped') {
-            resetCount++;
-            console.log(`   T-30min: ${result === 'deleted' ? 'Override obrisan' : '__EMPTY__ postavljen'} za let ${flightNumber}`);
-          }
+      const { reset, reason, usedTime } = shouldResetGate(std, etd, status);
+      if (reset) {
+        try {
+          await redis.hdel(key, 'GateNumber');
+          console.log(`[auto-reset] ✅ GateNumber reset za ${flightNumber} (ref: ${usedTime}): ${reason}`);
+          results.push({ flightNumber, field: 'GateNumber', reason });
+
+          const rem = await redis.hlen(key);
+          if (rem === 0) await redis.del(key);
+        } catch (err) {
+          console.error(`[auto-reset] ❌ GateNumber redis greška za ${flightNumber}:`, err);
         }
+      } else {
+        console.log(`[auto-reset] ⏳ GateNumber NE resetuje za ${flightNumber}: ${reason}`);
       }
     }
-
-    // PROLAZ 2: Letovi iz API-ja koji NEMAJU Redis override key
-    console.log('🔄 Prolaz 2: Letovi bez override-a za T-30min...');
-    try {
-      for (const flight of allFlights) {
-        if (!flight.ScheduledDepartureTime) continue;
-        if (!shouldAutoResetCheckIn(flight.ScheduledDepartureTime)) continue;
-
-        const key = `override:${flight.FlightNumber}`;
-        const existing = await client.hgetall(key).catch(() => ({} as Record<string, string>));
-
-        if (existing.CheckInDesk === '__EMPTY__') continue;
-        if (Object.keys(existing).length > 0) continue;
-
-        const result = await resolveCheckInReset(
-          client, key, flight.FlightNumber, flight.ScheduledDepartureTime, allFlights
-        );
-        if (result !== 'skipped') resetCount++;
-      }
-    } catch (err) {
-      console.error('⚠️ Prolaz 2 nije uspio (non-critical):', err);
-    }
-
-    if (resetCount > 0) {
-      console.log(`✅ Auto-resetovano ukupno ${resetCount} override-ova`);
-    } else {
-      console.log('ℹ️ Nema override-ova za resetovanje');
-    }
-
-    return resetCount;
-  } catch (error) {
-    console.error('Auto-reset error:', error);
-    return 0;
   }
+
+  console.log(`[auto-reset] Završeno — resetovano ${results.length} polja`);
+  return results;
 }
 
-let resetTimer: NodeJS.Timeout | null = null;
+// ─────────────────────────────────────────────
+// Legacy funkcije (zadržano za kompatibilnost)
+// ─────────────────────────────────────────────
 
-export function startAutoResetTimer() {
-  if (resetTimer) clearInterval(resetTimer);
-  resetTimer = setInterval(async () => {
-    await resetExpiredCheckInOverrides();
+let _timerRunning = false;
+let _timerHandle: ReturnType<typeof setInterval> | null = null;
+
+export function isTimerRunning(): boolean {
+  return _timerRunning;
+}
+
+export function startAutoResetTimer(): void {
+  if (_timerRunning) return;
+  _timerRunning = true;
+  console.log('[auto-reset-timer] Timer pokrenut (interval 5min)');
+  _timerHandle = setInterval(async () => {
+    try {
+      await resetExpiredCheckInOverrides();
+    } catch (err) {
+      console.error('[auto-reset-timer] Greška:', err);
+    }
   }, 5 * 60 * 1000);
-  console.log('✅ Auto-reset timer pokrenut (provjera svakih 5 minuta)');
 }
 
-export function stopAutoResetTimer() {
-  if (resetTimer) { clearInterval(resetTimer); resetTimer = null; }
+export function stopAutoResetTimer(): void {
+  if (_timerHandle) clearInterval(_timerHandle);
+  _timerRunning = false;
+  _timerHandle = null;
+  console.log('[auto-reset-timer] Timer zaustavljen');
 }
 
-export function isTimerRunning() {
-  return resetTimer !== null;
+/** Legacy: zadržano za kompatibilnost, nova logika koristi runAutoReset() */
+export async function resetExpiredCheckInOverrides(): Promise<number> {
+  const redis = getRedisClient();
+  let count = 0;
+  const keys = await redis.keys('override:*');
+
+  for (const key of keys) {
+    const data = await redis.hgetall(key);
+    if (!data?.CheckInDesk) continue;
+    count++;
+  }
+  return count;
 }
