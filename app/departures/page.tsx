@@ -201,7 +201,7 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
-const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ']);
+const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ','IZ','LY']);
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? '').trim();

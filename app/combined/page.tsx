@@ -298,6 +298,10 @@ const CHECKIN_OFFSETS: Record<string, number> = {
   "6H": 180,
   "FZ": 180,
   "LS": 150, // <-- dodato
+  "LY": 180, // <-- dodato
+  "IZ": 180, // <-- dodato
+ 
+
 }
 
 function getAutoStatus(flight: Flight): string | null {
@@ -515,26 +519,33 @@ const FlightRow = memo(
     const rowBg    = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
-    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.currentTarget;
-      if (img.dataset.fallback === 'png') {
-        img.src = PLACEHOLDER_IMAGE;
-        img.onerror = null;
-        return;
-      }
-      if (img.dataset.fallback === 'jpg') {
-        img.dataset.fallback = 'png';
-        img.src = `/airlines/${icao}.png`;
-        return;
-      }
-      if (icao) {
-        img.dataset.fallback = 'jpg';
-        img.src = `/airlines/${icao}.jpg`;
-      } else {
-        img.src = PLACEHOLDER_IMAGE;
-        img.onerror = null;
-      }
-    }, [icao])
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  
+  // Prvi fail: probali smo PNG, sad probaj JPG u public/airlines/
+  if (img.dataset.tried === 'png') {
+    img.dataset.tried = 'jpg';
+    img.src = `/airlines/${icao}.jpg`;
+    return;
+  }
+  
+  // Drugi fail: nema ni PNG ni JPG u public/airlines/, idi na Flightware
+  if (img.dataset.tried === 'jpg') {
+    img.dataset.tried = 'flightware';
+    const fwUrl = getFlightawareLogoURL(icao);
+    if (fwUrl) {
+      img.src = fwUrl;
+    } else {
+      img.src = PLACEHOLDER_IMAGE;
+      img.onerror = null;
+    }
+    return;
+  }
+  
+  // Treći fail: nema ni na Flightware, stavi placeholder
+  img.src = PLACEHOLDER_IMAGE;
+  img.onerror = null;
+}, [icao]);
 
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
@@ -582,9 +593,16 @@ const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] fo
           {/* Flight Info */}
           <div className="flex items-center gap-3" style={{ width: "280px" }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-              <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full" onError={onImgErr}
-                decoding="async" loading={index < 9 ? "eager" : "lazy"} fetchPriority={index < 8 ? "high" : "auto"} />
+<img 
+  src={`/airlines/${icao}.png`}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried="png"  // označavamo da smo prvo probali PNG
+  decoding="async" 
+  loading={index < 9 ? "eager" : "lazy"} 
+  fetchPriority={index < 8 ? "high" : "auto"}
+/>
             </div>
             <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
