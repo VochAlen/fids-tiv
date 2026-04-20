@@ -1,0 +1,1024 @@
+'use client';
+
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  Plane,
+  ArrowUpRight,
+  ArrowDownRight,
+  Clock,
+  MapPin,
+  RefreshCw,
+  Home,
+  Edit,
+  Lock,
+  Unlock,
+  Trash2,
+  AlertTriangle,
+  X,
+  ArrowDown
+} from 'lucide-react';
+import type { Flight } from '@/types/flight';
+
+// ==========================================
+// KONFIGURACIJA
+// ==========================================
+const ADMIN_PIN = 'tivatfidsadmin';
+
+// ==========================================
+// POMOĆNE FUNKCIJE
+// ==========================================
+const formatTime = (timeString: string): string => {
+  if (!timeString || timeString.trim() === '') return '--:--';
+  try {
+    const [hours, minutes] = timeString.split(':').map(Number);
+    if (Number.isNaN(hours) || Number.isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return '--:--';
+    const date = new Date();
+    date.setHours(hours, minutes, 0, 0);
+    return date.toLocaleTimeString('sr-Latn-RS', { hour: '2-digit', minute: '2-digit', hour12: false });
+  } catch { return '--:--'; }
+};
+
+const getStatusColor = (status: string): string => {
+  if (!status) return 'text-gray-400';
+  const s = status.toLowerCase();
+  if (s.includes('on time') || s.includes('na vrijeme')) return 'text-green-400';
+  if (s.includes('delay') || s.includes('kasni')) return 'text-yellow-400';
+  if (s.includes('cancel') || s.includes('otkazan')) return 'text-red-400';
+  if (s.includes('board') || s.includes('ukrcaj')) return 'text-blue-400';
+  if (s.includes('departed') || s.includes('poletio')) return 'text-purple-400';
+  return 'text-gray-400';
+};
+
+// ==========================================
+// KOMPONENTA: ADMIN ZONE
+// ==========================================
+interface AdminZoneProps {
+  children: React.ReactNode;
+}
+
+const AdminZone: React.FC<AdminZoneProps> = ({ children }) => {
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [error, setError] = useState('');
+
+  const handleUnlock = () => {
+    if (pinInput === ADMIN_PIN) {
+      setIsUnlocked(true);
+      setError('');
+      setPinInput('');
+    } else {
+      setError('Pogrešna šifra!');
+    }
+  };
+
+  if (isUnlocked) {
+    return (
+      <div className="mt-4 border border-red-500/30 bg-red-500/5 rounded-lg p-4 animate-in fade-in slide-in-from-top-2">
+        <div className="flex justify-between items-center mb-4 border-b border-red-500/20 pb-2">
+          <div className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-2">
+            <Unlock className="w-3 h-3" />
+            Admin Zone (Napredno)
+          </div>
+          <button onClick={() => setIsUnlocked(false)} className="text-xs flex items-center gap-1 text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+            <Lock className="w-3 h-3" /> Zaključaj
+          </button>
+        </div>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 border border-dashed border-white/20 rounded-lg p-6 text-center transition-all hover:border-white/30">
+      <Lock className="w-6 h-6 text-white/20 mx-auto mb-2" />
+      <div className="text-sm text-white/70 mb-3 font-medium">Napredne opcije su zaključane</div>
+      <div className="flex gap-2 justify-center max-w-xs mx-auto">
+        <input
+          type="password"
+          value={pinInput}
+          onChange={(e) => setPinInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleUnlock()}
+          placeholder="Admin PIN"
+          className="flex-1 px-3 py-2 bg-black/30 border border-white/10 rounded text-center text-white placeholder-white/30 focus:outline-none focus:border-red-500 transition-colors"
+        />
+        <button onClick={handleUnlock} className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded text-sm transition-colors">Otključaj</button>
+      </div>
+      {error && <div className="text-red-400 text-xs mt-2">{error}</div>}
+    </div>
+  );
+};
+
+// ==========================================
+// KOMPONENTA: READ ONLY ROW
+// ==========================================
+interface ReadOnlyRowProps {
+  label: string;
+  value: string | undefined;
+  hasOverride: boolean;
+}
+
+const ReadOnlyRow: React.FC<ReadOnlyRowProps> = ({ label, value, hasOverride }) => {
+  return (
+    <div className="flex items-center justify-between py-3 border-b border-white/5 last:border-0 hover:bg-white/[0.02] px-2 -mx-2 rounded transition-colors">
+      <span className="text-white/50 text-sm font-medium w-32">{label}</span>
+      <div className="flex-1 px-4">
+        <span className="text-white font-bold text-lg tracking-wide">{value || '--'}</span>
+      </div>
+      <div>
+        <span className={`text-[10px] px-2 py-0.5 rounded font-medium border ${
+          hasOverride 
+            ? 'bg-orange-500/20 text-orange-300 border-orange-500/30 shadow-[0_0_10px_rgba(249,115,22,0.1)]' 
+            : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
+        }`}>
+          {hasOverride ? 'Ručno postavljeno' : 'API podatak'}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+// ==========================================
+// KOMPONENTA: OVERRIDE CONTROL (Editabilni Red)
+// ==========================================
+interface OverrideControlProps {
+  label: string;
+  currentValue: string | undefined;
+  fieldName: 'GateNumber' | 'CheckInDesk' | 'BaggageReclaim';
+  hasOverride: boolean;
+  flightNumber: string;
+  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+}
+
+const OverrideControl: React.FC<OverrideControlProps> = ({ 
+  label, currentValue, hasOverride, fieldName, flightNumber, onFlightOverride 
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [inputValue, setInputValue] = useState('');
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  useEffect(() => {
+    if (isEditing) setInputValue(currentValue || '');
+  }, [isEditing, currentValue]);
+
+  const handleClear = async () => {
+    if (!confirm(`Vratiti ${label.toLowerCase()} na automatski API podatak?`)) return;
+    setIsUpdating(true);
+    try {
+      await onFlightOverride(flightNumber, fieldName, 'clear');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleStartEdit = () => {
+    setIsEditing(true);
+    setInputValue(currentValue || '');
+  };
+
+  const handleSaveClick = () => {
+    if (!inputValue.trim()) {
+      alert('Polje ne može biti prazno!');
+      return;
+    }
+    setShowConfirm(true);
+  };
+
+  const handleConfirmSave = async () => {
+    setIsUpdating(true);
+    setShowConfirm(false);
+    try {
+      await onFlightOverride(flightNumber, fieldName, 'assign', inputValue);
+      setIsEditing(false);
+    } catch (error) {
+      console.error('Error:', error);
+      alert('Greška pri čuvanju.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  return (
+    <div className="border-b border-white/5 last:border-0 py-2 relative">
+      {/* Display Mode */}
+      {!isEditing && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-2">
+          <div className="flex items-center flex-1">
+             <span className="text-white/50 text-sm font-medium w-32">{label}</span>
+             <div className="flex-1 px-4">
+                <span className={`text-white font-bold text-lg ${hasOverride ? 'text-orange-300' : ''}`}>
+                  {currentValue || <span className="text-white/20 text-base font-normal">Nije postavljeno</span>}
+                </span>
+             </div>
+             <span className={`text-[10px] px-2 py-0.5 rounded font-medium border ${
+              hasOverride 
+                ? 'bg-orange-500/20 text-orange-300 border-orange-500/30' 
+                : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
+            }`}>
+              {hasOverride ? 'Ručno postavljeno' : 'API podatak'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 sm:w-auto w-full sm:justify-end justify-between">
+             {hasOverride && (
+               <button onClick={handleClear} disabled={isUpdating} className="text-xs text-red-400 hover:text-red-300 underline sm:mr-auto mr-0">
+                 Reset
+               </button>
+             )}
+             <button onClick={handleStartEdit} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2">
+               <Edit className="w-3.5 h-3.5" /> Promijeni
+             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Mode */}
+      {isEditing && (
+        <div className="bg-white/5 p-4 rounded-lg border border-white/10 mt-2 animate-in fade-in zoom-in-95 duration-200">
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder="Nova vrijednost..."
+              className="flex-1 px-3 py-2 bg-black/30 border border-white/20 rounded text-white focus:outline-none focus:border-blue-500 font-mono text-center"
+              autoFocus
+              disabled={isUpdating}
+            />
+            <button onClick={() => setIsEditing(false)} className="px-3 py-2 text-white/70 hover:text-white hover:bg-white/10 rounded transition-colors"><X className="w-4 h-4" /></button>
+          </div>
+          <button 
+            onClick={handleSaveClick} 
+            disabled={isUpdating}
+            className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {isUpdating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span className="font-bold">SAČUVAJ IZMJENU</span>}
+          </button>
+          
+          {/* Confirmation Modal */}
+          {showConfirm && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm bg-black/60">
+              <div className="bg-slate-800 p-5 rounded-lg border border-white/10 max-w-sm w-full shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+                <div className="flex items-start gap-3 mb-4">
+                   <AlertTriangle className="w-6 h-6 text-yellow-500 flex-shrink-0 mt-1" />
+                   <div>
+                     <h4 className="text-white font-bold text-sm mb-1">Potvrdite promjenu</h4>
+                     <p className="text-white/70 text-xs">
+                       Postavljate <span className="text-blue-400 font-bold">{label}</span> na vrijednost: <span className="font-mono text-white bg-white/10 px-1 rounded">{inputValue}</span>.
+                     </p>
+                   </div>
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <button onClick={() => setShowConfirm(false)} className="px-3 py-1.5 text-sm bg-white/10 hover:bg-white/20 text-white rounded transition-colors">Otkaži</button>
+                  <button onClick={handleConfirmSave} disabled={isUpdating} className="px-3 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-500 text-white rounded font-bold transition-colors">POTVRDI</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// KOMPONENTE: MANUAL CONTROLS (Admin Only)
+// ==========================================
+interface DeskManualControlProps {
+  deskNumbers: string | undefined;
+  flightNumber?: string;
+}
+
+const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flightNumber }) => {
+  const [savedStatuses, setSavedStatuses] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!deskNumbers) return;
+    const desks = deskNumbers.split(',').map(d => d.trim());
+    desks.forEach(async (desk) => {
+      try {
+        const res = await fetch(`/api/desk-status/${desk}`);
+        const data = await res.json();
+        if (data.status) setSavedStatuses(prev => ({ ...prev, [desk]: data.status }));
+      } catch {}
+    });
+  }, [deskNumbers]);
+
+  const handleAction = async (desk: string, action: string) => {
+    if (!confirm(`Force ${action.toUpperCase()} za šalter ${desk}?`)) return;
+    setIsLoading(true);
+    try {
+      const body: any = { deskNumber: desk, action };
+      if (flightNumber) body.flightNumber = flightNumber;
+      await fetch('/api/admin/desk-status-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (action === 'clear') {
+        setSavedStatuses(prev => { const next = { ...prev }; delete next[desk]; return next; });
+      } else {
+        setSavedStatuses(prev => ({ ...prev, [desk]: action }));
+      }
+    } catch (error) { console.error('Desk status error:', error); } 
+    finally { setIsLoading(false); }
+  };
+
+  if (!deskNumbers) return null;
+  const desks = deskNumbers.split(',').map(d => d.trim());
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-2"><Clock className="w-3 h-3"/> Manual Check-in Override</h4>
+      <div className="space-y-2">
+        {desks.map(desk => {
+          const status = savedStatuses[desk];
+          return (
+            <div key={desk} className="flex items-center justify-between bg-black/20 p-3 rounded-lg border border-white/10">
+              <span className="text-white font-bold">Š{desk}</span>
+              <div className="flex gap-2">
+                {!status ? (
+                  <>
+                    <button onClick={() => handleAction(desk, 'open')} disabled={isLoading} className="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs font-bold rounded transition-colors">FORCE OPEN</button>
+                    <button onClick={() => handleAction(desk, 'closed')} disabled={isLoading} className="px-3 py-1 bg-red-700 hover:bg-red-600 text-white text-xs font-bold rounded transition-colors">FORCE CLOSE</button>
+                  </>
+                ) : (
+                  <>
+                    <span className={`text-xs px-2 py-1 rounded ${status === 'open' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'}`}>{status.toUpperCase()}</span>
+                    <button onClick={() => handleAction(desk, 'clear')} disabled={isLoading} className="text-xs text-white/50 hover:text-white underline transition-colors">Reset</button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+interface GateManualControlProps {
+  gateNumber: string | undefined;
+}
+
+const GateManualControl: React.FC<GateManualControlProps> = ({ gateNumber }) => {
+  const [savedStatus, setSavedStatus] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!gateNumber) return;
+    fetch(`/api/gate-status/${gateNumber}`)
+      .then(res => res.json())
+      .then(data => { if (data.status) setSavedStatus(data.status); })
+      .catch(() => {});
+  }, [gateNumber]);
+
+  const handleAction = async (action: string) => {
+    if (!confirm(`Gate ${gateNumber}: Force ${action.toUpperCase()}?`)) return;
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/gate-status-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gateNumber, action }),
+      });
+      setSavedStatus(action === 'clear' ? null : action);
+    } finally { setIsLoading(false); }
+  };
+
+  if (!gateNumber) return null;
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-2"><Plane className="w-3 h-3"/> Manual Gate Override</h4>
+      <div className="flex items-center justify-between bg-black/20 p-3 rounded-lg border border-white/10">
+        <div className="flex items-center gap-3">
+          <span className="text-white font-bold">Gate {gateNumber}</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${!savedStatus ? 'bg-gray-700 text-gray-300' : (savedStatus === 'open' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400')}`}>
+            {(!savedStatus ? 'AUTO' : savedStatus.toUpperCase())}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => handleAction('open')} disabled={isLoading} className="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs font-bold rounded transition-colors">OPEN</button>
+          <button onClick={() => handleAction('closed')} disabled={isLoading} className="px-3 py-1 bg-red-700 hover:bg-red-600 text-white text-xs font-bold rounded transition-colors">CLOSE</button>
+          {savedStatus && <button onClick={() => handleAction('clear')} disabled={isLoading} className="px-2 py-1 text-xs text-white/50 hover:text-white underline transition-colors">AUTO</button>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface DeskClassControlProps {
+  deskNumbers: string | undefined;
+}
+
+const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
+  const [savedClasses, setSavedClasses] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!deskNumbers) return;
+    const desks = deskNumbers.split(',').map(d => d.trim());
+    desks.forEach(async (desk) => {
+      try {
+        const res = await fetch(`/api/desk-class/${desk}`);
+        const data = await res.json();
+        if (data.classType) setSavedClasses(prev => ({ ...prev, [desk]: data.classType }));
+      } catch {}
+    });
+  }, [deskNumbers]);
+
+  const handleSave = async (desk: string, type: string) => {
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, classType: type, action: 'assign' }),
+      });
+      setSavedClasses(prev => ({ ...prev, [desk]: type }));
+    } finally { setIsLoading(false); }
+  };
+
+  const handleClear = async (desk: string) => {
+    setIsLoading(true);
+    try {
+      await fetch('/api/admin/desk-class-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
+      });
+      setSavedClasses(prev => { const next = { ...prev }; delete next[desk]; return next; });
+    } finally { setIsLoading(false); }
+  };
+
+  if (!deskNumbers) return null;
+  const desks = deskNumbers.split(',').map(d => d.trim());
+  const options = ['BUSINESS', 'PREMIUM', 'ECONOMY', 'PRIORITY'];
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-2"><MapPin className="w-3 h-3"/> Klasa Saltera</h4>
+      <div className="space-y-2">
+        {desks.map(desk => (
+          <div key={desk} className="bg-black/20 p-3 rounded-lg border border-white/10">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-white text-sm font-bold">Š{desk}</span>
+              {savedClasses[desk] && (
+                <button onClick={() => handleClear(desk)} disabled={isLoading} className="text-xs text-red-400 hover:text-red-300 underline transition-colors">Ukloni ({savedClasses[desk]})</button>
+              )}
+            </div>
+            {!savedClasses[desk] && (
+              <div className="flex flex-wrap gap-1">
+                {options.map(opt => (
+                  <button key={opt} onClick={() => handleSave(desk, opt)} disabled={isLoading} className="px-2 py-1 text-[10px] bg-white/5 border border-white/10 hover:bg-white/10 rounded text-white/80 transition-colors">
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ==========================================
+// LOGIKA ZA OBRADU LETOVA (Iste kao prije)
+// ==========================================
+const removeDuplicates = (arr: string[]): string[] => {
+  const seen: Record<string, boolean> = {};
+  return arr.filter((item) => { if (seen[item]) return false; seen[item] = true; return true; });
+};
+
+const consolidateFlights = (flights: Flight[]): Flight[] => {
+  const flightMap = new Map<string, Flight>();
+  flights.forEach((flight) => {
+    const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}`;
+    if (flightMap.has(baseKey)) {
+      const existingFlight = flightMap.get(baseKey)!;
+      if (flight.GateNumber && existingFlight.GateNumber) {
+        existingFlight.GateNumber = removeDuplicates([...existingFlight.GateNumber.split(',').map(g => g.trim()), ...flight.GateNumber.split(',').map(g => g.trim())]).join(', ');
+      } else if (flight.GateNumber) { existingFlight.GateNumber = flight.GateNumber; }
+      if (flight.CheckInDesk && existingFlight.CheckInDesk) {
+        existingFlight.CheckInDesk = removeDuplicates([...existingFlight.CheckInDesk.split(',').map(d => d.trim()), ...flight.CheckInDesk.split(',').map(d => d.trim())]).join(', ');
+      } else if (flight.CheckInDesk) { existingFlight.CheckInDesk = flight.CheckInDesk; }
+      if (!existingFlight.AirlineName && flight.AirlineName) existingFlight.AirlineName = flight.AirlineName;
+      if (!existingFlight.AirlineCode && flight.AirlineCode) existingFlight.AirlineCode = flight.AirlineCode;
+      if (!existingFlight.StatusEN && flight.StatusEN) existingFlight.StatusEN = flight.StatusEN;
+      if (!existingFlight.StatusMN && flight.StatusMN) existingFlight.StatusMN = flight.StatusMN;
+    } else {
+      flightMap.set(baseKey, { ...flight });
+    }
+  });
+  return Array.from(flightMap.values());
+};
+
+const generateFlightKey = (flight: Flight, index: number): string => {
+  const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime || 'no-time'}`;
+  const additionalKeys = [flight.GateNumber, flight.CheckInDesk, flight.Terminal, flight.AirlineCode, index.toString()].filter(Boolean).join('-');
+  return `${baseKey}-${additionalKeys}`.replace(/\s+/g, '-');
+};
+
+interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
+
+// ==========================================
+// KOMPONENTA: FLIGHT CARD
+// ==========================================
+interface FlightCardProps {
+  flight: Flight & { _hasOverride?: boolean; _overrideFields?: Record<string, string> };
+  flightKey: string;
+  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+  onClearOverrides: (flightNumber: string) => Promise<void>;
+}
+
+const FlightCard: React.FC<FlightCardProps> = ({ 
+  flight, 
+  flightKey, 
+  onFlightOverride,
+  onClearOverrides 
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const isDeparture = flight.FlightType === 'departure';
+  const statusColor = getStatusColor(flight.StatusEN || '');
+  const overrideFields = (flight as any)._overrideFields || {};
+  const hasCheckInOverride = overrideFields['CheckInDesk'] !== undefined;
+  const hasGateOverride = overrideFields['GateNumber'] !== undefined;
+  const hasStatusOverride = overrideFields['StatusEN'] !== undefined;
+  const hasTerminalOverride = overrideFields['Terminal'] !== undefined;
+  const hasBaggageOverride = overrideFields['BaggageReclaim'] !== undefined;
+
+  return (
+    <div className={`bg-white/5 rounded-xl overflow-hidden transition-all duration-300 border ${expanded ? 'border-white/20 shadow-xl shadow-black/20' : 'border-white/10'} hover:border-white/20`}>
+      {/* Header */}
+      <div 
+        className="p-4 sm:p-5 cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <div className="flex items-center gap-4">
+          <div className={`p-2 rounded-lg ${isDeparture ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+            {isDeparture ? <ArrowUpRight className="w-5 h-5" /> : <ArrowDownRight className="w-5 h-5" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <h2 className="text-xl font-bold text-white">{flight.FlightNumber}</h2>
+            </div>
+            <div className="text-sm text-white/60 font-medium">
+              {flight.AirlineName}
+              <span className="mx-1.5 text-white/20">•</span>
+              {isDeparture ? (flight.DestinationCityName || flight.DestinationAirportName) : 'Tivat (TIV)'}
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-6 w-full sm:w-auto justify-between sm:justify-end">
+          <div className="text-right">
+            <div className="text-2xl font-bold text-white tabular-nums tracking-tight">
+              {formatTime(flight.ScheduledDepartureTime)}
+            </div>
+          </div>
+          
+          <div className="text-right sm:w-32">
+            <div className={`text-sm font-bold px-2 py-1 rounded bg-white/5 border border-white/10 inline-block ${statusColor}`}>
+              {flight.StatusEN || 'Unknown'}
+            </div>
+          </div>
+          
+          <div className={`transition-transform duration-300 text-white/40 ${expanded ? 'rotate-180' : ''}`}>
+             <ArrowDownRight className={`w-5 h-5 ${expanded ? 'rotate-90' : ''}`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Expanded List Content */}
+      {expanded && (
+        <div className="border-t border-white/10 bg-black/20 p-0 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="p-4 sm:p-6">
+            <div className="max-w-3xl mx-auto space-y-0">
+              
+              {/* Check-in Desk (Editabilno) */}
+              {isDeparture && (
+                <OverrideControl
+                  label="Check-in šalter"
+                  currentValue={flight.CheckInDesk}
+                  hasOverride={hasCheckInOverride}
+                  fieldName="CheckInDesk"
+                  flightNumber={flight.FlightNumber}
+                  onFlightOverride={onFlightOverride}
+                />
+              )}
+
+              {/* Gate (Editabilno) */}
+              {isDeparture && (
+                <OverrideControl
+                  label="Gate"
+                  currentValue={flight.GateNumber}
+                  hasOverride={hasGateOverride}
+                  fieldName="GateNumber"
+                  flightNumber={flight.FlightNumber}
+                  onFlightOverride={onFlightOverride}
+                />
+              )}
+
+              {/* Terminal (Read Only) */}
+              <ReadOnlyRow 
+                label="Terminal" 
+                value={flight.Terminal} 
+                hasOverride={hasTerminalOverride} 
+              />
+
+              {/* Status (Read Only) */}
+              <ReadOnlyRow 
+                label="Status" 
+                value={flight.StatusEN} 
+                hasOverride={hasStatusOverride} 
+              />
+
+              {/* Baggage (Read Only) */}
+              {!isDeparture && (
+                <ReadOnlyRow 
+                  label="Baggage Belt" 
+                  value={flight.BaggageReclaim} 
+                  hasOverride={hasBaggageOverride} 
+                />
+              )}
+            </div>
+
+            {/* Admin Zone - Sada sadrži sve napredne kontrole */}
+            <div className="mt-6 pt-6 border-t border-white/10">
+              <AdminZone>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="col-span-1 space-y-4">
+                    <DeskManualControl deskNumbers={flight.CheckInDesk} flightNumber={flight.FlightNumber} />
+                  </div>
+                  <div className="col-span-1 space-y-4">
+                    <GateManualControl gateNumber={flight.GateNumber} />
+                    <DeskClassControl deskNumbers={flight.CheckInDesk} />
+                  </div>
+                  <div className="col-span-1 flex flex-col justify-center">
+                     <div className="text-xs text-red-400/70 mb-2 uppercase tracking-widest font-bold">Danger Zone</div>
+                     <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (confirm(`UKLONITI SVE RUČNE PROMJENE za let ${flight.FlightNumber}?`)) {
+                          await onClearOverrides(flight.FlightNumber);
+                        }
+                      }}
+                      className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg font-medium transition-all hover:border-red-500/50 flex items-center justify-center gap-2 group"
+                      type="button"
+                    >
+                      <Trash2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                      Resetuj sve na API podatak
+                    </button>
+                    <p className="text-[10px] text-white/30 mt-2 text-center leading-tight">
+                      Ovo će ukloniti sve ručne postavke (check-in, gate, klasu) za ovaj let.
+                    </p>
+                  </div>
+                </div>
+              </AdminZone>
+            </div>
+
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// GLAVNA ADMIN KOMPONENTA
+// ==========================================
+export default function AdminFlightsPage() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [flights, setFlights] = useState<FlightsData>({ departures: [], arrivals: [] });
+  const [lastUpdated, setLastUpdated] = useState<string>('');
+  const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');
+  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'all' | 'departures' | 'arrivals'>('all');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const loadOverrides = useCallback(async (): Promise<Record<string, any>> => {
+    try {
+      const response = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('Error loading overrides:', error);
+      return {};
+    }
+  }, []);
+  
+  const mapOverrideValue = (val: string) => val === '__EMPTY__' ? '' : val;
+
+  const loadFlights = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      setRefreshing(true);
+      setError(null);
+      
+      const [flightsResponse, overridesData] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        }),
+        loadOverrides()
+      ]);
+      
+      if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
+      const data = await flightsResponse.json();
+
+      const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
+        const consolidated = consolidateFlights(flightArray);
+        const seen: Record<string, boolean> = {};
+        return consolidated.filter((flight) => {
+          const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
+          if (seen[uniqueId]) return false;
+          seen[uniqueId] = true;
+          return true;
+        });
+      };
+
+      const addOverrideFlags = (flightList: Flight[]) => {
+        return flightList.map((flight) => {
+          const flightOverrides = overridesData[flight.FlightNumber] || {};
+          const mappedOverrides: Record<string, string> = {};
+          Object.entries(flightOverrides).forEach(([k, v]) => {
+            mappedOverrides[k] = mapOverrideValue(v as string);
+          });
+          return {
+            ...flight,
+            _hasOverride: Object.keys(mappedOverrides).length > 0,
+            _overrideFields: mappedOverrides,
+          };
+        });
+      };
+
+      const departures = removeDuplicatesAndConsolidate(addOverrideFlags(data.departures || []));
+      const arrivals = removeDuplicatesAndConsolidate(addOverrideFlags(data.arrivals || []));
+
+      // Auto-reset logic
+      const resetDeparted = (list: Flight[]) => list.filter(f => {
+        const s = (f.StatusEN || '').toLowerCase();
+        return (s.includes('departed') || s.includes('poletio')) && (f as any)._hasOverride;
+      });
+
+      const allDeparted = [...resetDeparted(departures), ...resetDeparted(arrivals)];
+      if (allDeparted.length > 0) {
+        console.log(`Auto-resetting ${allDeparted.length} flights...`);
+        allDeparted.forEach(f => {
+           fetch('/api/admin/auto-reset-departed', {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ 
+               flightNumber: f.FlightNumber,
+               deskNumber: f.CheckInDesk?.split(',')[0],
+               gateNumber: f.GateNumber?.split(',')[0] 
+             }),
+           }).catch(e => console.error('Auto-reset failed', e));
+        });
+      }
+      
+      setFlights({ departures, arrivals });
+      setLastUpdated(data.lastUpdated || new Date().toISOString());
+      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
+      
+    } catch (error) {
+      console.error('Error loading flights:', error);
+      setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
+      setFlights({ departures: [], arrivals: [] });
+      setSystemStatus('offline');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [loadOverrides]);
+
+  const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
+    try {
+      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const allOverrides = await overridesRes.json();
+      const flightOverrides = allOverrides[flightNumber] || {};
+      
+      await Promise.all(Object.keys(flightOverrides).map(field =>
+        fetch('/api/admin/flight-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+        })
+      ));
+      
+      await loadFlights(true);
+    } catch (error) {
+      alert('Greška pri poništavanju.');
+    }
+  }, [loadFlights]);
+
+  // Global Clear function
+  const handleClearAllFlightsOverrides = useCallback(async () => {
+    if (!confirm('Da li ste sigurni da želite ukloniti SVE override-ove za SVE letove? Ova akcija je nepovratna!')) return;
+    
+    try {
+      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      const allOverrides = await overridesRes.json();
+      
+      const clearPromises = Object.entries(allOverrides).flatMap(([flightNumber, fields]) =>
+        Object.keys(fields as Record<string, string>).map(field =>
+          fetch('/api/admin/flight-override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+          })
+        )
+      );
+      
+      await Promise.all(clearPromises);
+      await loadFlights(true);
+      alert('Svi override-ovi su uspješno obrisani!');
+    } catch (error) {
+      console.error('Error clearing all overrides:', error);
+      alert('Greška pri brisanju svih override-ova');
+    }
+  }, [loadFlights]);
+
+  const handleFlightOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
+    try {
+      const response = await fetch('/api/admin/flight-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flightNumber, field, action, value }),
+      });
+      if (!response.ok) throw new Error('Greška pri ažuriranju');
+      await loadFlights(true);
+    } catch (error) {
+      console.error('Override error:', error);
+      throw error;
+    }
+  }, [loadFlights]);
+
+  useEffect(() => { loadFlights(); }, [loadFlights]);
+  
+  const handleRefresh = useCallback(() => { loadFlights(true); }, [loadFlights]);
+  const handleLogout = useCallback(async () => {
+    try { await fetch('/api/admin/logout', { method: 'POST' }); } catch {}
+    finally { router.push('/admin/login'); }
+  }, [router]);
+
+  const getFilteredFlights = useMemo(() => {
+    let filtered: Flight[] = activeTab === 'all' ? [...flights.departures, ...flights.arrivals] : activeTab === 'departures' ? flights.departures : flights.arrivals;
+    if (searchTerm) {
+      const term = searchTerm.toLowerCase();
+      filtered = filtered.filter((f) => f.FlightNumber?.toLowerCase().includes(term) || f.AirlineName?.toLowerCase().includes(term) || f.DestinationCityName?.toLowerCase().includes(term));
+    }
+    return filtered.sort((a, b) => (a.ScheduledDepartureTime || '00:00').localeCompare(b.ScheduledDepartureTime || '00:00'));
+  }, [activeTab, flights, searchTerm]);
+
+  const today = useMemo(() => new Date().toLocaleDateString('sr-Latn-RS', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), []);
+
+  return (
+    <>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white font-sans selection:bg-blue-500/30">
+        <div className="max-w-5xl mx-auto p-4 md:p-8">
+          
+          {/* Header */}
+          <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 pb-6 border-b border-white/10">
+            <div className="flex items-center gap-4">
+              <Link href="/admin" className="p-2 bg-white/5 rounded-lg hover:bg-white/10 transition-colors text-white/70">
+                <Home className="w-5 h-5" />
+              </Link>
+              <div>
+                <h1 className="text-2xl md:text-3xl font-bold tracking-tight flex items-center gap-3">
+                  Tivat FIDS — Red letenja
+                </h1>
+                <div className="text-white/50 text-sm mt-1 flex items-center gap-4">
+                  <span>{today}</span>
+                  <span className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${systemStatus === 'online' ? 'bg-green-500/10 text-green-400' : 'bg-yellow-500/10 text-yellow-400'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${systemStatus === 'online' ? 'bg-green-500' : 'bg-yellow-500'}`}></span>
+                    {systemStatus.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-3 w-full md:w-auto">
+              <div className="relative flex-1 md:w-64">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-white/20 rounded-full" />
+                <input 
+                  type="text" 
+                  placeholder="Pretraga..." 
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:bg-white/10 transition-all placeholder:text-white/20"
+                />
+              </div>
+              
+              {/* Dugme za skrolovanje do dna */}
+              <button 
+                  onClick={() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })}
+                  className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/10 relative group"
+                  title="Idi na dno"
+              >
+                  <ArrowDown className="w-5 h-5 text-white/70" />
+              </button>
+
+              {/* Global Clear All Button */}
+              <button 
+                  onClick={handleClearAllFlightsOverrides} 
+                  className="p-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 rounded-lg transition-colors border border-orange-500/20 relative group"
+                  title="Očisti sve override-ove za sve letove"
+              >
+                  <Trash2 className="w-5 h-5" />
+              </button>
+
+              <button onClick={handleRefresh} disabled={refreshing} className="p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/10 relative group">
+                <RefreshCw className={`w-5 h-5 text-white/70 ${refreshing ? 'animate-spin' : ''}`} />
+              </button>
+              <button onClick={handleLogout} className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg transition-colors border border-red-500/20 text-sm font-medium">
+                Odjava
+              </button>
+            </div>
+          </header>
+
+          {/* Tabs */}
+          <div className="flex gap-1 p-1 bg-white/5 rounded-lg border border-white/10 mb-8 w-fit">
+            {(['all', 'departures', 'arrivals'] as const).map((tab) => (
+              <button 
+                key={tab} 
+                onClick={() => setActiveTab(tab)}
+                className={`px-6 py-2 rounded-md text-sm font-medium transition-all ${
+                  activeTab === tab 
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' 
+                    : 'text-white/50 hover:text-white hover:bg-white/5'
+                }`}
+                type="button"
+              >
+                {tab === 'all' ? `Svi letovi` : tab === 'departures' ? 'Polasci' : 'Dolasci'}
+              </button>
+            ))}
+          </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-3 text-red-400">
+              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {/* Flights List */}
+          <div className="space-y-3">
+            {loading ? (
+              <div className="space-y-3">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="h-28 bg-white/5 rounded-xl animate-pulse border border-white/5" />
+                ))}
+              </div>
+            ) : getFilteredFlights.length === 0 ? (
+              <div className="text-center py-20 text-white/30">
+                <Plane className="w-16 h-16 mx-auto mb-4 opacity-20" />
+                <p>Nema letova za prikaz.</p>
+              </div>
+            ) : (
+              getFilteredFlights.map((flight, index) => (
+                <FlightCard 
+                  key={generateFlightKey(flight, index)} 
+                  flight={flight as any} 
+                  flightKey={generateFlightKey(flight, index)} 
+                  onFlightOverride={handleFlightOverride}
+                  onClearOverrides={handleClearAllOverrides}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+      
+      {/* GLOBAL STYLES ZA SCROLL */}
+      <style jsx global>{`
+        /* Omogući scroll na cijeloj stranici */
+        html, body {
+          overflow-y: auto !important;
+          overflow-x: hidden !important;
+          height: 100% !important;
+        }
+        
+        body {
+          min-height: 100vh;
+          position: relative;
+        }
+        
+        /* Osiguraj da glavni container može rasti */
+        #__next, .min-h-screen {
+          min-height: 100vh !important;
+          height: auto !important;
+          overflow-y: visible !important;
+          display: block !important;
+        }
+      `}</style>
+    </>
+  );
+}
