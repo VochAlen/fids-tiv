@@ -201,29 +201,43 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
-const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ','IZ','LY']);
+const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ', 'IZ', 'LY']);
+const EXTRA_EARLY_CHECKIN_AIRLINES = new Set(['LS']); // 150 min
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? '').trim();
   if (status && status !== '-') return null;
+  
   const scheduled = parseFlightTimeToDate(flight.ScheduledDepartureTime);
   if (!scheduled) return null;
+  
   const referenceTime = parseFlightTimeToDate(flight.EstimatedDepartureTime) ?? scheduled;
   const now = Date.now();
   const minsToRef = (referenceTime.getTime() - now) / 60_000;
   const minsToSTD = (scheduled.getTime() - now) / 60_000;
+  
   if (minsToRef < -5) return null;
   if (minsToRef <= 5)  return 'Close';
   if (minsToRef <= 10) return 'Final Call';
   if (minsToRef <= 30) return 'Go to Gate';
+  
   if (minsToSTD > 30) {
     const iata = (flight.FlightNumber ?? '').replace(/\s/g, '').substring(0, 2).toUpperCase();
-    const checkInMinutesOffset = EARLY_CHECKIN_AIRLINES.has(iata) ? 180 : 120;
+    
+    let checkInMinutesOffset = 120; // default
+    
+    if (EXTRA_EARLY_CHECKIN_AIRLINES.has(iata)) {
+      checkInMinutesOffset = 150; // 150 min prije
+    } else if (EARLY_CHECKIN_AIRLINES.has(iata)) {
+      checkInMinutesOffset = 180; // 180 min prije
+    }
+    
     const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000));
     const hh = String(checkInDate.getHours()).padStart(2, '0');
     const mm = String(checkInDate.getMinutes()).padStart(2, '0');
     return `Check In at ${hh}:${mm}`;
   }
+  
   return null;
 }
 
@@ -392,9 +406,16 @@ const FlightRow = memo(
           {/* Flight Info */}
           <div className="flex items-center gap-3" style={{ width: '280px' }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-              <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full" onError={onImgErr}
-                decoding="async" loading={index < 9 ? 'eager' : 'lazy'} />
+<img 
+  src={`/airlines/${icao}.png`}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried="png"  // označavamo da smo prvo probali PNG
+  decoding="async" 
+  loading={index < 9 ? "eager" : "lazy"} 
+  fetchPriority={index < 8 ? "high" : "auto"}
+/>
             </div>
             <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
