@@ -1,0 +1,1100 @@
+'use client';
+
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  Plane,
+  ArrowUpRight,
+  ArrowDownRight,
+  Clock,
+  RefreshCw,
+  Calendar,
+  Search,
+  ChevronDown,
+  LogOut,
+  Home,
+  Save,
+  Trash2,
+  AlertTriangle,
+  XCircle,
+  CheckCircle,
+  AlertCircle,
+  Plus,
+  X,
+} from 'lucide-react';
+import type { Flight } from '@/types/flight';
+
+// ─────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────
+
+const formatTime = (t: string): string => {
+  if (!t || !t.trim()) return '--:--';
+  try {
+    const [h, m] = t.split(':').map(Number);
+    if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return '--:--';
+    return new Date(0, 0, 0, h, m).toLocaleTimeString('sr-Latn-RS', {
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  } catch { return '--:--'; }
+};
+
+const STATUS_META: Record<string, { label: string; color: string; bg: string; icon: React.ReactNode }> = {
+  ontime:   { label: 'Na vrijeme',  color: '#3B6D11', bg: '#EAF3DE', icon: <CheckCircle size={13} /> },
+  delayed:  { label: 'Kasni',       color: '#854F0B', bg: '#FAEEDA', icon: <AlertCircle size={13} /> },
+  boarding: { label: 'Ukrcaj',      color: '#185FA5', bg: '#E6F1FB', icon: <Plane size={13} /> },
+  departed: { label: 'Poletio',     color: '#5F5E5A', bg: '#F1EFE8', icon: <ArrowUpRight size={13} /> },
+  cancelled:{ label: 'Otkazan',     color: '#A32D2D', bg: '#FCEBEB', icon: <XCircle size={13} /> },
+  diverted: { label: 'Preusmjeren', color: '#444441', bg: '#D3D1C7', icon: <AlertTriangle size={13} /> },
+};
+
+const resolveStatusKey = (s: string): string => {
+  const l = (s || '').toLowerCase();
+  if (l.includes('on time') || l.includes('na vrijeme')) return 'ontime';
+  if (l.includes('delay') || l.includes('kasni'))        return 'delayed';
+  if (l.includes('board') || l.includes('ukrcaj'))       return 'boarding';
+  if (l.includes('depart') || l.includes('poletio'))     return 'departed';
+  if (l.includes('cancel') || l.includes('otkazan'))     return 'cancelled';
+  if (l.includes('divert') || l.includes('preusmjer'))   return 'diverted';
+  return 'ontime';
+};
+
+const removeDuplicates = (arr: string[]) => [...new Set(arr)];
+
+const consolidateFlights = (flights: Flight[]): Flight[] => {
+  const map = new Map<string, Flight>();
+  flights.forEach((f) => {
+    const key = `${f.FlightNumber}-${f.ScheduledDepartureTime}`;
+    if (map.has(key)) {
+      const e = map.get(key)!;
+      if (f.GateNumber && e.GateNumber)
+        e.GateNumber = removeDuplicates([...e.GateNumber.split(','), ...f.GateNumber.split(',')].map(x => x.trim())).join(', ');
+      else if (f.GateNumber) e.GateNumber = f.GateNumber;
+      if (f.CheckInDesk && e.CheckInDesk)
+        e.CheckInDesk = removeDuplicates([...e.CheckInDesk.split(','), ...f.CheckInDesk.split(',')].map(x => x.trim())).join(', ');
+      else if (f.CheckInDesk) e.CheckInDesk = f.CheckInDesk;
+    } else { map.set(key, { ...f }); }
+  });
+  return [...map.values()];
+};
+
+const mapOverrideValue = (v: string) => (v === '__EMPTY__' ? '' : v);
+
+// ─────────────────────────────────────────────
+// StatusPill
+// ─────────────────────────────────────────────
+
+const StatusPill: React.FC<{ status: string }> = ({ status }) => {
+  const key = resolveStatusKey(status);
+  const meta = STATUS_META[key] ?? STATUS_META.ontime;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '3px 10px', borderRadius: 20,
+      fontSize: 11, fontWeight: 500,
+      background: meta.bg, color: meta.color,
+    }}>
+      {meta.icon} {meta.label}
+    </span>
+  );
+};
+
+// ─────────────────────────────────────────────
+// InlineEditInput – reusable small input+confirm
+// ─────────────────────────────────────────────
+
+const InlineEditInput: React.FC<{
+  placeholder: string;
+  onSave: (val: string) => void;
+  onCancel: () => void;
+}> = ({ placeholder, onSave, onCancel }) => {
+  const [val, setVal] = useState('');
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+      <input
+        autoFocus
+        value={val}
+        onChange={e => setVal(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') onSave(val.trim()); if (e.key === 'Escape') onCancel(); }}
+        placeholder={placeholder}
+        style={{
+          height: 30, padding: '0 10px', fontSize: 13,
+          borderRadius: 6, border: '0.5px solid var(--color-border-secondary)',
+          background: 'var(--color-background-secondary)',
+          color: 'var(--color-text-primary)', width: 80, outline: 'none',
+        }}
+      />
+      <button
+        onClick={() => onSave(val.trim())}
+        style={{
+          height: 30, padding: '0 12px', fontSize: 12, fontWeight: 500,
+          borderRadius: 6, border: '0.5px solid var(--color-border-info)',
+          background: 'var(--color-background-info)', color: 'var(--color-text-info)', cursor: 'pointer',
+        }}
+      >Spremi</button>
+      <button
+        onClick={onCancel}
+        style={{
+          height: 30, padding: '0 10px', fontSize: 12,
+          borderRadius: 6, border: '0.5px solid var(--color-border-tertiary)',
+          background: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer',
+        }}
+      >×</button>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// Chip
+// ─────────────────────────────────────────────
+
+const Chip: React.FC<{
+  label: string;
+  isOverride?: boolean;
+  onRemove?: () => void;
+  color?: 'amber' | 'blue' | 'default';
+}> = ({ label, isOverride, onRemove, color = 'default' }) => {
+  const colors: Record<string, { bg: string; text: string; border: string }> = {
+    amber:   { bg: '#FAEEDA', text: '#854F0B', border: '#EF9F27' },
+    blue:    { bg: '#E6F1FB', text: '#185FA5', border: '#85B7EB' },
+    default: { bg: 'var(--color-background-secondary)', text: 'var(--color-text-primary)', border: 'var(--color-border-secondary)' },
+  };
+  const c = isOverride ? (color === 'blue' ? colors.blue : colors.amber) : colors.default;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '4px 10px', borderRadius: 6, fontSize: 13, fontWeight: 500,
+      background: c.bg, color: c.text, border: `0.5px solid ${c.border}`,
+    }}>
+      {label}
+      {onRemove && (
+        <button onClick={onRemove} style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          color: 'inherit', opacity: 0.6, padding: '0 1px', lineHeight: 1, fontSize: 13,
+        }}>×</button>
+      )}
+    </span>
+  );
+};
+
+// ─────────────────────────────────────────────
+// StatusControl
+// ─────────────────────────────────────────────
+
+const QUICK_STATUSES = [
+  { value: 'On Time',   label: 'Na vrijeme',  key: 'ontime' },
+  { value: 'Delayed',   label: 'Kasni',        key: 'delayed' },
+  { value: 'Boarding',  label: 'Ukrcaj',       key: 'boarding' },
+  { value: 'Departed',  label: 'Poletio',      key: 'departed' },
+  { value: 'Cancelled', label: 'Otkazan',      key: 'cancelled' },
+  { value: 'Diverted',  label: 'Preusmjeren',  key: 'diverted' },
+];
+
+const StatusControl: React.FC<{
+  currentStatus: string;
+  flightNumber: string;
+  onOverride: (field: string, action: string, value?: string) => Promise<void>;
+}> = ({ currentStatus, flightNumber, onOverride }) => {
+  const [busy, setBusy] = useState(false);
+  const current = resolveStatusKey(currentStatus);
+
+  const handle = async (value: string) => {
+    setBusy(true);
+    try { await onOverride('StatusEN', 'assign', value); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Status</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {QUICK_STATUSES.map(s => {
+          const isActive = current === s.key;
+          const meta = STATUS_META[s.key];
+          return (
+            <button
+              key={s.value}
+              onClick={() => handle(s.value)}
+              disabled={busy || isActive}
+              style={{
+                padding: '4px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                border: isActive ? `1.5px solid ${meta.color}` : '0.5px solid var(--color-border-tertiary)',
+                background: isActive ? meta.bg : 'var(--color-background-secondary)',
+                color: isActive ? meta.color : 'var(--color-text-secondary)',
+                cursor: isActive ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, transition: 'all 0.12s',
+              }}
+            >{s.label}</button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// DeskControl  (NO manual open/close)
+// ─────────────────────────────────────────────
+
+const DeskControl: React.FC<{
+  currentValue: string | undefined;
+  isOverride: boolean;
+  flightNumber: string;
+  onOverride: (field: string, action: string, value?: string) => Promise<void>;
+}> = ({ currentValue, isOverride, onOverride }) => {
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const desks = useMemo(
+    () => (currentValue ? currentValue.split(',').map(d => d.trim()).filter(Boolean) : []),
+    [currentValue]
+  );
+
+  const saveDesks = async (list: string[]) => {
+    setBusy(true);
+    try {
+      if (list.length === 0) {
+        await onOverride('CheckInDesk', 'clear');
+      } else {
+        await onOverride('CheckInDesk', 'assign', list.join(', '));
+      }
+    } finally { setBusy(false); }
+  };
+
+  const addDesk = async (val: string) => {
+    setAdding(false);
+    if (!val) return;
+    await saveDesks(removeDuplicates([...desks, val]));
+  };
+
+  const removeDesk = async (d: string) => {
+    await saveDesks(desks.filter(x => x !== d));
+  };
+
+  return (
+    <div>
+      <div style={{
+        fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6,
+        textTransform: 'uppercase', letterSpacing: '0.07em', display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        Check-in šalteri
+        {isOverride && <span style={{ fontSize: 10, color: '#BA7517', fontWeight: 500 }}>✎ override</span>}
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}>
+        {desks.length === 0
+          ? <span style={{ fontSize: 12, color: 'var(--color-text-tertiary)', fontStyle: 'italic' }}>Nije dodijeljeno</span>
+          : desks.map(d => (
+              <Chip
+                key={d}
+                label={d}
+                isOverride={isOverride}
+                color="amber"
+                onRemove={busy ? undefined : () => removeDesk(d)}
+              />
+            ))
+        }
+        {!adding && (
+          <button
+            onClick={() => setAdding(true)}
+            disabled={busy}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '4px 10px', borderRadius: 6, fontSize: 12,
+              border: '0.5px dashed var(--color-border-secondary)',
+              background: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer',
+            }}
+          ><Plus size={11} /> Dodaj</button>
+        )}
+      </div>
+
+      {adding && (
+        <InlineEditInput
+          placeholder="npr. 5"
+          onSave={addDesk}
+          onCancel={() => setAdding(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// GateControl  (NO manual open/close)
+// ─────────────────────────────────────────────
+
+const GateControl: React.FC<{
+  currentValue: string | undefined;
+  isOverride: boolean;
+  onOverride: (field: string, action: string, value?: string) => Promise<void>;
+}> = ({ currentValue, isOverride, onOverride }) => {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const save = async (val: string) => {
+    setEditing(false);
+    if (!val) return;
+    setBusy(true);
+    try { await onOverride('GateNumber', 'assign', val); }
+    finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try { await onOverride('GateNumber', 'clear'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <div style={{
+        fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6,
+        textTransform: 'uppercase', letterSpacing: '0.07em', display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        Izlaz (gate)
+        {isOverride && <span style={{ fontSize: 10, color: '#185FA5', fontWeight: 500 }}>✎ override</span>}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {currentValue
+          ? <>
+              <span style={{ fontSize: 22, fontWeight: 500, color: isOverride ? '#185FA5' : 'var(--color-text-primary)' }}>
+                {currentValue}
+              </span>
+              {isOverride && (
+                <button
+                  onClick={clear} disabled={busy}
+                  style={{
+                    fontSize: 11, padding: '3px 9px', borderRadius: 5, cursor: 'pointer',
+                    border: '0.5px solid var(--color-border-danger)',
+                    background: 'none', color: 'var(--color-text-danger)', opacity: busy ? 0.5 : 1,
+                  }}
+                >Reset</button>
+              )}
+            </>
+          : <span style={{ fontSize: 12, color: 'var(--color-text-tertiary)', fontStyle: 'italic' }}>Nije dodijeljeno</span>
+        }
+        {!editing && (
+          <button
+            onClick={() => setEditing(true)} disabled={busy}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '4px 10px', borderRadius: 6, fontSize: 12,
+              border: '0.5px dashed var(--color-border-secondary)',
+              background: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer',
+            }}
+          >{currentValue ? '✎ Promijeni' : <><Plus size={11} /> Dodaj</>}</button>
+        )}
+      </div>
+
+      {editing && (
+        <InlineEditInput
+          placeholder="npr. 2"
+          onSave={save}
+          onCancel={() => setEditing(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// FlightCard
+// ─────────────────────────────────────────────
+
+interface EnrichedFlight extends Flight {
+  _hasOverride?: boolean;
+  _overrideFields?: Record<string, string>;
+}
+
+const FlightCard: React.FC<{
+  flight: EnrichedFlight;
+  onOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
+  onClearAll: (flightNumber: string) => Promise<void>;
+}> = ({ flight, onOverride, onClearAll }) => {
+  const [expanded, setExpanded] = useState(false);
+  const isDep = flight.FlightType === 'departure';
+  const hasOverride = !!flight._hasOverride;
+  const overrideFields = flight._overrideFields || {};
+
+  const hasDeskOverride = 'CheckInDesk' in overrideFields;
+  const hasGateOverride = 'GateNumber' in overrideFields;
+  const hasStatusOverride = 'StatusEN' in overrideFields;
+
+  const wrap = (field: string, action: string, value?: string) =>
+    onOverride(flight.FlightNumber, field, action, value);
+
+  return (
+    <div style={{
+      background: 'var(--color-background-primary)',
+      border: hasOverride
+        ? '0.5px solid #EF9F27'
+        : '0.5px solid var(--color-border-tertiary)',
+      borderRadius: 'var(--border-radius-lg)',
+      boxShadow: hasOverride ? '0 0 0 3px rgba(239,159,39,0.08)' : 'none',
+      marginBottom: 10,
+      transition: 'box-shadow 0.15s',
+      overflow: 'hidden',
+    }}>
+      {/* ── Header row ── */}
+      <div
+        onClick={() => setExpanded(e => !e)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '14px 18px', cursor: 'pointer',
+          background: expanded ? 'var(--color-background-secondary)' : 'transparent',
+          transition: 'background 0.12s',
+        }}
+      >
+        {/* Direction icon */}
+        <div style={{
+          width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: isDep ? '#E6F1FB' : '#EAF3DE',
+          color: isDep ? '#185FA5' : '#3B6D11',
+        }}>
+          {isDep ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />}
+        </div>
+
+        {/* Flight info */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 16, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+              {flight.FlightNumber}
+            </span>
+            {hasOverride && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                fontSize: 10, fontWeight: 500, padding: '2px 8px', borderRadius: 20,
+                background: '#FAEEDA', color: '#854F0B', border: '0.5px solid #EF9F27',
+              }}>
+                <AlertTriangle size={9} />
+                Override aktivan
+                {hasDeskOverride && ' · Check-in'}
+                {hasGateOverride && ' · Gate'}
+                {hasStatusOverride && ' · Status'}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 2 }}>
+            {isDep
+              ? (flight.DestinationCityName || flight.DestinationAirportName || '—')
+              : 'Tivat (TIV)'}
+            {flight.AirlineName && ` · ${flight.AirlineName}`}
+          </div>
+        </div>
+
+        {/* Times */}
+        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+            {formatTime(flight.ScheduledDepartureTime || '')}
+          </div>
+          {flight.EstimatedDepartureTime && (
+            <div style={{ fontSize: 11, color: '#854F0B', marginTop: 1 }}>
+              ETD {formatTime(flight.EstimatedDepartureTime)}
+            </div>
+          )}
+        </div>
+
+        {/* Status */}
+        <div style={{ flexShrink: 0 }}>
+          <StatusPill status={flight.StatusEN || ''} />
+        </div>
+
+        {/* Chevron */}
+        <ChevronDown
+          size={16}
+          style={{
+            color: 'var(--color-text-tertiary)', flexShrink: 0,
+            transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s',
+          }}
+        />
+      </div>
+
+      {/* ── Expanded panel ── */}
+      {expanded && (
+        <div
+          style={{ padding: '18px 18px 18px', borderTop: '0.5px solid var(--color-border-tertiary)' }}
+          onClick={e => e.stopPropagation()}
+        >
+          {/* Clear all overrides */}
+          {hasOverride && (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+              marginBottom: 16,
+            }}>
+              <button
+                onClick={() => onClearAll(flight.FlightNumber)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  fontSize: 12, padding: '5px 12px', borderRadius: 6, cursor: 'pointer',
+                  border: '0.5px solid var(--color-border-danger)',
+                  background: 'none', color: 'var(--color-text-danger)',
+                }}
+              >
+                <Trash2 size={12} /> Ukloni sve override-ove
+              </button>
+            </div>
+          )}
+
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: isDep ? '1fr 1fr 1fr' : '1fr 1fr',
+            gap: 20,
+          }}>
+            {/* Status */}
+            <div style={{
+              padding: '14px 16px', borderRadius: 'var(--border-radius-md)',
+              border: '0.5px solid var(--color-border-tertiary)',
+              background: 'var(--color-background-secondary)',
+              gridColumn: isDep ? '1 / -1' : 'auto',
+            }}>
+              <StatusControl
+                currentStatus={flight.StatusEN || ''}
+                flightNumber={flight.FlightNumber}
+                onOverride={wrap}
+              />
+            </div>
+
+            {/* Check-in desk (only departures) */}
+            {isDep && (
+              <div style={{
+                padding: '14px 16px', borderRadius: 'var(--border-radius-md)',
+                border: hasDeskOverride
+                  ? '0.5px solid #EF9F27'
+                  : '0.5px solid var(--color-border-tertiary)',
+                background: hasDeskOverride ? 'rgba(239,159,39,0.04)' : 'var(--color-background-secondary)',
+              }}>
+                <DeskControl
+                  currentValue={flight.CheckInDesk}
+                  isOverride={hasDeskOverride}
+                  flightNumber={flight.FlightNumber}
+                  onOverride={wrap}
+                />
+                {flight.CheckInDesk && (
+                  <div style={{
+                    marginTop: 10, fontSize: 10,
+                    color: 'var(--color-text-tertiary)',
+                    padding: '5px 8px',
+                    background: 'var(--color-background-primary)',
+                    borderRadius: 5,
+                    border: '0.5px solid var(--color-border-tertiary)',
+                  }}>
+                    ⏰ Auto-reset na STD − 30 min
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Gate (only departures) */}
+            {isDep && (
+              <div style={{
+                padding: '14px 16px', borderRadius: 'var(--border-radius-md)',
+                border: hasGateOverride
+                  ? '0.5px solid #85B7EB'
+                  : '0.5px solid var(--color-border-tertiary)',
+                background: hasGateOverride ? 'rgba(55,138,221,0.04)' : 'var(--color-background-secondary)',
+              }}>
+                <GateControl
+                  currentValue={flight.GateNumber}
+                  isOverride={hasGateOverride}
+                  onOverride={wrap}
+                />
+                {flight.GateNumber && (
+                  <div style={{
+                    marginTop: 10, fontSize: 10,
+                    color: 'var(--color-text-tertiary)',
+                    padding: '5px 8px',
+                    background: 'var(--color-background-primary)',
+                    borderRadius: 5,
+                    border: '0.5px solid var(--color-border-tertiary)',
+                  }}>
+                    ⏰ Auto-reset na ETD / STD
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Arrivals: baggage belt */}
+            {!isDep && (
+              <div style={{
+                padding: '14px 16px', borderRadius: 'var(--border-radius-md)',
+                border: '0.5px solid var(--color-border-tertiary)',
+                background: 'var(--color-background-secondary)',
+              }}>
+                <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                  Traka za prtljag
+                </div>
+                <span style={{ fontSize: 18, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                  {flight.BaggageReclaim || <span style={{ fontSize: 12, color: 'var(--color-text-tertiary)', fontStyle: 'italic' }}>Nije dodijeljeno</span>}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Extra meta row */}
+          <div style={{
+            display: 'flex', gap: 16, marginTop: 14,
+            padding: '10px 14px', borderRadius: 'var(--border-radius-md)',
+            border: '0.5px solid var(--color-border-tertiary)',
+            background: 'var(--color-background-primary)',
+            flexWrap: 'wrap',
+          }}>
+            {[
+              { label: 'Terminal', val: flight.Terminal },
+              { label: 'Airline code', val: flight.AirlineCode },
+              { label: 'ICAO', val: flight.AirlineICAO },
+              { label: 'Actual dep.', val: flight.ActualDepartureTime ? formatTime(flight.ActualDepartureTime) : undefined },
+              ...(flight.CodeShareFlights?.length
+                ? [{ label: 'Code-share', val: flight.CodeShareFlights.join(', ') }]
+                : []),
+            ].filter(r => r.val).map(r => (
+              <div key={r.label}>
+                <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 2 }}>{r.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-primary)' }}>{r.val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// MAIN PAGE
+// ─────────────────────────────────────────────
+
+interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
+
+export default function AdminFlightsPage() {
+  const router = useRouter();
+  const [loading, setLoading]     = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [flights, setFlights]     = useState<FlightsData>({ departures: [], arrivals: [] });
+  const [lastUpdated, setLastUpdated] = useState('');
+  const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');
+  const [error, setError]         = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'all' | 'departures' | 'arrivals'>('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [airlineFilter, setAirlineFilter] = useState('all');
+
+  // ── Load overrides ──────────────────────────
+  const loadOverrides = useCallback(async (): Promise<Record<string, any>> => {
+    try {
+      const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      return await res.json();
+    } catch { return {}; }
+  }, []);
+
+  // ── Load flights ────────────────────────────
+  const loadFlights = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      setRefreshing(true);
+      setError(null);
+
+      const [flightsRes, overrides] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, { cache: 'no-store' }),
+        loadOverrides(),
+      ]);
+      if (!flightsRes.ok) throw new Error(`HTTP ${flightsRes.status}`);
+      const data = await flightsRes.json();
+
+      const dedup = (arr: Flight[]): Flight[] => {
+        const consolidated = consolidateFlights(arr);
+        const seen: Record<string, boolean> = {};
+        return consolidated.filter(f => {
+          const id = `${f.FlightNumber}-${f.ScheduledDepartureTime}-${f.GateNumber||''}-${f.CheckInDesk||''}`;
+          if (seen[id]) return false;
+          seen[id] = true;
+          return true;
+        });
+      };
+
+      const enrich = (arr: Flight[]): EnrichedFlight[] =>
+        arr.map(f => {
+          const raw = overrides[f.FlightNumber] || {};
+          const mapped: Record<string, string> = {};
+          Object.entries(raw).forEach(([k, v]) => { mapped[k] = mapOverrideValue(v as string); });
+          return { ...f, _hasOverride: Object.keys(mapped).length > 0, _overrideFields: mapped };
+        });
+
+      // Auto-reset departed flights with overrides
+      const allEnriched = [...enrich(data.departures || []), ...enrich(data.arrivals || [])];
+      const departed = allEnriched.filter(f => {
+        const s = (f.StatusEN || '').toLowerCase();
+        return (s.includes('departed') || s.includes('poletio')) && f._hasOverride;
+      });
+
+      if (departed.length > 0) {
+        for (const f of departed) {
+          const ov = (f._overrideFields || {});
+          const gate = (ov.GateNumber || f.GateNumber || '').split(',')[0]?.trim();
+          fetch('/api/admin/auto-reset-departed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightNumber: f.FlightNumber, gateNumber: gate }),
+          }).catch(() => {});
+        }
+      }
+
+      const clearDeparted = (f: EnrichedFlight): EnrichedFlight => {
+        const s = (f.StatusEN || '').toLowerCase();
+        if ((s.includes('departed') || s.includes('poletio')) && f._hasOverride)
+          return { ...f, _hasOverride: false, _overrideFields: {} };
+        return f;
+      };
+
+      setFlights({
+        departures: dedup(enrich(data.departures || []).map(clearDeparted)) as Flight[],
+        arrivals:   dedup(enrich(data.arrivals   || []).map(clearDeparted)) as Flight[],
+      });
+      setLastUpdated(data.lastUpdated || new Date().toISOString());
+      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Greška pri učitavanju');
+      setFlights({ departures: [], arrivals: [] });
+      setSystemStatus('offline');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [loadOverrides]);
+
+  useEffect(() => { loadFlights(); }, [loadFlights]);
+
+  // ── Override handler ────────────────────────
+  const handleOverride = useCallback(async (
+    flightNumber: string, field: string, action: string, value?: string
+  ) => {
+    const res = await fetch('/api/admin/flight-override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flightNumber, field, action, value }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || 'Greška pri ažuriranju');
+    }
+    await loadFlights(true);
+  }, [loadFlights]);
+
+  // ── Clear all overrides for one flight ──────
+  const handleClearAll = useCallback(async (flightNumber: string) => {
+    const allRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+    const all = await allRes.json();
+    const fields = Object.keys(all[flightNumber] || {});
+    await Promise.all(fields.map(field =>
+      fetch('/api/admin/flight-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flightNumber, field, action: 'clear' }),
+      })
+    ));
+    await loadFlights(true);
+  }, [loadFlights]);
+
+  // ── Clear ALL overrides ─────────────────────
+  const handleClearAllFlights = useCallback(async () => {
+    if (!confirm('Ukloniti SVE override-ove za sve letove?')) return;
+    const allRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
+    const all = await allRes.json();
+    await Promise.all(
+      Object.entries(all).flatMap(([fn, fields]) =>
+        Object.keys(fields as object).map(field =>
+          fetch('/api/admin/flight-override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightNumber: fn, field, action: 'clear' }),
+          })
+        )
+      )
+    );
+    await loadFlights(true);
+  }, [loadFlights]);
+
+  // ── Filtered list ───────────────────────────
+  const filteredFlights = useMemo(() => {
+    let list: Flight[] = activeTab === 'all'
+      ? [...flights.departures, ...flights.arrivals]
+      : activeTab === 'departures' ? flights.departures : flights.arrivals;
+    if (searchTerm) {
+      const t = searchTerm.toLowerCase();
+      list = list.filter(f =>
+        f.FlightNumber?.toLowerCase().includes(t) ||
+        f.AirlineName?.toLowerCase().includes(t) ||
+        f.DestinationCityName?.toLowerCase().includes(t) ||
+        f.DestinationAirportCode?.toLowerCase().includes(t)
+      );
+    }
+    if (airlineFilter !== 'all') list = list.filter(f => f.AirlineName?.toLowerCase() === airlineFilter);
+    return list.sort((a, b) => (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || ''));
+  }, [activeTab, flights, searchTerm, airlineFilter]);
+
+  const uniqueAirlines = useMemo(() => {
+    const seen = new Set<string>();
+    return [...flights.departures, ...flights.arrivals]
+      .map(f => f.AirlineName).filter((n): n is string => !!n && !seen.has(n) && !!seen.add(n))
+      .sort();
+  }, [flights]);
+
+  const overrideCount = useMemo(() =>
+    [...flights.departures, ...flights.arrivals].filter(f => (f as EnrichedFlight)._hasOverride).length,
+  [flights]);
+
+  const getTimeSince = useCallback(() => {
+    if (!lastUpdated) return '—';
+    const mins = Math.floor((Date.now() - new Date(lastUpdated).getTime()) / 60000);
+    if (mins < 1) return 'upravo sada';
+    if (mins < 60) return `${mins} min`;
+    return `${Math.floor(mins / 60)} h`;
+  }, [lastUpdated]);
+
+  const today = useMemo(() =>
+    new Date().toLocaleDateString('sr-Latn-RS', { weekday: 'long', day: 'numeric', month: 'long' }),
+  []);
+
+  // ── Logout ──────────────────────────────────
+  const handleLogout = useCallback(async () => {
+    try { await fetch('/api/admin/logout', { method: 'POST' }); } catch {}
+    router.push('/admin/login');
+  }, [router]);
+
+  // ─────────────────────────────────────────────
+  // RENDER
+  // ─────────────────────────────────────────────
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
+      padding: '2rem 1rem',
+      fontFamily: 'var(--font-sans)',
+    }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+
+        {/* ── Top bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 28, flexWrap: 'wrap', gap: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Link href="/admin" style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 32, height: 32, borderRadius: 8,
+              background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)',
+              border: '0.5px solid rgba(255,255,255,0.1)', textDecoration: 'none',
+            }}>
+              <Home size={14} />
+            </Link>
+            <div>
+              <h1 style={{ fontSize: 20, fontWeight: 500, color: '#fff', margin: 0 }}>
+                Red letenja
+              </h1>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+                {today} · ažurirano {getTimeSince()}
+              </div>
+            </div>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '4px 10px', borderRadius: 20, fontSize: 11,
+              background: systemStatus === 'online' ? 'rgba(99,153,34,0.15)' : 'rgba(186,117,23,0.15)',
+              color: systemStatus === 'online' ? '#97C459' : '#EF9F27',
+              border: `0.5px solid ${systemStatus === 'online' ? 'rgba(99,153,34,0.3)' : 'rgba(186,117,23,0.3)'}`,
+            }}>
+              <div style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: systemStatus === 'online' ? '#97C459' : '#EF9F27',
+              }} />
+              {systemStatus === 'online' ? 'LIVE' : 'BACKUP'}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={() => loadFlights(true)} disabled={refreshing}
+              style={{
+                width: 32, height: 32, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.1)',
+                background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <RefreshCw size={14} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
+            </button>
+            {overrideCount > 0 && (
+              <button
+                onClick={handleClearAllFlights}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  padding: '6px 14px', borderRadius: 8, fontSize: 12, cursor: 'pointer',
+                  border: '0.5px solid rgba(239,159,39,0.4)',
+                  background: 'rgba(239,159,39,0.08)', color: '#EF9F27',
+                }}
+              >
+                <XCircle size={13} /> Clear all overrides ({overrideCount})
+              </button>
+            )}
+            <button
+              onClick={handleLogout}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                padding: '6px 14px', borderRadius: 8, fontSize: 12, cursor: 'pointer',
+                border: '0.5px solid rgba(242,75,74,0.3)',
+                background: 'rgba(242,75,74,0.08)', color: '#F09595',
+              }}
+            >
+              <LogOut size={13} /> Odjavi se
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div style={{
+            marginBottom: 16, padding: '10px 14px', borderRadius: 8,
+            background: 'rgba(242,75,74,0.1)', border: '0.5px solid rgba(242,75,74,0.3)',
+            color: '#F09595', fontSize: 13,
+          }}>⚠️ {error}</div>
+        )}
+
+        {/* ── Stats ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 20 }}>
+          {[
+            { label: 'Ukupno', val: flights.departures.length + flights.arrivals.length },
+            { label: 'Polasci', val: flights.departures.length },
+            { label: 'Dolasci', val: flights.arrivals.length },
+            { label: 'Override', val: overrideCount, warn: overrideCount > 0 },
+          ].map(s => (
+            <div key={s.label} style={{
+              padding: '12px 14px', borderRadius: 'var(--border-radius-md)',
+              background: 'rgba(255,255,255,0.04)',
+              border: s.warn ? '0.5px solid rgba(239,159,39,0.3)' : '0.5px solid rgba(255,255,255,0.08)',
+            }}>
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                {s.label}
+              </div>
+              <div style={{
+                fontSize: 22, fontWeight: 500, marginTop: 4,
+                color: s.warn ? '#EF9F27' : '#fff',
+              }}>
+                {loading ? '—' : s.val}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Filters ── */}
+        <div style={{
+          display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center',
+        }}>
+          <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '0.5px solid rgba(255,255,255,0.1)' }}>
+            {(['all', 'departures', 'arrivals'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                style={{
+                  padding: '7px 14px', fontSize: 12, cursor: 'pointer', border: 'none',
+                  background: activeTab === tab ? 'rgba(55,138,221,0.2)' : 'rgba(255,255,255,0.04)',
+                  color: activeTab === tab ? '#85B7EB' : 'rgba(255,255,255,0.4)',
+                  fontWeight: activeTab === tab ? 500 : 400,
+                  borderRight: tab !== 'arrivals' ? '0.5px solid rgba(255,255,255,0.1)' : 'none',
+                }}
+              >
+                {tab === 'all' ? `Svi (${flights.departures.length + flights.arrivals.length})`
+                  : tab === 'departures' ? `Polasci (${flights.departures.length})`
+                  : `Dolasci (${flights.arrivals.length})`}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+            <Search size={13} style={{
+              position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
+              color: 'rgba(255,255,255,0.3)',
+            }} />
+            <input
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              placeholder="Pretraži letove..."
+              style={{
+                width: '100%', height: 34, paddingLeft: 30, paddingRight: 10,
+                fontSize: 13, borderRadius: 8,
+                border: '0.5px solid rgba(255,255,255,0.1)',
+                background: 'rgba(255,255,255,0.06)', color: '#fff', outline: 'none',
+              }}
+            />
+          </div>
+
+          <select
+            value={airlineFilter}
+            onChange={e => setAirlineFilter(e.target.value)}
+            style={{
+              height: 34, padding: '0 10px', fontSize: 13, borderRadius: 8,
+              border: '0.5px solid rgba(255,255,255,0.1)',
+              background: 'rgba(255,255,255,0.06)', color: '#fff', outline: 'none',
+            }}
+          >
+            <option value="all">Sve kompanije</option>
+            {uniqueAirlines.map(a => <option key={a} value={a.toLowerCase()}>{a}</option>)}
+          </select>
+        </div>
+
+        {/* ── Flight list ── */}
+        {loading ? (
+          [...Array(4)].map((_, i) => (
+            <div key={i} style={{
+              height: 64, borderRadius: 'var(--border-radius-lg)', marginBottom: 10,
+              background: 'rgba(255,255,255,0.04)', border: '0.5px solid rgba(255,255,255,0.08)',
+              animation: 'pulse 1.5s ease-in-out infinite',
+            }} />
+          ))
+        ) : filteredFlights.length === 0 ? (
+          <div style={{
+            padding: '48px 0', textAlign: 'center',
+            color: 'rgba(255,255,255,0.3)', fontSize: 14,
+          }}>
+            <Plane size={32} style={{ opacity: 0.2, marginBottom: 12 }} />
+            <div>Nema letova</div>
+          </div>
+        ) : (
+          filteredFlights.map((f, i) => (
+            <FlightCard
+              key={`${f.FlightNumber}-${f.ScheduledDepartureTime}-${i}`}
+              flight={f as EnrichedFlight}
+              onOverride={handleOverride}
+              onClearAll={handleClearAll}
+            />
+          ))
+        )}
+
+        {/* ── Footer ── */}
+        <div style={{
+          marginTop: 24, paddingTop: 16,
+          borderTop: '0.5px solid rgba(255,255,255,0.08)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+        }}>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)' }}>
+            Prikazano {filteredFlights.length} od {flights.departures.length + flights.arrivals.length} letova
+          </span>
+          <button
+            onClick={() => loadFlights(true)} disabled={refreshing}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '6px 14px', borderRadius: 8, fontSize: 12, cursor: 'pointer',
+              border: '0.5px solid rgba(255,255,255,0.1)',
+              background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.5)',
+            }}
+          >
+            <RefreshCw size={13} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
+            {refreshing ? 'Osvježava...' : 'Osvježi'}
+          </button>
+        </div>
+      </div>
+
+      <style jsx global>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.5 } }
+        body, html { overflow: auto !important; height: auto !important; }
+      `}</style>
+    </div>
+  );
+}

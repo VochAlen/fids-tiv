@@ -1,9 +1,10 @@
 // app/api/admin/desk-status-override/route.ts
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
+import { computeOverrideTTL } from '@/lib/override-ttl';
 
-// Helper za dobijanje STD vremena leta za dati desk
-async function getFlightScheduledTimeForDesk(deskNumber: string): Promise<string | null> {
+// Helper za dobijanje vremena leta za dati desk
+async function getFlightTimesForDesk(deskNumber: string): Promise<{ scheduledTime: string | null, estimatedTime: string | null }> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
     const response = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
@@ -11,12 +12,21 @@ async function getFlightScheduledTimeForDesk(deskNumber: string): Promise<string
       headers: { 'Cache-Control': 'no-cache' }
     });
     
-    if (!response.ok) return null;
+    if (!response.ok) return { scheduledTime: null, estimatedTime: null };
     const data = await response.json();
     
-    // Pronađi let koji koristi ovaj desk
+    const parseHHMM = (t: string): number | null => {
+      const m = t?.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const d = new Date();
+      d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+      return d.getTime();
+    };
+    
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
-    const flight = allFlights.find((f: any) => {
+    
+    // Pronađi sve letove koji koriste ovaj desk
+    const relevantFlights = allFlights.filter((f: any) => {
       if (!f.CheckInDesk) return false;
       const desks = f.CheckInDesk.split(',').map((d: string) => d.trim());
       return desks.includes(deskNumber) || 
@@ -24,10 +34,43 @@ async function getFlightScheduledTimeForDesk(deskNumber: string): Promise<string
              desks.includes(deskNumber.padStart(2, '0'));
     });
     
-    return flight?.ScheduledDepartureTime || null;
+    if (relevantFlights.length === 0) {
+      return { scheduledTime: null, estimatedTime: null };
+    }
+    
+    // Sortiraj po vremenu polijetanja
+    const sorted = relevantFlights.sort((a, b) => {
+      const timeA = parseHHMM(a.ScheduledDepartureTime) || Infinity;
+      const timeB = parseHHMM(b.ScheduledDepartureTime) || Infinity;
+      return timeA - timeB;
+    });
+    
+    const now = Date.now();
+    
+    // Pronađi AKTIVNI let (check-in još nije zatvoren = STD - 30 min > now)
+    const activeFlight = sorted.find(flight => {
+      const stdMs = parseHHMM(flight.ScheduledDepartureTime);
+      if (!stdMs) return false;
+      const checkInClosesMs = stdMs - 30 * 60 * 1000; // STD - 30 min
+      return checkInClosesMs > now;
+    });
+    
+    // Ako nema aktivnog leta, vrati null (override će se obrisati)
+    if (!activeFlight) {
+      console.log(`[desk-helper] Desk ${deskNumber} - No active flight, override will be cleared`);
+      return { scheduledTime: null, estimatedTime: null };
+    }
+    
+    console.log(`[desk-helper] Desk ${deskNumber} - Active flight: ${activeFlight.FlightNumber} at ${activeFlight.ScheduledDepartureTime}`);
+    
+    return {
+      scheduledTime: activeFlight.ScheduledDepartureTime,
+      estimatedTime: activeFlight.EstimatedDepartureTime || null
+    };
+    
   } catch (error) {
-    console.error('Error fetching scheduled time:', error);
-    return null;
+    console.error('Error fetching flight times:', error);
+    return { scheduledTime: null, estimatedTime: null };
   }
 }
 
@@ -40,36 +83,35 @@ export async function POST(request: Request) {
 
     const client = getRedisClient();
     const redisKey = `desk-status:${deskNumber}`;
+    
+    let responseTtl = null;
 
     if (action === 'open' || action === 'closed') {
-      // Default TTL: 2 sata
-      let ttlSeconds = 2 * 60 * 60; // 7200 sekundi = 2 sata
+      // Dohvati vremena leta za ovaj desk
+      const { scheduledTime, estimatedTime } = await getFlightTimesForDesk(deskNumber);
       
-      // Pokušaj dobiti STD za ovaj desk
-      const scheduledTime = await getFlightScheduledTimeForDesk(deskNumber);
-      
-      if (scheduledTime) {
-        const [h, m] = scheduledTime.split(':').map(Number);
-        if (!isNaN(h) && !isNaN(m)) {
-          const stdDate = new Date();
-          stdDate.setHours(h, m, 0, 0);
-          
-          // Ako je STD već prošao danas, gledaj sutra
-          if (stdDate.getTime() < Date.now()) {
-            stdDate.setDate(stdDate.getDate() + 1);
-          }
-          
-          const secondsUntilSTD = Math.floor((stdDate.getTime() - Date.now()) / 1000);
-          
-          if (secondsUntilSTD > 0) {
-            // TTL = STD + 5 minuta (300 sekundi)
-            ttlSeconds = secondsUntilSTD + 300;
-            console.log(`[desk-status-override] Desk ${deskNumber} - STD: ${scheduledTime}, TTL: ${ttlSeconds}s (${Math.floor(ttlSeconds / 60)}min, do ${new Date(Date.now() + ttlSeconds * 1000).toLocaleTimeString()})`);
-          }
-        }
+      // Ako nema aktivnog leta, odmah obriši override
+      if (!scheduledTime) {
+        await client.del(redisKey);
+        return NextResponse.json({ 
+          success: true, 
+          message: `Nema aktivnog leta na salteru ${deskNumber}, override obrisan`,
+          cleared: true
+        });
       }
       
-      await client.set(redisKey, action, 'EX', ttlSeconds);
+      // Izračunaj TTL koristeći computeOverrideTTL
+      const ttl = computeOverrideTTL('CheckInDesk', scheduledTime, estimatedTime);
+      responseTtl = ttl;
+      
+      console.log(`[desk-status-override] Desk ${deskNumber} - action: ${action}, TTL: ${ttl}s (${Math.floor(ttl / 60)}min)`);
+      
+      // Ako je TTL 0, odmah obriši (check-in je već zatvoren)
+      if (ttl === 0) {
+        await client.del(redisKey);
+      } else {
+        await client.set(redisKey, action, 'EX', ttl);
+      }
       
     } else if (action === 'clear') {
       await client.del(redisKey);
@@ -79,7 +121,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ 
       success: true, 
-      message: `Status saltera ${deskNumber} ažuriran` 
+      message: `Status saltera ${deskNumber} ažuriran`,
+      ...(responseTtl !== null && { ttl: responseTtl })
     });
     
   } catch (error: unknown) {

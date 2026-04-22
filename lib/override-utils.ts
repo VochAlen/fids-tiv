@@ -4,7 +4,7 @@
  * Centralna logika za auto-reset override-ova:
  *
  * CheckInDesk  → resetuje se na STD - 30 minuta
- * GateNumber   → resetuje se na STD (ili ETD ako postoji i bliže je)
+ * GateNumber   → resetuje se na ETD ako je ETD > STD, inače na STD
  *
  * Funkcije se pozivaju:
  *  1. Iz GET /api/admin/flight-override?action=getAllOverrides
@@ -21,6 +21,14 @@ export interface AutoResetResult {
   flightNumber: string;
   field: 'CheckInDesk' | 'GateNumber';
   reason: string;
+}
+
+interface FlightLike {
+  FlightNumber: string;
+  ScheduledDepartureTime?: string;
+  EstimatedDepartureTime?: string;
+  StatusEN?: string;
+  CheckInDesk?: string;
 }
 
 // ─────────────────────────────────────────────
@@ -89,6 +97,25 @@ export function minutesUntilCheckInReset(scheduledTime: string): number {
 }
 
 // ─────────────────────────────────────────────
+// Status helpers
+// ─────────────────────────────────────────────
+
+/**
+ * Vraća true ako je let u terminalnom stanju
+ * (departed / cancelled / diverted) — u tom slučaju
+ * nema smisla resetovati pojedinačna polja.
+ * Centralizovano ovdje da se ne ponavlja u svakoj funkciji.
+ */
+export function isTerminatedStatus(statusEN: string): boolean {
+  const s = (statusEN || '').toLowerCase();
+  return (
+    s.includes('departed')    || s.includes('poletio')    ||
+    s.includes('cancelled')   || s.includes('otkazan')    ||
+    s.includes('diverted')    || s.includes('preusmjeren')
+  );
+}
+
+// ─────────────────────────────────────────────
 // Logika za reset pojedinih polja
 // ─────────────────────────────────────────────
 
@@ -107,13 +134,7 @@ export function shouldResetCheckIn(
 ): { reset: boolean; reason: string } {
   if (!scheduledTime) return { reset: false, reason: 'nema scheduled time' };
 
-  const s = (statusEN || '').toLowerCase();
-  const isTerminated =
-    s.includes('departed') || s.includes('poletio') ||
-    s.includes('cancelled') || s.includes('otkazan') ||
-    s.includes('diverted') || s.includes('preusmjeren');
-
-  if (isTerminated) {
+  if (isTerminatedStatus(statusEN)) {
     return { reset: false, reason: 'let je terminiran' };
   }
 
@@ -136,7 +157,15 @@ export function shouldResetCheckIn(
 }
 
 /**
- * GateNumber se resetuje kada ETD (ili STD ako ETD ne postoji) prođe.
+ * GateNumber se resetuje kada referentno vrijeme prođe.
+ *
+ * Referentno vrijeme:
+ *  - ETD ako postoji I ako je ETD > STD (let kasni) → uzimamo ETD
+ *  - U svim ostalim slučajevima → uzimamo STD
+ *
+ * Ovo sprječava situaciju gdje je ETD ranije korigovan na manje od STD
+ * (npr. greškom), što bi uzrokovalo prerani reset gate-a.
+ *
  * Prozor: od 0 do -4h.
  */
 export function shouldResetGate(
@@ -144,35 +173,36 @@ export function shouldResetGate(
   estimatedTime: string | undefined,
   statusEN: string
 ): { reset: boolean; reason: string; usedTime: string } {
-  const referenceTime =
-    estimatedTime && parseTimeToMinutes(estimatedTime) >= 0
-      ? estimatedTime
-      : scheduledTime;
-
-  const mins = minutesUntil(referenceTime);
-  const usedTime = referenceTime;
-
-  const s = (statusEN || '').toLowerCase();
-  const isTerminated =
-    s.includes('departed') || s.includes('poletio') ||
-    s.includes('cancelled') || s.includes('otkazan') ||
-    s.includes('diverted') || s.includes('preusmjeren');
-
-  if (isTerminated) {
-    return { reset: false, reason: 'let je terminiran', usedTime };
+  if (!scheduledTime && !estimatedTime) {
+    return { reset: false, reason: 'nema STD ni ETD', usedTime: '' };
   }
+
+  if (isTerminatedStatus(statusEN)) {
+    return { reset: false, reason: 'let je terminiran', usedTime: scheduledTime };
+  }
+
+  // ETD je relevantan samo ako je kasniji od STD (let kasni)
+  const etdMins = estimatedTime ? parseTimeToMinutes(estimatedTime) : -1;
+  const stdMins = parseTimeToMinutes(scheduledTime);
+  const useETD  = etdMins > stdMins;
+
+  const referenceTime = useETD ? estimatedTime! : scheduledTime;
+  const usedTime      = referenceTime;
+  const mins          = minutesUntil(referenceTime);
 
   if (mins <= 0 && mins > -240) {
     return {
       reset: true,
-      reason: `${estimatedTime ? 'ETD' : 'STD'} ${referenceTime} je dostignut (${Math.abs(mins)} min prošlo)`,
+      reason: `${useETD ? 'ETD' : 'STD'} ${referenceTime} je dostignut (${Math.abs(mins)} min prošlo)`,
       usedTime
     };
   }
 
   return {
     reset: false,
-    reason: `${mins} min do ${estimatedTime ? 'ETD' : 'STD'}, previše rano`,
+    reason: mins === Infinity
+      ? 'referentno vrijeme nije parsibilno'
+      : `${mins} min do ${useETD ? 'ETD' : 'STD'} (${referenceTime}), previše rano`,
     usedTime
   };
 }
@@ -185,7 +215,7 @@ export function shouldResetGate(
  * Prolazi kroz sve Redis override ključeve, provjerava svaki let
  * i resetuje CheckInDesk i/ili GateNumber gdje je potrebno.
  */
-export async function runAutoReset(allFlights: any[]): Promise<AutoResetResult[]> {
+export async function runAutoReset(allFlights: FlightLike[]): Promise<AutoResetResult[]> {
   const redis = getRedisClient();
   const results: AutoResetResult[] = [];
 
@@ -213,54 +243,49 @@ export async function runAutoReset(allFlights: any[]): Promise<AutoResetResult[]
     if (!data || Object.keys(data).length === 0) continue;
 
     // Pronađi let iz live podataka
-    const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
+    const flight = allFlights.find((f) => f.FlightNumber === flightNumber);
     if (!flight) {
       console.warn(`[auto-reset] ⚠️ Let "${flightNumber}" nije pronađen u live podacima!`);
-      console.warn(`[auto-reset] Dostupni letovi: ${allFlights.map((f: any) => f.FlightNumber).join(', ')}`);
+      console.warn(`[auto-reset] Dostupni letovi: ${allFlights.map((f) => f.FlightNumber).join(', ')}`);
       continue;
     }
 
-    const std = flight.ScheduledDepartureTime || '';
-    const etd = flight.EstimatedDepartureTime || '';
+    const std    = flight.ScheduledDepartureTime || '';
+    const etd    = flight.EstimatedDepartureTime || '';
     const status = flight.StatusEN || '';
 
-    // ── Desk status reset (ako je let departed) ────────────────
-const s = (status || '').toLowerCase();
-const isDeparted =
-  s.includes('departed') || s.includes('poletio') ||
-  s.includes('cancelled') || s.includes('otkazan') ||
-  s.includes('diverted') || s.includes('preusmjeren');
-
-if (isDeparted) {
-  // Reset desk-status override-ova za sve deskove ovog leta
-  const deskValue = data.CheckInDesk || '';
-  if (deskValue) {
-    const desks = deskValue.split(',').map((d: string) => d.trim());
-    for (const desk of desks) {
-      if (desk) {
-        try {
-          await redis.del(`desk-status:${desk}`);
-          console.log(`[auto-reset] ✅ desk-status:${desk} obrisan za departed let ${flightNumber}`);
-        } catch (err) {
-          console.error(`[auto-reset] ❌ desk-status redis greška za ${desk}:`, err);
+    // ── Full reset za terminated letove ──────────────────────
+    if (isTerminatedStatus(status)) {
+      // Briši desk-status override-ove za sve šaltere ovog leta
+      const deskValue = data.CheckInDesk || '';
+      if (deskValue) {
+        const desks = deskValue.split(',').map((d) => d.trim()).filter(Boolean);
+        for (const desk of desks) {
+          try {
+            await redis.del(`desk-status:${desk}`);
+            console.log(`[auto-reset] ✅ desk-status:${desk} obrisan za terminated let ${flightNumber}`);
+          } catch (err) {
+            console.error(`[auto-reset] ❌ desk-status redis greška za ${desk}:`, err);
+          }
         }
       }
+
+      // Briši cijeli override ključ
+      try {
+        await redis.del(key);
+        console.log(`[auto-reset] ✅ Svi override-ovi obrisani za terminated let ${flightNumber} (${status})`);
+        results.push({ flightNumber, field: 'CheckInDesk', reason: `let je terminiran (${status}) — full reset` });
+      } catch (err) {
+        console.error(`[auto-reset] ❌ Full reset greška za ${flightNumber}:`, err);
+      }
+
+      continue;
     }
-  }
 
-  // Reset cijelog override ključa za departed let
-  try {
-    await redis.del(key);
-    console.log(`[auto-reset] ✅ Svi override-ovi obrisani za departed let ${flightNumber}`);
-    results.push({ flightNumber, field: 'CheckInDesk', reason: 'let je departed — full reset' });
-  } catch (err) {
-    console.error(`[auto-reset] ❌ Full reset greška za ${flightNumber}:`, err);
-  }
-  
-  continue; // Preskači dalju obradu ovog leta
-}
-
-    console.log(`[auto-reset] Provjera ${flightNumber}: STD=${std}, ETD=${etd}, status="${status}", minsToReset=${minutesUntilCheckInReset(std)}`);
+    console.log(
+      `[auto-reset] Provjera ${flightNumber}: STD=${std}, ETD=${etd}, ` +
+      `status="${status}", minsToReset=${minutesUntilCheckInReset(std)}`
+    );
 
     // ── CheckInDesk reset ──────────────────────────────────
     if (data.CheckInDesk !== undefined) {
@@ -283,6 +308,7 @@ if (isDeparted) {
 
     // ── GateNumber reset ───────────────────────────────────
     if (data.GateNumber !== undefined) {
+      // Osvježi podatke u slučaju da je CheckInDesk reset upravo obrisao key
       let freshData: Record<string, string> = {};
       try {
         freshData = await redis.hgetall(key);
@@ -291,7 +317,7 @@ if (isDeparted) {
       }
       if (!freshData || freshData.GateNumber === undefined) continue;
 
-      const { reset, reason, usedTime } = shouldResetGate(std, etd, status);
+      const { reset, reason, usedTime } = shouldResetGate(std, etd || undefined, status);
       if (reset) {
         try {
           await redis.hdel(key, 'GateNumber');

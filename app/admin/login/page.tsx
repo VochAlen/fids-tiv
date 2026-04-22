@@ -107,11 +107,11 @@ export default function AdminLoginPage() {
             </div>
           </div>
 
-          <div className="text-sm text-white/70">
+          {/* <div className="text-sm text-white/70">
             <p>Podrazumevani login:</p>
             <p className="font-mono mt-1">Korisničko ime: <span className="text-yellow-300">admin</span></p>
             <p className="font-mono">Lozinka: <span className="text-yellow-300">tivat2025</span></p>
-          </div>
+          </div> */}
 
           <button
             type="submit"
