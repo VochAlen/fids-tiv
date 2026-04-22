@@ -1,6 +1,7 @@
+// app/admin/login/page.tsx
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Lock, LogIn } from 'lucide-react';
 
@@ -11,16 +12,23 @@ export default function AdminLoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
+  // Optimizovana provera sesije - brža i bez nepotrebnog renderovanja
   useEffect(() => {
-    // Proverava sesiju u pozadini, ne blokira formu
+    // Brza provera - koristi samo localStorage (sinkrono)
     const isLocalAuth = localStorage.getItem('adminAuthenticated') === 'true';
-    const hasCookie = document.cookie.includes('admin-authenticated=true');
-    if (isLocalAuth || hasCookie) {
+    
+    if (isLocalAuth) {
+      router.push('/admin');
+      return;
+    }
+    
+    // Provera cookie-a (ako je potrebno)
+    if (document.cookie.includes('admin-authenticated=true')) {
       router.push('/admin');
     }
   }, [router]);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
@@ -30,28 +38,32 @@ export default function AdminLoginPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
+        // Dodajte signal za timeout (5 sekundi)
+        signal: AbortSignal.timeout(5000),
       });
 
       const data = await response.json();
 
       if (data.success) {
+        // Postavi localStorage i cookie sinkrono
         localStorage.setItem('adminAuthenticated', 'true');
         localStorage.setItem('adminLoginTime', new Date().toISOString());
-
+        
         const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
         document.cookie = `admin-authenticated=true; path=/; expires=${expires.toUTCString()}; SameSite=Strict`;
-
+        
+        // Odmah redirect bez čekanja
         router.push('/admin');
       } else {
         setError(data.message || 'Pogrešno korisničko ime ili lozinka');
+        setLoading(false);
       }
     } catch (error) {
       console.error('Login error:', error);
       setError('Došlo je do greške pri prijavljivanju');
-    } finally {
       setLoading(false);
     }
-  };
+  }, [username, password, router]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800">
@@ -86,6 +98,7 @@ export default function AdminLoginPage() {
                 className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="Unesite korisničko ime"
                 disabled={loading}
+                autoComplete="off"
               />
             </div>
 
@@ -103,15 +116,10 @@ export default function AdminLoginPage() {
                 className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="Unesite lozinku"
                 disabled={loading}
+                autoComplete="off"
               />
             </div>
           </div>
-
-          {/* <div className="text-sm text-white/70">
-            <p>Podrazumevani login:</p>
-            <p className="font-mono mt-1">Korisničko ime: <span className="text-yellow-300">admin</span></p>
-            <p className="font-mono">Lozinka: <span className="text-yellow-300">tivat2025</span></p>
-          </div> */}
 
           <button
             type="submit"
