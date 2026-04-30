@@ -43,7 +43,6 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
   try {
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
-    // Dohvati letove i checkin-config paralelno
     const [flightsRes, checkInConfig] = await Promise.all([
       fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
         cache: 'no-store',
@@ -68,13 +67,12 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
 
     const relevant = allFlights.filter((f: any) => {
-      if (!f.CheckInDesk) return false;
-      const desks = f.CheckInDesk.split(',').map((d: string) => d.trim());
-      return (
-        desks.includes(deskNumber) ||
-        desks.includes(deskNumber.replace(/^0+/, '')) ||
-        desks.includes(deskNumber.padStart(2, '0'))
-      );
+      const deskField = f.CheckInDesk;
+      if (!deskField) return false;
+      const desks = deskField.split(',').map((d: string) => d.trim());
+      return desks.includes(deskNumber) ||
+             desks.includes(deskNumber.replace(/^0+/, '')) ||
+             desks.includes(deskNumber.padStart(2, '0'));
     });
 
     if (relevant.length === 0) return [];
@@ -85,12 +83,10 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
       const stdMs = parseHHMM(f.ScheduledDepartureTime);
       if (!stdMs) continue;
 
-      // Izvuci airline IATA iz broja leta (prva 2 slova/znaka)
       const airlineIata: string = (f.AirlineCode || f.FlightNumber || '')
         .substring(0, 2)
         .toUpperCase();
 
-      // Dohvati checkInOpenMins iz config-a — fallback na default
       const checkInOpenMins: number =
         checkInConfig[airlineIata] ?? DEFAULT_CHECKIN_MINS;
 
@@ -100,12 +96,11 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
         scheduledTime:   f.ScheduledDepartureTime,
         estimatedTime:   f.EstimatedDepartureTime || null,
         checkInOpenMins,
-        checkInOpensAt:  stdMs - checkInOpenMins * 60 * 1000, // STD - airline-specific
-        checkInClosesAt: stdMs - 30 * 60 * 1000,              // STD - 30min (uvijek)
+        checkInOpensAt:  stdMs - checkInOpenMins * 60 * 1000,
+        checkInClosesAt: stdMs - 30 * 60 * 1000,
       });
     }
 
-    // Sortiraj po STD
     result.sort((a, b) => {
       const aMs = parseHHMM(a.scheduledTime) ?? Infinity;
       const bMs = parseHHMM(b.scheduledTime) ?? Infinity;
@@ -128,32 +123,37 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
 }
 
 // ─────────────────────────────────────────────
+// Helper: Postavi/obriši CheckInDesk override za let
+// ─────────────────────────────────────────────
+async function setFlightCheckInDeskOverride(
+  flightNumber: string,
+  action: 'assign' | 'clear',
+  value?: string
+): Promise<void> {
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    const response = await fetch(`${baseUrl}/api/admin/flight-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flightNumber,
+        field: 'CheckInDesk',
+        action,
+        value,
+      }),
+    });
+    if (!response.ok) {
+      console.error(`Failed to set flight override for ${flightNumber}:`, await response.text());
+    }
+  } catch (err) {
+    console.error(`Error calling flight-override for ${flightNumber}:`, err);
+  }
+}
+
+// ─────────────────────────────────────────────
 // Ključna logika: izračunaj TTL za desk-status
 // ─────────────────────────────────────────────
 
-/**
- * TTL mora biti najmanji od:
- *  A) checkInClosesAt trenutnog leta  (STD_current - 30min)
- *  B) checkInOpensAt  sljedećeg leta  (STD_next - checkInOpenMins_next)
- *
- * Primjer sa tvojim scenarijem:
- *   W6 567  STD 11:00  checkInCloses = 10:30  (Ryanair, 120min)
- *   Let XY  STD 12:00  checkInOpens  = 10:00  (Ryanair, 120min)
- *
- *   FORCE OPEN u 08:30 →
- *     A = 10:30 - 08:30 = 120min
- *     B = 10:00 - 08:30 = 90min
- *     TTL = min(120, 90) = 90min → ključ istekne u 10:00 ✅
- *
- * Primjer sa Jet2 (150min):
- *   LS 123  STD 11:00  checkInCloses = 10:30
- *   LS 456  STD 12:00  checkInOpens  = 09:30  (150min prije STD)
- *
- *   FORCE OPEN u 08:30 →
- *     A = 10:30 - 08:30 = 120min
- *     B = 09:30 - 08:30 = 60min
- *     TTL = min(120, 60) = 60min → ključ istekne u 09:30 ✅
- */
 function computeDeskStatusTTL(
   current: DeskFlightInfo,
   next: DeskFlightInfo | null,
@@ -188,7 +188,6 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { deskNumber, action, flightNumber: providedFlightNumber } = body;
 
-    // Validacija
     const desk = String(deskNumber ?? '').trim();
     if (!desk) {
       return NextResponse.json(
@@ -206,10 +205,11 @@ export async function POST(request: Request) {
     const client   = getRedisClient();
     const redisKey = `desk-status:${desk}`;
 
-    // ── Clear ────────────────────────────────────────────────────────────
+    // ── Clear (Reset to Auto) ────────────────────────────────────────────
     if (action === 'clear') {
       await client.del(redisKey);
-      console.log(`[desk-status-override] Desk ${desk} — override obrisan`);
+      console.log(`[desk-status-override] Desk ${desk} — override obrisan (reset to auto)`);
+      // Ne diramo flight-override marker __EMPTY__ – to ostaje, tako da zatvoreni letovi ostaju zatvoreni.
       return NextResponse.json({ success: true, message: `Status šaltera ${desk} resetovan` });
     }
 
@@ -226,23 +226,63 @@ export async function POST(request: Request) {
       });
     }
 
-    // Pronađi trenutno aktivni let (check-in prozor još nije zatvoren)
-    const currentFlight = flights.find((f) => f.checkInClosesAt > now) ?? null;
+    let currentFlight: DeskFlightInfo | null = null;
+    let flightNumberToStore: string | null = null;
 
-    if (!currentFlight) {
-      await client.del(redisKey);
-      console.log(`[desk-status-override] Desk ${desk} — svi check-in prozori zatvoreni`);
-      return NextResponse.json({
-        success: true,
-        message: `Svi check-in prozori su zatvoreni za šalter ${desk} — override obrisan`,
-        cleared: true,
-      });
+    // Ako je action 'open' i poslan je flightNumber – koristi taj let
+    if (action === 'open' && providedFlightNumber) {
+      const targetFlight = flights.find(f => f.flightNumber === providedFlightNumber);
+      if (!targetFlight) {
+        return NextResponse.json({
+          message: `Let ${providedFlightNumber} nije dodijeljen šalteru ${desk}`,
+        }, { status: 400 });
+      }
+      // Provjeri da li je check-in prozor već zatvoren
+      if (targetFlight.checkInClosesAt < now) {
+        return NextResponse.json({
+          message: `Ne možete otvoriti let ${providedFlightNumber} jer je check-in zatvoren u ${new Date(targetFlight.checkInClosesAt).toLocaleTimeString()}`,
+        }, { status: 400 });
+      }
+      currentFlight = targetFlight;
+      flightNumberToStore = targetFlight.flightNumber;
+      console.log(`[desk-status-override] Desk ${desk} — ručno odabran let ${providedFlightNumber}`);
+      
+      // Kada ručno otvaramo let, uklanjamo mu __EMPTY__ marker (ako je postojao)
+      await setFlightCheckInDeskOverride(providedFlightNumber, 'clear');
+    } else if (action === 'closed' && providedFlightNumber) {
+      // Ručno zatvaranje – označi let kao trajno zatvoren za automatsku logiku
+      await setFlightCheckInDeskOverride(providedFlightNumber, 'assign', '__EMPTY__');
+      // Zatim nastavi sa postavljanjem desk-status (closed) – koristimo isti let kao activeFlight
+      const targetFlight = flights.find(f => f.flightNumber === providedFlightNumber);
+      if (targetFlight) {
+        currentFlight = targetFlight;
+        flightNumberToStore = targetFlight.flightNumber;
+      } else {
+        // Ako let nije pronađen u listi, ipak zatvaramo desk bez prikaza leta
+        await client.set(redisKey, JSON.stringify({ status: 'closed', flightNumber: providedFlightNumber, setAt: new Date().toISOString() }), 'EX', 3600);
+        return NextResponse.json({ success: true, message: `Šalter ${desk} zatvoren bez aktivnog leta` });
+      }
+    } else {
+      // Postojeća logika: pronađi trenutno aktivni let (check-in prozor još nije zatvoren)
+      currentFlight = flights.find((f) => f.checkInClosesAt > now) ?? null;
+      if (!currentFlight) {
+        await client.del(redisKey);
+        console.log(`[desk-status-override] Desk ${desk} — svi check-in prozori zatvoreni`);
+        return NextResponse.json({
+          success: true,
+          message: `Svi check-in prozori su zatvoreni za šalter ${desk} — override obrisan`,
+          cleared: true,
+        });
+      }
+      flightNumberToStore = currentFlight.flightNumber;
     }
 
-    // Pronađi sljedeći let IZA trenutnog
-    const currentIdx = flights.indexOf(currentFlight);
-    const nextFlight = flights[currentIdx + 1] ?? null;
+    // Pronađi sljedeći let IZA currentFlight (u sortiranom nizu flights)
+    const currentIdx = flights.findIndex(f => f.flightNumber === currentFlight!.flightNumber);
+    const nextFlight = (currentIdx >= 0 && currentIdx < flights.length - 1) ? flights[currentIdx + 1] : null;
 
+    // Ako je action === 'closed', želimo da desk status bude 'closed', a ne 'open'
+    const finalAction = (action === 'closed') ? 'closed' : 'open';
     const ttl = computeDeskStatusTTL(currentFlight, nextFlight, now);
 
     if (ttl <= 0) {
@@ -255,13 +295,10 @@ export async function POST(request: Request) {
       });
     }
 
-    // Spremi JSON sa svim relevantnim podacima (korisno za debug i GET endpoint)
-    const flightNum = providedFlightNumber || currentFlight.flightNumber;
     const expiresAt = new Date(now + ttl * 1000);
-
     const value = JSON.stringify({
-      status:       action,
-      flightNumber: flightNum,
+      status:       finalAction,
+      flightNumber: flightNumberToStore,
       airlineIata:  currentFlight.airlineIata,
       std:          currentFlight.scheduledTime,
       nextFlight:   nextFlight?.flightNumber ?? null,
@@ -273,8 +310,8 @@ export async function POST(request: Request) {
     await client.set(redisKey, value, 'EX', ttl);
 
     console.log(
-      `[desk-status-override] Desk ${desk} — status: ${action}, ` +
-      `let: ${flightNum} (${currentFlight.airlineIata}, STD ${currentFlight.scheduledTime}, opens ${currentFlight.checkInOpenMins}min), ` +
+      `[desk-status-override] Desk ${desk} — status: ${finalAction}, ` +
+      `let: ${flightNumberToStore} (${currentFlight.airlineIata}, STD ${currentFlight.scheduledTime}, opens ${currentFlight.checkInOpenMins}min), ` +
       (nextFlight
         ? `sljedeći: ${nextFlight.flightNumber} (${nextFlight.airlineIata}, STD ${nextFlight.scheduledTime}, opens ${nextFlight.checkInOpenMins}min), `
         : '') +
@@ -283,9 +320,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success:      true,
-      message:      `Status šaltera ${desk} ažuriran na "${action}"`,
+      message:      `Status šaltera ${desk} ažuriran na "${finalAction}"`,
       ttl,
-      flightNumber: flightNum,
+      flightNumber: flightNumberToStore,
       nextFlight:   nextFlight?.flightNumber ?? null,
       expiresAt:    expiresAt.toLocaleTimeString('sr-Latn-RS', { hour: '2-digit', minute: '2-digit' }),
     });
