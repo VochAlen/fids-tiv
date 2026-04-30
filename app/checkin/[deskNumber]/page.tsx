@@ -1406,12 +1406,13 @@ useEffect(() => {
               </div>
             )}
 
-            <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
-              <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-              <div className="text-[1.36rem] font-bold text-yellow-300 text-center">
-                Portable chargers: CABIN BAGGAGE ONLY! Not in overhead bins. No charging during flight.
-              </div>
-            </div>
+  <div className="flex flex-col sm:flex-row items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-5 py-3 mx-auto w-fit max-w-3xl">
+  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
+  <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
+    ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals. 
+    <span className="text-yellow-400/80 ml-1">(valid from 27.03.2026.)</span>
+  </div>
+</div>
           </div>
 
           <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">

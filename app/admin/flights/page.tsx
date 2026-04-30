@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
-  Plane,
+  Plane,CheckSquare,
   ArrowUpRight,
   ArrowDownRight,
   Clock,
@@ -273,8 +273,13 @@ interface DeskManualControlProps {
   flightNumber?: string;
 }
 
+interface DeskManualControlProps {
+  deskNumbers: string | undefined;
+  flightNumber?: string;
+}
+
 const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flightNumber }) => {
-  const [savedStatuses, setSavedStatuses] = useState<Record<string, string>>({});
+  const [savedStatuses, setSavedStatuses] = useState<Record<string, { status: string; flightNumber?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -283,10 +288,16 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flig
     
     desks.forEach(async (desk) => {
       try {
-        const res = await fetch(`/api/desk-status/${desk}`);
+ const res = await fetch(`/api/admin/desk-status-override/${desk}`);
         const data = await res.json();
         if (data.status) {
-          setSavedStatuses(prev => ({ ...prev, [desk]: data.status }));
+          setSavedStatuses(prev => ({ 
+            ...prev, 
+            [desk]: { 
+              status: data.status, 
+              flightNumber: data.flightNumber 
+            } 
+          }));
         }
       } catch {}
     });
@@ -297,14 +308,17 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flig
     try {
       const body: any = { deskNumber: desk, action };
       if (flightNumber) {
-        body.flightNumber = flightNumber;
+        body.flightNumber = flightNumber;  // ← Šaljemo flightNumber
       }
       
-      await fetch('/api/admin/desk-status-override', {
+      const response = await fetch('/api/admin/desk-status-override', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      
+      const result = await response.json();
+      
       if (action === 'clear') {
         setSavedStatuses(prev => {
           const next = { ...prev };
@@ -312,10 +326,26 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flig
           return next;
         });
       } else {
-        setSavedStatuses(prev => ({ ...prev, [desk]: action }));
+        setSavedStatuses(prev => ({ 
+          ...prev, 
+          [desk]: { 
+            status: action, 
+            flightNumber: flightNumber 
+          } 
+        }));
       }
+      
+      // Ako je TTL bio 0, prikaži poruku
+      if (result.ttl === 0) {
+        alert(`Check-in za let ${flightNumber} je već zatvoren (STD - 30min). Override nije sačuvan.`);
+      } else if (result.ttl) {
+        const minutes = Math.floor(result.ttl / 60);
+        console.log(`[DeskManualControl] Override postavljen, TTL: ${minutes} minuta`);
+      }
+      
     } catch (error) {
       console.error('Desk status override error:', error);
+      alert('Greška pri postavljanju statusa saltera');
     } finally {
       setIsLoading(false);
     }
@@ -339,59 +369,81 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flig
       <div className="space-y-2">
         {desks.map(desk => {
           const hasOverride = savedStatuses[desk] !== undefined;
+          const overrideInfo = savedStatuses[desk];
+          const isDifferentFlight = overrideInfo?.flightNumber && overrideInfo.flightNumber !== flightNumber;
+          
           return (
             <div 
               key={desk} 
-              className={`flex items-center gap-2 rounded-lg p-2 border transition-all ${
+              className={`flex flex-col gap-2 rounded-lg p-2 border transition-all ${
                 hasOverride 
-                  ? 'bg-orange-500/10 border-orange-500/30 ring-1 ring-orange-500/20' 
+                  ? isDifferentFlight
+                    ? 'bg-red-500/10 border-red-500/30 ring-1 ring-red-500/20'
+                    : 'bg-orange-500/10 border-orange-500/30 ring-1 ring-orange-500/20'
                   : 'bg-white/5 border-white/10'
               }`}
             >
-              <span className={`text-xs font-bold w-8 ${hasOverride ? 'text-orange-300' : 'text-white/70'}`}>
-                Š{desk}
-              </span>
-              
-              {!savedStatuses[desk] ? (
-                <div className="flex-1 flex items-center gap-1 flex-wrap">
-                  <button
-                    onClick={() => handleAction(desk, 'open')}
-                    disabled={isLoading}
-                    className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50"
-                    type="button"
-                  >
-                    FORCE OPEN
-                  </button>
-                  <button
-                    onClick={() => handleAction(desk, 'closed')}
-                    disabled={isLoading}
-                    className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50"
-                    type="button"
-                  >
-                    FORCE CLOSE
-                  </button>
-                </div>
-              ) : (
-                <div className="flex-1 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                      savedStatuses[desk] === 'open' 
-                        ? 'bg-green-500/20 text-green-300 border border-green-500/30' 
-                        : 'bg-red-500/20 text-red-300 border border-red-500/30'
-                    }`}>
-                      {savedStatuses[desk].toUpperCase()}
-                    </span>
-                    <span className="text-[9px] text-orange-400/70">(manual override active)</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs font-bold w-8 ${hasOverride ? 'text-orange-300' : 'text-white/70'}`}>
+                  Š{desk}
+                </span>
+                
+                {!savedStatuses[desk] ? (
+                  <div className="flex-1 flex items-center gap-1 flex-wrap">
+                    <button
+                      onClick={() => handleAction(desk, 'open')}
+                      disabled={isLoading}
+                      className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50"
+                      type="button"
+                    >
+                      FORCE OPEN
+                    </button>
+                    <button
+                      onClick={() => handleAction(desk, 'closed')}
+                      disabled={isLoading}
+                      className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50"
+                      type="button"
+                    >
+                      FORCE CLOSE
+                    </button>
                   </div>
-                  <button 
-                    onClick={() => handleAction(desk, 'clear')} 
-                    disabled={isLoading} 
-                    className="flex items-center gap-1 text-[10px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-1 rounded transition disabled:opacity-50"
-                    type="button"
-                  >
-                    <RefreshCw className="w-2.5 h-2.5" />
-                    Reset to Auto
-                  </button>
+                ) : (
+                  <div className="flex-1 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                        savedStatuses[desk].status === 'open' 
+                          ? 'bg-green-500/20 text-green-300 border border-green-500/30' 
+                          : 'bg-red-500/20 text-red-300 border border-red-500/30'
+                      }`}>
+                        {savedStatuses[desk].status.toUpperCase()}
+                      </span>
+                      {isDifferentFlight && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-300">
+                          ⚠️ Stari let: {overrideInfo.flightNumber}
+                        </span>
+                      )}
+                      <span className="text-[9px] text-orange-400/70">
+                        (manual override active{overrideInfo.flightNumber && ` for ${overrideInfo.flightNumber}`})
+                      </span>
+                    </div>
+                    <button 
+                      onClick={() => handleAction(desk, 'clear')} 
+                      disabled={isLoading} 
+                      className="flex items-center gap-1 text-[10px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-1 rounded transition disabled:opacity-50"
+                      type="button"
+                    >
+                      <RefreshCw className="w-2.5 h-2.5" />
+                      Reset to Auto
+                    </button>
+                  </div>
+                )}
+              </div>
+              
+              {/* Prikaži upozorenje ako je override za stari let */}
+              {isDifferentFlight && (
+                <div className="text-[10px] text-red-400/80 bg-red-500/10 p-1.5 rounded-lg mt-1">
+                  ⚠️ Ovaj desk je i dalje otvoren za stari let ({overrideInfo.flightNumber})! 
+                  Kliknite &quot;Reset to Auto&quot; da oslobodite desk za trenutni let.
                 </div>
               )}
             </div>
@@ -1224,6 +1276,14 @@ if (departedFlights.length > 0) {
                 <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button">
                   <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
+                <Link
+  href="/admin/assign-checkin"
+  className="flex items-center gap-2 px-3 py-2 md:px-4 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 rounded-lg border border-purple-500/30 transition-colors"
+>
+  <CheckSquare className="w-4 h-4" />
+  <span className="hidden sm:inline">TIV CheckIn & Gate Assignment Panel - RUČNO</span>
+  <span className="sm:hidden">Assign</span>
+</Link>
                 <button
                   onClick={handleClearAllFlightsOverrides}
                   className="flex items-center gap-2 px-3 py-2 md:px-4 bg-orange-600/20 hover:bg-orange-600/30 text-orange-300 rounded-lg border border-orange-500/30 transition-colors"

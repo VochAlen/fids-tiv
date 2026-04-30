@@ -1,0 +1,222 @@
+// app/api/admin/desk-status-override/route.ts
+import { NextResponse } from 'next/server';
+import { getRedisClient } from '@/lib/redis';
+import { computeOverrideTTL } from '@/lib/override-ttl';
+
+export async function GET(
+  request: Request,
+  { params }: { params: { deskNumber: string } }
+) {
+  try {
+    const { deskNumber } = params;
+    const client = getRedisClient();
+    const redisKey = `desk-status:${deskNumber}`;
+    
+    const value = await client.get(redisKey);
+    
+    if (!value) {
+      return NextResponse.json({ status: null });
+    }
+    
+    // Parsiraj JSON
+    let data: any;
+    try {
+      data = JSON.parse(value);
+    } catch {
+      // Stari format (samo string)
+      return NextResponse.json({ status: value });
+    }
+    
+    // 🔥 PROVJERA: Da li je let još uvijek aktivan?
+    if (data.flightNumber && data.status) {
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+      const response = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`);
+      
+      if (response.ok) {
+        const flightsData = await response.json();
+        const allFlights = [...(flightsData.departures || []), ...(flightsData.arrivals || [])];
+        const flight = allFlights.find((f: any) => f.FlightNumber === data.flightNumber);
+        
+        if (flight) {
+          const parseHHMM = (t: string): number | null => {
+            const m = t?.match(/^(\d{1,2}):(\d{2})$/);
+            if (!m) return null;
+            const d = new Date();
+            d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+            return d.getTime();
+          };
+          
+          const stdMs = parseHHMM(flight.ScheduledDepartureTime);
+          const now = Date.now();
+          const checkInClosesMs = stdMs ? stdMs - 30 * 60 * 1000 : 0;
+          
+          // Ako je check-in zatvoren (STD - 30min), ignoriši override
+          if (stdMs && checkInClosesMs <= now) {
+            console.log(`[desk-status] Ignorišem override za ${deskNumber} - let ${data.flightNumber} je završio (check-in zatvoren u ${flight.ScheduledDepartureTime})`);
+            // Opciono: obriši zastarjeli override
+            await client.del(redisKey);
+            return NextResponse.json({ status: null });
+          }
+          
+          // Također provjeri da li je let otkazan ili poletio
+          const status = (flight.StatusEN || '').toLowerCase();
+          if (status.includes('cancelled') || status.includes('departed') || status.includes('diverted')) {
+            console.log(`[desk-status] Ignorišem override za ${deskNumber} - let ${data.flightNumber} je ${status}`);
+            await client.del(redisKey);
+            return NextResponse.json({ status: null });
+          }
+        } else {
+          // Let više ne postoji u današnjem redu letenja
+          console.log(`[desk-status] Let ${data.flightNumber} ne postoji, brišem override za ${deskNumber}`);
+          await client.del(redisKey);
+          return NextResponse.json({ status: null });
+        }
+      }
+    }
+    
+    // Sve ok, vrati status
+    return NextResponse.json({ 
+      status: data.status,
+      flightNumber: data.flightNumber
+    });
+    
+  } catch (error) {
+    console.error('[desk-status] Error:', error);
+    return NextResponse.json({ status: null });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const { deskNumber, action, flightNumber } = await request.json();
+    if (!deskNumber) {
+      return NextResponse.json({ message: 'Nedostaje broj saltera' }, { status: 400 });
+    }
+
+    const client = getRedisClient();
+    const redisKey = `desk-status:${deskNumber}`;
+    
+    let responseTtl = null;
+
+    if (action === 'open' || action === 'closed') {
+      // Ako nemamo flightNumber, pokušaj ga pronaći
+      let targetFlightNumber = flightNumber;
+      
+      if (!targetFlightNumber) {
+        // Pokušaj pronaći let za ovaj desk
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+        const response = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+          
+          const parseHHMM = (t: string): number | null => {
+            const m = t?.match(/^(\d{1,2}):(\d{2})$/);
+            if (!m) return null;
+            const d = new Date();
+            d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+            return d.getTime();
+          };
+          
+          const now = Date.now();
+          
+          // Pronađi aktivni let za ovaj desk
+          const activeFlight = allFlights.find((f: any) => {
+            if (!f.CheckInDesk) return false;
+            const desks = f.CheckInDesk.split(',').map((d: string) => d.trim());
+            const matchesDesk = desks.includes(deskNumber) || 
+                               desks.includes(deskNumber.replace(/^0+/, '')) ||
+                               desks.includes(deskNumber.padStart(2, '0'));
+            
+            if (!matchesDesk) return false;
+            
+            const stdMs = parseHHMM(f.ScheduledDepartureTime);
+            if (!stdMs) return false;
+            const checkInClosesMs = stdMs - 30 * 60 * 1000;
+            return checkInClosesMs > now;
+          });
+          
+          if (activeFlight) {
+            targetFlightNumber = activeFlight.FlightNumber;
+          }
+        }
+      }
+      
+      // Dohvati vremena leta za ovaj desk
+      let scheduledTime = null;
+      let estimatedTime = null;
+      
+      if (targetFlightNumber) {
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+        const response = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+          const flight = allFlights.find((f: any) => f.FlightNumber === targetFlightNumber);
+          
+          if (flight) {
+            scheduledTime = flight.ScheduledDepartureTime;
+            estimatedTime = flight.EstimatedDepartureTime || null;
+          }
+        }
+      }
+      
+      // Ako nema aktivnog leta, odmah obriši override
+      if (!scheduledTime) {
+        await client.del(redisKey);
+        return NextResponse.json({ 
+          success: true, 
+          message: `Nema aktivnog leta na salteru ${deskNumber}, override obrisan`,
+          cleared: true
+        });
+      }
+      
+      // Izračunaj TTL koristeći computeOverrideTTL
+      const ttl = computeOverrideTTL('CheckInDesk', scheduledTime, estimatedTime);
+      responseTtl = ttl;
+      
+      console.log(`[desk-status-override] Desk ${deskNumber} - flight: ${targetFlightNumber}, action: ${action}, TTL: ${ttl}s (${Math.floor(ttl / 60)}min)`);
+      
+      // Spremi i status i flightNumber u Redis (koristeći hash ili JSON)
+      const value = JSON.stringify({
+        status: action,
+        flightNumber: targetFlightNumber,
+        setAt: Date.now()
+      });
+      
+      // Ako je TTL 0, odmah obriši (check-in je već zatvoren)
+      if (ttl === 0) {
+        await client.del(redisKey);
+      } else {
+        await client.set(redisKey, value, 'EX', ttl);
+      }
+      
+    } else if (action === 'clear') {
+      await client.del(redisKey);
+    } else {
+      return NextResponse.json({ message: 'Nepoznata akcija' }, { status: 400 });
+    }
+
+    return NextResponse.json({ 
+      success: true, 
+      message: `Status saltera ${deskNumber} ažuriran`,
+      ...(responseTtl !== null && { ttl: responseTtl })
+    });
+    
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[desk-status-override] Redis error:', msg);
+    return NextResponse.json(
+      { message: 'Redis nedostupan, pokušajte ponovo za nekoliko sekundi' },
+      { status: 503 }
+    );
+  }
+}

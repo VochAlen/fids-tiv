@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { 
-  Plane, 
+  Plane,CheckSquare, 
   Settings, 
   LogOut, 
   Building,
@@ -409,6 +409,22 @@ const handleLogout = useCallback(async () => {
               </div>
             </div>
           </Link>
+          <Link
+  href="/admin/assign-checkin"
+  className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
+>
+  <div className="flex items-start gap-4">
+    <div className="p-3 bg-indigo-600/20 rounded-lg text-indigo-400 group-hover:bg-indigo-600/30 transition-colors">
+      <CheckSquare className="w-6 h-6" />
+    </div>
+    <div>
+      <h3 className="font-bold text-lg text-white mb-1">TIV CheckIn & Gate</h3>
+      <p className="text-white/70 text-sm">
+        Ručna dodjela check-in šaltera i izlaza (gate-ova)
+      </p>
+    </div>
+  </div>
+</Link>
 
           <Link
             href="/admin/airlines"

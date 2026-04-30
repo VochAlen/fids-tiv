@@ -207,6 +207,101 @@ export function shouldResetGate(
   };
 }
 
+// Dodaj u lib/override-utils.ts, prije runAutoReset funkcije
+
+/**
+ * Briše desk-status override za dati desk ako let nije više aktivan
+ */
+export async function cleanupDeskStatusOverrides(allFlights: FlightLike[]): Promise<number> {
+  const redis = getRedisClient();
+  let cleaned = 0;
+  
+  try {
+    // Pronađi sve desk-status ključeve
+    const keys = await redis.keys('desk-status:*');
+    
+    const parseHHMM = (t: string): number | null => {
+      const m = t?.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const d = new Date();
+      d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
+      return d.getTime();
+    };
+    
+    const now = Date.now();
+    
+    for (const key of keys) {
+      const value = await redis.get(key);
+      if (!value) continue;
+      
+      let flightNumber: string | null = null;
+      let deskStatus: string | null = null;
+      
+      // Pokušaj parsirati JSON
+      try {
+        const data = JSON.parse(value);
+        flightNumber = data.flightNumber;
+        deskStatus = data.status;
+      } catch {
+        // Stari format - ne možemo znati koji let, preskoči
+        console.log(`[cleanup] Skipping old format desk-status:${key}`);
+        continue;
+      }
+      
+      if (!flightNumber) continue;
+      
+      // Pronađi let u podacima
+      const flight = allFlights.find(f => f.FlightNumber === flightNumber);
+      
+      if (!flight) {
+        // Let ne postoji - obriši override
+        await redis.del(key);
+        cleaned++;
+        console.log(`[cleanup] Deleted desk-status:${key} - flight ${flightNumber} not found`);
+        continue;
+      }
+      
+      const std = flight.ScheduledDepartureTime;
+      if (!std) {
+        await redis.del(key);
+        cleaned++;
+        console.log(`[cleanup] Deleted desk-status:${key} - no scheduled time for ${flightNumber}`);
+        continue;
+      }
+      
+      const stdMs = parseHHMM(std);
+      if (!stdMs) {
+        await redis.del(key);
+        cleaned++;
+        console.log(`[cleanup] Deleted desk-status:${key} - invalid time for ${flightNumber}`);
+        continue;
+      }
+      
+      const checkInClosesMs = stdMs - 30 * 60 * 1000;
+      
+      // Ako je check-in zatvoren, obriši override
+      if (checkInClosesMs <= now) {
+        await redis.del(key);
+        cleaned++;
+        console.log(`[cleanup] Deleted desk-status:${key} - check-in closed for ${flightNumber} (STD ${std})`);
+        continue;
+      }
+      
+      // Također provjeri status leta
+      const status = (flight.StatusEN || '').toLowerCase();
+      if (status.includes('departed') || status.includes('cancelled') || status.includes('diverted')) {
+        await redis.del(key);
+        cleaned++;
+        console.log(`[cleanup] Deleted desk-status:${key} - flight ${flightNumber} terminated (${status})`);
+      }
+    }
+  } catch (err) {
+    console.error('[cleanup] Error cleaning desk-status overrides:', err);
+  }
+  
+  return cleaned;
+}
+
 // ─────────────────────────────────────────────
 // Glavna funkcija
 // ─────────────────────────────────────────────
@@ -220,6 +315,10 @@ export async function runAutoReset(allFlights: FlightLike[]): Promise<AutoResetR
   const results: AutoResetResult[] = [];
 
   console.log(`[auto-reset] Pokrenuto u ${new Date().toLocaleTimeString('sr-Latn-RS')}, letova: ${allFlights.length}`);
+  const cleanedDesks = await cleanupDeskStatusOverrides(allFlights);
+if (cleanedDesks > 0) {
+  console.log(`[auto-reset] Očišćeno ${cleanedDesks} desk-status override-ova`);
+}
 
   let keys: string[] = [];
   try {
@@ -383,3 +482,4 @@ export async function resetExpiredCheckInOverrides(): Promise<number> {
   }
   return count;
 }
+
