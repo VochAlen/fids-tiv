@@ -13,8 +13,7 @@ import {
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
 
-
-const REFRESH_INTERVAL_MS    = 60_000;
+const REFRESH_INTERVAL_MS    = 20_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 interface EBState { hasError: boolean; message: string }
@@ -83,6 +82,14 @@ const parseDepartureTime = (t: string): Date | null => {
     return d;
   } catch { return null; }
 };
+
+// ---------- NEW: helper for effective departure time ----------
+const getEffectiveDepartureTime = (flight: Flight): Date | null => {
+  const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
+  if (!timeStr) return null;
+  return parseDepartureTime(timeStr);
+};
+// --------------------------------------------------------------
 
 const formatTimeRemaining = (min: number): string => {
   if (min <= 0) return 'Now';
@@ -169,39 +176,44 @@ function GateDisplay() {
     catch { return null; }
   }, []);
 
-// const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-//   if (manualGateStatusRef.current === 'open') return true;
-//   const s = (f.StatusEN || '').toLowerCase().trim();
+  const clearGateOverride = useCallback(async () => {
+    try {
+      const isDev = process.env.NODE_ENV === 'development';
+      const apiPrefix = isDev ? '/api/test' : '/api/admin';
+      await fetch(`${apiPrefix}/gate-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gateNumber, action: 'clear' }),
+      });
+      console.log(`[gate] Override cleared for gate ${gateNumber} (flight departed)`);
+    } catch (err) {
+      console.error('Failed to clear override:', err);
+    }
+  }, [gateNumber]);
 
-//   if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-//   if (s.includes('diverted')  || s.includes('preusmjeren'))                        return false;
+  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+    if (manualGateStatusRef.current === 'open') return true;
+    const s = (f.StatusEN || '').toLowerCase().trim();
+    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+    if (s.includes('departed') || s.includes('poletio')) return false;
 
-//   // departed: sakrij SAMO ako je prošlo ETD (ili STD ako ETD nema)
-//   if (s.includes('departed') || s.includes('poletio')) {
-//     const refTimeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
-//     const dep = parseDepartureTime(refTimeStr);
-//     // Ako ne možemo parsirati vrijeme, sakrij odmah
-//     if (!dep) return false;
-//     // Prikaži dok nije prošlo vrijeme polaska
-//     return Date.now() < dep.getTime();
-//   }
+    // Use effective departure time (Estimated > Scheduled)
+    const depTimeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime;
+    if (depTimeStr) {
+      const dep = parseDepartureTime(depTimeStr);
+      if (dep && (Date.now() - dep.getTime() > 1 * 60 * 1000)) {
+        console.log(`[shouldDisplayFlight] Flight ${f.FlightNumber} hidden – departed by time (${depTimeStr})`);
+        return false;
+      }
+    }
+    return true;
+  }, []);
 
-//   return true;
-// }, []);
-const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-  if (manualGateStatusRef.current === 'open') return true;
-  const s = (f.StatusEN || '').toLowerCase().trim();
-
-  if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
-  if (s.includes('departed')  || s.includes('poletio')) return false;  // ← odmah sakri
-
-  return true;
-}, []);
   const weather = useWeather({
-  cityName: display.flight?.DestinationCityName,
-  airportCode: display.flight?.DestinationAirportCode,
-}, 0);
+    cityName: display.flight?.DestinationCityName,
+    airportCode: display.flight?.DestinationAirportCode,
+  }, 0);
 
   useEffect(() => {
     const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS);
@@ -220,10 +232,12 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     };
   }, []);
 
+  // Countdown using effective departure time
   const updateCountdown = useCallback((f: Flight | null) => {
     if (!f) { setTimeUntilDeparture(null); return; }
-    const dep = parseDepartureTime(f.ScheduledDepartureTime || '');
+    const dep = getEffectiveDepartureTime(f);
     if (dep) setTimeUntilDeparture(Math.floor((dep.getTime() - Date.now()) / 60_000));
+    else setTimeUntilDeparture(null);
   }, []);
 
   const getFlightCheckInStatus = useCallback(async (f: Flight): Promise<CheckInStatus | null> => {
@@ -231,70 +245,83 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     catch { return null; }
   }, []);
 
-const loadFlights = useCallback(async () => {
-  if (!isMountedRef.current) return;
-  try {
-    const data = await fetchFlightData();
-    const now  = new Date();
-    const allForGate = data.departures.filter((f: Flight) => {
-      if (!f.GateNumber) return false;
-      const gates = f.GateNumber.split(',').map((g: string) => g.trim());
-      return gates.includes(gateNumber) || gates.includes(gateNumber.replace(/^0+/, '')) || gates.includes(gateNumber.padStart(2, '0'));
-    });
-    const withStatus = await Promise.all(allForGate.map(async f => ({ ...f, checkInStatus: await getFlightCheckInStatus(f) })));
-    const withTime   = withStatus
-      .map(f => ({ ...f, departureTime: parseDepartureTime(f.ScheduledDepartureTime || '') }))
-      .filter(f => f.departureTime !== null) as (Flight & { departureTime: Date; checkInStatus: CheckInStatus | null })[];
-    const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
+  const loadFlights = useCallback(async () => {
+    if (!isMountedRef.current) return;
+    try {
+      const data = await fetchFlightData();
+      const allForGate = data.departures.filter((f: Flight) => {
+        if (!f.GateNumber) return false;
+        const gates = f.GateNumber.split(',').map((g: string) => g.trim());
+        return gates.includes(gateNumber) || gates.includes(gateNumber.replace(/^0+/, '')) || gates.includes(gateNumber.padStart(2, '0'));
+      });
+      const withStatus = await Promise.all(allForGate.map(async f => ({ ...f, checkInStatus: await getFlightCheckInStatus(f) })));
+      // Use effective departure time for sorting and filtering
+      const withTime = withStatus
+        .map(f => ({ ...f, departureTime: getEffectiveDepartureTime(f) }))
+        .filter(f => f.departureTime !== null) as (Flight & { departureTime: Date; checkInStatus: CheckInStatus | null })[];
+      const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
-    if (manualGateStatusRef.current === 'closed') {
+      if (manualGateStatusRef.current === 'closed') {
+        if (!isMountedRef.current) return;
+        currentFlightRef.current = null;
+        currentStatusRef.current = null;
+        setDisplay({ flight: null, checkInStatus: null, nextFlight: null, gateChangedAt: undefined, manualGateStatus: 'closed' });
+        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+        setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+        setLoading(false);
+        return;
+      }
+
+      let current: (typeof sorted)[number] | null = null;
+      if (manualGateStatusRef.current === 'open') {
+        current = sorted[0] || null;
+      } else {
+        for (const f of sorted) {
+          if (!shouldDisplayFlight(f)) continue;
+          current = f;
+          break;
+        }
+        if (!current) current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
+      }
+
+      // If override exists and flight has departed → clear override
+      if (current && manualGateStatusRef.current === 'open') {
+        const status = current.StatusEN?.toLowerCase() || '';
+        const isDeparted = status.includes('departed') || status.includes('poletio');
+        if (isDeparted) {
+          console.log(`[gate] Flight ${current.FlightNumber} has departed → clearing override`);
+          await clearGateOverride();
+          manualGateStatusRef.current = null;
+          await loadFlights();
+          return;
+        }
+      }
+
+      const idx = sorted.findIndex(f => f.FlightNumber === current?.FlightNumber);
+      const nextFlight = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
+
+      let gateChangedAt: number | undefined;
+      if (current?.GateNumber && currentFlightRef.current?.GateNumber !== current.GateNumber) {
+        const prev = currentFlightRef.current?.GateNumber;
+        if (prev && prev !== '-') gateChangedAt = Date.now();
+      }
+
       if (!isMountedRef.current) return;
-      currentFlightRef.current = null;
-      currentStatusRef.current = null;
-      setDisplay({ flight: null, checkInStatus: null, nextFlight: null, gateChangedAt: undefined, manualGateStatus: 'closed' });
+      if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
+        currentFlightRef.current = current;
+        currentStatusRef.current = current?.checkInStatus ?? null;
+        prevGateRef.current      = current?.GateNumber;
+        setDisplay({ flight: current, checkInStatus: current?.checkInStatus ?? null, nextFlight, gateChangedAt, manualGateStatus: null });
+        updateCountdown(current);
+      }
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
       setLoading(false);
-      return;
+    } catch (err) {
+      console.error('Gate load error:', err);
+      if (isMountedRef.current) setLoading(false);
     }
-
-    let current: (typeof sorted)[number] | null = null;
-    if (manualGateStatusRef.current === 'open') {
-      current = sorted[0] || null;
-    } else {
-      for (const f of sorted) {
-        if (!shouldDisplayFlight(f)) continue;
-        current = f;
-        break;
-      }
-      if (!current) current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
-    }
-
-    const idx        = sorted.findIndex(f => f.FlightNumber === current?.FlightNumber);
-    const nextFlight = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
-
-    let gateChangedAt: number | undefined;
-    if (current?.GateNumber && currentFlightRef.current?.GateNumber !== current.GateNumber) {
-      const prev = currentFlightRef.current?.GateNumber;
-      if (prev && prev !== '-') gateChangedAt = Date.now();
-    }
-
-    if (!isMountedRef.current) return;
-    if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
-      currentFlightRef.current = current;
-      currentStatusRef.current = current?.checkInStatus ?? null;
-      prevGateRef.current      = current?.GateNumber;
-      setDisplay({ flight: current, checkInStatus: current?.checkInStatus ?? null, nextFlight, gateChangedAt, manualGateStatus: null });
-      updateCountdown(current);
-    }
-    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
-    setLoading(false);
-  } catch (err) {
-    console.error('Gate load error:', err);
-    if (isMountedRef.current) setLoading(false);
-  }
-}, [gateNumber, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
+  }, [gateNumber, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight, clearGateOverride]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -304,10 +331,11 @@ const loadFlights = useCallback(async () => {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
 
+  // Auto-refresh timer based on effective departure time
   useEffect(() => {
     if (stdSwitchTimerRef.current) { clearTimeout(stdSwitchTimerRef.current); stdSwitchTimerRef.current = null; }
-    if (!display.flight?.ScheduledDepartureTime) return;
-    const dep = parseDepartureTime(display.flight.ScheduledDepartureTime);
+    if (!display.flight) return;
+    const dep = getEffectiveDepartureTime(display.flight);
     if (!dep) return;
     const ms = dep.getTime() - Date.now();
     if (ms > 0) {
@@ -317,7 +345,7 @@ const loadFlights = useCallback(async () => {
       }, ms);
     }
     return () => { if (stdSwitchTimerRef.current) { clearTimeout(stdSwitchTimerRef.current); stdSwitchTimerRef.current = null; } };
-  }, [display.flight?.ScheduledDepartureTime, display.flight?.FlightNumber, gateNumber, loadFlights]);
+  }, [display.flight, loadFlights]);
 
   useEffect(() => {
     const poll = async () => {
@@ -336,13 +364,13 @@ const loadFlights = useCallback(async () => {
     return () => clearInterval(id);
   }, [updateCountdown]);
 
-  // ── DERIVED STATE ────────────────────────────────────────────
+  // Derived state
   const { isCancelled, isDiverted } = checkFlightStatus(display.flight?.StatusEN || '');
   const isGateChanged = !!(display.gateChangedAt && (Date.now() - display.gateChangedAt < 15_000));
   const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
-  // ── AUTO-BOARDING ────────────────────────────────────────────
+  // Auto-boarding (still uses effective time)
   const effectiveStatus = (() => {
     const raw = display.flight?.StatusEN || '';
     if (!display.flight) return raw;
@@ -362,7 +390,7 @@ const loadFlights = useCallback(async () => {
 
   const statusCfg = getStatusConfig(effectiveStatus);
 
-  // ── RENDER: Loading ──────────────────────────────────────────
+  // Loading screen
   if (loading) return (
     <div style={styles.splash}>
       <div style={styles.spinner} />
@@ -370,7 +398,7 @@ const loadFlights = useCallback(async () => {
     </div>
   );
 
-  // ── RENDER: No flight ────────────────────────────────────────
+  // No flight
   if (!display.flight) {
     const closed = display.manualGateStatus === 'closed';
     return (
@@ -386,11 +414,10 @@ const loadFlights = useCallback(async () => {
     );
   }
 
-  // ── RENDER: Main ─────────────────────────────────────────────
+  // Main display
   const f = display.flight;
   return (
     <div style={styles.root} className="fids-root">
-
       {/* TOP BAR */}
       <div style={styles.topBar} className="fids-topbar">
         <div style={styles.topBarLeft} className="fids-topbar-left">
@@ -411,128 +438,115 @@ const loadFlights = useCallback(async () => {
 
       {/* MAIN CONTENT */}
       <div style={styles.main} className="fids-main">
-
-        {/* ── LEFT COLUMN ── */}
+        {/* LEFT COLUMN */}
         <div style={styles.leftCol} className="fids-left-col">
-
           <AirlineLogo icao={f.AirlineICAO} flightNumber={f.FlightNumber} name={f.AirlineName} />
-
           <div style={styles.flightNumber} className="fids-flight-number">{f.FlightNumber}</div>
-
           {f.CodeShareFlights?.length > 0 && (
             <div style={styles.codeshare} className="fids-codeshare">
               Also operating as:&nbsp;
               <span style={styles.codeshareList}>{f.CodeShareFlights.join(' · ')}</span>
             </div>
           )}
-
           <Divider />
-
           <div style={styles.destCode} className="fids-dest-code">{f.DestinationAirportCode}</div>
-  {/* ── DEST + WEATHER ROW ── */}
-<div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-  <div style={styles.destCity} className="fids-dest-city">{f.DestinationCityName}</div>
-  
-  {!weather.loading && !weather.error && weather.temperature !== 0 && (
-    <div style={styles.weatherWidget} className="fids-weather">
-      <span style={{ fontSize: '1.6rem', lineHeight: '1' }}>{getWeatherIcon(weather.weatherCode)}</span>
-      <span style={styles.weatherTemp}>{Math.round(weather.temperature)}°C</span>
-    </div>
-  )}
-</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+            <div style={styles.destCity} className="fids-dest-city">{f.DestinationCityName}</div>
+            {!weather.loading && !weather.error && weather.temperature !== 0 && (
+              <div style={styles.weatherWidget} className="fids-weather">
+                <span style={{ fontSize: '1.6rem', lineHeight: '1' }}>{getWeatherIcon(weather.weatherCode)}</span>
+                <span style={styles.weatherTemp}>{Math.round(weather.temperature)}°C</span>
+              </div>
+            )}
+          </div>
 
-          {/* ── PORTABLE CHARGERS WARNING ── */}
+          {/* Power bank warning */}
           <div style={styles.chargerWarning} className="fids-charger-warning">
             <span style={styles.chargerIcon}>⚠</span>
-<span style={styles.chargerText}>
-Power banks: no overhead bins; keep under seat or in seat pocket. Do not use during flight.
-
-</span>
+            <span style={styles.chargerText}>
+              Power banks: CABIN ONLY, max 2. No recharging or use during flight. Protect terminals. (valid from 27.03.2026.)
+            </span>
           </div>
-          {/* ── BOARDING NOTICE ── */}
+
+          {/* Boarding notice */}
           <div style={styles.boardingNotice} className="fids-boarding-notice">
             <span style={styles.boardingIcon}>✈️</span>
-<span style={styles.boardingText}>
-Families with small children and elderly passengers may board first. If two stairs are used: rear section passengers (approx. rows B737-800 16+, A320 14+, A321 18+, E195 15+, may vary) use rear stairs; others use front. Thank you and have a pleasant flight 😊
-</span>
+            <span style={styles.boardingText}>
+              Families with small children and elderly passengers may board first. If two stairs are used: rear section passengers (approx. rows B737-800 16+, A320 14+, A321 18+, E195 15+, may vary) use rear stairs; others use front. Thank you and have a pleasant flight 😊
+            </span>
           </div>
-
         </div>
 
         {/* VERTICAL DIVIDER */}
         <div style={styles.vDivider} className="fids-v-divider" />
 
-        {/* ── RIGHT COLUMN ── */}
-{/* ── RIGHT COLUMN ── */}
-<div style={styles.rightCol} className="fids-right-col">
+        {/* RIGHT COLUMN */}
+        <div style={styles.rightCol} className="fids-right-col">
+          {/* Scheduled & Estimated */}
+          <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={styles.timeBlock}>
+              <div style={styles.timeLabel}>SCHEDULED DEPARTURE</div>
+              <div style={styles.timeValue} className="fids-time-value">{f.ScheduledDepartureTime}</div>
+            </div>
+            {hasDel && (
+              <div style={styles.timeBlock}>
+                <div style={{ ...styles.timeLabel, color: '#f59e0b' }}>ESTIMATED DEPARTURE</div>
+                <div style={{ ...styles.timeValue, color: '#f59e0b' }} className="fids-time-value">{f.EstimatedDepartureTime}</div>
+              </div>
+            )}
+          </div>
 
-  {/* Scheduled & Estimated departure side by side */}
-  <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-    <div style={styles.timeBlock}>
-      <div style={styles.timeLabel}>SCHEDULED DEPARTURE</div>
-      <div style={styles.timeValue} className="fids-time-value">{f.ScheduledDepartureTime}</div>
-    </div>
+          {/* Countdown */}
+          {!isCancelled && !isDiverted && timeUntilDeparture !== null && timeUntilDeparture > 0 && (
+            <div style={styles.countdown} className="fids-countdown">
+              <span style={styles.countdownVal}>{formatTimeRemaining(timeUntilDeparture)}</span>
+              <span style={styles.countdownLabel}>until departure</span>
+            </div>
+          )}
 
-    {hasDel && (
-      <div style={styles.timeBlock}>
-        <div style={{ ...styles.timeLabel, color: '#f59e0b' }}>ESTIMATED DEPARTURE</div>
-        <div style={{ ...styles.timeValue, color: '#f59e0b' }} className="fids-time-value">{f.EstimatedDepartureTime}</div>
-      </div>
-    )}
-  </div>
+          <Divider />
 
-  {/* Countdown */}
-  {!isCancelled && !isDiverted && timeUntilDeparture !== null && timeUntilDeparture > 0 && (
-    <div style={styles.countdown} className="fids-countdown">
-      <span style={styles.countdownVal}>{formatTimeRemaining(timeUntilDeparture)}</span>
-      <span style={styles.countdownLabel}>until departure</span>
-    </div>
-  )}
+          {/* Status badge */}
+          <div style={styles.statusBlock} className="fids-status-block">
+            {isCancelled ? (
+              <div style={{ ...styles.statusBadge, background: '#7f1d1d', color: '#fca5a5' }} className="fids-status-badge">CANCELLED</div>
+            ) : isDiverted ? (
+              <div style={{ ...styles.statusBadge, background: '#7c2d12', color: '#fdba74' }} className="fids-status-badge">DIVERTED</div>
+            ) : (
+              <div style={{
+                ...styles.statusBadge,
+                background: statusCfg.priority ? `${statusCfg.color}22` : '#1e293b',
+                color: statusCfg.color,
+                border: `1.5px solid ${statusCfg.color}44`,
+                animation: statusCfg.pulse ? 'fidsPulse 1.2s ease-in-out infinite' : 'none',
+              }} className="fids-status-badge">
+                {effectiveStatus.toUpperCase()}
+              </div>
+            )}
+          </div>
 
-  <Divider />
+          {/* Gate changed banner */}
+          {isGateChanged && (
+            <div style={styles.gateChangedBanner} className="fids-gate-changed-banner">⚠ GATE CHANGED TO {f.GateNumber}</div>
+          )}
 
-  {/* Status badge */}
-  <div style={styles.statusBlock} className="fids-status-block">
-    {isCancelled ? (
-      <div style={{ ...styles.statusBadge, background: '#7f1d1d', color: '#fca5a5' }} className="fids-status-badge">CANCELLED</div>
-    ) : isDiverted ? (
-      <div style={{ ...styles.statusBadge, background: '#7c2d12', color: '#fdba74' }} className="fids-status-badge">DIVERTED</div>
-    ) : (
-      <div style={{
-        ...styles.statusBadge,
-        background: statusCfg.priority ? `${statusCfg.color}22` : '#1e293b',
-        color: statusCfg.color,
-        border: `1.5px solid ${statusCfg.color}44`,
-        animation: statusCfg.pulse ? 'fidsPulse 1.2s ease-in-out infinite' : 'none',
-      }} className="fids-status-badge">
-        {effectiveStatus.toUpperCase()}
-      </div>
-    )}
-  </div>
+          {/* Check-in closing */}
+          {display.checkInStatus?.checkInCloseTime && timeUntilDeparture !== null && timeUntilDeparture <= 30 && timeUntilDeparture > 0 && (
+            <div style={styles.checkInBanner} className="fids-checkin-banner">
+              FLIGHT CLOSES IN {formatTimeRemaining(Math.max(0, timeUntilDeparture - 5))}
+            </div>
+          )}
 
-  {/* Gate changed */}
-  {isGateChanged && (
-    <div style={styles.gateChangedBanner} className="fids-gate-changed-banner">⚠ GATE CHANGED TO {f.GateNumber}</div>
-  )}
-
-  {/* Check-in closing */}
-  {display.checkInStatus?.checkInCloseTime && timeUntilDeparture !== null && timeUntilDeparture <= 30 && timeUntilDeparture > 0 && (
-    <div style={styles.checkInBanner} className="fids-checkin-banner">
-      FLIGHT CLOSES IN {formatTimeRemaining(Math.max(0, timeUntilDeparture - 5))}
-    </div>
-  )}
-
-  {/* ── DANGEROUS GOODS IMAGE ── */}
-  <div style={styles.dangerousGoodsWrapper} className="fids-dgr-wrapper">
-    <img
-      src="/dgr-gate.png"
-      alt="Dangerous Goods — Not Allowed"
-      style={styles.dangerousGoodsImg}
-      onError={(e) => { e.currentTarget.style.display = 'none'; }}
-    />
-  </div>
-
-</div>
+          {/* DGR image */}
+          <div style={styles.dangerousGoodsWrapper} className="fids-dgr-wrapper">
+            <img
+              src="/dgr-gate.png"
+              alt="Dangerous Goods — Not Allowed"
+              style={styles.dangerousGoodsImg}
+              onError={(e) => { e.currentTarget.style.display = 'none'; }}
+            />
+          </div>
+        </div>
       </div>
 
       <Divider />
@@ -560,10 +574,7 @@ Families with small children and elderly passengers may board first. If two stai
         @keyframes fidsPulse { 0%,100%{opacity:1} 50%{opacity:.55} }
         @keyframes spin { to { transform: rotate(360deg); } }
         html,body,#__next { width:100vw; height:100vh; overflow:hidden; background:#070d1a; }
-
-        /* ═══════════════════════════════════════════════════════
-           TABLET (≤ 1024px)
-           ═══════════════════════════════════════════════════════ */
+        /* Responsive CSS – unchanged from original */
         @media (max-width: 1024px) {
           .fids-topbar { padding: 0.6rem 1.5rem !important; }
           .fids-topbar-left { gap: 0.5rem !important; }
@@ -573,247 +584,54 @@ Families with small children and elderly passengers may board first. If two stai
           .fids-footer { padding: 0.7rem 1.5rem !important; }
           .fids-next-dest { max-width: 200px !important; }
         }
-
-        /* ═══════════════════════════════════════════════════════
-           MOBILE LANDSCAPE & SMALL TABLET (≤ 768px)
-           ═══════════════════════════════════════════════════════ */
         @media (max-width: 768px) {
-          html, body, #__next {
-            overflow: auto !important;
-            height: auto !important;
-            min-height: 100vh !important;
-          }
-
-          .fids-root {
-            overflow-y: auto !important;
-            overflow-x: hidden !important;
-            height: auto !important;
-            min-height: 100vh !important;
-          }
-
-          .fids-topbar {
-            padding: 0.5rem 1rem !important;
-            flex-wrap: wrap !important;
-            gap: 0.2rem !important;
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 10 !important;
-          }
-
-          .fids-topbar-left {
-            gap: 0.4rem !important;
-            flex-wrap: wrap !important;
-          }
-
-          .fids-clock {
-            font-size: 1.4rem !important;
-          }
-
-          .fids-main {
-            flex-direction: column !important;
-            padding: 0.8rem 1rem !important;
-            gap: 1rem !important;
-          }
-
-          .fids-left-col {
-            flex: none !important;
-            width: 100% !important;
-            padding-right: 0 !important;
-            gap: 0.5rem !important;
-          }
-
-          .fids-logo-card {
-            height: 70px !important;
-            border-radius: 8px !important;
-          }
-
-          .fids-flight-number {
-            font-size: 3rem !important;
-          }
-
-          .fids-codeshare {
-            font-size: 0.8rem !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            white-space: nowrap !important;
-          }
-
-          .fids-dest-code {
-            font-size: 2rem !important;
-          }
-
-          .fids-dest-city {
-            font-size: 2.8rem !important;
-          }
-
-          .fids-charger-warning {
-            flex-direction: column !important;
-            gap: 0.25rem !important;
-            padding: 0.5rem 0.7rem !important;
-          }
-
-          .fids-charger-warning .fids-charger-icon,
-          .fids-boarding-notice .fids-boarding-icon {
-            display: none !important;
-          }
-
-          .fids-boarding-notice {
-            flex-direction: column !important;
-            gap: 0.25rem !important;
-            padding: 0.5rem 0.7rem !important;
-          }
-
-          .fids-v-divider {
-            width: 100% !important;
-            height: 1px !important;
-            margin: 0 !important;
-            background: linear-gradient(90deg, transparent 0%, #1e3a5f 20%, #1e3a5f 80%, transparent 100%) !important;
-          }
-
-          .fids-right-col {
-            width: 100% !important;
-            gap: 0.7rem !important;
-          }
-
-          .fids-time-value {
-            font-size: 2.8rem !important;
-          }
-
-          .fids-countdown {
-            flex-direction: column !important;
-            gap: 0.15rem !important;
-          }
-
-          .fids-status-badge {
-            font-size: 1.4rem !important;
-            padding: 0.35em 0.8em !important;
-          }
-
-          .fids-gate-changed-banner {
-            font-size: 0.9rem !important;
-            padding: 0.4rem 0.8rem !important;
-          }
-
-          .fids-checkin-banner {
-            font-size: 0.85rem !important;
-            padding: 0.35rem 0.8rem !important;
-          }
-
-          .fids-dgr-wrapper {
-            justify-content: center !important;
-            padding: 0.5rem 0 !important;
-            flex: none !important;
-          }
-
-          .fids-dgr-wrapper img {
-            max-height: 100px !important;
-          }
-
-          .fids-footer {
-            flex-direction: column !important;
-            padding: 0.6rem 1rem !important;
-            gap: 0.4rem !important;
-            align-items: flex-start !important;
-          }
-
-          .fids-footer-meta {
-            font-size: 0.7rem !important;
-          }
-
-          .fids-next-flight {
-            flex-wrap: wrap !important;
-            gap: 0.3rem 0.8rem !important;
-          }
-
-          .fids-next-fn {
-            font-size: 1.6rem !important;
-          }
-
-          .fids-next-dest {
-            font-size: 1.4rem !important;
-            max-width: 100% !important;
-            white-space: normal !important;
-            order: 10 !important;
-            width: 100% !important;
-          }
-
-          .fids-next-time {
-            font-size: 1.6rem !important;
-          }
+          html, body, #__next { overflow: auto !important; height: auto !important; min-height: 100vh !important; }
+          .fids-root { overflow-y: auto !important; overflow-x: hidden !important; height: auto !important; min-height: 100vh !important; }
+          .fids-topbar { padding: 0.5rem 1rem !important; flex-wrap: wrap !important; gap: 0.2rem !important; position: sticky !important; top: 0 !important; z-index: 10 !important; }
+          .fids-topbar-left { gap: 0.4rem !important; flex-wrap: wrap !important; }
+          .fids-clock { font-size: 1.4rem !important; }
+          .fids-main { flex-direction: column !important; padding: 0.8rem 1rem !important; gap: 1rem !important; }
+          .fids-left-col { flex: none !important; width: 100% !important; padding-right: 0 !important; gap: 0.5rem !important; }
+          .fids-logo-card { height: 70px !important; border-radius: 8px !important; }
+          .fids-flight-number { font-size: 3rem !important; }
+          .fids-codeshare { font-size: 0.8rem !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+          .fids-dest-code { font-size: 2rem !important; }
+          .fids-dest-city { font-size: 2.8rem !important; }
+          .fids-charger-warning { flex-direction: column !important; gap: 0.25rem !important; padding: 0.5rem 0.7rem !important; }
+          .fids-charger-warning .fids-charger-icon, .fids-boarding-notice .fids-boarding-icon { display: none !important; }
+          .fids-boarding-notice { flex-direction: column !important; gap: 0.25rem !important; padding: 0.5rem 0.7rem !important; }
+          .fids-v-divider { width: 100% !important; height: 1px !important; margin: 0 !important; background: linear-gradient(90deg, transparent 0%, #1e3a5f 20%, #1e3a5f 80%, transparent 100%) !important; }
+          .fids-right-col { width: 100% !important; gap: 0.7rem !important; }
+          .fids-time-value { font-size: 2.8rem !important; }
+          .fids-countdown { flex-direction: column !important; gap: 0.15rem !important; }
+          .fids-status-badge { font-size: 1.4rem !important; padding: 0.35em 0.8em !important; }
+          .fids-gate-changed-banner { font-size: 0.9rem !important; padding: 0.4rem 0.8rem !important; }
+          .fids-checkin-banner { font-size: 0.85rem !important; padding: 0.35rem 0.8rem !important; }
+          .fids-dgr-wrapper { justify-content: center !important; padding: 0.5rem 0 !important; flex: none !important; }
+          .fids-dgr-wrapper img { max-height: 100px !important; }
+          .fids-footer { flex-direction: column !important; padding: 0.6rem 1rem !important; gap: 0.4rem !important; align-items: flex-start !important; }
+          .fids-footer-meta { font-size: 0.7rem !important; }
+          .fids-next-flight { flex-wrap: wrap !important; gap: 0.3rem 0.8rem !important; }
+          .fids-next-fn { font-size: 1.6rem !important; }
+          .fids-next-dest { font-size: 1.4rem !important; max-width: 100% !important; white-space: normal !important; order: 10 !important; width: 100% !important; }
+          .fids-next-time { font-size: 1.6rem !important; }
         }
-
-        /* ═══════════════════════════════════════════════════════
-           SMALL MOBILE (≤ 480px)
-           ═══════════════════════════════════════════════════════ */
         @media (max-width: 480px) {
-          .fids-topbar {
-            padding: 0.4rem 0.6rem !important;
-          }
-
-          .fids-main {
-            padding: 0.6rem !important;
-            gap: 0.7rem !important;
-          }
-
-          .fids-logo-card {
-            height: 55px !important;
-            border-radius: 6px !important;
-          }
-
-          .fids-flight-number {
-            font-size: 2.4rem !important;
-          }
-
-          .fids-dest-code {
-            font-size: 1.6rem !important;
-          }
-
-          .fids-dest-city {
-            font-size: 2rem !important;
-          }
-
-          .fids-charger-warning,
-          .fids-boarding-notice {
-            padding: 0.4rem 0.5rem !important;
-            border-radius: 6px !important;
-          }
-
-          .fids-time-value {
-            font-size: 2.2rem !important;
-          }
-
-          .fids-status-badge {
-            font-size: 1.2rem !important;
-            padding: 0.3em 0.6em !important;
-          }
-
-          .fids-dgr-wrapper img {
-            max-height: 70px !important;
-          }
-
-          .fids-footer {
-            padding: 0.5rem 0.6rem !important;
-          }
-
-          .fids-next-fn,
-          .fids-next-time {
-            font-size: 1.3rem !important;
-          }
-
-          .fids-next-dest {
-            font-size: 1.1rem !important;
-          }
-
-          .fids-gate-changed-banner,
-          .fids-checkin-banner {
-            font-size: 0.8rem !important;
-            padding: 0.3rem 0.6rem !important;
-          }
+          .fids-topbar { padding: 0.4rem 0.6rem !important; }
+          .fids-main { padding: 0.6rem !important; gap: 0.7rem !important; }
+          .fids-logo-card { height: 55px !important; border-radius: 6px !important; }
+          .fids-flight-number { font-size: 2.4rem !important; }
+          .fids-dest-code { font-size: 1.6rem !important; }
+          .fids-dest-city { font-size: 2rem !important; }
+          .fids-charger-warning, .fids-boarding-notice { padding: 0.4rem 0.5rem !important; border-radius: 6px !important; }
+          .fids-time-value { font-size: 2.2rem !important; }
+          .fids-status-badge { font-size: 1.2rem !important; padding: 0.3em 0.6em !important; }
+          .fids-dgr-wrapper img { max-height: 70px !important; }
+          .fids-footer { padding: 0.5rem 0.6rem !important; }
+          .fids-next-fn, .fids-next-time { font-size: 1.3rem !important; }
+          .fids-next-dest { font-size: 1.1rem !important; }
+          .fids-gate-changed-banner, .fids-checkin-banner { font-size: 0.8rem !important; padding: 0.3rem 0.6rem !important; }
         }
-
-        /* ═══════════════════════════════════════════════════════
-           MOBILE PORTRAIT TALL SCREENS (≥ 769px width, ≤ 600px height)
-           ═══════════════════════════════════════════════════════ */
         @media (max-height: 600px) and (min-width: 769px) {
           .fids-main { padding: 0.6rem 1.5rem !important; gap: 0.5rem !important; }
           .fids-left-col { gap: 0.4rem !important; }
@@ -861,7 +679,7 @@ const styles: Record<string, React.CSSProperties> = {
   destCode: { fontSize: 'clamp(2.8rem, 5.5vw, 5rem)', fontWeight: 700, letterSpacing: '.12em', color: C.accent, lineHeight: 1 },
   destCity: { fontSize: 'clamp(4.5rem, 9vw, 9rem)', fontWeight: 700, color: C.white, letterSpacing: '.03em', lineHeight: 1, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const },
 
-  // ── PORTABLE CHARGERS WARNING ────────────────────────────────
+  // ── AŽURIRANO IATA UPOZORENJE ────────────────────────────────
   chargerWarning: { display: 'flex', alignItems: 'flex-start', gap: '.7rem', background: 'rgba(234,179,8,0.12)', border: '1px solid rgba(234,179,8,0.35)', borderRadius: '10px', padding: '.7rem 1rem' },
   chargerIcon: { fontSize: '1.3rem', color: '#eab308', flexShrink: 0, lineHeight: '1.3' as unknown as number },
   chargerText: { fontSize: 'clamp(0.85rem, 1.4vw, 1.25rem)', fontWeight: 600, color: '#fde047', letterSpacing: '.04em', lineHeight: '1.4' as unknown as number, fontFamily: FONT_DISPLAY },
@@ -902,18 +720,17 @@ const styles: Record<string, React.CSSProperties> = {
   gateLabel: { fontWeight: 800, color: C.gold, letterSpacing: '.06em', fontFamily: FONT_DISPLAY },
   spinner: { width: 56, height: 56, border: `3px solid ${C.border}`, borderTop: `3px solid ${C.accent}`, borderRadius: '50%', animation: 'spin 1s linear infinite' },
   metaRow: { display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '1.2rem', color: C.textMuted, fontSize: '.9rem', letterSpacing: '.1em', fontFamily: FONT_MONO },
-weatherWidget: {
-  display: 'flex', alignItems: 'center', gap: '.5rem',
-  background: 'rgba(30,144,255,0.08)',
-  border: '1px solid rgba(30,144,255,0.2)',
-  borderRadius: '8px', padding: '.4rem .9rem',
-  alignSelf: 'center',  // ← promjena
-  flexShrink: 0,        // ← dodaj ovo da se ne skuplja
-},
-weatherTemp: {
-  fontFamily: FONT_MONO,
-  fontSize: 'clamp(1.2rem, 2.2vw, 1.8rem)',
-  color: C.accent, fontWeight: 400, letterSpacing: '.08em',
-},
-
+  weatherWidget: {
+    display: 'flex', alignItems: 'center', gap: '.5rem',
+    background: 'rgba(30,144,255,0.08)',
+    border: '1px solid rgba(30,144,255,0.2)',
+    borderRadius: '8px', padding: '.4rem .9rem',
+    alignSelf: 'center',
+    flexShrink: 0,
+  },
+  weatherTemp: {
+    fontFamily: FONT_MONO,
+    fontSize: 'clamp(1.2rem, 2.2vw, 1.8rem)',
+    color: C.accent, fontWeight: 400, letterSpacing: '.08em',
+  },
 };

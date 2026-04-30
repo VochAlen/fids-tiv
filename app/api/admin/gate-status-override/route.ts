@@ -3,8 +3,13 @@ import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { computeOverrideTTL } from '@/lib/override-ttl';
 
-// Helper za dobijanje vremena leta za dati gate
-async function getFlightTimesForGate(gateNumber: string): Promise<{ scheduledTime: string | null, estimatedTime: string | null }> {
+// Helper: returns flight times and status for the given gate
+async function getFlightTimesForGate(gateNumber: string): Promise<{ 
+  scheduledTime: string | null, 
+  estimatedTime: string | null, 
+  flightStatus: string | null,
+  isDeparted: boolean 
+}> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
     const response = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
@@ -12,7 +17,7 @@ async function getFlightTimesForGate(gateNumber: string): Promise<{ scheduledTim
       headers: { 'Cache-Control': 'no-cache' }
     });
     
-    if (!response.ok) return { scheduledTime: null, estimatedTime: null };
+    if (!response.ok) return { scheduledTime: null, estimatedTime: null, flightStatus: null, isDeparted: false };
     const data = await response.json();
     
     const parseHHMM = (t: string): number | null => {
@@ -29,7 +34,7 @@ async function getFlightTimesForGate(gateNumber: string): Promise<{ scheduledTim
     const relevantFlights = allFlights.filter((f: any) => f.GateNumber === gateNumber);
     
     if (relevantFlights.length === 0) {
-      return { scheduledTime: null, estimatedTime: null };
+      return { scheduledTime: null, estimatedTime: null, flightStatus: null, isDeparted: false };
     }
     
     // Sortiraj po vremenu polijetanja
@@ -49,22 +54,27 @@ async function getFlightTimesForGate(gateNumber: string): Promise<{ scheduledTim
       return departMs && departMs > now;
     });
     
-    // Ako nema aktivnog leta, vrati null (override će se obrisati)
+    // Ako nema aktivnog leta, vrati prazno (override će se obrisati)
     if (!activeFlight) {
       console.log(`[gate-helper] Gate ${gateNumber} - No active flight, override will be cleared`);
-      return { scheduledTime: null, estimatedTime: null };
+      return { scheduledTime: null, estimatedTime: null, flightStatus: null, isDeparted: false };
     }
     
-    console.log(`[gate-helper] Gate ${gateNumber} - Active flight: ${activeFlight.FlightNumber} at ${activeFlight.ScheduledDepartureTime}`);
+    const status = activeFlight.StatusEN || '';
+    const isDeparted = status.toLowerCase().includes('departed') || status.toLowerCase().includes('poletio');
+    
+    console.log(`[gate-helper] Gate ${gateNumber} - Active flight: ${activeFlight.FlightNumber} at ${activeFlight.ScheduledDepartureTime}, isDeparted: ${isDeparted}`);
     
     return {
       scheduledTime: activeFlight.ScheduledDepartureTime,
-      estimatedTime: activeFlight.EstimatedDepartureTime || null
+      estimatedTime: activeFlight.EstimatedDepartureTime || null,
+      flightStatus: status,
+      isDeparted,
     };
     
   } catch (error) {
     console.error('Error fetching flight times:', error);
-    return { scheduledTime: null, estimatedTime: null };
+    return { scheduledTime: null, estimatedTime: null, flightStatus: null, isDeparted: false };
   }
 }
 
@@ -81,15 +91,15 @@ export async function POST(request: Request) {
     let responseTtl = null;
 
     if (action === 'open' || action === 'closed') {
-      // Dohvati vremena leta za ovaj gate
-      const { scheduledTime, estimatedTime } = await getFlightTimesForGate(gateNumber);
+      // Dohvati vremena leta i status
+      const { scheduledTime, estimatedTime, isDeparted } = await getFlightTimesForGate(gateNumber);
       
-      // Ako nema aktivnog leta, odmah obriši override
-      if (!scheduledTime) {
+      // Ako nema aktivnog leta ILI je let već poletio → obriši override odmah
+      if (!scheduledTime || isDeparted) {
         await client.del(redisKey);
         return NextResponse.json({ 
           success: true, 
-          message: `Nema aktivnog leta na gate-u ${gateNumber}, override obrisan`,
+          message: `Nema aktivnog leta ili je let već poletio – override obrisan`,
           cleared: true
         });
       }
