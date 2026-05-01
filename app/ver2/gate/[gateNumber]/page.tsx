@@ -3,9 +3,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 
-const POLL_INTERVAL_MS = 15_000;
+const POLL_INTERVAL_MS = 10_000;
 const isDevelopment = process.env.NODE_ENV === 'development';
-const API_PREFIX = isDevelopment ? '/api/test' : '/api/admin';
+const API_PREFIX = isDevelopment ? '/api/test' : '/api/test';
 
 // ============================================================
 // TIPOVI

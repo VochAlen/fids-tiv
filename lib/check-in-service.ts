@@ -21,6 +21,21 @@ export interface CheckInStatus {
   checkInCloseTime: Date | null;
 }
 
+// Dodaj ovo na vrh fajla, nakon importa
+async function fetchManualDeskStatus(deskNumber: string): Promise<{ isOpen: boolean; flightNumber?: string } | null> {
+  try {
+    const res = await fetch(`/api/desk-status/${deskNumber}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status === 'open') return { isOpen: true, flightNumber: data.flightNumber };
+    if (data.status === 'closed') return { isOpen: false, flightNumber: data.flightNumber };
+    return null;
+  } catch (error) {
+    console.error(`[fetchManualDeskStatus] Error for desk ${deskNumber}:`, error);
+    return null;
+  }
+}
+
 // Konfiguracija koja se puni sa servera
 let airlineConfigs: CheckInConfig[] = [];
 let configLoaded = false;
@@ -321,7 +336,6 @@ function parseDepartureTime(timeString: string): Date | null {
   if (!timeString) return null;
 
   const cacheKey = `${timeString}_${new Date().toDateString()}`;
-
   if (timeParseCache.has(cacheKey)) {
     return timeParseCache.get(cacheKey) || null;
   }
@@ -330,8 +344,6 @@ function parseDepartureTime(timeString: string): Date | null {
     if (timeString.includes('T')) {
       const date = new Date(timeString);
       if (!isNaN(date.getTime())) {
-        // NOVA PROVJERA: odbaci ISO timestamp koji je stariji od 12 sati unazad
-        // Ovo sprječava Redis override-e od juče da otvaraju check-in prerano
         const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
         if (date < twelveHoursAgo) {
           console.warn(`⚠️ parseDepartureTime: odbačen stari ISO timestamp: ${timeString}`);
@@ -349,8 +361,10 @@ function parseDepartureTime(timeString: string): Date | null {
     const d = new Date(now);
     d.setHours(hours, minutes, 0, 0);
 
-    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
-    if (now.getTime() - d.getTime() > SIX_HOURS_MS) {
+    // 🔧 POPRAVLJENA LOGIKA: Ako je vrijeme već prošlo danas, dodaj sutra
+    // Tolerancija 30 minuta za letove koji su upravo poletjeli
+    const THIRTY_MIN_MS = 30 * 60 * 1000;
+    if (d.getTime() < now.getTime() - THIRTY_MIN_MS) {
       d.setDate(d.getDate() + 1);
     }
 
@@ -360,7 +374,6 @@ function parseDepartureTime(timeString: string): Date | null {
     return null;
   }
 }
-
 // Pomocna funkcija za generiranje ključa za čuvanje stanja check-in-a
 function generateCheckInKey(flightNumber: string, scheduledTime: string): string {
   return `${flightNumber.toUpperCase()}_${scheduledTime.replace(/[:\s-]/g, '')}`;
@@ -503,10 +516,12 @@ function calculateCheckInStatus(
 }
 
 // Glavna funkcija za određivanje statusa check-in-a
+// Glavna funkcija za određivanje statusa check-in-a
 export async function getEnhancedCheckInStatus(
   flightNumber: string,
   scheduledTime: string,
-  currentStatus: string
+  currentStatus: string,
+  deskNumber?: string  // NOVO: opcioni parametar za desk override
 ): Promise<CheckInStatus> {
   // Osiguraj da je konfiguracija učitana
   await loadCheckInConfig();
@@ -541,7 +556,37 @@ export async function getEnhancedCheckInStatus(
     };
   }
 
-  // 2. Provjeri da li je check-in ručno otvoren (admin override)
+  // 2. ⭐ NOVO: Provjeri desk status override iz Redis-a (ima najveći prioritet)
+  if (deskNumber) {
+    const deskStatus = await fetchManualDeskStatus(deskNumber);
+    if (deskStatus && deskStatus.flightNumber === flightNumber) {
+      if (deskStatus.isOpen) {
+        console.log(`[check-in-service] Desk ${deskNumber} manually OPEN for ${flightNumber}`);
+        return {
+          shouldBeOpen: true,
+          status: 'open',
+          reason: `Manually opened on desk ${deskNumber}`,
+          minutesBeforeDeparture: 0,
+          isAutoOpened: false,
+          checkInOpenTime: null,
+          checkInCloseTime: null,
+        };
+      } else {
+        console.log(`[check-in-service] Desk ${deskNumber} manually CLOSED for ${flightNumber}`);
+        return {
+          shouldBeOpen: false,
+          status: 'closed',
+          reason: `Manually closed on desk ${deskNumber}`,
+          minutesBeforeDeparture: 0,
+          isAutoOpened: false,
+          checkInOpenTime: null,
+          checkInCloseTime: null,
+        };
+      }
+    }
+  }
+
+  // 3. Provjeri da li je check-in ručno otvoren (stara fallback logika za let-specific override)
   if (isManuallyOpened(flightNumber, scheduledTime)) {
     const departureTime = parseDepartureTime(scheduledTime);
     if (departureTime) {
@@ -565,7 +610,7 @@ export async function getEnhancedCheckInStatus(
     return {
       shouldBeOpen: true,
       status: 'open',
-      reason: 'Manually opened from admin panel',
+      reason: 'Manually opened from admin panel (flight override)',
       minutesBeforeDeparture: 0,
       isAutoOpened: false,
       checkInOpenTime: manuallyOpenedCheckIns[key]?.openedAt || null,
@@ -573,10 +618,10 @@ export async function getEnhancedCheckInStatus(
     };
   }
 
-  // 3. Dobavi konfiguraciju za aviokompaniju
+  // 4. Dobavi konfiguraciju za aviokompaniju
   const config = getCheckInConfig(airlineIata);
 
-  // 4. Izračunaj status
+  // 5. Izračunaj status na osnovu vremena (auto logika)
   return calculateCheckInStatus(scheduledTime, currentStatus, airlineIata, config);
 }
 

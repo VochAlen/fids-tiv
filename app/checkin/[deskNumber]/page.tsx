@@ -761,7 +761,8 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         getEnhancedCheckInStatus(
           nextFlight.FlightNumber,
           nextFlight.ScheduledDepartureTime || '',
-          nextFlight.StatusEN || ''
+          nextFlight.StatusEN || '',
+          deskNumberParam
         ),
       ]);
 
@@ -848,13 +849,68 @@ const loadFlights = useCallback(async () => {
         const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
         if (res.ok) allOverrides = await res.json();
       } catch {
-        // Redis nedostupan — nastavljamo bez override provjere,
-        // prikazat će se future[0] kao fallback
+        // Redis nedostupan — nastavljamo bez override provjere
       }
 
+      // ⭐⭐⭐ NOVO: OČISTI STARE __EMPTY__ MARKERE (prije svega) ⭐⭐⭐
+      const cleanedFlightNumbers: string[] = [];
+      for (const [flightNum, override] of Object.entries(allOverrides)) {
+        if (override.CheckInDesk === '__EMPTY__') {
+          // Pronađi let u trenutnim podacima
+          const flightInList = data.departures.find((f: any) => f.FlightNumber === flightNum);
+          if (flightInList?.ScheduledDepartureTime) {
+            const [h, m] = flightInList.ScheduledDepartureTime.split(':').map(Number);
+            const stdDate = new Date();
+            stdDate.setHours(h, m, 0, 0);
+            
+            // Ako je STD prošao (let je poletio jučer ili danas), obriši __EMPTY__
+            if (stdDate < now) {
+              cleanedFlightNumbers.push(flightNum);
+              delete allOverrides[flightNum]; // Ukloni iz memorije
+              
+              // Tiho obriši iz Redis-a (ne čekamo odgovor)
+              fetch('/api/admin/flight-override', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  flightNumber: flightNum, 
+                  field: 'CheckInDesk', 
+                  action: 'clear' 
+                }),
+              }).catch(() => {});
+              
+              if (DEVELOPMENT) {
+                console.log(`🧹 Cleaned old __EMPTY__ marker for ${flightNum} (STD ${flightInList.ScheduledDepartureTime} passed)`);
+              }
+            }
+          } else {
+            // Let ne postoji u današnjim podacima - vjerovatno je od juče, obriši
+            cleanedFlightNumbers.push(flightNum);
+            delete allOverrides[flightNum];
+            
+            fetch('/api/admin/flight-override', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                flightNumber: flightNum, 
+                field: 'CheckInDesk', 
+                action: 'clear' 
+              }),
+            }).catch(() => {});
+            
+            if (DEVELOPMENT) {
+              console.log(`🧹 Cleaned orphaned __EMPTY__ marker for ${flightNum} (flight not found in today's schedule)`);
+            }
+          }
+        }
+      }
+      
+      if (cleanedFlightNumbers.length > 0 && DEVELOPMENT) {
+        console.log(`🧹 Total cleaned: ${cleanedFlightNumbers.length} old __EMPTY__ markers`);
+      }
+      // ⭐⭐⭐ KRAJ ČIŠĆENJA ⭐⭐⭐
+
       // ── NOVA PROVJERA: odbaci override-e od juče ili starije ─
-      // Redis override-i nemaju automatski TTL pa zaostaju i otvaraju
-      // check-in 5+ sati prerano jer parseDepartureTime dobija stari ISO timestamp
       const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
 
       for (const flightNum in allOverrides) {
@@ -941,15 +997,25 @@ const loadFlights = useCallback(async () => {
       for (const f of future) {
         const override = allOverrides[f.FlightNumber];
         if (override?.CheckInDesk === '__EMPTY__') {
-          if (DEVELOPMENT) {
-            console.log(
-              `[CheckIn ${deskNumberParam}] Preskačem ${f.FlightNumber} ` +
-              `(STD: ${f.ScheduledDepartureTime}) — CheckInDesk = __EMPTY__`
-            );
+          // Provjeri da li je __EMPTY__ marker star (od juče)
+          // Koristimo STD samog leta (iz live podataka), ne iz override-a
+          const stdMs = (() => {
+            const [h, m] = (f.ScheduledDepartureTime || '').split(':').map(Number);
+            if (isNaN(h)) return null;
+            const d = new Date();
+            d.setHours(h, m, 0, 0);
+            return d.getTime();
+          })();
+          
+          // Ako je STD leta prošao više od 4h, __EMPTY__ je od prethodnog leta/dana
+          if (stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000) {
+            if (DEVELOPMENT) console.log(`[CheckIn] __EMPTY__ istekao za ${f.FlightNumber}, ignorišem blokadu`);
+            // Ne radimo continue — dozvoljavamo let (pada kroz override provjeru)
+          } else {
+            if (DEVELOPMENT) console.log(`[CheckIn] Preskačem blokirani let ${f.FlightNumber} (__EMPTY__ marker)`);
+            continue; // Marker je svjež, zaista blokiramo
           }
-          continue;
         }
-        // Ovaj let nije blokiran — uzimamo ga kao trenutni
         currentFlight = f;
         break;
       }
@@ -968,7 +1034,6 @@ const loadFlights = useCallback(async () => {
       if (changed) await queueFlightTransition(currentFlight);
 
       // nextScheduledFlight = sljedeći let u future listi nakon currentFlight
-      // (koristimo future listu, ne filtriranu — da bi se prikazao i sljedeći blokiran)
       const idx = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
       const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
       if (isMountedRef.current) setNextScheduledFlight(next);
@@ -1028,7 +1093,7 @@ const loadFlights = useCallback(async () => {
     };
     
     refreshStatus();
-    const id = setInterval(refreshStatus, 30_000); // Proverava svakih 30s
+    const id = setInterval(refreshStatus, 15_000); // Proverava svakih 30s
     return () => clearInterval(id);
   }, [flightDisplay.flight, deskNumberParam, fetchDeskStatusOverride]);
 
@@ -1041,7 +1106,8 @@ const loadFlights = useCallback(async () => {
         const s = await getEnhancedCheckInStatus(
           flightDisplay.flight!.FlightNumber,
           flightDisplay.flight!.ScheduledDepartureTime || '',
-          flightDisplay.flight!.StatusEN || ''
+          flightDisplay.flight!.StatusEN || '',
+          deskNumberParam
         );
         setFlightDisplay((p) => ({ ...p, checkInStatus: s }));
         updateCountdowns(s);
@@ -1084,6 +1150,38 @@ useEffect(() => {
   flightDisplay.flight?.FlightNumber,
   flightDisplay.checkInStatus.checkInCloseTime,
   loadFlights,
+]);
+
+// Dodaj iza postojećeg auto-close timera
+useEffect(() => {
+  if (flightDisplay.manualDeskStatus !== 'open') return;
+  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+  if (!closeTime) return;
+
+  const msUntilClose = closeTime.getTime() - Date.now();
+  if (msUntilClose <= 0) {
+    // Odmah refreshaj desk status
+    void fetchDeskStatusOverride(deskNumberParam).then(newStatus => {
+      setFlightDisplay(prev => ({ ...prev, manualDeskStatus: newStatus }));
+    });
+    return;
+  }
+
+  const tid = setTimeout(() => {
+    if (isMountedRef.current) {
+      // Redis TTL je istekao — osvježi status
+      void fetchDeskStatusOverride(deskNumberParam).then(newStatus => {
+        setFlightDisplay(prev => ({ ...prev, manualDeskStatus: newStatus }));
+      });
+    }
+  }, msUntilClose + 2000); // +2s buffer za Redis propagaciju
+
+  return () => clearTimeout(tid);
+}, [
+  flightDisplay.manualDeskStatus,
+  flightDisplay.checkInStatus.checkInCloseTime,
+  deskNumberParam,
+  fetchDeskStatusOverride,
 ]);
 
   // ── checkin-status-updated event ───────────────────────────

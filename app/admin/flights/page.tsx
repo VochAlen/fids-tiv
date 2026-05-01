@@ -318,6 +318,13 @@ const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flig
       });
       
       const result = await response.json();
+      if (result.cleared || result.ttl === 0) {
+  alert(
+    `Ne može se otvoriti: check-in prozor za ovaj let je već zatvoren ` +
+    `(STD - 30min je prošlo). Koristite ručni override direktno iz FIDS check-in ekrana.`
+  );
+  return; // Ne ažuriraj savedStatuses
+}
       
       if (action === 'clear') {
         setSavedStatuses(prev => {
@@ -476,6 +483,8 @@ const GateManualControl: React.FC<GateManualControlProps> = ({ gateNumber }) => 
     };
     fetchStatus();
   }, [gateNumber]);
+
+  
 
   const handleAction = async (action: string) => {
     if (!gateNumber) return;
@@ -1110,6 +1119,25 @@ if (departedFlights.length > 0) {
       setRefreshing(false);
     }
   }, [loadOverrides]);
+
+  // Dodaj u komponentu AdminFlightsPage
+useEffect(() => {
+  // Pokreni auto-reset svakih 5 minuta
+  const interval = setInterval(async () => {
+    try {
+      const response = await fetch('/api/admin/flight-override?action=triggerReset');
+      const result = await response.json();
+      if (result.resetCount > 0) {
+        console.log(`Auto-reset: ${result.resetCount} override-ova resetovano`);
+        loadFlights(true);
+      }
+    } catch (err) {
+      console.error('Auto-reset error:', err);
+    }
+  }, 5 * 60 * 1000);
+  
+  return () => clearInterval(interval);
+}, [loadFlights]);
 
   // Funkcija za brisanje svih override-ova za jedan let
   const handleClearAllOverrides = useCallback(async (flightNumber: string) => {

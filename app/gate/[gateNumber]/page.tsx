@@ -297,8 +297,24 @@ function GateDisplay() {
         }
       }
 
-      const idx = sorted.findIndex(f => f.FlightNumber === current?.FlightNumber);
-      const nextFlight = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
+const idx = sorted.findIndex(f => f.FlightNumber === current?.FlightNumber);
+let nextFlight: (typeof sorted)[number] | null = null;
+
+if (idx >= 0 && idx < sorted.length - 1) {
+  for (let i = idx + 1; i < sorted.length; i++) {
+    const candidate = sorted[i];
+    // Ako je manual open, prikaži prvi sljedeći let
+    if (manualGateStatusRef.current === 'open') {
+      nextFlight = candidate;
+      break;
+    }
+    // Inače, prikaži samo letove koji treba da se prikazuju
+    if (shouldDisplayFlight(candidate)) {
+      nextFlight = candidate;
+      break;
+    }
+  }
+}
 
       let gateChangedAt: number | undefined;
       if (current?.GateNumber && currentFlightRef.current?.GateNumber !== current.GateNumber) {
