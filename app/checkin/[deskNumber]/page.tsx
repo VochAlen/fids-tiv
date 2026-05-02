@@ -167,7 +167,7 @@ interface FlightDisplayState {
   logoUrl: string;
   cityUrl: string;
   classType: string | null;
-  manualDeskStatus: string | null; // Popravljeno za TypeScript
+  manualDeskStatus: string | null;
   airlineName: string;
   destinationCity: string;
   flightNumber: string;
@@ -186,7 +186,7 @@ const EMPTY_DISPLAY: FlightDisplayState = {
   logoUrl: '',
   cityUrl: '',
   classType: null,
-    manualDeskStatus: null, // DODANO
+  manualDeskStatus: null,
   airlineName: '',
   destinationCity: '',
   flightNumber: '',
@@ -209,7 +209,7 @@ const EMPTY_DISPLAY: FlightDisplayState = {
 };
 
 // ============================================================
-// ERROR BOUNDARY — sprječava bijeli ekran pri runtime grešci
+// ERROR BOUNDARY
 // ============================================================
 class CheckInErrorBoundary extends Component<
   { children: ReactNode },
@@ -244,7 +244,7 @@ class CheckInErrorBoundary extends Component<
 }
 
 // ============================================================
-// DEBUG PANEL — van render funkcije, memorizovan
+// DEBUG PANEL
 // ============================================================
 const DebugPanel = memo(function DebugPanel({
   flightDisplay,
@@ -318,7 +318,7 @@ const DebugPanel = memo(function DebugPanel({
 });
 
 // ============================================================
-// AIRLINE LOGO — memorizovan, decoding async
+// AIRLINE LOGO
 // ============================================================
 const AirlineLogo = memo(function AirlineLogo({
   logoUrl,
@@ -371,7 +371,7 @@ const AirlineLogo = memo(function AirlineLogo({
 });
 
 // ============================================================
-// CITY IMAGE — memorizovan
+// CITY IMAGE
 // ============================================================
 const CityImage = memo(function CityImage({
   cityUrl,
@@ -408,7 +408,7 @@ const CityImage = memo(function CityImage({
 });
 
 // ============================================================
-// AD BANNER — memorizovan crossfade
+// AD BANNER
 // ============================================================
 const AdBanner = memo(function AdBanner({
   adImages,
@@ -432,7 +432,7 @@ const AdBanner = memo(function AdBanner({
           fill
           className="object-fill"
           priority={currentIndex === 0}
-          loading={currentIndex === 0 ? "eager" : "lazy"}
+          loading={currentIndex === 0 ? 'eager' : 'lazy'}
           quality={80}
           sizes="100vw"
           placeholder="blur"
@@ -458,7 +458,7 @@ const AdBanner = memo(function AdBanner({
 });
 
 // ============================================================
-// CLOSING TIME WARNING — memorizovan
+// CLOSING TIME WARNING
 // ============================================================
 const ClosingWarning = memo(function ClosingWarning({
   timeUntilClose,
@@ -527,7 +527,7 @@ function CheckInDisplay() {
   const { adImages } = useAdImages();
   const currentTheme = useSeasonalTheme();
 
-    // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
+  // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
   const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
       const res = await fetch(`/api/desk-class/${desk}`);
@@ -538,7 +538,7 @@ function CheckInDisplay() {
     }
   }, []);
 
-    // ── Helper: dohvati ručni status saltera (Open/Close) ──────
+  // ── Helper: dohvati ručni status saltera (Open/Close) ──────
   const fetchDeskStatusOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
       const res = await fetch(`/api/desk-status/${desk}`);
@@ -554,10 +554,10 @@ function CheckInDisplay() {
     currentFlightRef.current = flightDisplay.flight;
   }, [flightDisplay.flight]);
 
-  // ── ✅ #4: Kiosk Hard Reset (6h) ──────────────────────────
+  // ── Kiosk Hard Reset (6h) ──────────────────────────────────
   useEffect(() => {
     const id = setTimeout(() => {
-      console.log("🔄 Check-in kiosk scheduled hard reset (6h)...");
+      console.log('🔄 Check-in kiosk scheduled hard reset (6h)...');
       window.location.reload();
     }, 6 * 60 * 60 * 1000);
     return () => clearTimeout(id);
@@ -585,7 +585,7 @@ function CheckInDisplay() {
     return () => clearInterval(id);
   }, []);
 
-  // ── Kiosk mode: blokira kontekstni meni, selekciju, drag ───
+  // ── Kiosk mode ──────────────────────────────────────────────
   useEffect(() => {
     const preventDefault = (e: Event) => e.preventDefault();
     document.addEventListener('contextmenu', preventDefault);
@@ -621,35 +621,29 @@ function CheckInDisplay() {
   }, []);
 
   // ── Helper: airline logo sa cache-om ───────────────────────
-  // ── Helper: airline logo sa cache-om (Lokalni > FlightAware) ───────────────────────
   const getAirlineLogoUrl = useCallback(async (flight: EnhancedFlight | null): Promise<string> => {
     if (!flight) return '/airlines/placeholder.jpg';
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
     if (!icao) return '/airlines/placeholder.jpg';
-    
-    // Ako je već u cache-u za ovu sesiju, vrati odmah (sprečava ponovno provjeravanje)
+
     if (logoCacheRef.current.has(icao)) return logoCacheRef.current.get(icao)!;
-    
-    // Pomoćna funkcija koja simulira "file_exists" preko browsera
+
     const checkLocalImage = (src: string): Promise<boolean> =>
       new Promise((resolve) => {
         if (typeof window === 'undefined') return resolve(false);
         const img = new window.Image();
         img.onload = () => resolve(true);
         img.onerror = () => resolve(false);
-        // Timeout od 1s: ako Next.js dev server sporo vraća 404, ne blokiramo dalje
         setTimeout(() => resolve(false), 1000);
         img.src = src;
       });
 
     try {
-      // Provjeravamo .jpg i .png ISTOVREMENO da ne gubimo vrijeme
       const [hasJpg, hasPng] = await Promise.all([
         checkLocalImage(`/airlines/${icao}.jpg`),
         checkLocalImage(`/airlines/${icao}.png`),
       ]);
 
-      // Ako pronađe lokalnu, zapiši u cache i vrati
       if (hasJpg) {
         logoCacheRef.current.set(icao, `/airlines/${icao}.jpg`);
         return `/airlines/${icao}.jpg`;
@@ -659,7 +653,6 @@ function CheckInDisplay() {
         return `/airlines/${icao}.png`;
       }
 
-      // Ako nema lokalno, fallback na FlightAware preko tvog postojećeg helpera
       const url = await getLogoURLWithFallback(icao, flight.AirlineLogoURL);
       logoCacheRef.current.set(icao, url);
       return url;
@@ -681,9 +674,7 @@ function CheckInDisplay() {
   // ── Helper: preload slika za let ───────────────────────────
   const preloadFlightImages = useCallback(
     async (flight: EnhancedFlight): Promise<{ logoUrl: string; cityUrl: string }> => {
-      const [logoUrl] = await Promise.all([
-        getAirlineLogoUrl(flight),
-      ]);
+      const [logoUrl] = await Promise.all([getAirlineLogoUrl(flight)]);
       const cityUrl = getCityImageUrl(flight);
 
       const loads: Promise<void>[] = [];
@@ -705,26 +696,25 @@ function CheckInDisplay() {
   );
 
   // ── Countdown ───────────────────────────────────────────────
-// Ova funkcija samo računa i postavlja countdowne — bez loadFlights
-const updateCountdowns = useCallback((status: CheckInStatus) => {
-  const now = new Date();
+  const updateCountdowns = useCallback((status: CheckInStatus) => {
+    const now = new Date();
 
-  if (status.status === 'scheduled' && status.checkInOpenTime) {
-    setTimeUntilCheckIn(
-      Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
-    );
-  } else {
-    setTimeUntilCheckIn(null);
-  }
+    if (status.status === 'scheduled' && status.checkInOpenTime) {
+      setTimeUntilCheckIn(
+        Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
+      );
+    } else {
+      setTimeUntilCheckIn(null);
+    }
 
-  if (status.shouldBeOpen && status.checkInCloseTime) {
-    setTimeUntilClose(
-      Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
-    );
-  } else {
-    setTimeUntilClose(null);
-  }
-}, []);
+    if (status.shouldBeOpen && status.checkInCloseTime) {
+      setTimeUntilClose(
+        Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
+      );
+    } else {
+      setTimeUntilClose(null);
+    }
+  }, []);
 
   // ── Transition queue processor ──────────────────────────────
   const processTransitionQueue = useCallback(async () => {
@@ -753,22 +743,21 @@ const updateCountdowns = useCallback((status: CheckInStatus) => {
         return;
       }
 
-const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] = await Promise.all([
-        preloadFlightImages(nextFlight),
-        getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
-        fetchDeskClassOverride(deskNumberParam),
-        fetchDeskStatusOverride(deskNumberParam), 
-        getEnhancedCheckInStatus(
-          nextFlight.FlightNumber,
-          nextFlight.ScheduledDepartureTime || '',
-          nextFlight.StatusEN || '',
-          deskNumberParam
-        ),
-      ]);
+      const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] =
+        await Promise.all([
+          preloadFlightImages(nextFlight),
+          getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
+          fetchDeskClassOverride(deskNumberParam),
+          fetchDeskStatusOverride(deskNumberParam),
+          getEnhancedCheckInStatus(
+            nextFlight.FlightNumber,
+            nextFlight.ScheduledDepartureTime || '',
+            nextFlight.StatusEN || '',
+            deskNumberParam
+          ),
+        ]);
 
-      // Admin override ima apsolutni prioritet nad automatskom klasom
       const finalClassType = overrideClass || fallbackClass;
-
       const { isCancelled, isDiverted } = checkFlightStatus(nextFlight.StatusEN || '');
 
       if (!isMountedRef.current) return;
@@ -778,7 +767,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         logoUrl,
         cityUrl,
         classType: finalClassType,
-        manualDeskStatus: overrideStatus, 
+        manualDeskStatus: overrideStatus,
         airlineName: nextFlight.AirlineName || '',
         destinationCity: nextFlight.DestinationCityName || '',
         flightNumber: nextFlight.FlightNumber || '',
@@ -786,7 +775,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         scheduledTime: nextFlight.ScheduledDepartureTime || '',
         estimatedTime: nextFlight.EstimatedDepartureTime || '',
         gateNumber: nextFlight.GateNumber || '',
-        checkInStatus: checkInStatus || EMPTY_DISPLAY.checkInStatus, // Sigurnosni fallback protiv null
+        checkInStatus: checkInStatus || EMPTY_DISPLAY.checkInStatus,
         isCancelled,
         isDiverted,
         flightStatus: nextFlight.StatusEN || '',
@@ -825,17 +814,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
   );
 
   // ── loadFlights ─────────────────────────────────────────────
-// ── loadFlights ─────────────────────────────────────────────
-  // Zamijeni cijelu loadFlights funkciju u CheckInDisplay komponenti.
-  //
-  // KLJUČNA PROMJENA:
-  //   Stara verzija je uvijek uzimala future[0] kao currentFlight.
-  //   Nova verzija dohvata SVE Redis override-e jednim pozivom,
-  //   pa iterira kroz future listu i preskače letove čiji je
-  //   CheckInDesk override = '__EMPTY__' (admin ih ugasio).
-  //   Tako se automatski prelazi na sljedeći let (npr. YM152).
-  // ─────────────────────────────────────────────────────────────
-const loadFlights = useCallback(async () => {
+  const loadFlights = useCallback(async () => {
     if (!isMountedRef.current || transitionGuardRef.current) return;
 
     try {
@@ -852,76 +831,50 @@ const loadFlights = useCallback(async () => {
         // Redis nedostupan — nastavljamo bez override provjere
       }
 
-      // ⭐⭐⭐ NOVO: OČISTI STARE __EMPTY__ MARKERE (prije svega) ⭐⭐⭐
+      // ── Očisti stare __EMPTY__ markere ───────────────────────
       const cleanedFlightNumbers: string[] = [];
       for (const [flightNum, override] of Object.entries(allOverrides)) {
         if (override.CheckInDesk === '__EMPTY__') {
-          // Pronađi let u trenutnim podacima
           const flightInList = data.departures.find((f: any) => f.FlightNumber === flightNum);
           if (flightInList?.ScheduledDepartureTime) {
             const [h, m] = flightInList.ScheduledDepartureTime.split(':').map(Number);
             const stdDate = new Date();
             stdDate.setHours(h, m, 0, 0);
-            
-            // Ako je STD prošao (let je poletio jučer ili danas), obriši __EMPTY__
             if (stdDate < now) {
               cleanedFlightNumbers.push(flightNum);
-              delete allOverrides[flightNum]; // Ukloni iz memorije
-              
-              // Tiho obriši iz Redis-a (ne čekamo odgovor)
+              delete allOverrides[flightNum];
               fetch('/api/admin/flight-override', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                  flightNumber: flightNum, 
-                  field: 'CheckInDesk', 
-                  action: 'clear' 
-                }),
+                body: JSON.stringify({ flightNumber: flightNum, field: 'CheckInDesk', action: 'clear' }),
               }).catch(() => {});
-              
-              if (DEVELOPMENT) {
-                console.log(`🧹 Cleaned old __EMPTY__ marker for ${flightNum} (STD ${flightInList.ScheduledDepartureTime} passed)`);
-              }
+              if (DEVELOPMENT) console.log(`🧹 Cleaned old __EMPTY__ marker for ${flightNum}`);
             }
           } else {
-            // Let ne postoji u današnjim podacima - vjerovatno je od juče, obriši
             cleanedFlightNumbers.push(flightNum);
             delete allOverrides[flightNum];
-            
             fetch('/api/admin/flight-override', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ 
-                flightNumber: flightNum, 
-                field: 'CheckInDesk', 
-                action: 'clear' 
-              }),
+              body: JSON.stringify({ flightNumber: flightNum, field: 'CheckInDesk', action: 'clear' }),
             }).catch(() => {});
-            
-            if (DEVELOPMENT) {
-              console.log(`🧹 Cleaned orphaned __EMPTY__ marker for ${flightNum} (flight not found in today's schedule)`);
-            }
+            if (DEVELOPMENT) console.log(`🧹 Cleaned orphaned __EMPTY__ marker for ${flightNum}`);
           }
         }
       }
-      
       if (cleanedFlightNumbers.length > 0 && DEVELOPMENT) {
         console.log(`🧹 Total cleaned: ${cleanedFlightNumbers.length} old __EMPTY__ markers`);
       }
-      // ⭐⭐⭐ KRAJ ČIŠĆENJA ⭐⭐⭐
 
-      // ── NOVA PROVJERA: odbaci override-e od juče ili starije ─
+      // ── Odbaci override-e starije od 12h ─────────────────────
       const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
-
       for (const flightNum in allOverrides) {
         const ov = allOverrides[flightNum];
         if (ov.ScheduledDepartureTime) {
           let ovDate: Date | null = null;
-
           if (ov.ScheduledDepartureTime.includes('T')) {
             ovDate = new Date(ov.ScheduledDepartureTime);
           } else {
-            // HH:MM format — konstruiši datum za danas
             const [h, m] = ov.ScheduledDepartureTime.split(':').map(Number);
             if (!isNaN(h) && !isNaN(m)) {
               const d = new Date();
@@ -929,14 +882,8 @@ const loadFlights = useCallback(async () => {
               ovDate = d;
             }
           }
-
           if (ovDate && ovDate.getTime() < twelveHoursAgo) {
-            if (DEVELOPMENT) {
-              console.log(
-                `[Override cleanup] Preskačem zaostali override za ${flightNum} ` +
-                `(STD: ${ov.ScheduledDepartureTime}, datum: ${ovDate.toLocaleString()})`
-              );
-            }
+            if (DEVELOPMENT) console.log(`[Override cleanup] Preskačem zaostali override za ${flightNum}`);
             delete allOverrides[flightNum];
           }
         }
@@ -979,26 +926,40 @@ const loadFlights = useCallback(async () => {
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
-      const future = sorted.filter(
-        (f) =>
-          f.isToday &&
-          f.departureTime > now &&
-          !f.StatusEN?.toLowerCase().includes('cancelled') &&
-          !f.StatusEN?.toLowerCase().includes('departed') &&
-          !f.StatusEN?.toLowerCase().includes('poletio')
-      );
+      // ── FIX 1: allFuture — svi budući letovi (za nextScheduledFlight) ──
+      // Ne filtrira po check-in prozoru — korisnik treba vidjeti
+      // kada dolazi sljedeći let čak i ako check-in još nije otvoren.
+      const allFuture = sorted.filter((f) => {
+        if (!f.isToday) return false;
+        if (f.departureTime <= now) return false;
+        const s = (f.StatusEN || '').toLowerCase();
+        return !s.includes('cancelled') && !s.includes('departed') && !s.includes('poletio');
+      });
 
-      // ── Pronađi prvi let koji NIJE blokiran ─────────────────
-      // Let je blokiran ako mu Redis override ima CheckInDesk = '__EMPTY__'
-      // To znači da je admin ručno ugasio check-in za taj let.
-      // U tom slučaju preskočimo ga i gledamo sljedeći u listi.
+      // ── FIX 2: future — samo letovi čiji je check-in prozor dostignut ──
+      //
+      // Problem koji rješavamo: bez ove provjere, YM123 sa STD 12:00
+      // postaje "current" čim prethodni let nestane (npr. u 09:58),
+      // iako check-in ne treba da se otvori do 10:00 (STD - 120min).
+      //
+      // Koristimo 130min (120min default + 10min buffer) kao sigurnu
+      // granicu. Tačna vrijednost po aviokompaniji (npr. 180min za LY/FZ)
+      // se ionako primjenjuje u getEnhancedCheckInStatus — ona će zatvoriti
+      // check-in ako smo ušli prerano, i prikazat će se inactive ekran
+      // sa "Check-in opens in X minutes".
+      const CHECK_IN_LOOKAHEAD_MS = 120 * 60 * 1000; // 130min = 120min + 10min buffer
+
+      const future = allFuture.filter((f) => {
+        const checkInWindowStart = f.departureTime.getTime() - CHECK_IN_LOOKAHEAD_MS;
+        return Date.now() >= checkInWindowStart;
+      });
+
+      // ── Pronađi prvi let koji NIJE blokiran (__EMPTY__ marker) ──
       let currentFlight: EnhancedFlight | null = null;
 
       for (const f of future) {
         const override = allOverrides[f.FlightNumber];
         if (override?.CheckInDesk === '__EMPTY__') {
-          // Provjeri da li je __EMPTY__ marker star (od juče)
-          // Koristimo STD samog leta (iz live podataka), ne iz override-a
           const stdMs = (() => {
             const [h, m] = (f.ScheduledDepartureTime || '').split(':').map(Number);
             if (isNaN(h)) return null;
@@ -1006,14 +967,13 @@ const loadFlights = useCallback(async () => {
             d.setHours(h, m, 0, 0);
             return d.getTime();
           })();
-          
-          // Ako je STD leta prošao više od 4h, __EMPTY__ je od prethodnog leta/dana
+
           if (stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000) {
             if (DEVELOPMENT) console.log(`[CheckIn] __EMPTY__ istekao za ${f.FlightNumber}, ignorišem blokadu`);
-            // Ne radimo continue — dozvoljavamo let (pada kroz override provjeru)
+            // Marker je istekao — dozvoljavamo let
           } else {
             if (DEVELOPMENT) console.log(`[CheckIn] Preskačem blokirani let ${f.FlightNumber} (__EMPTY__ marker)`);
-            continue; // Marker je svjež, zaista blokiramo
+            continue;
           }
         }
         currentFlight = f;
@@ -1033,9 +993,22 @@ const loadFlights = useCallback(async () => {
 
       if (changed) await queueFlightTransition(currentFlight);
 
-      // nextScheduledFlight = sljedeći let u future listi nakon currentFlight
-      const idx = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
-      const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
+      // ── FIX 2 (nastavak): nextScheduledFlight koristi allFuture ──
+      // Bez ovoga, letovi koji još nisu u check-in prozoru (< 130min do STD)
+      // ne bi bili prikazani kao "sljedeći let" na inactive ekranu.
+  // NOVO (koristi future - samo letovi koji su u check-in prozoru):
+// ── nextScheduledFlight koristi future (samo letovi u check-in prozoru) ──
+    let next: Flight | null = null;
+
+      if (currentFlight) {
+        // Ako imamo trenutni let, gledaj sljedeći u future listi
+        const idx = future.findIndex((f) => f.FlightNumber === currentFlight.FlightNumber);
+        next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
+      } else {
+        // Nema trenutnog leta - prikaži prvi let iz future (ako postoji)
+        next = future.length > 0 ? future[0] : null;
+      }
+
       if (isMountedRef.current) setNextScheduledFlight(next);
 
     } catch (err) {
@@ -1048,16 +1021,10 @@ const loadFlights = useCallback(async () => {
   }, [deskNumberParam, queueFlightTransition]);
 
   // ── shouldShowCheckIn ───────────────────────────────────────
-  // ── shouldShowCheckIn ───────────────────────────────────────
   const shouldShowCheckIn = useMemo(() => {
-    // 1. RUČNI OVERRIDE IMA APSOLUTNI PRIORITET
     if (flightDisplay.manualDeskStatus === 'open') return true;
     if (flightDisplay.manualDeskStatus === 'closed') return false;
-    
-    // 2. Otkazani/Preusmjereni letovi su uvijek zatvoreni
     if (flightDisplay.isCancelled || flightDisplay.isDiverted) return false;
-    
-    // 3. Ako nema ručnog overridea, koristi automatsku logiku
     return shouldDisplayCheckIn(flightDisplay.checkInStatus);
   }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
@@ -1075,11 +1042,10 @@ const loadFlights = useCallback(async () => {
     };
   }, [loadFlights, shouldShowCheckIn]);
 
-    // ── Class Override refresh (Dohvata admin promjene uživo) ──
-  // ── Manual Status Override refresh (Dohvata admin promjene uživo) ──
+  // ── Manual Status Override refresh ─────────────────────────
   useEffect(() => {
     if (!flightDisplay.flight) return;
-    
+
     const refreshStatus = async () => {
       try {
         const newStatus = await fetchDeskStatusOverride(deskNumberParam);
@@ -1091,12 +1057,11 @@ const loadFlights = useCallback(async () => {
         console.error('Status override refresh error:', err);
       }
     };
-    
+
     refreshStatus();
-    const id = setInterval(refreshStatus, 15_000); // Proverava svakih 30s
+    const id = setInterval(refreshStatus, 15_000);
     return () => clearInterval(id);
   }, [flightDisplay.flight, deskNumberParam, fetchDeskStatusOverride]);
-
 
   // ── Check-in status refresh svaku minutu ───────────────────
   useEffect(() => {
@@ -1123,66 +1088,65 @@ const loadFlights = useCallback(async () => {
   // ── Countdown refresh svaku minutu ─────────────────────────
   useEffect(() => {
     if (!flightDisplay.flight) return;
-    const id = setInterval(() => updateCountdowns(flightDisplay.checkInStatus), COUNTDOWN_REFRESH_INTERVAL);
+    const id = setInterval(
+      () => updateCountdowns(flightDisplay.checkInStatus),
+      COUNTDOWN_REFRESH_INTERVAL
+    );
     return () => clearInterval(id);
   }, [flightDisplay.checkInStatus, flightDisplay.flight, updateCountdowns]);
 
   // ── Auto-close timer: osvježi tačno kad istekne STD-30min ──
-useEffect(() => {
-  if (!flightDisplay.flight) return;
-  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-  if (!closeTime) return;
+  useEffect(() => {
+    if (!flightDisplay.flight) return;
+    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+    if (!closeTime) return;
 
-  const msUntilClose = closeTime.getTime() - Date.now();
-  if (msUntilClose <= 0) {
-    // Već je prošlo — odmah refreshaj
-    void loadFlights();
-    return;
-  }
-
-  // Postavi timer koji će se okinuti tačno u trenutku zatvaranja
-  const tid = setTimeout(() => {
-    if (isMountedRef.current) void loadFlights();
-  }, msUntilClose);
-
-  return () => clearTimeout(tid);
-}, [
-  flightDisplay.flight?.FlightNumber,
-  flightDisplay.checkInStatus.checkInCloseTime,
-  loadFlights,
-]);
-
-// Dodaj iza postojećeg auto-close timera
-useEffect(() => {
-  if (flightDisplay.manualDeskStatus !== 'open') return;
-  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-  if (!closeTime) return;
-
-  const msUntilClose = closeTime.getTime() - Date.now();
-  if (msUntilClose <= 0) {
-    // Odmah refreshaj desk status
-    void fetchDeskStatusOverride(deskNumberParam).then(newStatus => {
-      setFlightDisplay(prev => ({ ...prev, manualDeskStatus: newStatus }));
-    });
-    return;
-  }
-
-  const tid = setTimeout(() => {
-    if (isMountedRef.current) {
-      // Redis TTL je istekao — osvježi status
-      void fetchDeskStatusOverride(deskNumberParam).then(newStatus => {
-        setFlightDisplay(prev => ({ ...prev, manualDeskStatus: newStatus }));
-      });
+    const msUntilClose = closeTime.getTime() - Date.now();
+    if (msUntilClose <= 0) {
+      void loadFlights();
+      return;
     }
-  }, msUntilClose + 2000); // +2s buffer za Redis propagaciju
 
-  return () => clearTimeout(tid);
-}, [
-  flightDisplay.manualDeskStatus,
-  flightDisplay.checkInStatus.checkInCloseTime,
-  deskNumberParam,
-  fetchDeskStatusOverride,
-]);
+    const tid = setTimeout(() => {
+      if (isMountedRef.current) void loadFlights();
+    }, msUntilClose);
+
+    return () => clearTimeout(tid);
+  }, [
+    flightDisplay.flight?.FlightNumber,
+    flightDisplay.checkInStatus.checkInCloseTime,
+    loadFlights,
+  ]);
+
+  // ── Auto-close timer za manual open ────────────────────────
+  useEffect(() => {
+    if (flightDisplay.manualDeskStatus !== 'open') return;
+    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+    if (!closeTime) return;
+
+    const msUntilClose = closeTime.getTime() - Date.now();
+    if (msUntilClose <= 0) {
+      void fetchDeskStatusOverride(deskNumberParam).then((newStatus) => {
+        setFlightDisplay((prev) => ({ ...prev, manualDeskStatus: newStatus }));
+      });
+      return;
+    }
+
+    const tid = setTimeout(() => {
+      if (isMountedRef.current) {
+        void fetchDeskStatusOverride(deskNumberParam).then((newStatus) => {
+          setFlightDisplay((prev) => ({ ...prev, manualDeskStatus: newStatus }));
+        });
+      }
+    }, msUntilClose + 2000);
+
+    return () => clearTimeout(tid);
+  }, [
+    flightDisplay.manualDeskStatus,
+    flightDisplay.checkInStatus.checkInCloseTime,
+    deskNumberParam,
+    fetchDeskStatusOverride,
+  ]);
 
   // ── checkin-status-updated event ───────────────────────────
   useEffect(() => {
@@ -1292,7 +1256,11 @@ useEffect(() => {
               <div className={`font-bold text-white/80 mb-4 ${isPortrait ? 'text-[6rem]' : 'text-[4rem]'}`}>
                 Check-in
               </div>
-              <div className={`font-black text-orange-400 leading-none drop-shadow-2xl ${isPortrait ? 'text-[20rem]' : 'text-[15rem]'}`}>
+              <div
+                className={`font-black text-orange-400 leading-none drop-shadow-2xl ${
+                  isPortrait ? 'text-[20rem]' : 'text-[15rem]'
+                }`}
+              >
                 {deskNumberParam}
               </div>
             </div>
@@ -1312,19 +1280,31 @@ useEffect(() => {
             )}
 
             {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
-              <div className={`text-orange-300 mb-6 font-medium bg-black/30 py-3 px-6 rounded-2xl ${isPortrait ? 'text-3xl' : 'text-2xl'}`}>
-                <div>Next flight: {nextScheduledFlight.FlightNumber} to {nextScheduledFlight.DestinationCityName}</div>
-                <div className="text-xl mt-2">Scheduled: {nextScheduledFlight.ScheduledDepartureTime}</div>
+              <div
+                className={`text-orange-300 mb-6 font-medium bg-black/30 py-3 px-6 rounded-2xl ${
+                  isPortrait ? 'text-3xl' : 'text-2xl'
+                }`}
+              >
+                <div>
+                  Next flight: {nextScheduledFlight.FlightNumber} to{' '}
+                  {nextScheduledFlight.DestinationCityName}
+                </div>
+                <div className="text-xl mt-2">
+                  Scheduled: {nextScheduledFlight.ScheduledDepartureTime}
+                </div>
                 {timeUntilCheckIn != null && flightDisplay.checkInStatus.status === 'scheduled' && (
-                  <div className="text-xl font-semibold mt-2">{formatTimeRemaining(timeUntilCheckIn)}</div>
+                  <div className="text-xl font-semibold mt-2">
+                    {formatTimeRemaining(timeUntilCheckIn)}
+                  </div>
                 )}
               </div>
             ) : flightDisplay.flight && !flightDisplay.isCancelled && !flightDisplay.isDiverted ? (
               <div className={`text-white/80 mb-6 ${isPortrait ? 'text-2xl' : 'text-xl'}`}>
-                <div>Upcoming flight: {flightDisplay.flightNumber} to {flightDisplay.destinationCity}</div>
+                <div>
+                  Upcoming flight: {flightDisplay.flightNumber} to {flightDisplay.destinationCity}
+                </div>
                 <br />
                 <span className="text-yellow-300">Scheduled: {flightDisplay.scheduledTime}</span>
-                {/* <div className="text-sm text-white/50 mt-2">(Check-in closed, waiting for departure)</div> */}
               </div>
             ) : null}
 
@@ -1404,9 +1384,13 @@ useEffect(() => {
         <div className="flex-1 flex flex-col px-2 py-1 min-h-0">
           <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
             <div className="flex flex-col items-center mb-4">
-              <AirlineLogo logoUrl={flightDisplay.logoUrl} airlineName={flightDisplay.airlineName} portrait />
+              <AirlineLogo
+                logoUrl={flightDisplay.logoUrl}
+                airlineName={flightDisplay.airlineName}
+                portrait
+              />
 
-                    {flightDisplay.classType && (
+              {flightDisplay.classType && (
                 <div className="w-full max-w-[90vw] mb-3">
                   <div
                     className={`rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
@@ -1427,23 +1411,21 @@ useEffect(() => {
               )}
 
               <div className="text-center w-full">
-                {/* PORTRAIT BOJA BROJA LETA + DESTINACIJA */}
-       <div className="text-[13rem] font-black leading-tight flight-number-transition">
-  {(() => {
-    const flightNum = flightDisplay.flightNumber || '';
-    const iataCode = flightNum.substring(0, 2);
-    const restNumber = flightNum.substring(2);
-    
-    return (
-      <>
-        <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
-          {iataCode}
-        </span>
-        <span className="text-yellow-500">{restNumber}</span>
-      </>
-    );
-  })()}
-</div>
+                <div className="text-[13rem] font-black leading-tight flight-number-transition">
+                  {(() => {
+                    const flightNum = flightDisplay.flightNumber || '';
+                    const iataCode = flightNum.substring(0, 2);
+                    const restNumber = flightNum.substring(2);
+                    return (
+                      <>
+                        <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
+                          {iataCode}
+                        </span>
+                        <span className="text-yellow-500">{restNumber}</span>
+                      </>
+                    );
+                  })()}
+                </div>
               </div>
             </div>
 
@@ -1464,28 +1446,27 @@ useEffect(() => {
                 destinationCity={flightDisplay.destinationCity}
                 portrait
               />
-<div className="flex-1 text-right min-w-0">
-  <div
-    className="font-bold text-white mb-1 leading-tight city-name-transition"
-    style={{
-      fontSize:
-        flightDisplay.destinationCity.length > 14
-          ? '4rem'
-          : flightDisplay.destinationCity.length > 11
-          ? '5.5rem'
-          : flightDisplay.destinationCity.length > 8
-          ? '7rem'
-          : '8.5rem',
-      wordBreak: 'break-word',
-      overflowWrap: 'anywhere',
-      hyphens: 'auto',
-    }}
-  >
-    {flightDisplay.destinationCity}
-  </div>
+              <div className="flex-1 text-right min-w-0">
+                <div
+                  className="font-bold text-white mb-1 leading-tight city-name-transition"
+                  style={{
+                    fontSize:
+                      flightDisplay.destinationCity.length > 14
+                        ? '4rem'
+                        : flightDisplay.destinationCity.length > 11
+                        ? '5.5rem'
+                        : flightDisplay.destinationCity.length > 8
+                        ? '7rem'
+                        : '8.5rem',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
+                    hyphens: 'auto',
+                  }}
+                >
+                  {flightDisplay.destinationCity}
+                </div>
 
-
-<div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
+                <div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
                   <span className="text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold">
                     Airport IATA code:
                   </span>
@@ -1504,13 +1485,13 @@ useEffect(() => {
               </div>
             )}
 
-  <div className="flex flex-col sm:flex-row items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-5 py-3 mx-auto w-fit max-w-3xl">
-  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-  <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
-    ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals. 
-    <span className="text-yellow-400/80 ml-1">(valid from 27.03.2026.)</span>
-  </div>
-</div>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-5 py-3 mx-auto w-fit max-w-3xl">
+              <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
+              <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
+                ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals.{' '}
+                <span className="text-yellow-400/80 ml-1">(valid from 27.03.2026.)</span>
+              </div>
+            </div>
           </div>
 
           <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
@@ -1520,7 +1501,9 @@ useEffect(() => {
                   <Clock className="w-5 h-5 text-slate-400" />
                   <div className="text-sm text-slate-400">Scheduled</div>
                 </div>
-                <div className="text-8xl font-mono font-bold text-white">{flightDisplay.scheduledTime}</div>
+                <div className="text-8xl font-mono font-bold text-white">
+                  {flightDisplay.scheduledTime}
+                </div>
               </div>
 
               {flightDisplay.estimatedTime && flightDisplay.estimatedTime !== flightDisplay.scheduledTime && (
@@ -1554,34 +1537,41 @@ useEffect(() => {
             nextIndex={nextAdIndex}
             isTransitioning={isAdTransitioning}
           />
-          {/* ── NEXT FLIGHT INFO (GATE style) ── */}
-<div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
-  <div className="flex items-center justify-between">
-    <div className="flex items-center gap-4">
-      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">NEXT FLIGHT</span>
-      {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
-        <>
-          <span className="text-2xl font-bold text-yellow-400">{nextScheduledFlight.FlightNumber}</span>
-          <span className="text-lg text-white/60">
-            {nextScheduledFlight.DestinationAirportCode} — {nextScheduledFlight.DestinationCityName}
-          </span>
-          <div className="flex items-center gap-1">
-            <Clock className="w-4 h-4 text-slate-400" />
-            <span className="text-xl font-mono font-bold text-cyan-400">{nextScheduledFlight.ScheduledDepartureTime}</span>
-          </div>
-        </>
-      ) : (
-        <span className="text-sm text-white/40">No upcoming flights</span>
-      )}
-    </div>
-    <div className="flex items-center gap-3 text-xs text-slate-500">
-      <span>LAST UPDATE {lastUpdate}</span>
-      <span className="opacity-35">|</span>
-      <span>NEXT UPDATE ...</span>
-    </div>
-  </div>
-</div>
 
+          {/* ── NEXT FLIGHT INFO ── */}
+          <div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  NEXT FLIGHT
+                </span>
+                {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
+                  <>
+                    <span className="text-2xl font-bold text-yellow-400">
+                      {nextScheduledFlight.FlightNumber}
+                    </span>
+                    <span className="text-lg text-white/60">
+                      {nextScheduledFlight.DestinationAirportCode} —{' '}
+                      {nextScheduledFlight.DestinationCityName}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Clock className="w-4 h-4 text-slate-400" />
+                      <span className="text-xl font-mono font-bold text-cyan-400">
+                        {nextScheduledFlight.ScheduledDepartureTime}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <span className="text-sm text-white/40">No upcoming flights</span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 text-xs text-slate-500">
+                <span>LAST UPDATE {lastUpdate}</span>
+                <span className="opacity-35">|</span>
+                <span>NEXT UPDATE ...</span>
+              </div>
+            </div>
+          </div>
 
           <div className="flex-shrink-0 flex justify-center items-center space-x-2 text-xs font-inter py-1">
             <Image
@@ -1637,7 +1627,6 @@ useEffect(() => {
       )}
 
       <div className="h-full grid grid-cols-12 gap-8 p-3 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
-
         <div className="col-span-7 flex flex-col justify-between">
           <div className="mb-8">
             <div className="flex items-center gap-6 mb-6">
@@ -1659,8 +1648,6 @@ useEffect(() => {
                 portrait={false}
               />
               <div className="flex-1">
-                
-                {/* DODATO: Klasa saltera za Landscape rezim */}
                 {flightDisplay.classType && (
                   <div className="mb-4">
                     <div
