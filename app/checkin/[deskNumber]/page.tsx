@@ -993,16 +993,13 @@ function CheckInDisplay() {
 
       if (changed) await queueFlightTransition(currentFlight);
 
-      // ── FIX 2 (nastavak): nextScheduledFlight koristi allFuture ──
-      // Bez ovoga, letovi koji još nisu u check-in prozoru (< 130min do STD)
-      // ne bi bili prikazani kao "sljedeći let" na inactive ekranu.
-  // NOVO (koristi future - samo letovi koji su u check-in prozoru):
-// ── nextScheduledFlight koristi future (samo letovi u check-in prozoru) ──
-    let next: Flight | null = null;
+      // ── nextScheduledFlight koristi future (samo letovi u check-in prozoru) ──
+      let next: Flight | null = null;
 
       if (currentFlight) {
         // Ako imamo trenutni let, gledaj sljedeći u future listi
-        const idx = future.findIndex((f) => f.FlightNumber === currentFlight.FlightNumber);
+        const currentFlightNumber = currentFlight.FlightNumber;
+        const idx = future.findIndex((f) => f.FlightNumber === currentFlightNumber);
         next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
       } else {
         // Nema trenutnog leta - prikaži prvi let iz future (ako postoji)
