@@ -1,19 +1,30 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 
+// ⭐ NOVO: Konstanta za starost ključeva (20 sati)
+const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const deskNumber = searchParams.get('deskNumber');
   const client = getRedisClient();
 
-  // Ako je specificiran deskNumber – vrati samo njega
+  // Ako je specificiran deskNumber – vrati samo njega (bez čišćenja)
   if (deskNumber) {
     const redisKey = `test:desk-status:${deskNumber}`;
     const value = await client.get(redisKey);
     if (!value) {
       return NextResponse.json({ status: null, flightNumber: null });
     }
+    
+    // ⭐ PROVJERI DA LI JE KLJUČ STAR
     const data = JSON.parse(value);
+    if (data.setAt && (Date.now() - data.setAt > MAX_AGE_MS)) {
+      // Ključ je star - obriši ga
+      await client.del(redisKey);
+      return NextResponse.json({ status: null, flightNumber: null });
+    }
+    
     return NextResponse.json({
       status: data.status,
       flightNumber: data.flightNumber,
@@ -21,9 +32,12 @@ export async function GET(request: Request) {
     });
   }
 
-  // Inače – vrati SVE testne dodjele (kao objekat { deskNumber: { status, flightNumber, setAt } })
+  // Inače – vrati SVE testne dodjele (uz čišćenje starih)
   const all: Record<string, any> = {};
   let cursor = '0';
+  const now = Date.now();
+  let cleanedCount = 0;
+  
   do {
     const [nextCursor, keys] = await client.scan(cursor, 'MATCH', 'test:desk-status:*', 'COUNT', 100);
     cursor = nextCursor;
@@ -31,15 +45,36 @@ export async function GET(request: Request) {
       const desk = key.replace('test:desk-status:', '');
       const value = await client.get(key);
       if (value) {
-        const data = JSON.parse(value);
-        all[desk] = {
-          status: data.status,
-          flightNumber: data.flightNumber,
-          setAt: data.setAt,
-        };
+        try {
+          const data = JSON.parse(value);
+          
+          // ⭐ PROVJERI DA LI JE KLJUČ STAR
+          if (data.setAt && (now - data.setAt > MAX_AGE_MS)) {
+            // Obriši stari ključ
+            await client.del(key);
+            cleanedCount++;
+            console.log(`[cleanup] Deleted old desk-status key: ${key} (age: ${Math.round((now - data.setAt) / 3600000)}h)`);
+            continue;
+          }
+          
+          all[desk] = {
+            status: data.status,
+            flightNumber: data.flightNumber,
+            setAt: data.setAt,
+          };
+        } catch (err) {
+          // Ako ne može parsirati, vjerovatno je korumpiran - obriši
+          console.warn(`[cleanup] Deleting invalid key: ${key}`);
+          await client.del(key);
+          cleanedCount++;
+        }
       }
     }
   } while (cursor !== '0');
+
+  if (cleanedCount > 0) {
+    console.log(`[cleanup] Total cleaned: ${cleanedCount} old desk-status keys`);
+  }
 
   return NextResponse.json(all);
 }
