@@ -259,6 +259,8 @@ function GateDisplay() {
   //
   // Manual override 'open': ignorišemo obje provjere, osoblje kontroliše.
   // ─────────────────────────────────────────────────────────────
+  // ── shouldDisplayFlight ─────────────────────────────────────
+  // ── shouldDisplayFlight ─────────────────────────────────────
   const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     // Manual override ima apsolutni prioritet (osim cancelled/diverted)
     const s = (f.StatusEN || '').toLowerCase().trim();
@@ -275,14 +277,20 @@ function GateDisplay() {
     // Automtski mod: departed status → sakrij odmah
     if (s.includes('departed') || s.includes('poletio')) return false;
 
-    // Backup: ako API kasni, sakrij let koji je prošao STD + 60 minuta
-    const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
-    if (stdDep) {
-      const BACKUP_HIDE_MS = 3 * 60 * 1000; // 60 minuta nakon STD
-      if (Date.now() - stdDep.getTime() > BACKUP_HIDE_MS) {
+    // ⭐ Za gate, koristimo ETD ako postoji za zatvaranje!
+    let departureTimeStr = f.ScheduledDepartureTime;
+    if (f.EstimatedDepartureTime) {
+      departureTimeStr = f.EstimatedDepartureTime;
+    }
+    
+    const dep = parseDepartureTime(departureTimeStr);
+    if (dep) {
+      // ⭐ Gate se gasi 5 minuta PRIJE polaska (ETD ili STD)
+      const GATE_CLOSE_BEFORE_MS = 5 * 60 * 1000; // 5 minuta
+      if (Date.now() >= dep.getTime() - GATE_CLOSE_BEFORE_MS) {
         console.log(
           `[shouldDisplayFlight] ${f.FlightNumber} skriveno — ` +
-          `API nije ažuriran, STD+60min prošao (STD: ${f.ScheduledDepartureTime})`
+          `gate closed 5min before ${departureTimeStr}`
         );
         return false;
       }
@@ -290,7 +298,6 @@ function GateDisplay() {
 
     return true;
   }, []);
-
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
     cityName:    display.flight?.DestinationCityName,
@@ -317,10 +324,15 @@ function GateDisplay() {
   }, []);
 
   // ── Countdown — koristi STD (ne ETD) za prikaz ──────────────
+  // ── Countdown — koristi ETD ako postoji, inače STD ──────────────
   const updateCountdown = useCallback((f: Flight | null) => {
     if (!f) { setTimeUntilDeparture(null); return; }
-    // Prikazujemo countdown do STD — precizniji za putnike
-    const dep = parseDepartureTime(f.ScheduledDepartureTime || '');
+    // ⭐ Za countdown prikazujemo ETD ako postoji, inače STD
+    let departureTimeStr = f.ScheduledDepartureTime;
+    if (f.EstimatedDepartureTime) {
+      departureTimeStr = f.EstimatedDepartureTime;
+    }
+    const dep = parseDepartureTime(departureTimeStr);
     if (dep) setTimeUntilDeparture(Math.floor((dep.getTime() - Date.now()) / 60_000));
     else     setTimeUntilDeparture(null);
   }, []);
@@ -540,6 +552,7 @@ function GateDisplay() {
 
   // Auto-boarding: prikaži "Boarding" 30-5 minuta prije STD
   // ako API još nije ažuriran
+  // Auto-boarding: prikaži "Boarding" 30-5 minuta prije polaska
   const effectiveStatus = useMemo(() => {
     const raw = display.flight?.StatusEN || '';
     if (!display.flight || isCancelled || isDiverted) return raw;
@@ -548,15 +561,17 @@ function GateDisplay() {
     if (s.includes('final call'))                           return raw;
     if (s.includes('boarding') || s.includes('gate open')) return raw;
 
-    // Koristi ETD za auto-boarding ako kasni
-    const refTime = (hasDel ? display.flight.EstimatedDepartureTime : null)
-      || display.flight.ScheduledDepartureTime || '';
+    // ⭐ Koristi ETD ako postoji za auto-boarding
+    let refTime = display.flight.ScheduledDepartureTime || '';
+    if (display.flight.EstimatedDepartureTime) {
+      refTime = display.flight.EstimatedDepartureTime;
+    }
     const dep = parseDepartureTime(refTime);
     if (!dep) return raw;
     const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
     if (minUntil <= 30 && minUntil > 5) return 'Boarding';
     return raw;
-  }, [display.flight, isCancelled, isDiverted, hasDel]);
+  }, [display.flight, isCancelled, isDiverted]);
 
   const statusCfg = getStatusConfig(effectiveStatus);
 
