@@ -1,640 +1,153 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
-  Plane,CheckSquare,
-  ArrowUpRight,
-  ArrowDownRight,
-  Clock,
-  MapPin,
-  CheckCircle,
-  XCircle,
-  AlertCircle,
-  RefreshCw,
-  Calendar,
-  Search,
-  ChevronDown,
-  LogOut,
-  Home,
-  Save,
-  Trash2,
-  AlertTriangle
+  Plane, CheckSquare, ArrowUpRight, ArrowDownRight, Clock, MapPin,
+  CheckCircle, XCircle, AlertCircle, RefreshCw, Calendar, Search,
+  ChevronDown, LogOut, Home, Save, Trash2, AlertTriangle, Shield, Lock
 } from 'lucide-react';
 import type { Flight } from '@/types/flight';
 
-// Helper funkcije
+// ============================================================
+// KONSTANTE
+// ============================================================
+const AUTO_REFRESH_INTERVAL = 30_000; // 30 sekundi
+const CONFIRM_THRESHOLD_MS = 500;
+const DEVELOPMENT = process.env.NODE_ENV === 'development';
+
+// ============================================================
+// HELPER FUNKCIJE
+// ============================================================
 const formatTime = (timeString: string): string => {
-  if (!timeString || timeString.trim() === '') return '--:--';
-  try {
-    const [hours, minutes] = timeString.split(':').map(Number);
-    if (Number.isNaN(hours) || Number.isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return '--:--';
-    const date = new Date();
-    date.setHours(hours, minutes, 0, 0);
-    return date.toLocaleTimeString('sr-Latn-RS', { hour: '2-digit', minute: '2-digit', hour12: false });
-  } catch { return '--:--'; }
+  if (!timeString || !timeString.includes(':')) return '--:--';
+  const [hours, minutes] = timeString.split(':').map(Number);
+  if (isNaN(hours) || isNaN(minutes)) return '--:--';
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
 };
 
 const getStatusColor = (status: string): string => {
   if (!status) return 'text-gray-400';
   const s = status.toLowerCase();
-  if (s.includes('on time') || s.includes('na vrijeme')) return 'text-green-500';
+  if (s.includes('cancelled') || s.includes('otkazan')) return 'text-red-500';
   if (s.includes('delay') || s.includes('kasni')) return 'text-yellow-500';
-  if (s.includes('cancel') || s.includes('otkazan')) return 'text-red-500';
   if (s.includes('board') || s.includes('ukrcaj')) return 'text-blue-500';
-  if (s.includes('gate') || s.includes('izlaz')) return 'text-purple-500';
-  if (s.includes('arriv') || s.includes('sletio')) return 'text-emerald-500';
-  if (s.includes('divert')) return 'text-white';
+  if (s.includes('departed') || s.includes('poletio')) return 'text-purple-500';
+  if (s.includes('diverted') || s.includes('preusmjeren')) return 'text-orange-500';
   return 'text-gray-400';
 };
 
 const getStatusIcon = (status: string) => {
   if (!status) return <Clock className="w-4 h-4 text-gray-400" />;
   const s = status.toLowerCase();
-  if (s.includes('on time') || s.includes('na vrijeme')) return <CheckCircle className="w-4 h-4 text-green-500" />;
+  if (s.includes('cancelled') || s.includes('otkazan')) return <XCircle className="w-4 h-4 text-red-500" />;
   if (s.includes('delay') || s.includes('kasni')) return <AlertCircle className="w-4 h-4 text-yellow-500" />;
-  if (s.includes('cancel') || s.includes('otkazan')) return <XCircle className="w-4 h-4 text-red-500" />;
   if (s.includes('board') || s.includes('ukrcaj')) return <Plane className="w-4 h-4 text-blue-500" />;
   return <Clock className="w-4 h-4 text-gray-400" />;
 };
 
 // ============================================================
-// KOMPONENTA: Override Control
+// TOAST KOMPONENTA
 // ============================================================
-interface OverrideControlProps {
-  label: string;
-  currentValue: string | undefined;
-  fieldName: 'GateNumber' | 'CheckInDesk' | 'BaggageReclaim' | 'Terminal';
-  flightNumber: string;
-  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
-}
-
-const OverrideControl: React.FC<OverrideControlProps> = ({ 
-  label, currentValue, fieldName, flightNumber, onFlightOverride 
-}) => {
-  const [inputValue, setInputValue] = useState(currentValue || '');
-  const [isUpdating, setIsUpdating] = useState(false);
-  const hasOverride = !!currentValue;
-
+const Toast = ({ message, type, onClose }: { message: string; type: 'success' | 'error' | 'warning'; onClose: () => void }) => {
   useEffect(() => {
-    if (!isUpdating) setInputValue(currentValue || '');
-  }, [currentValue, isUpdating]);
+    const timer = setTimeout(onClose, 3000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
 
-  const handleAction = useCallback(async (action: 'assign' | 'clear') => {
-    setIsUpdating(true);
-    try {
-      await onFlightOverride(flightNumber, fieldName, action, action === 'assign' ? inputValue : undefined);
-      if (action === 'clear') setInputValue('');
-    } catch (error) {
-      console.error('Override error:', error);
-    } finally {
-      setIsUpdating(false);
-    }
-  }, [flightNumber, fieldName, inputValue, onFlightOverride]);
-
+  const colors = { success: 'bg-green-500', error: 'bg-red-500', warning: 'bg-yellow-500' };
   return (
-    <div className={`flex flex-col gap-2 p-2 rounded-lg transition-all ${
-      fieldName === 'CheckInDesk' && hasOverride 
-        ? 'bg-purple-500/10 border border-purple-500/30' 
-        : ''
-    }`}>
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-white/50 flex items-center gap-1">
-          {label}
-          {hasOverride && (
-            <span className="text-[10px] text-orange-300">(Override)</span>
-          )}
+    <div className={`fixed bottom-4 right-4 z-50 ${colors[type]} text-white px-4 py-2 rounded-lg shadow-lg animate-pulse`}>
+      {message}
+    </div>
+  );
+};
+
+// ============================================================
+// CONFIRM DIALOG
+// ============================================================
+const ConfirmDialog = ({ open, title, message, onConfirm, onCancel }: { open: boolean; title: string; message: string; onConfirm: () => void; onCancel: () => void }) => {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onCancel}>
+      <div className="bg-slate-900 rounded-xl p-6 max-w-md w-full border border-white/20" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <AlertTriangle className="w-6 h-6 text-yellow-500" />
+          <h3 className="text-lg font-bold text-white">{title}</h3>
         </div>
-        {hasOverride && (
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">
-              ✏️
-            </span>
-            <button
-              onClick={() => handleAction('clear')}
-              className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-colors"
-              title="Ukloni override za ovo polje"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-      </div>
-      <div className="text-sm text-white mb-1 font-medium break-all">
-        Trenutno: {currentValue || <span className="text-white/30">Nije dodijeljeno (API podatak)</span>}
-        {fieldName === 'CheckInDesk' && currentValue && (
-          <span className="ml-2 text-[10px] text-yellow-400/70 bg-yellow-500/10 px-1.5 py-0.5 rounded-full">
-            ⏰ Auto-reset - 30 min prije STD
-          </span>
-        )}
-        {fieldName === 'CheckInDesk' && !currentValue && (
-          <span className="ml-2 text-[10px] text-green-400/70 bg-green-500/10 px-1.5 py-0.5 rounded-full">
-            ✅ Auto-reset aktivan
-          </span>
-        )}
-      </div>
-      
-      <div className="flex flex-col sm:flex-row gap-2 w-full" onClick={(e) => e.stopPropagation()}>
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="npr. 1, 2 ili 3"
-          className="w-full sm:w-28 min-w-0 flex-1 px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          disabled={isUpdating}
-        />
-
-        <button
-          onClick={() => handleAction('assign')}
-         disabled={isUpdating}
-          className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg border border-blue-500/30 transition-colors disabled:opacity-50 text-sm"
-          type="button"
-        >
-          <Save className="w-3.5 h-3.5" />
-          {isUpdating ? '...' : 'Promijeni'}
-        </button>
-
-        <button
-          onClick={() => handleAction('clear')}
-          disabled={isUpdating || !currentValue}
-          className="w-full sm:w-auto flex justify-center items-center gap-1 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg border border-red-500/30 transition-colors disabled:opacity-50 text-sm"
-          type="button"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-          Ukloni
-        </button>
+        <p className="text-sm text-white/70 mb-6">{message}</p>
+        <div className="flex gap-3">
+          <button onClick={onCancel} className="flex-1 py-2 rounded-lg text-sm font-medium bg-white/10 hover:bg-white/20 text-white transition">Odustani</button>
+          <button onClick={onConfirm} className="flex-1 py-2 rounded-lg text-sm font-bold bg-red-500 hover:bg-red-600 text-white transition">Potvrdi</button>
+        </div>
       </div>
     </div>
   );
 };
 
 // ============================================================
-// KOMPONENTA: Status Control
+// OVERRIDE CONTROL (pojednostavljen)
 // ============================================================
-interface StatusControlProps {
-  currentStatus: string;
-  flightNumber: string;
-  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
-}
+const OverrideControl = ({ label, currentValue, fieldName, flightNumber, onOverride }: any) => {
+  const [value, setValue] = useState(currentValue || '');
+  const [loading, setLoading] = useState(false);
+  const hasOverride = !!currentValue;
 
-const statusStyles: Record<string, { active: string; inactive: string }> = {
-  green: {
-    active: 'bg-green-600/40 border-green-500 text-green-300 ring-1 ring-green-500/50',
-    inactive: 'bg-green-600/10 border-green-500/30 text-green-400/70 hover:bg-green-600/20'
-  },
-  yellow: {
-    active: 'bg-yellow-600/40 border-yellow-500 text-yellow-300 ring-1 ring-yellow-500/50',
-    inactive: 'bg-yellow-600/10 border-yellow-500/30 text-yellow-400/70 hover:bg-yellow-600/20'
-  },
-  blue: {
-    active: 'bg-blue-600/40 border-blue-500 text-blue-300 ring-1 ring-blue-500/50',
-    inactive: 'bg-blue-600/10 border-blue-500/30 text-blue-400/70 hover:bg-blue-600/20'
-  },
-  purple: {
-    active: 'bg-purple-600/40 border-purple-500 text-purple-300 ring-1 ring-purple-500/50',
-    inactive: 'bg-purple-600/10 border-purple-500/30 text-purple-400/70 hover:bg-purple-600/20'
-  },
-  red: {
-    active: 'bg-red-600/40 border-red-500 text-red-300 ring-1 ring-red-500/50',
-    inactive: 'bg-red-600/10 border-red-500/30 text-red-400/70 hover:bg-red-600/20'
-  },
-  white: {
-    active: 'bg-white/40 border-white text-white ring-1 ring-white/50',
-    inactive: 'bg-white/10 border-white/30 text-white/70 hover:bg-white/20'
-  }
+  const handleAction = async (action: 'assign' | 'clear') => {
+    setLoading(true);
+    try {
+      await onOverride(flightNumber, fieldName, action, action === 'assign' ? value : undefined);
+      if (action === 'clear') setValue('');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className={`p-2 rounded-lg ${fieldName === 'CheckInDesk' && hasOverride ? 'bg-purple-500/10 border border-purple-500/30' : ''}`}>
+      <div className="flex justify-between items-center mb-1">
+        <span className="text-xs text-white/50">{label} {hasOverride && <span className="text-orange-300">(Override)</span>}</span>
+        {hasOverride && <button onClick={() => handleAction('clear')} className="text-[10px] text-red-400 hover:text-red-300">✕ Ukloni</button>}
+      </div>
+      <div className="text-xs text-white/50 mb-1">Trenutno: {currentValue || <span className="text-white/30">Nije postavljeno</span>}</div>
+      <div className="flex gap-2">
+        <input type="text" value={value} onChange={e => setValue(e.target.value)} placeholder="npr. 1,2,3" className="flex-1 px-2 py-1.5 text-sm bg-white/10 border border-white/20 rounded text-white" disabled={loading} />
+        <button onClick={() => handleAction('assign')} disabled={loading} className="px-3 py-1.5 text-sm bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 rounded transition"><Save className="w-3.5 h-3.5" /></button>
+        <button onClick={() => handleAction('clear')} disabled={loading || !currentValue} className="px-3 py-1.5 text-sm bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded transition"><Trash2 className="w-3.5 h-3.5" /></button>
+      </div>
+    </div>
+  );
 };
 
-const StatusControl: React.FC<StatusControlProps> = ({ 
-  currentStatus, flightNumber, onFlightOverride 
-}) => {
-  const [isUpdating, setIsUpdating] = useState(false);
-
-  const quickStatuses = [
+// ============================================================
+// STATUS CONTROL (pojednostavljen)
+// ============================================================
+const StatusControl = ({ currentStatus, flightNumber, onOverride }: any) => {
+  const [loading, setLoading] = useState(false);
+  const statuses = [
     { value: 'On Time', label: 'Na vrijeme', color: 'green' },
     { value: 'Delayed', label: 'Kasni', color: 'yellow' },
     { value: 'Boarding', label: 'Ukrcaj', color: 'blue' },
     { value: 'Departed', label: 'Poletio', color: 'purple' },
     { value: 'Cancelled', label: 'Otkazan', color: 'red' },
-    { value: 'Diverted', label: 'Preusmjeren', color: 'white' },
+    { value: 'Diverted', label: 'Preusmjeren', color: 'orange' },
   ];
 
-  const handleStatusChange = async (newStatus: string) => {
-    setIsUpdating(true);
-    try {
-      await onFlightOverride(flightNumber, 'StatusEN', 'assign', newStatus);
-    } catch (error) {
-      console.error('Status change error:', error);
-    } finally {
-      setIsUpdating(false);
-    }
-  };
-
-  const isCurrentlyActive = (statusValue: string) => {
-    if (!currentStatus) return false;
-    return currentStatus.toLowerCase() === statusValue.toLowerCase();
-  };
+  const isActive = (val: string) => currentStatus?.toLowerCase() === val.toLowerCase();
 
   return (
-    <div className="space-y-2">
-      <div className="text-xs text-white/50">Status leta (Quick Change)</div>
-      <div className="text-sm text-white mb-2 font-medium">
-        Trenutno: {currentStatus || <span className="text-white/30">N/A</span>}
-      </div>
-      <div className="flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-        {quickStatuses.map((status) => {
-          const isActive = isCurrentlyActive(status.value);
-          const styles = statusStyles[status.color] || statusStyles.green;
-          
-          return (
-            <button
-              key={status.value}
-              onClick={() => handleStatusChange(status.value)}
-              disabled={isUpdating || isActive}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                isActive ? styles.active : styles.inactive
-              } disabled:opacity-50`}
-              type="button"
-            >
-              {status.label}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
-// ============================================================
-// KOMPONENTA: Manual Desk Override (sa flightNumber prop)
-// ============================================================
-interface DeskManualControlProps {
-  deskNumbers: string | undefined;
-  flightNumber?: string;
-}
-
-interface DeskManualControlProps {
-  deskNumbers: string | undefined;
-  flightNumber?: string;
-}
-
-const DeskManualControl: React.FC<DeskManualControlProps> = ({ deskNumbers, flightNumber }) => {
-  const [savedStatuses, setSavedStatuses] = useState<Record<string, { status: string; flightNumber?: string }>>({});
-  const [isLoading, setIsLoading] = useState(false);
-
-  useEffect(() => {
-    if (!deskNumbers) return;
-    const desks = deskNumbers.split(',').map(d => d.trim());
-    
-    desks.forEach(async (desk) => {
-      try {
- const res = await fetch(`/api/admin/desk-status-override/${desk}`);
-        const data = await res.json();
-        if (data.status) {
-          setSavedStatuses(prev => ({ 
-            ...prev, 
-            [desk]: { 
-              status: data.status, 
-              flightNumber: data.flightNumber 
-            } 
-          }));
-        }
-      } catch {}
-    });
-  }, [deskNumbers]);
-
-  const handleAction = async (desk: string, action: string) => {
-    setIsLoading(true);
-    try {
-      const body: any = { deskNumber: desk, action };
-      if (flightNumber) {
-        body.flightNumber = flightNumber;  // ← Šaljemo flightNumber
-      }
-      
-      const response = await fetch('/api/admin/desk-status-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      
-      const result = await response.json();
-      if (result.cleared || result.ttl === 0) {
-  alert(
-    `Ne može se otvoriti: check-in prozor za ovaj let je već zatvoren ` +
-    `(STD - 30min je prošlo). Koristite ručni override direktno iz FIDS check-in ekrana.`
-  );
-  return; // Ne ažuriraj savedStatuses
-}
-      
-      if (action === 'clear') {
-        setSavedStatuses(prev => {
-          const next = { ...prev };
-          delete next[desk];
-          return next;
-        });
-      } else {
-        setSavedStatuses(prev => ({ 
-          ...prev, 
-          [desk]: { 
-            status: action, 
-            flightNumber: flightNumber 
-          } 
-        }));
-      }
-      
-      // Ako je TTL bio 0, prikaži poruku
-      if (result.ttl === 0) {
-        alert(`Check-in za let ${flightNumber} je već zatvoren (STD - 30min). Override nije sačuvan.`);
-      } else if (result.ttl) {
-        const minutes = Math.floor(result.ttl / 60);
-        console.log(`[DeskManualControl] Override postavljen, TTL: ${minutes} minuta`);
-      }
-      
-    } catch (error) {
-      console.error('Desk status override error:', error);
-      alert('Greška pri postavljanju statusa saltera');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  if (!deskNumbers) return null;
-
-  const desks = deskNumbers.split(',').map(d => d.trim());
-  const hasAnyOverride = Object.keys(savedStatuses).length > 0;
-
-  return (
-    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
-      <div className="text-xs text-white/50 flex items-center gap-2">
-        🚷 Manual Open/Close (FIDS override)
-        {hasAnyOverride && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">
-            {Object.keys(savedStatuses).length} desk(s) overridden
-          </span>
-        )}
-      </div>
-      <div className="space-y-2">
-        {desks.map(desk => {
-          const hasOverride = savedStatuses[desk] !== undefined;
-          const overrideInfo = savedStatuses[desk];
-          const isDifferentFlight = overrideInfo?.flightNumber && overrideInfo.flightNumber !== flightNumber;
-          
-          return (
-            <div 
-              key={desk} 
-              className={`flex flex-col gap-2 rounded-lg p-2 border transition-all ${
-                hasOverride 
-                  ? isDifferentFlight
-                    ? 'bg-red-500/10 border-red-500/30 ring-1 ring-red-500/20'
-                    : 'bg-orange-500/10 border-orange-500/30 ring-1 ring-orange-500/20'
-                  : 'bg-white/5 border-white/10'
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span className={`text-xs font-bold w-8 ${hasOverride ? 'text-orange-300' : 'text-white/70'}`}>
-                  Š{desk}
-                </span>
-                
-                {!savedStatuses[desk] ? (
-                  <div className="flex-1 flex items-center gap-1 flex-wrap">
-                    <button
-                      onClick={() => handleAction(desk, 'open')}
-                      disabled={isLoading}
-                      className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50"
-                      type="button"
-                    >
-                      FORCE OPEN
-                    </button>
-                    <button
-                      onClick={() => handleAction(desk, 'closed')}
-                      disabled={isLoading}
-                      className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50"
-                      type="button"
-                    >
-                      FORCE CLOSE
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex-1 flex items-center justify-between flex-wrap gap-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                        savedStatuses[desk].status === 'open' 
-                          ? 'bg-green-500/20 text-green-300 border border-green-500/30' 
-                          : 'bg-red-500/20 text-red-300 border border-red-500/30'
-                      }`}>
-                        {savedStatuses[desk].status.toUpperCase()}
-                      </span>
-                      {isDifferentFlight && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-300">
-                          ⚠️ Stari let: {overrideInfo.flightNumber}
-                        </span>
-                      )}
-                      <span className="text-[9px] text-orange-400/70">
-                        (manual override active{overrideInfo.flightNumber && ` for ${overrideInfo.flightNumber}`})
-                      </span>
-                    </div>
-                    <button 
-                      onClick={() => handleAction(desk, 'clear')} 
-                      disabled={isLoading} 
-                      className="flex items-center gap-1 text-[10px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-1 rounded transition disabled:opacity-50"
-                      type="button"
-                    >
-                      <RefreshCw className="w-2.5 h-2.5" />
-                      Reset to Auto
-                    </button>
-                  </div>
-                )}
-              </div>
-              
-              {/* Prikaži upozorenje ako je override za stari let */}
-              {isDifferentFlight && (
-                <div className="text-[10px] text-red-400/80 bg-red-500/10 p-1.5 rounded-lg mt-1">
-                  ⚠️ Ovaj desk je i dalje otvoren za stari let ({overrideInfo.flightNumber})! 
-                  Kliknite &quot;Reset to Auto&quot; da oslobodite desk za trenutni let.
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
-// ============================================================
-// KOMPONENTA: Manual Gate Override
-// ============================================================
-interface GateManualControlProps {
-  gateNumber: string | undefined;
-}
-
-const GateManualControl: React.FC<GateManualControlProps> = ({ gateNumber }) => {
-  const [savedStatus, setSavedStatus] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-
-  useEffect(() => {
-    if (!gateNumber) return;
-    const fetchStatus = async () => {
-      try {
-        const res = await fetch(`/api/gate-status/${gateNumber}`);
-        const data = await res.json();
-        if (data.status) setSavedStatus(data.status);
-      } catch {}
-    };
-    fetchStatus();
-  }, [gateNumber]);
-
-  
-
-  const handleAction = async (action: string) => {
-    if (!gateNumber) return;
-    setIsLoading(true);
-    try {
-      await fetch('/api/admin/gate-status-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gateNumber, action }),
-      });
-      setSavedStatus(action === 'clear' ? null : action);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  if (!gateNumber) return null;
-
-  return (
-    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
-      <div className="text-xs text-white/50">🚪 Manual Gate Override (FIDS TV)</div>
-      <div className="flex items-center gap-2 bg-white/5 rounded-lg p-2 border border-white/10">
-        <span className="text-xs text-white/70 w-8 font-bold">G{gateNumber}</span>
-        
-        {!savedStatus ? (
-          <div className="flex-1 flex items-center gap-1 flex-wrap">
-            <button onClick={() => handleAction('open')} disabled={isLoading} className="px-2 py-1 text-[10px] font-bold rounded text-white bg-green-600 hover:bg-green-700 transition disabled:opacity-50" type="button">FORCE OPEN</button>
-            <button onClick={() => handleAction('closed')} disabled={isLoading} className="px-2 py-1 text-[10px] font-bold rounded text-white bg-red-600 hover:bg-red-700 transition disabled:opacity-50" type="button">FORCE CLOSE</button>
-          </div>
-        ) : (
-          <div className="flex-1 flex items-center justify-between">
-            <span className={`text-xs font-bold px-2 py-0.5 rounded ${savedStatus === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>
-              {savedStatus.toUpperCase()}
-            </span>
-            <button onClick={() => handleAction('clear')} disabled={isLoading} className="flex items-center gap-1 text-[10px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-1 rounded transition disabled:opacity-50" type="button">
-              <RefreshCw className="w-2.5 h-2.5" />
-              Reset to Auto
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// ============================================================
-// KOMPONENTA: Desk Class Control
-// ============================================================
-interface DeskClassControlProps {
-  deskNumbers: string | undefined;
-}
-
-const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
-  const [savedClasses, setSavedClasses] = useState<Record<string, string>>({});
-  const [isLoading, setIsLoading] = useState(false);
-
-  useEffect(() => {
-    if (!deskNumbers) return;
-    const desks = deskNumbers.split(',').map(d => d.trim());
-    
-    desks.forEach(async (desk) => {
-      try {
-        const res = await fetch(`/api/desk-class/${desk}`);
-        const data = await res.json();
-        if (data.classType) {
-          setSavedClasses(prev => ({ ...prev, [desk]: data.classType }));
-        }
-      } catch {}
-    });
-  }, [deskNumbers]);
-
-  const handleSave = async (desk: string, type: string) => {
-    setIsLoading(true);
-    try {
-      await fetch('/api/admin/desk-class-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: desk, classType: type, action: 'assign' }),
-      });
-      setSavedClasses(prev => ({ ...prev, [desk]: type }));
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleClear = async (desk: string) => {
-    setIsLoading(true);
-    try {
-      await fetch('/api/admin/desk-class-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
-      });
-      setSavedClasses(prev => {
-        const next = { ...prev };
-        delete next[desk];
-        return next;
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  if (!deskNumbers) return null;
-
-  const classOptions = [
-    { value: 'BUSINESS CLASS', label: 'BUSINESS', color: 'bg-red-600 hover:bg-red-700' },
-    { value: 'PREMIUM ECONOMY', label: 'PREMIUM', color: 'bg-purple-600 hover:bg-purple-700' },
-    { value: 'ECONOMY CLASS', label: 'ECONOMY', color: 'bg-blue-600 hover:bg-blue-700' },
-    { value: 'PRIORITY', label: 'PRIORITY', color: 'bg-green-600 hover:bg-green-700' },
-  ];
-
-  const desks = deskNumbers.split(',').map(d => d.trim());
-
-  return (
-    <div className="space-y-2 mt-2" onClick={(e) => e.stopPropagation()}>
-      <div className="text-xs text-white/50">🏷️ Klasa saltera (FIDS prikaz ispod loga)</div>
-      <div className="space-y-2">
-        {desks.map(desk => (
-          <div key={desk} className="flex items-center gap-2 bg-white/5 rounded-lg p-2 border border-white/10">
-            <span className="text-xs text-white/70 w-8 font-bold">Š{desk}</span>
-            
-            {savedClasses[desk] ? (
-              <div className="flex-1 flex items-center justify-between">
-                <span className="text-sm font-bold text-amber-300">{savedClasses[desk]}</span>
-                <button 
-                  onClick={() => handleClear(desk)} 
-                  disabled={isLoading} 
-                  className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-500/10 rounded"
-                  type="button"
-                >
-                  Ukloni
-                </button>
-              </div>
-            ) : (
-              <div className="flex-1 flex items-center gap-1 flex-wrap">
-                {classOptions.map(opt => (
-                  <button
-                    key={opt.value}
-                    onClick={() => handleSave(desk, opt.value)}
-                    disabled={isLoading}
-                    className={`px-2 py-1 text-[10px] font-bold rounded text-white transition disabled:opacity-50 ${opt.color}`}
-                    type="button"
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+    <div>
+      <div className="text-xs text-white/50 mb-1">Status leta</div>
+      <div className="text-sm text-white mb-2">Trenutno: {currentStatus || <span className="text-white/30">N/A</span>}</div>
+      <div className="flex flex-wrap gap-2">
+        {statuses.map(s => (
+          <button key={s.value} onClick={async () => {
+            setLoading(true);
+            try { await onOverride(flightNumber, 'StatusEN', 'assign', s.value); } finally { setLoading(false); }
+          }} disabled={loading || isActive(s.value)} className={`px-3 py-1 text-xs font-medium rounded-lg border transition ${isActive(s.value) ? `bg-${s.color}-600/40 border-${s.color}-500 text-${s.color}-300` : 'bg-white/5 border-white/10 text-white/70 hover:bg-white/10'}`}>
+            {s.label}
+          </button>
         ))}
       </div>
     </div>
@@ -642,311 +155,156 @@ const DeskClassControl: React.FC<DeskClassControlProps> = ({ deskNumbers }) => {
 };
 
 // ============================================================
-// FUNKCIJE ZA OBRADU LETOVA
+// DESK MANUAL CONTROL (pojednostavljen)
 // ============================================================
-const removeDuplicates = (arr: string[]): string[] => {
-  const seen: Record<string, boolean> = {};
-  return arr.filter((item) => { if (seen[item]) return false; seen[item] = true; return true; });
-};
+const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string; flightNumber?: string }) => {
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const desks = deskNumbers?.split(',').map(d => d.trim()) || [];
 
-const consolidateFlights = (flights: Flight[]): Flight[] => {
-  const flightMap = new Map<string, Flight>();
-  flights.forEach((flight) => {
-    const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}`;
-    if (flightMap.has(baseKey)) {
-      const existingFlight = flightMap.get(baseKey)!;
-      if (flight.GateNumber && existingFlight.GateNumber) {
-        existingFlight.GateNumber = removeDuplicates([...existingFlight.GateNumber.split(',').map(g => g.trim()), ...flight.GateNumber.split(',').map(g => g.trim())]).join(', ');
-      } else if (flight.GateNumber) { existingFlight.GateNumber = flight.GateNumber; }
-      
-      if (flight.CheckInDesk && existingFlight.CheckInDesk) {
-        existingFlight.CheckInDesk = removeDuplicates([...existingFlight.CheckInDesk.split(',').map(d => d.trim()), ...flight.CheckInDesk.split(',').map(d => d.trim())]).join(', ');
-      } else if (flight.CheckInDesk) { existingFlight.CheckInDesk = flight.CheckInDesk; }
-      
-      if (!existingFlight.AirlineName && flight.AirlineName) existingFlight.AirlineName = flight.AirlineName;
-      if (!existingFlight.AirlineCode && flight.AirlineCode) existingFlight.AirlineCode = flight.AirlineCode;
-      if (!existingFlight.StatusEN && flight.StatusEN) existingFlight.StatusEN = flight.StatusEN;
-      if (!existingFlight.StatusMN && flight.StatusMN) existingFlight.StatusMN = flight.StatusMN;
-    } else {
-      flightMap.set(baseKey, { ...flight });
+  useEffect(() => {
+    desks.forEach(async desk => {
+      try {
+        const res = await fetch(`/api/admin/desk-status-override/${desk}`);
+        const data = await res.json();
+        if (data.status) setOverrides(prev => ({ ...prev, [desk]: data.status }));
+      } catch {}
+    });
+  }, [desks]);
+
+  const handleAction = async (desk: string, action: string) => {
+    try {
+      const res = await fetch('/api/admin/desk-status-override', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action, flightNumber })
+      });
+      const result = await res.json();
+      if (result.cleared || result.ttl === 0) {
+        alert('Check-in prozor je već zatvoren (STD - 30min).');
+        return;
+      }
+      if (action === 'clear') setOverrides(prev => { const next = { ...prev }; delete next[desk]; return next; });
+      else setOverrides(prev => ({ ...prev, [desk]: action }));
+    } catch (error) {
+      alert('Greška pri postavljanju statusa');
     }
-  });
-  return Array.from(flightMap.values());
-};
+  };
 
-const generateFlightKey = (flight: Flight, index: number): string => {
-  const baseKey = `${flight.FlightNumber}-${flight.ScheduledDepartureTime || 'no-time'}`;
-  const additionalKeys = [flight.GateNumber, flight.CheckInDesk, flight.Terminal, flight.AirlineCode, index.toString()].filter(Boolean).join('-');
-  return `${baseKey}-${additionalKeys}`.replace(/\s+/g, '-');
-};
-
-interface FlightsData { departures: Flight[]; arrivals: Flight[]; }
-
-// POMOĆNA MAPA ZA BOJE KARTICA
-const cardStylesMap: Record<string, { bg: string; text: string }> = {
-  blue: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
-  green: { bg: 'bg-green-500/20', text: 'text-green-400' },
-  yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' }
-};
-
-// ============================================================
-// KOMPONENTA: Flight Card (sa override indikatorom i clear dugmetom)
-// ============================================================
-interface FlightCardProps {
-  flight: Flight & { _hasOverride?: boolean; _overrideFields?: Record<string, string> };
-  flightKey: string;
-  onFlightOverride: (flightNumber: string, field: string, action: string, value?: string) => Promise<void>;
-  onClearOverrides: (flightNumber: string) => Promise<void>;
-}
-
-const FlightCard: React.FC<FlightCardProps> = ({ 
-  flight, 
-  flightKey, 
-  onFlightOverride,
-  onClearOverrides 
-}) => {
-  const [expanded, setExpanded] = useState(false);
-  const isDeparture = flight.FlightType === 'departure';
-  const statusColor = getStatusColor(flight.StatusEN);
-  const StatusIcon = getStatusIcon(flight.StatusEN);
-  const hasOverride = (flight as any)._hasOverride === true;
-  const overrideFields = (flight as any)._overrideFields || {};
-  const hasCheckInOverride = overrideFields['CheckInDesk'] !== undefined;
-  const hasGateOverride = overrideFields['GateNumber'] !== undefined;
-  const hasStatusOverride = overrideFields['StatusEN'] !== undefined;
+  if (!deskNumbers) return null;
 
   return (
-    <div
-      className={`bg-white/5 border rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer ${
-        expanded ? 'bg-white/10' : ''
-      } ${hasOverride ? 'border-orange-500/50 ring-1 ring-orange-500/30 shadow-lg shadow-orange-500/10' : 'border-white/10'}`}
-      onClick={() => setExpanded(!expanded)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(!expanded); } }}
-    >
+    <div className="mt-2 space-y-2">
+      <div className="text-xs text-white/50">🚷 Manual Open/Close</div>
+      {desks.map(desk => (
+        <div key={desk} className="flex items-center gap-2 p-2 rounded-lg bg-white/5 border border-white/10">
+          <span className="text-xs font-bold w-8">Š{desk}</span>
+          {!overrides[desk] ? (
+            <div className="flex gap-1">
+              <button onClick={() => handleAction(desk, 'open')} className="px-2 py-1 text-[10px] font-bold rounded bg-green-600 hover:bg-green-700 text-white">FORCE OPEN</button>
+              <button onClick={() => handleAction(desk, 'closed')} className="px-2 py-1 text-[10px] font-bold rounded bg-red-600 hover:bg-red-700 text-white">FORCE CLOSE</button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between flex-1">
+              <span className={`text-xs font-bold px-2 py-0.5 rounded ${overrides[desk] === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>{overrides[desk].toUpperCase()}</span>
+              <button onClick={() => handleAction(desk, 'clear')} className="text-[10px] text-white/70 hover:text-white px-2 py-1 rounded bg-white/10">Reset to Auto</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+// ============================================================
+// OVERRIDE BADGE KOMPONENTA
+// ============================================================
+const OverrideBadge = ({ fieldName }: { fieldName: string }) => {
+  const config: Record<string, { label: string; color: string; icon: JSX.Element }> = {
+    CheckInDesk: { label: 'Check-in', color: 'bg-purple-500/20 text-purple-300 border-purple-500/30', icon: <CheckSquare className="w-2.5 h-2.5" /> },
+    GateNumber: { label: 'Gate', color: 'bg-blue-500/20 text-blue-300 border-blue-500/30', icon: <MapPin className="w-2.5 h-2.5" /> },
+    StatusEN: { label: 'Status', color: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30', icon: <AlertCircle className="w-2.5 h-2.5" /> },
+    Terminal: { label: 'Terminal', color: 'bg-green-500/20 text-green-300 border-green-500/30', icon: <Home className="w-2.5 h-2.5" /> },
+    BaggageReclaim: { label: 'Baggage', color: 'bg-orange-500/20 text-orange-300 border-orange-500/30', icon: <MapPin className="w-2.5 h-2.5" /> },
+  };
+  
+  const cfg = config[fieldName];
+  if (!cfg) return null;
+  
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-medium border ${cfg.color}`}>
+      {cfg.icon}
+      {cfg.label}
+    </span>
+  );
+};
+
+// ============================================================
+// FLIGHT CARD (pojednostavljen)
+// ============================================================
+// ============================================================
+// FLIGHT CARD (sa badge-evima za override)
+// ============================================================
+const FlightCard = ({ flight, onOverride, onClearAll }: any) => {
+  const [expanded, setExpanded] = useState(false);
+  const isDeparture = flight.FlightType === 'departure';
+  const hasOverride = flight._hasOverride;
+  const overrideFields = flight._overrideFields || {};
+
+  return (
+    <div className={`bg-white/5 border rounded-xl p-4 cursor-pointer transition ${expanded ? 'bg-white/10' : ''} ${hasOverride ? 'border-orange-500/50 ring-1 ring-orange-500/30' : 'border-white/10'}`} onClick={() => setExpanded(!expanded)}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <div className={`p-2 rounded-lg ${isDeparture ? 'bg-blue-500/20' : 'bg-green-500/20'}`}>
             {isDeparture ? <ArrowUpRight className="w-5 h-5 text-blue-400" /> : <ArrowDownRight className="w-5 h-5 text-green-400" />}
           </div>
           <div>
-            <div className="flex flex-col sm:flex-row gap-2 items-center">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xl font-bold text-white">{flight.FlightNumber}</span>
-                {hasOverride && (
-                  <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" title="Aktivan override" />
-                )}
-                {hasOverride && (
-                  <div className="flex flex-wrap gap-1">
-                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 flex items-center gap-1">
-                      <AlertTriangle className="w-2.5 h-2.5" />
-                      Override Active
-                    </span>
-                    {hasCheckInOverride && (
-                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                        Check-in ✏️
-                      </span>
-                    )}
-                    {hasGateOverride && (
-                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                        Gate ✏️
-                      </span>
-                    )}
-                    {hasStatusOverride && (
-                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">
-                        Status ✏️
-                      </span>
-                    )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`Da li ste sigurni da želite ukloniti SVE override-ove za let ${flight.FlightNumber}?`)) {
-                          onClearOverrides(flight.FlightNumber);
-                        }
-                      }}
-                      className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 transition-colors flex items-center gap-1"
-                      title="Ukloni sve override-ove za ovaj let"
-                    >
-                      <XCircle className="w-2.5 h-2.5" />
-                      Clear all
-                    </button>
-                  </div>
-                )}
-              </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xl font-bold text-white">{flight.FlightNumber}</span>
+              {hasOverride && (
+                <div className="flex flex-wrap gap-1">
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 flex items-center gap-1">
+                    <AlertTriangle className="w-2.5 h-2.5" />
+                    Override Active
+                  </span>
+                  {/* ⭐ OVDJE KORISTIMO OverrideBadge ZA SVAKI OVERRIDE */}
+                  {Object.keys(overrideFields).map(field => (
+                    <OverrideBadge key={field} fieldName={field} />
+                  ))}
+                </div>
+              )}
               <span className="text-sm text-white/60">{flight.AirlineName}</span>
             </div>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-sm text-white/80">
-                {isDeparture ? flight.DestinationCityName || flight.DestinationAirportName : 'Tivat (TIV)'}
-              </span>
-              <span className="text-xs text-white/40">•</span>
-              <span className="text-sm text-white/60">
-                {isDeparture ? flight.DestinationAirportCode : 'TIV'}
-              </span>
-            </div>
+            <div className="text-sm text-white/80">{isDeparture ? flight.DestinationCityName : 'Tivat (TIV)'}</div>
           </div>
         </div>
         <div className="flex items-center gap-6">
           <div className="text-right">
-            <div className="text-lg font-semibold text-white">{formatTime(flight.ScheduledDepartureTime || '--:--')}</div>
-            <div className="text-sm text-white/60">
-              {flight.EstimatedDepartureTime ? <>Est: {formatTime(flight.EstimatedDepartureTime)}</> : 'Scheduled'}
-            </div>
+            <div className="text-lg font-semibold text-white">{formatTime(flight.ScheduledDepartureTime)}</div>
+            {flight.EstimatedDepartureTime && <div className="text-sm text-yellow-400">Est: {formatTime(flight.EstimatedDepartureTime)}</div>}
           </div>
-          <div className="flex flex-col sm:flex-row gap-2">{StatusIcon}<span className={`text-sm font-medium ${statusColor}`}>{flight.StatusEN || 'Unknown'}</span></div>
-          <div className={`transition-transform ${expanded ? 'rotate-180' : ''}`}><ChevronDown className="w-5 h-5 text-white/40" /></div>
+          <div className="flex items-center gap-2">{getStatusIcon(flight.StatusEN)}<span className={`text-sm font-medium ${getStatusColor(flight.StatusEN)}`}>{flight.StatusEN || 'Unknown'}</span></div>
+          <ChevronDown className={`w-5 h-5 text-white/40 transition-transform ${expanded ? 'rotate-180' : ''}`} />
         </div>
       </div>
 
       {expanded && (
-        <div className="mt-4 pt-4 border-t border-white/10" onClick={(e) => e.stopPropagation()}>
+        <div className="mt-4 pt-4 border-t border-white/10" onClick={e => e.stopPropagation()}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-3">
-              <div className="flex gap-4">
-                <div><div className="text-xs text-white/50 mb-1">Terminal</div><div className="text-sm text-white">{flight.Terminal || '--'}</div></div>
-                <div><div className="text-xs text-white/50 mb-1">Aktuelno vrijeme</div><div className="text-sm text-white">{formatTime(flight.ActualDepartureTime || '--:--')}</div></div>
-              </div>
-              {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-                <div><div className="text-xs text-white/50 mb-1">Code-share</div><div className="flex flex-wrap gap-2">{flight.CodeShareFlights.map((c, i) => <span key={i} className="px-2 py-1 bg-white/10 rounded text-xs text-white/80">{c}</span>)}</div></div>
-              )}
-              {flight.StatusMN && <div><div className="text-xs text-white/50 mb-1">Status (CN)</div><div className="text-sm text-white">{flight.StatusMN}</div></div>}
-              <div className="flex gap-4">
-                <div><div className="text-xs text-white/50 mb-1">Airline Code</div><div className="text-sm text-white">{flight.AirlineCode || '--'}</div></div>
-                <div><div className="text-xs text-white/50 mb-1">ICAO</div><div className="text-sm text-white">{flight.AirlineICAO || '--'}</div></div>
-              </div>
-              {!isDeparture && flight.BaggageReclaim && (
-                 <div><div className="text-xs text-white/50 mb-1">Baggage Belt</div><div className="text-sm text-white">{flight.BaggageReclaim}</div></div>
-              )}
+              <div className="text-sm"><span className="text-white/50">Terminal:</span> {flight.Terminal || '--'}</div>
+              <div className="text-sm"><span className="text-white/50">Gate:</span> {flight.GateNumber || '--'}</div>
+              {flight.CodeShareFlights?.length > 0 && <div className="text-sm"><span className="text-white/50">Code-share:</span> {flight.CodeShareFlights.join(', ')}</div>}
             </div>
 
-            {isDeparture ? (
-              <div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
-                <h3 className="text-sm font-bold text-white/80 uppercase tracking-wider border-b border-white/10 pb-2">
-                  ⚙️ Upravljanje polaskom
-                </h3>
-                
-                <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
-
-{isDeparture && (
-  <div className="space-y-2">
-    <div className="flex items-center justify-between">
-      <div className="text-xs text-white/50">🚮 Brisanje check-in countera</div>
-      <button
-        onClick={async (e) => {
-          e.stopPropagation();
-          if (confirm(`Da li ste sigurni da želite OBRISATI SVE check-in countere za let ${flight.FlightNumber}? Ova akcija će ukloniti sve override-ove i vratiti na API podatke.`)) {
-            try {
-              // Prvo dohvatimo sve override-ove za ovaj let
-              const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
-              const allOverrides = await overridesRes.json();
-              const flightOverrides = allOverrides[flight.FlightNumber] || {};
-              
-              // Ako postoji override za CheckInDesk, obrišemo ga
-              if (flightOverrides['CheckInDesk']) {
-                await fetch('/api/admin/flight-override', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ 
-                    flightNumber: flight.FlightNumber, 
-                    field: 'CheckInDesk', 
-                    action: 'clear' 
-                  }),
-                });
-              }
-              
-              // Također resetujemo status svih deskova za ovaj let
-              const deskNumbers = flight.CheckInDesk;
-              if (deskNumbers) {
-                const desks = deskNumbers.split(',').map(d => d.trim());
-                for (const desk of desks) {
-                  await fetch('/api/admin/desk-status-override', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ deskNumber: desk, action: 'clear', flightNumber: flight.FlightNumber }),
-                  }).catch(() => {});
-                  
-                  await fetch('/api/admin/desk-class-override', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
-                  }).catch(() => {});
-                }
-              }
-              
-              await onFlightOverride(flight.FlightNumber, 'CheckInDesk', 'clear');
-              alert(`Svi check-in counteri za let ${flight.FlightNumber} su obrisani!`);
-            } catch (error) {
-              console.error('Error clearing check-in desks:', error);
-              alert('Greška pri brisanju check-in countera');
-            }
-          }
-        }}
-        className="flex items-center gap-1 px-3 py-1.5 bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-lg border border-red-500/40 transition-colors text-sm"
-        type="button"
-        title="Obriši sve check-in countere za ovaj let (bez vremenskog ograničenja)"
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-        Obriši sve check-in countere
-      </button>
-    </div>
-    <div className="text-[10px] text-yellow-400/60 bg-yellow-500/10 p-2 rounded-lg">
-      ⚠️ Ova akcija briše SVE override-ove za check-in countere, bez obzira na vrijeme do polijetanja. 
-      Sistem će se vratiti na originalne API podatke.
-    </div>
-  </div>
-)}
-
-                <OverrideControl
-                  label="Terminal"
-                  currentValue={flight.Terminal}
-                  fieldName="Terminal"
-                  flightNumber={flight.FlightNumber}
-                  onFlightOverride={onFlightOverride}
-                />
-
-                <OverrideControl
-                  label="Check-In Desk"
-                  currentValue={flight.CheckInDesk}
-                  fieldName="CheckInDesk"
-                  flightNumber={flight.FlightNumber}
-                  onFlightOverride={onFlightOverride}
-                />
-
-                <OverrideControl
-                  label="Gate (Izlaz)"
-                  currentValue={flight.GateNumber}
-                  fieldName="GateNumber"
-                  flightNumber={flight.FlightNumber}
-                  onFlightOverride={onFlightOverride}
-                />
-                <GateManualControl gateNumber={flight.GateNumber} />
-                <DeskClassControl deskNumbers={flight.CheckInDesk} />
+            {isDeparture && (
+              <div className="space-y-4 bg-white/5 rounded-xl p-4">
+                <StatusControl currentStatus={flight.StatusEN} flightNumber={flight.FlightNumber} onOverride={onOverride} />
+                <OverrideControl label="Check-In Desk" currentValue={flight.CheckInDesk} fieldName="CheckInDesk" flightNumber={flight.FlightNumber} onOverride={onOverride} />
+                <OverrideControl label="Gate" currentValue={flight.GateNumber} fieldName="GateNumber" flightNumber={flight.FlightNumber} onOverride={onOverride} />
                 <DeskManualControl deskNumbers={flight.CheckInDesk} flightNumber={flight.FlightNumber} />
-              </div>
-            ) : (
-              <div className="bg-white/5 rounded-xl p-4 md:p-5 border border-white/10 space-y-4 md:space-y-6 w-full md:-ml-4">
-                <h3 className="text-sm font-bold text-white/80 uppercase tracking-wider border-b border-white/10 pb-2">
-                  ⚙️ Upravljanje dolaskom
-                </h3>
-                
-                <StatusControl currentStatus={flight.StatusEN || ''} flightNumber={flight.FlightNumber} onFlightOverride={onFlightOverride} />
-
-                <OverrideControl
-                  label="Terminal"
-                  currentValue={flight.Terminal}
-                  fieldName="Terminal"
-                  flightNumber={flight.FlightNumber}
-                  onFlightOverride={onFlightOverride}
-                />
-
-                <OverrideControl
-                  label="Baggage Belt (Traka za prtljag)"
-                  currentValue={flight.BaggageReclaim}
-                  fieldName="BaggageReclaim"
-                  flightNumber={flight.FlightNumber}
-                  onFlightOverride={onFlightOverride}
-                />
+                {hasOverride && (
+                  <button onClick={() => onClearAll(flight.FlightNumber)} className="w-full mt-2 px-3 py-2 text-sm bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-lg transition">
+                    <Trash2 className="w-4 h-4 inline mr-2" /> Ukloni sve override-ove
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -961,481 +319,245 @@ const FlightCard: React.FC<FlightCardProps> = ({
 // ============================================================
 export default function AdminFlightsPage() {
   const router = useRouter();
+  
+  // State
+  const [flights, setFlights] = useState<{ departures: Flight[]; arrivals: Flight[] }>({ departures: [], arrivals: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [flights, setFlights] = useState<FlightsData>({ departures: [], arrivals: [] });
-  const [lastUpdated, setLastUpdated] = useState<string>('');
-  const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');
-  const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'departures' | 'arrivals'>('all');
   const [searchTerm, setSearchTerm] = useState('');
-  const [airlineFilter, setAirlineFilter] = useState<string>('all');
-
-  // Funkcija za dohvatanje svih override-ova
-  const loadOverrides = useCallback(async (): Promise<Record<string, any>> => {
-    try {
-      const response = await fetch('/api/admin/flight-override?action=getAllOverrides');
-      const data = await response.json();
-      console.log('Aktivni override-ovi:', data);
-      return data;
-    } catch (error) {
-      console.error('Error loading overrides:', error);
-      return {};
-    }
-  }, []);
+  const [airlineFilter, setAirlineFilter] = useState('all');
+  const [error, setError] = useState<string | null>(null);
   
-  const mapOverrideValue = (val: string) => val === '__EMPTY__' ? '' : val;
+  // Sigurnost
+  const [safetyMode, setSafetyMode] = useState(true);
+  const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; title: string; message: string; action: () => void }>({ open: false, title: '', message: '', action: () => {} });
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
+  const [countdown, setCountdown] = useState(AUTO_REFRESH_INTERVAL / 1000);
+  const lastClickRef = useRef(0);
 
-  const loadFlights = useCallback(async (silent = false) => {
+  // Utility
+  const showToast = (message: string, type: 'success' | 'error' | 'warning') => setToast({ message, type });
+  const confirmAction = (title: string, message: string, action: () => void) => {
+    if (safetyMode) setConfirmDialog({ open: true, title, message, action });
+    else action();
+  };
+  const withDebounce = (cb: () => void) => {
+    if (Date.now() - lastClickRef.current > CONFIRM_THRESHOLD_MS) { lastClickRef.current = Date.now(); cb(); }
+    else showToast('Prebrzi klikovi! Sačekajte.', 'warning');
+  };
+
+  // Load overrides
+  const loadOverrides = useCallback(async () => {
     try {
-      if (!silent) setLoading(true);
-      setRefreshing(true);
-      setError(null);
-      
-      // Učitaj letove i override-ove paralelno
-      const [flightsResponse, overridesData] = await Promise.all([
-        fetch(`/api/flights?nocache=${Date.now()}`, {
-          cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' }
-        }),
+      const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
+      return await res.json();
+    } catch { return {}; }
+  }, []);
+
+  // Load flights
+  const loadFlights = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    setRefreshing(true);
+    setError(null);
+    try {
+      const [flightsRes, overrides] = await Promise.all([
+        fetch(`/api/flights?nocache=${Date.now()}`, { cache: 'no-store' }),
         loadOverrides()
       ]);
+      if (!flightsRes.ok) throw new Error('Failed to fetch');
+      const data = await flightsRes.json();
       
-      if (!flightsResponse.ok) throw new Error(`HTTP ${flightsResponse.status}: Greška pri učitavanju letova`);
-      const data = await flightsResponse.json();
-
-      const removeDuplicatesAndConsolidate = (flightArray: Flight[]): Flight[] => {
-        const consolidated = consolidateFlights(flightArray);
-        const seen: Record<string, boolean> = {};
-        return consolidated.filter((flight) => {
-          const uniqueId = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.GateNumber || 'nogate'}-${flight.CheckInDesk || 'nodesk'}`;
-          if (seen[uniqueId]) return false;
-          seen[uniqueId] = true;
-          return true;
-        });
-      };
-
-      // Dodaj flag za override u svaki let
-      const departuresWithOverride = (data.departures || []).map((flight: Flight) => {
-        const flightOverrides = overridesData[flight.FlightNumber] || {};
-        const mappedOverrides: Record<string, string> = {};
-        Object.entries(flightOverrides).forEach(([k, v]) => {
-          mappedOverrides[k] = mapOverrideValue(v as string);
-        });
-        return {
-          ...flight,
-          _hasOverride: Object.keys(mappedOverrides).length > 0,
-          _overrideFields: mappedOverrides,
-        };
-      });
-
-      const arrivalsWithOverride = (data.arrivals || []).map((flight: Flight) => {
-        const flightOverrides = overridesData[flight.FlightNumber] || {};
-        const mappedOverrides: Record<string, string> = {};
-        Object.entries(flightOverrides).forEach(([k, v]) => {
-          mappedOverrides[k] = mapOverrideValue(v as string);
-        });
-        return {
-          ...flight,
-          _hasOverride: Object.keys(mappedOverrides).length > 0,
-          _overrideFields: mappedOverrides,
-        };
-      });
-
-      // 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
-// 🔄 AUTO-RESET: Provjeri i resetuj departed letove (bez rekurzije)
-const departedFlights = [...departuresWithOverride, ...arrivalsWithOverride].filter(flight => {
-  const status = (flight.StatusEN || '').toLowerCase();
-  return (status.includes('departed') || status.includes('poletio')) && (flight as any)._hasOverride;
-});
-
-// Izvrši resetovanje asinhrono, ne blokiraj prikaz
-if (departedFlights.length > 0) {
-  console.log(`🔄 Pronađeno ${departedFlights.length} departed letova sa override-om, resetujem...`);
-  
-  for (const flight of departedFlights) {
-    const overrideFields = (flight as any)._overrideFields || {};
-    const deskNumber = overrideFields.CheckInDesk || flight.CheckInDesk;
-    const gateNumber = overrideFields.GateNumber || flight.GateNumber;
-    
-    // Pozovi API za resetovanje svih override-ova za ovaj let
-    fetch('/api/admin/auto-reset-departed', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        flightNumber: flight.FlightNumber,
-        deskNumber: deskNumber?.split(',')[0],
-        gateNumber: gateNumber?.split(',')[0]  // Dodato: šaljemo i gate
-      }),
-    }).catch(err => console.error(`Failed to reset ${flight.FlightNumber}:`, err));
-    
-    // Također direktno resetuj gate status preko API-ja
-    if (gateNumber) {
-      const gates = gateNumber.split(',').map((g: string) => g.trim());
-      for (const gate of gates) {
-        fetch('/api/admin/gate-status-override', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ gateNumber: gate, action: 'clear' }),
-        }).catch(err => console.error(`Failed to reset gate ${gate}:`, err));
-      }
-    }
-  }
-  
-  // Ukloni override flag iz prikaza za ove letove (ne čekamo Redis)
-  const removeOverrideFromDeparted = (flight: any) => {
-    const status = (flight.StatusEN || '').toLowerCase();
-    const isDeparted = status.includes('departed') || status.includes('poletio');
-    if (isDeparted && flight._hasOverride) {
-      return { ...flight, _hasOverride: false, _overrideFields: {} };
-    }
-    return flight;
-  };
-  
-  // Postavi state sa očišćenim departed letovima
-  setFlights({
-    departures: removeDuplicatesAndConsolidate(departuresWithOverride.map(removeOverrideFromDeparted)),
-    arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride.map(removeOverrideFromDeparted))
-  });
-} else {
-  // Nema departed letova, normalno postavi state
-  setFlights({
-    departures: removeDuplicatesAndConsolidate(departuresWithOverride),
-    arrivals: removeDuplicatesAndConsolidate(arrivalsWithOverride)
-  });
-}
+      const mapOverrides = (list: Flight[]) => list.map(f => ({
+        ...f,
+        _hasOverride: !!overrides[f.FlightNumber] && Object.keys(overrides[f.FlightNumber] || {}).length > 0,
+        _overrideFields: overrides[f.FlightNumber] || {}
+      }));
       
+      setFlights({ departures: mapOverrides(data.departures || []), arrivals: mapOverrides(data.arrivals || []) });
       setLastUpdated(data.lastUpdated || new Date().toISOString());
-      setSystemStatus(data.isOfflineMode ? 'offline' : 'online');
-      
-    } catch (error) {
-      console.error('Error loading flights:', error);
-      setError(error instanceof Error ? error.message : 'Greška pri učitavanju letova');
-      setFlights({ departures: [], arrivals: [] });
-      setSystemStatus('offline');
-      setLastUpdated(new Date().toISOString());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Greška');
+      showToast('Greška pri učitavanju podataka!', 'error');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, [loadOverrides]);
 
-  // Dodaj u komponentu AdminFlightsPage
-useEffect(() => {
-  // Pokreni auto-reset svakih 5 minuta
-  const interval = setInterval(async () => {
-    try {
-      const response = await fetch('/api/admin/flight-override?action=triggerReset');
-      const result = await response.json();
-      if (result.resetCount > 0) {
-        console.log(`Auto-reset: ${result.resetCount} override-ova resetovano`);
-        loadFlights(true);
+  // Override handler
+  const handleOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
+    withDebounce(async () => {
+      try {
+        const res = await fetch('/api/admin/flight-override', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightNumber, field, action, value })
+        });
+        if (!res.ok) throw new Error((await res.json()).message);
+        await loadFlights(true);
+        showToast(`Uspješno: ${field} → ${value || 'uklonjeno'}`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Greška', 'error');
       }
-    } catch (err) {
-      console.error('Auto-reset error:', err);
-    }
-  }, 5 * 60 * 1000);
-  
-  return () => clearInterval(interval);
-}, [loadFlights]);
+    });
+  }, [loadFlights]);
 
-  // Funkcija za brisanje svih override-ova za jedan let
+  // Clear all overrides for a flight
   const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
-    if (!confirm(`Da li ste sigurni da želite ukloniti SVE override-ove za let ${flightNumber}?`)) {
-      return;
-    }
-    
-    try {
-      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
-      const allOverrides = await overridesRes.json();
-      const flightOverrides = allOverrides[flightNumber] || {};
-      
-      const clearPromises = Object.keys(flightOverrides).map(field =>
-        fetch('/api/admin/flight-override', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            flightNumber, 
-            field, 
-            action: 'clear' 
-          }),
-        })
-      );
-      
-      await Promise.all(clearPromises);
-      await loadFlights(true);
-      alert(`Svi override-ovi za let ${flightNumber} su uklonjeni`);
-    } catch (error) {
-      console.error('Error clearing overrides:', error);
-      alert('Greška pri uklanjanju override-ova');
-    }
-  }, [loadFlights]);
+    confirmAction('Uklanjanje override-a', `Ukloniti sve override-ove za let ${flightNumber}?`, async () => {
+      try {
+        const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
+        const overrides = await res.json();
+        const fields = Object.keys(overrides[flightNumber] || {});
+        await Promise.all(fields.map(field => 
+          fetch('/api/admin/flight-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flightNumber, field, action: 'clear' }) })
+        ));
+        await loadFlights(true);
+        showToast(`Svi override-ovi za let ${flightNumber} su uklonjeni`, 'success');
+      } catch { showToast('Greška pri uklanjanju', 'error'); }
+    });
+  }, [loadFlights, safetyMode]);
 
+  // Clear all flights overrides
   const handleClearAllFlightsOverrides = useCallback(async () => {
-    if (!confirm('Da li ste sigurni da želite ukloniti SVE override-ove za SVE letove?')) return;
-    
-    try {
-      const overridesRes = await fetch('/api/admin/flight-override?action=getAllOverrides');
-      const allOverrides = await overridesRes.json();
-      
-      const clearPromises = Object.entries(allOverrides).flatMap(([flightNumber, fields]) =>
-        Object.keys(fields as Record<string, string>).map(field =>
-          fetch('/api/admin/flight-override', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ flightNumber, field, action: 'clear' }),
-          })
-        )
-      );
-      
-      await Promise.all(clearPromises);
-      await loadFlights(true);
-      alert('Svi override-ovi su uspješno obrisani!');
-    } catch (error) {
-      console.error('Error clearing all overrides:', error);
-      alert('Greška pri brisanju svih override-ova');
-    }
-  }, [loadFlights]);
+    confirmAction('Brisanje SVIH override-a', 'Ovo će ukloniti sve override-ove za sve letove! Ova akcija se ne može poništiti.', async () => {
+      try {
+        const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
+        const overrides = await res.json();
+        const promises = Object.entries(overrides).flatMap(([fn, fields]) =>
+          Object.keys(fields as object).map(field =>
+            fetch('/api/admin/flight-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flightNumber: fn, field, action: 'clear' }) })
+          )
+        );
+        await Promise.all(promises);
+        await loadFlights(true);
+        showToast('Svi override-ovi su obrisani!', 'success');
+      } catch { showToast('Greška pri brisanju', 'error'); }
+    });
+  }, [loadFlights, safetyMode]);
 
-  const handleFlightOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
-    try {
-      const response = await fetch('/api/admin/flight-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ flightNumber, field, action, value }),
-      });
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Greška pri ažuriranju');
-      }
-      await loadFlights(true);
-    } catch (error) {
-      console.error('Override error:', error);
-      alert(error instanceof Error ? error.message : 'Došlo je do greške.');
-      throw error;
-    }
-  }, [loadFlights]);
+  // Auto-refresh timers
+  useEffect(() => {
+    const interval = setInterval(() => { if (!refreshing) loadFlights(true); }, AUTO_REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, [loadFlights, refreshing]);
 
-  useEffect(() => { 
-    loadFlights(); 
-  }, [loadFlights]);
-  
-  const handleRefresh = useCallback(() => { 
-    loadFlights(true);
-  }, [loadFlights]);
-
-  const handleLogout = useCallback(async () => {
-    try { await fetch('/api/admin/logout', { method: 'POST' }); } catch (error) { console.error('Logout error:', error); }
-    finally { router.push('/admin/login'); }
-  }, [router]);
-
-  const getFilteredFlights = useMemo(() => {
-    let filtered: Flight[] = activeTab === 'all' ? [...flights.departures, ...flights.arrivals] : activeTab === 'departures' ? flights.departures : flights.arrivals;
-    
-    if (searchTerm) {
-      const term = searchTerm.toLowerCase();
-      filtered = filtered.filter((f) => f.FlightNumber?.toLowerCase().includes(term) || f.AirlineName?.toLowerCase().includes(term) || f.DestinationCityName?.toLowerCase().includes(term) || f.DestinationAirportCode?.toLowerCase().includes(term));
-    }
-    if (airlineFilter !== 'all') filtered = filtered.filter((f) => f.AirlineName?.toLowerCase() === airlineFilter.toLowerCase());
-    
-    return filtered.sort((a, b) => (a.ScheduledDepartureTime || '00:00').localeCompare(b.ScheduledDepartureTime || '00:00'));
-  }, [activeTab, flights, searchTerm, airlineFilter]);
-
-  const uniqueAirlines = useMemo(() => {
-    const allFlights = [...flights.departures, ...flights.arrivals];
-    const seenAirlines: Record<string, boolean> = {};
-    return allFlights.map((f) => f.AirlineName).filter((name): name is string => { if (!name || seenAirlines[name]) return false; seenAirlines[name] = true; return true; }).sort((a, b) => a.localeCompare(b));
-  }, [flights]);
-
-  const formatDate = useCallback((dateString: string) => {
-    try { const date = new Date(dateString); if (Number.isNaN(date.getTime())) return 'Nepoznato'; return date.toLocaleString('sr-Latn-RS', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return 'Nepoznato'; }
+  useEffect(() => {
+    const interval = setInterval(() => setCountdown(prev => prev <= 1 ? AUTO_REFRESH_INTERVAL / 1000 : prev - 1), 1000);
+    return () => clearInterval(interval);
   }, []);
 
-  const getTimeSinceUpdate = useCallback(() => {
+  useEffect(() => { loadFlights(); }, [loadFlights]);
+
+  // Helpers for display
+  const allFlights = useMemo(() => activeTab === 'all' ? [...flights.departures, ...flights.arrivals] : activeTab === 'departures' ? flights.departures : flights.arrivals, [flights, activeTab]);
+  const filteredFlights = useMemo(() => {
+    let result = allFlights;
+    if (searchTerm) {
+      const term = searchTerm.toLowerCase();
+      result = result.filter(f => f.FlightNumber?.toLowerCase().includes(term) || f.AirlineName?.toLowerCase().includes(term) || f.DestinationCityName?.toLowerCase().includes(term));
+    }
+    if (airlineFilter !== 'all') result = result.filter(f => f.AirlineName === airlineFilter);
+    return result.sort((a, b) => (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || ''));
+  }, [allFlights, searchTerm, airlineFilter]);
+
+  const uniqueAirlines = useMemo(() => [...new Set(allFlights.map(f => f.AirlineName).filter(Boolean))].sort(), [allFlights]);
+  const overrideCount = useMemo(() => allFlights.filter(f => (f as any)._hasOverride).length, [allFlights]);
+  const getTimeSinceUpdate = () => {
     if (!lastUpdated) return 'Nepoznato';
-    try {
-      const diffMs = Date.now() - new Date(lastUpdated).getTime();
-      const diffMins = Math.floor(diffMs / 60000);
-      if (diffMins < 1) return 'upravo sada';
-      if (diffMins === 1) return 'pre 1 minut';
-      if (diffMins < 60) return `pre ${diffMins} minuta`;
-      const diffHours = Math.floor(diffMins / 60);
-      if (diffHours === 1) return 'pre 1 sat';
-      if (diffHours < 24) return `pre ${diffHours} sati`;
-      const diffDays = Math.floor(diffHours / 24);
-      return diffDays === 1 ? 'pre 1 dan' : `pre ${diffDays} dana`;
-    } catch { return 'Nepoznato'; }
-  }, [lastUpdated]);
-
-  const today = useMemo(() => new Date().toLocaleDateString('sr-Latn-RS', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), []);
-
-  // Broj letova sa override-om
-  const overrideCount = useMemo(() => {
-    return [...flights.departures, ...flights.arrivals].filter(f => (f as any)._hasOverride).length;
-  }, [flights]);
+    const mins = Math.floor((Date.now() - new Date(lastUpdated).getTime()) / 60000);
+    if (mins < 1) return 'upravo sada';
+    if (mins < 60) return `pre ${mins} min`;
+    return `pre ${Math.floor(mins / 60)}h`;
+  };
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
-      <div className="max-w-7xl mx-auto">
-        <header className="mb-8">
-          <div className="flex flex-col md:flex-row md:justify-between md:items-start gap-4">
+    <>
+      <style jsx global>{`
+        html, body, #__next {
+          overflow-y: auto !important;
+          height: auto !important;
+          min-height: 100vh !important;
+        }
+      `}</style>
+      
+      <div className="w-full min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
+        {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+        <ConfirmDialog open={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} onConfirm={() => { confirmDialog.action(); setConfirmDialog({ ...confirmDialog, open: false }); }} onCancel={() => setConfirmDialog({ ...confirmDialog, open: false })} />
+
+        <div className="max-w-7xl mx-auto">
+          {/* Header */}
+          <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
             <div>
-              <div className="flex items-center gap-4 mb-2">
-                <Link href="/admin" className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Nazad na dashboard"><Home className="w-5 h-5" /></Link>
-                <h1 className="text-3xl font-bold text-white flex items-center gap-3">
-                  Red letenja
-                  <span className="bg-red-500 text-white text-sm px-3 py-1 rounded-full">
-                    by Alen
-                  </span>
-                </h1>
-                <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${systemStatus === 'online' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}`}>
-                  <div className={`w-2 h-2 rounded-full ${systemStatus === 'online' ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                  {systemStatus === 'online' ? 'LIVE' : 'BACKUP'}
+              <div className="flex items-center gap-3 mb-2 flex-wrap">
+                <Link href="/admin" className="p-2 hover:bg-white/10 rounded-lg transition"><Home className="w-5 h-5 text-slate-400" /></Link>
+                <h1 className="text-2xl font-bold text-white">Red letenja</h1>
+                <div className={`px-2 py-1 rounded-full text-xs ${overrideCount > 0 ? 'bg-orange-500/20 text-orange-400' : 'bg-green-500/20 text-green-400'}`}>
+                  {overrideCount > 0 ? `${overrideCount} override-a` : 'Sinhronizovano'}
                 </div>
-              </div>
-              <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:gap-4 text-sm text-slate-300">
-                <div className="flex flex-col sm:flex-row gap-2"><Calendar className="w-4 h-4" /><span>{today}</span></div>
-                <div className="flex flex-col sm:flex-row gap-2"><Clock className="w-4 h-4" /><span>Poslednje ažuriranje: {getTimeSinceUpdate()}</span></div>
-                <div className="flex flex-col sm:flex-row gap-2"><Plane className="w-4 h-4" /><span>{flights.departures.length} polazaka • {flights.arrivals.length} dolazaka</span></div>
-              </div>
-            </div>
-            <div className="flex flex-col gap-3 w-full md:w-auto">
-              <div className="flex flex-wrap gap-2 justify-end">
-                <button onClick={handleRefresh} disabled={refreshing} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50" title="Osvježi podatke" type="button">
-                  <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-                </button>
-                <Link
-  href="/admin/assign-checkin"
-  className="flex items-center gap-2 px-3 py-2 md:px-4 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 rounded-lg border border-purple-500/30 transition-colors"
->
-  <CheckSquare className="w-4 h-4" />
-  <span className="hidden sm:inline">TIV CheckIn & Gate Assignment Panel - RUČNO</span>
-  <span className="sm:hidden">Assign</span>
-</Link>
-                <button
-                  onClick={handleClearAllFlightsOverrides}
-                  className="flex items-center gap-2 px-3 py-2 md:px-4 bg-orange-600/20 hover:bg-orange-600/30 text-orange-300 rounded-lg border border-orange-500/30 transition-colors"
-                  type="button"
-                  title="Obriši sve override-ove za sve letove"
-                >
-                  <XCircle className="w-4 h-4" />
-                  <span className="hidden sm:inline">Clear all overrides</span>
-                </button>
-                <button onClick={handleLogout} className="flex items-center gap-2 px-3 py-2 md:px-4 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg border border-red-500/30 transition-colors" type="button">
-                  <LogOut className="w-4 h-4" />
-                  <span className="hidden sm:inline">Odjavi se</span>
+                <button onClick={() => setSafetyMode(!safetyMode)} className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition ${safetyMode ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                  {safetyMode ? <Shield className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                  {safetyMode ? 'Safety ON' : 'Safety OFF'}
                 </button>
               </div>
-              {error && <div className="text-right"><div className="text-sm text-red-400">⚠️ {error}</div></div>}
-            </div>
-          </div>
-        </header>
-
-        {/* Override summary banner */}
-        {overrideCount > 0 && (
-          <div className="mb-4 bg-orange-500/10 border border-orange-500/30 rounded-xl p-3 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-orange-300">
-              <AlertTriangle className="w-4 h-4" />
-              <span className="text-sm font-medium">{overrideCount} let(ova) ima aktivne override-ove</span>
-            </div>
-            <button
-              onClick={handleClearAllFlightsOverrides}
-              className="text-xs px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg transition-colors flex items-center gap-1"
-              type="button"
-            >
-              <Trash2 className="w-3 h-3" />
-              Clear all overrides
-            </button>
-          </div>
-        )}
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          {[ 
-            { label: 'Ukupno letova', count: flights.departures.length + flights.arrivals.length, color: 'blue', icon: Plane },
-            { label: 'Polasci', count: flights.departures.length, color: 'blue', icon: ArrowUpRight },
-            { label: 'Dolasci', count: flights.arrivals.length, color: 'green', icon: ArrowDownRight },
-            { label: 'Aktivni letovi', count: getFilteredFlights.length, color: 'yellow', icon: Clock }
-          ].map((card) => {
-            const styles = cardStylesMap[card.color] || cardStylesMap.blue;
-            const IconComponent = card.icon;
-            return (
-              <div key={card.label} className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10">
-                <div className="flex items-center justify-between">
-                  <div><div className="text-sm text-white/60">{card.label}</div><div className="text-2xl font-bold text-white mt-1">{loading ? '...' : card.count}</div></div>
-                  <div className={`p-2 ${styles.bg} rounded-lg`}><IconComponent className={`w-6 h-6 ${styles.text}`} /></div>
-                </div>
+              <div className="flex flex-wrap gap-4 text-xs text-slate-400">
+                <span>📅 {new Date().toLocaleDateString('sr-Latn-RS')}</span>
+                <span>🕐 Zadnji update: {getTimeSinceUpdate()}</span>
+                <span>🔄 Auto-refresh za {countdown}s</span>
+                <span>✈️ {flights.departures.length} polazaka • {flights.arrivals.length} dolazaka</span>
               </div>
-            );
-          })}
-        </div>
-
-        {/* Filteri */}
-        <div className="bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10 mb-8">
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="flex border-b border-white/10 md:border-none">
-              {(['all', 'departures', 'arrivals'] as const).map((tab) => (
-                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 ${tab === 'all' ? 'rounded-t-lg md:rounded-l-lg md:rounded-r-none' : tab === 'arrivals' ? 'rounded-b-lg md:rounded-r-lg' : 'rounded-lg'} transition-colors ${activeTab === tab ? 'bg-blue-600 text-white' : 'text-white/70 hover:text-white hover:bg-white/10'}`} type="button">
-                  {tab === 'all' ? `Svi (${flights.departures.length + flights.arrivals.length})` : tab === 'departures' ? `Polasci (${flights.departures.length})` : `Dolasci (${flights.arrivals.length})`}
-                </button>
-              ))}
             </div>
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
-              <input type="text" placeholder="Pretraži letove..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            </div>
-            <div className="relative">
-              <select value={airlineFilter} onChange={(e) => setAirlineFilter(e.target.value)} className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none pr-10">
-                <option value="all">Sve avio kompanije</option>
-                {uniqueAirlines.map((airline) => <option key={airline} value={airline}>{airline}</option>)}
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40 pointer-events-none" />
+            <div className="flex gap-2">
+              <button onClick={() => loadFlights(true)} disabled={refreshing} className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition disabled:opacity-50"><RefreshCw className={`w-5 h-5 text-white/60 ${refreshing ? 'animate-spin' : ''}`} /></button>
+              <Link href="/admin/assign-checkin" className="flex items-center gap-1 px-3 py-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 rounded-lg text-sm transition"><CheckSquare className="w-4 h-4" />Assign</Link>
+              {overrideCount > 0 && <button onClick={handleClearAllFlightsOverrides} className="flex items-center gap-1 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg text-sm transition"><Trash2 className="w-4 h-4" />Clear all</button>}
+              <button onClick={async () => { await fetch('/api/admin/logout', { method: 'POST' }); router.push('/admin/login'); }} className="px-3 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg text-sm transition">Odjava</button>
             </div>
           </div>
-        </div>
 
-        {/* Lista letova */}
-        <div className="space-y-4">
-          {loading ? (
-            <div className="space-y-4">{[...Array(5)].map((_, i) => (<div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse"><div className="flex items-center justify-between"><div className="flex items-center gap-4"><div className="w-10 h-10 bg-white/10 rounded-lg" /><div><div className="h-6 w-32 bg-white/10 rounded mb-2" /><div className="h-4 w-48 bg-white/10 rounded" /></div></div><div className="flex items-center gap-6"><div className="text-right"><div className="h-6 w-16 bg-white/10 rounded mb-1" /><div className="h-4 w-24 bg-white/10 rounded" /></div><div className="h-4 w-24 bg-white/10 rounded" /></div></div></div>))}</div>
-          ) : getFilteredFlights.length === 0 ? (
-            <div className="text-center py-12 bg-white/5 backdrop-blur-sm rounded-xl border border-white/10">
-              <Plane className="w-16 h-16 text-white/20 mx-auto mb-4" />
-              <div className="text-xl text-white/70 mb-2">Nema letova</div>
-              <div className="text-white/50">{searchTerm || airlineFilter !== 'all' ? 'Nema letova za odabrane filtere' : 'Nema današnjih letova'}</div>
-            </div>
-          ) : (
-            getFilteredFlights.map((flight, index) => (
-              <FlightCard 
-                key={generateFlightKey(flight, index)} 
-                flight={flight as any} 
-                flightKey={generateFlightKey(flight, index)} 
-                onFlightOverride={handleFlightOverride}
-                onClearOverrides={handleClearAllOverrides}
-              />
-            ))
-          )}
-        </div>
+          {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm">⚠️ {error}</div>}
 
-        <div className="mt-8 pt-6 border-t border-white/10">
-          <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <div className="text-sm text-white/50">{lastUpdated && `Sistem ažuriran: ${formatDate(lastUpdated)}`}</div>
-            <div className="flex items-center gap-4">
-              {systemStatus === 'offline' && <div className="px-3 py-1 bg-yellow-900/20 text-yellow-400 rounded-full text-sm">⚠️ Backup mode</div>}
-              <div className="text-sm text-white/50">Prikazano: {getFilteredFlights.length} od {flights.departures.length + flights.arrivals.length}</div>
-              <button onClick={handleRefresh} disabled={refreshing} className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors disabled:opacity-50" type="button">
-                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />{refreshing ? 'Osvježava se...' : 'Osvježi'}
-              </button>
+          {/* Filteri */}
+          <div className="bg-white/5 rounded-xl p-4 mb-6">
+            <div className="flex flex-wrap gap-4">
+              <div className="flex gap-1">
+                {(['all', 'departures', 'arrivals'] as const).map(tab => (
+                  <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 rounded-lg text-sm font-medium transition ${activeTab === tab ? 'bg-blue-600 text-white' : 'text-white/70 hover:bg-white/10'}`}>
+                    {tab === 'all' ? 'Svi' : tab === 'departures' ? 'Polasci' : 'Dolasci'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
+                <input type="text" placeholder="Pretraži letove..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full pl-9 pr-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              {uniqueAirlines.length > 0 && (
+                <select value={airlineFilter} onChange={e => setAirlineFilter(e.target.value)} className="px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="all">Sve kompanije</option>
+                  {uniqueAirlines.map(a => <option key={a} value={a}>{a}</option>)}
+                </select>
+              )}
             </div>
           </div>
+
+          {/* Lista letova */}
+          <div className="space-y-3">
+            {loading && !flights.departures.length ? (
+              <div className="text-center py-12"><div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><div className="text-white/50">Učitavanje...</div></div>
+            ) : filteredFlights.length === 0 ? (
+              <div className="text-center py-12 bg-white/5 rounded-xl"><Plane className="w-12 h-12 text-white/20 mx-auto mb-3" /><div className="text-white/50">Nema letova</div></div>
+            ) : (
+              filteredFlights.map((flight, idx) => <FlightCard key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`} flight={flight} onOverride={handleOverride} onClearAll={handleClearAllOverrides} />)
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="mt-6 pt-4 border-t border-white/10 text-center text-xs text-white/30 pb-8">
+            Prikazano {filteredFlights.length} od {allFlights.length} letova • Sistem ažuriran: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : 'N/A'}
+          </div>
         </div>
-        <style jsx global>{`
-          body, html {
-            overflow: auto !important;
-            height: auto !important;
-          }
-        `}</style>
       </div>
-    </div>
+    </>
   );
 }
