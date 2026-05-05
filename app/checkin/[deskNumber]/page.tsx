@@ -549,6 +549,21 @@ function CheckInDisplay() {
     }
   }, []);
 
+  // ── Helper: brisanje ručnog statusa šaltera ──────────────────
+const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
+  try {
+    // Pretpostavka: endpoint prima { action: 'clear' }
+    await fetch(`/api/desk-status/${desk}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clear' }),
+    });
+    if (DEVELOPMENT) console.log(`✅ Cleared manual override for desk ${desk}`);
+  } catch (err) {
+    console.error(`Failed to clear override for desk ${desk}:`, err);
+  }
+}, []);
+
   // ── Sync currentFlightRef s aktualnim state-om ──────────────
   useEffect(() => {
     currentFlightRef.current = flightDisplay.flight;
@@ -1086,6 +1101,34 @@ useEffect(() => {
   loadFlights,
 ]);
 
+// ── Auto clear manual override kada check‑in zatvori (STD - 30min) ──
+useEffect(() => {
+  if (flightDisplay.manualDeskStatus !== 'open') return;
+  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+  if (!closeTime) return;
+
+  const msUntilClose = closeTime.getTime() - Date.now();
+  if (msUntilClose <= 0) {
+    clearDeskOverride(deskNumberParam).then(() => {
+      if (isMountedRef.current) loadFlights();
+    });
+    return;
+  }
+
+  const timerId = setTimeout(() => {
+    clearDeskOverride(deskNumberParam).then(() => {
+      if (isMountedRef.current) loadFlights();
+    });
+  }, msUntilClose);
+
+  return () => clearTimeout(timerId);
+}, [
+  flightDisplay.manualDeskStatus,
+  flightDisplay.checkInStatus.checkInCloseTime,
+  deskNumberParam,
+  clearDeskOverride,
+  loadFlights,
+]);
   // ── checkin-status-updated event ───────────────────────────
   useEffect(() => {
     const handler = (e: CustomEvent) => {
@@ -1408,9 +1451,11 @@ useEffect(() => {
 
             <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
               <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-              <div className="text-[1.36rem] font-bold text-yellow-300 text-center">
-                Portable chargers: CABIN BAGGAGE ONLY! Not in overhead bins. No charging during flight.
+         <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
+                ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals.{' '}
+                <span className="text-yellow-400/80 ml-1">(valid from 27.03.2026.)</span>
               </div>
+
             </div>
           </div>
 

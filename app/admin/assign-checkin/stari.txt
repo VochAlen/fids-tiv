@@ -1,0 +1,855 @@
+'use client';
+
+import { useEffect, useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import {
+  RefreshCw,
+  Save,
+  Trash2,
+  LogOut,
+  Home,
+  CheckSquare,
+  GitBranch,
+  ChevronDown,
+} from 'lucide-react';
+import type { Flight } from '@/types/flight';
+
+// ── API prefix ─────────────────────────────────────────────
+const isDevelopment = process.env.NODE_ENV === 'development';
+const API_PREFIX = isDevelopment ? '/api/test' : '/api/admin';
+
+// ── Konstante ──────────────────────────────────────────────
+const DESKS = [...Array.from({ length: 12 }, (_, i) => String(i + 1)), '21', '22', '23', '24', '25', '26'];
+const GATES = [
+  '2','3','4','5','6',
+  '21','22','23','24','25','26','27','28','29','30','31',
+];
+
+// ── Tipovi ─────────────────────────────────────────────────
+interface Assignment {
+  resourceId: string;   // broj šaltera ili naziv gate-a
+  flightNumber: string;
+  airlineName: string;
+  destinationCity: string;
+  scheduledTime: string;
+  assignedAt: string;
+}
+
+type TabType = 'checkin' | 'gate';
+
+// ── Helpers ────────────────────────────────────────────────
+function FlightBadge({ isAssigned }: { isAssigned: boolean }) {
+  return (
+    <span
+      className={`inline-block w-2 h-2 rounded-full mr-1.5 ${
+        isAssigned ? 'bg-red-400' : 'bg-green-400'
+      }`}
+    />
+  );
+}
+
+// ============================================================
+export default function AssignPanel() {
+  const router = useRouter();
+
+  // Tab
+  const [activeTab, setActiveTab] = useState<TabType>('checkin');
+
+  // Shared flight data
+  const [flights, setFlights] = useState<Flight[]>([]);
+  const [loadingFlights, setLoadingFlights] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState('');
+
+  // Check-in state
+  const [checkinAssignments, setCheckinAssignments] = useState<Assignment[]>([]);
+  const [selectedCheckinDesk, setSelectedCheckinDesk] = useState('');
+  const [selectedCheckinFlight, setSelectedCheckinFlight] = useState<Flight | null>(null);
+  const [isSubmittingCheckin, setIsSubmittingCheckin] = useState(false);
+  // Dodaj state
+const [refreshing, setRefreshing] = useState(false);
+
+  // Gate state
+  const [gateAssignments, setGateAssignments] = useState<Assignment[]>([]);
+  const [selectedGate, setSelectedGate] = useState('');
+  const [selectedGateFlight, setSelectedGateFlight] = useState<Flight | null>(null);
+  const [isSubmittingGate, setIsSubmittingGate] = useState(false);
+
+  // ── Dohvati letove ────────────────────────────────────────
+  const fetchFlights = useCallback(async () => {
+    try {
+      const res = await fetch('/api/flights?nocache=' + Date.now());
+      const data = await res.json();
+      const departures: Flight[] = data.departures || [];
+      const sorted = [...departures].sort((a, b) =>
+        (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || '')
+      );
+      setFlights(sorted);
+      setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
+    } catch (err) {
+      console.error('Error fetching flights:', err);
+    } finally {
+      setLoadingFlights(false);
+    }
+  }, []);
+
+  // ── Dohvati check-in assignmente ──────────────────────────
+  const fetchCheckinAssignments = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_PREFIX}/desk-status-override`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: Assignment[] = [];
+
+      for (const [deskNumber, value] of Object.entries(data)) {
+        const parsed =
+          typeof value === 'string' ? JSON.parse(value) : (value as Record<string, unknown>);
+        if (parsed.flightNumber && parsed.status === 'open') {
+          const flight = flights.find((f) => f.FlightNumber === parsed.flightNumber);
+          list.push({
+            resourceId: deskNumber,
+            flightNumber: parsed.flightNumber as string,
+            airlineName: flight?.AirlineName || '',
+            destinationCity: flight?.DestinationCityName || '',
+            scheduledTime: flight?.ScheduledDepartureTime || '',
+            assignedAt: parsed.setAt
+              ? new Date(parsed.setAt as number).toLocaleTimeString()
+              : 'unknown',
+          });
+        }
+      }
+      setCheckinAssignments(list);
+    } catch (err) {
+      console.error('Error fetching check-in assignments:', err);
+    }
+  }, [flights]);
+
+  // ── Dohvati gate assignmente ──────────────────────────────
+  const fetchGateAssignments = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_PREFIX}/gate-status-override`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: Assignment[] = [];
+
+      for (const [gateNumber, value] of Object.entries(data)) {
+        const parsed =
+          typeof value === 'string' ? JSON.parse(value) : (value as Record<string, unknown>);
+        if (parsed.flightNumber && parsed.status === 'open') {
+          const flight = flights.find((f) => f.FlightNumber === parsed.flightNumber);
+          list.push({
+            resourceId: gateNumber,
+            flightNumber: parsed.flightNumber as string,
+            airlineName: flight?.AirlineName || '',
+            destinationCity: flight?.DestinationCityName || '',
+            scheduledTime: flight?.ScheduledDepartureTime || '',
+            assignedAt: parsed.setAt
+              ? new Date(parsed.setAt as number).toLocaleTimeString()
+              : 'unknown',
+          });
+        }
+      }
+      setGateAssignments(list);
+    } catch (err) {
+      console.error('Error fetching gate assignments:', err);
+    }
+  }, [flights]);
+
+  // ── Init ──────────────────────────────────────────────────
+  useEffect(() => {
+    void fetchFlights();
+  }, [fetchFlights]);
+
+  useEffect(() => {
+    if (flights.length > 0) {
+      void fetchCheckinAssignments();
+      void fetchGateAssignments();
+    }
+  }, [flights, fetchCheckinAssignments, fetchGateAssignments]);
+
+const handleRefresh = useCallback(async () => {
+  setRefreshing(true);
+  try {
+    await fetchFlights();
+    await fetchCheckinAssignments();
+    await fetchGateAssignments();
+  } finally {
+    setRefreshing(false);
+  }
+}, [fetchFlights, fetchCheckinAssignments, fetchGateAssignments]);
+
+  // ── Dodijeli check-in ─────────────────────────────────────
+  const handleAssignCheckin = async () => {
+    if (!selectedCheckinFlight || !selectedCheckinDesk) {
+      alert('Please select a flight and a desk');
+      return;
+    }
+    setIsSubmittingCheckin(true);
+    try {
+      const existing = checkinAssignments.find((a) => a.resourceId === selectedCheckinDesk);
+      if (
+        existing &&
+        !confirm(
+          `Desk ${selectedCheckinDesk} is already assigned to ${existing.flightNumber}. Override?`
+        )
+      ) {
+        return;
+      }
+      const res = await fetch(`${API_PREFIX}/desk-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deskNumber: selectedCheckinDesk,
+          action: 'open',
+          flightNumber: selectedCheckinFlight.FlightNumber,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to assign');
+      alert(`✅ Flight ${selectedCheckinFlight.FlightNumber} → Desk ${selectedCheckinDesk}`);
+      await fetchCheckinAssignments();
+      setSelectedCheckinFlight(null);
+      setSelectedCheckinDesk('');
+    } catch {
+      alert('Error assigning flight to desk');
+    } finally {
+      setIsSubmittingCheckin(false);
+    }
+  };
+
+  // ── Ukloni check-in ───────────────────────────────────────
+  const handleRemoveCheckin = async (deskNumber: string, flightNumber: string) => {
+    if (!confirm(`Remove ${flightNumber} from Desk ${deskNumber}?`)) return;
+    try {
+      await fetch(`${API_PREFIX}/desk-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber, action: 'clear' }),
+      });
+      await fetchCheckinAssignments();
+    } catch {
+      alert('Error removing assignment');
+    }
+  };
+
+  // ── Dodijeli gate ─────────────────────────────────────────
+  const handleAssignGate = async () => {
+    if (!selectedGateFlight || !selectedGate) {
+      alert('Please select a flight and a gate');
+      return;
+    }
+    setIsSubmittingGate(true);
+    try {
+      const existing = gateAssignments.find((a) => a.resourceId === selectedGate);
+      if (
+        existing &&
+        !confirm(
+          `Gate ${selectedGate} is already assigned to ${existing.flightNumber}. Override?`
+        )
+      ) {
+        return;
+      }
+      const res = await fetch(`${API_PREFIX}/gate-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gateNumber: selectedGate,
+          action: 'open',
+          flightNumber: selectedGateFlight.FlightNumber,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to assign gate');
+      alert(`✅ Flight ${selectedGateFlight.FlightNumber} → Gate ${selectedGate}`);
+      await fetchGateAssignments();
+      setSelectedGateFlight(null);
+      setSelectedGate('');
+    } catch {
+      alert('Error assigning flight to gate');
+    } finally {
+      setIsSubmittingGate(false);
+    }
+  };
+
+  // ── Ukloni gate ───────────────────────────────────────────
+  const handleRemoveGate = async (gateNumber: string, flightNumber: string) => {
+    if (!confirm(`Remove ${flightNumber} from Gate ${gateNumber}?`)) return;
+    try {
+      await fetch(`${API_PREFIX}/gate-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gateNumber, action: 'clear' }),
+      });
+      await fetchGateAssignments();
+    } catch {
+      alert('Error removing gate assignment');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/admin/logout', { method: 'POST' });
+    } catch {}
+    router.push('/admin/login');
+  };
+
+  // ============================================================
+  // RENDER
+  // ============================================================
+  if (loadingFlights) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <div className="text-white text-xl">Loading flights...</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+   <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-6 overflow-y-auto">
+      <div className="max-w-7xl mx-auto">
+
+        {/* ── Header ── */}
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-3xl font-bold text-white">TIV CheckIn & Gate Assignment Panel</h1>
+            <div className="text-slate-400 text-sm mt-1">
+              Manage check-in desks and departure gates
+              {isDevelopment && (
+                <span className="ml-2 text-yellow-400">(mock API – no Redis)</span>
+              )}
+            </div>
+          </div>
+          <div className="flex gap-3">
+<button
+  onClick={handleRefresh}
+  disabled={refreshing}
+  className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors disabled:opacity-50"
+  title="Refresh"
+>
+  <RefreshCw className={`w-5 h-5 text-white ${refreshing ? 'animate-spin' : ''}`} />
+</button>
+            <button
+              onClick={() => router.push('/admin')}
+              className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors"
+              title="Admin Home"
+            >
+              <Home className="w-5 h-5 text-white" />
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-300 rounded-lg transition-colors"
+            >
+              <LogOut className="w-4 h-4" /> Logout
+            </button>
+          </div>
+        </div>
+
+        {/* ── Tabs ── */}
+        <div className="flex gap-2 mb-6">
+          <button
+            onClick={() => setActiveTab('checkin')}
+            className={`flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all ${
+              activeTab === 'checkin'
+                ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                : 'bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <CheckSquare className="w-5 h-5" />
+            Check-in Desks
+            <span
+              className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                activeTab === 'checkin' ? 'bg-white/20' : 'bg-white/10'
+              }`}
+            >
+              {checkinAssignments.length}
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab('gate')}
+            className={`flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all ${
+              activeTab === 'gate'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                : 'bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <GitBranch className="w-5 h-5" />
+            Departure Gates
+            <span
+              className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                activeTab === 'gate' ? 'bg-white/20' : 'bg-white/10'
+              }`}
+            >
+              {gateAssignments.length}
+            </span>
+          </button>
+        </div>
+
+        {/* ══════════════════════════════════════════════════════
+            TAB: CHECK-IN DESKS
+        ══════════════════════════════════════════════════════ */}
+        {activeTab === 'checkin' && (
+          <>
+            {/* Forma */}
+            <div className="bg-white/5 rounded-xl border border-white/10 p-6 mb-6">
+              <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+                <CheckSquare className="w-5 h-5 text-blue-400" />
+                Assign Flight to Check-in Desk
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Desk */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Select Desk</label>
+                  <div className="relative">
+                    <select
+                      value={selectedCheckinDesk}
+                      onChange={(e) => setSelectedCheckinDesk(e.target.value)}
+                      className="w-full px-4 py-2.5 bg-white border border-white/20 rounded-lg text-black focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none pr-10"
+                    >
+                      <option value="">Choose desk...</option>
+                      {DESKS.map((d) => {
+                        const occupied = checkinAssignments.find((a) => a.resourceId === d);
+                        return (
+                          <option key={d} value={d} className="text-black">
+                            Desk {d} {occupied ? `🔴 ${occupied.flightNumber}` : '🟢 FREE'}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Flight */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Select Flight</label>
+                  <div className="relative">
+          <select
+  value={selectedCheckinFlight?.FlightNumber || ''}
+  onChange={(e) => {
+    const f = flights.find((fl) => fl.FlightNumber === e.target.value);
+    setSelectedCheckinFlight(f || null);
+  }}
+  className="w-full px-4 py-2.5 bg-white border border-white/20 rounded-lg text-black focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none pr-10"
+>
+  <option value="">Choose flight...</option>
+  {flights.map((flight) => {
+    const isAssigned = checkinAssignments.some(
+      (a) => a.flightNumber === flight.FlightNumber
+    );
+    return (
+      <option
+        key={flight.id}
+        value={flight.FlightNumber}
+        className="text-black"
+      >
+        {flight.FlightNumber} – {flight.DestinationCityName} (
+        {flight.ScheduledDepartureTime}){isAssigned ? ' 🔴' : ''}
+      </option>
+    );
+  })}
+</select>
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Dugme */}
+                <div className="flex items-end">
+                  <button
+                    onClick={handleAssignCheckin}
+                    disabled={!selectedCheckinFlight || !selectedCheckinDesk || isSubmittingCheckin}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/40 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-semibold"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isSubmittingCheckin ? 'Assigning...' : 'Assign to Desk'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Preview */}
+              {selectedCheckinFlight && (
+                <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                  <div className="text-xs text-slate-400 mb-1">Selected flight:</div>
+                  <div className="text-white font-semibold">
+                    {selectedCheckinFlight.FlightNumber} →{' '}
+                    {selectedCheckinFlight.DestinationCityName} (
+                    {selectedCheckinFlight.DestinationAirportCode})
+                    <span className="ml-3 text-cyan-400">
+                      {selectedCheckinFlight.ScheduledDepartureTime}
+                    </span>
+                  </div>
+                  {selectedCheckinFlight.AirlineName && (
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {selectedCheckinFlight.AirlineName}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Aktivne dodjele */}
+            <div className="bg-white/5 rounded-xl border border-white/10 p-6">
+              <h2 className="text-xl font-semibold text-white mb-4">
+                Active Check-in Assignments ({checkinAssignments.length})
+              </h2>
+              {checkinAssignments.length === 0 ? (
+                <div className="text-center py-10 text-slate-500">
+                  No desks currently assigned. Use the form above.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                  {checkinAssignments
+                    .sort((a, b) => Number(a.resourceId) - Number(b.resourceId))
+                    .map((a) => (
+                      <AssignmentCard
+                        key={a.resourceId}
+                        label="Desk"
+                        assignment={a}
+                        accentColor="blue"
+                        onRemove={() => handleRemoveCheckin(a.resourceId, a.flightNumber)}
+                      />
+                    ))}
+                </div>
+              )}
+            </div>
+
+            {/* Pregled svih šaltera */}
+     {/* Pregled svih šaltera – podijeljen po terminalima */}
+<div className="mt-6 bg-white/5 rounded-xl border border-white/10 p-6">
+  <h2 className="text-lg font-semibold text-white mb-4">All Desks Overview</h2>
+
+  {/* Terminal 1 */}
+  <div className="mb-6">
+    <div className="flex items-center gap-2 mb-3">
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+      <span className="text-sm font-bold text-blue-400 uppercase tracking-wider px-2">Terminal 1</span>
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+    </div>
+    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-12 gap-2">
+      {DESKS.filter(d => parseInt(d) <= 12).map(d => {
+        const occupied = checkinAssignments.find(a => a.resourceId === d);
+        return (
+          <div key={d} className={`rounded-lg p-2 text-center border text-xs font-bold cursor-default ${
+            occupied
+              ? 'bg-red-500/20 border-red-500/40 text-red-300'
+              : 'bg-green-500/10 border-green-500/20 text-green-400'
+          }`} title={occupied ? occupied.flightNumber : 'Free'}>
+            <div className="text-base font-black">{d}</div>
+            {occupied ? (
+              <div className="truncate text-[10px] mt-0.5">{occupied.flightNumber}</div>
+            ) : (
+              <div className="text-[10px] mt-0.5 opacity-60">free</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  </div>
+
+  {/* Terminal 2 */}
+  <div>
+    <div className="flex items-center gap-2 mb-3">
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent" />
+      <span className="text-sm font-bold text-purple-400 uppercase tracking-wider px-2">Terminal 2</span>
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent" />
+    </div>
+    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-12 gap-2">
+      {DESKS.filter(d => parseInt(d) >= 21).map(d => {
+        const occupied = checkinAssignments.find(a => a.resourceId === d);
+        return (
+          <div key={d} className={`rounded-lg p-2 text-center border text-xs font-bold cursor-default ${
+            occupied
+              ? 'bg-red-500/20 border-red-500/40 text-red-300'
+              : 'bg-green-500/10 border-green-500/20 text-green-400'
+          }`} title={occupied ? occupied.flightNumber : 'Free'}>
+            <div className="text-base font-black">{d}</div>
+            {occupied ? (
+              <div className="truncate text-[10px] mt-0.5">{occupied.flightNumber}</div>
+            ) : (
+              <div className="text-[10px] mt-0.5 opacity-60">free</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  </div>
+</div>
+          </>
+        )}
+
+        {/* ══════════════════════════════════════════════════════
+            TAB: GATES
+        ══════════════════════════════════════════════════════ */}
+        {activeTab === 'gate' && (
+          <>
+            {/* Forma */}
+            <div className="bg-white/5 rounded-xl border border-white/10 p-6 mb-6">
+              <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+                <GitBranch className="w-5 h-5 text-emerald-400" />
+                Assign Flight to Departure Gate
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Gate */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Select Gate</label>
+                  <div className="relative">
+                    <select
+                      value={selectedGate}
+                      onChange={(e) => setSelectedGate(e.target.value)}
+                      className="w-full px-4 py-2.5 bg-white border border-white/20 rounded-lg text-black focus:outline-none focus:ring-2 focus:ring-emerald-500 appearance-none pr-10"
+                    >
+                      <option value="">Choose gate...</option>
+                      {GATES.map((g) => {
+                        const occupied = gateAssignments.find((a) => a.resourceId === g);
+                        return (
+                          <option key={g} value={g} className="text-black">
+                            Gate {g} {occupied ? `🔴 ${occupied.flightNumber}` : '🟢 FREE'}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Flight */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Select Flight</label>
+                  <div className="relative">
+            <select
+  value={selectedGateFlight?.FlightNumber || ''}
+  onChange={(e) => {
+    const f = flights.find((fl) => fl.FlightNumber === e.target.value);
+    setSelectedGateFlight(f || null);
+  }}
+  className="w-full px-4 py-2.5 bg-white border border-white/20 rounded-lg text-black focus:outline-none focus:ring-2 focus:ring-emerald-500 appearance-none pr-10"
+>
+  <option value="">Choose flight...</option>
+  {flights.map((flight) => {
+    const isAssigned = gateAssignments.some(
+      (a) => a.flightNumber === flight.FlightNumber
+    );
+    return (
+      <option
+        key={flight.id}
+        value={flight.FlightNumber}
+        className="text-black"
+      >
+        {flight.FlightNumber} – {flight.DestinationCityName} (
+        {flight.ScheduledDepartureTime}){isAssigned ? ' 🔴' : ''}
+      </option>
+    );
+  })}
+</select>
+                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Dugme */}
+                <div className="flex items-end">
+                  <button
+                    onClick={handleAssignGate}
+                    disabled={!selectedGateFlight || !selectedGate || isSubmittingGate}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-600/40 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-semibold"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isSubmittingGate ? 'Assigning...' : 'Assign to Gate'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Preview */}
+              {selectedGateFlight && (
+                <div className="mt-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                  <div className="text-xs text-slate-400 mb-1">Selected flight:</div>
+                  <div className="text-white font-semibold">
+                    {selectedGateFlight.FlightNumber} →{' '}
+                    {selectedGateFlight.DestinationCityName} (
+                    {selectedGateFlight.DestinationAirportCode})
+                    <span className="ml-3 text-cyan-400">
+                      {selectedGateFlight.ScheduledDepartureTime}
+                    </span>
+                  </div>
+                  {selectedGateFlight.AirlineName && (
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {selectedGateFlight.AirlineName}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Aktivne dodjele */}
+            <div className="bg-white/5 rounded-xl border border-white/10 p-6">
+              <h2 className="text-xl font-semibold text-white mb-4">
+                Active Gate Assignments ({gateAssignments.length})
+              </h2>
+              {gateAssignments.length === 0 ? (
+                <div className="text-center py-10 text-slate-500">
+                  No gates currently assigned. Use the form above.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                  {gateAssignments
+                    .sort((a, b) => a.resourceId.localeCompare(b.resourceId))
+                    .map((a) => (
+                      <AssignmentCard
+                        key={a.resourceId}
+                        label="Gate"
+                        assignment={a}
+                        accentColor="emerald"
+                        onRemove={() => handleRemoveGate(a.resourceId, a.flightNumber)}
+                      />
+                    ))}
+                </div>
+              )}
+            </div>
+
+            {/* Pregled svih gate-ova */}
+  {/* Pregled svih gate-ova – podijeljen po terminalima */}
+<div className="mt-6 bg-white/5 rounded-xl border border-white/10 p-6">
+  <h2 className="text-lg font-semibold text-white mb-4">All Gates Overview</h2>
+
+  {/* Terminal 1 – gateovi 2..6 */}
+  <div className="mb-6">
+    <div className="flex items-center gap-2 mb-3">
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+      <span className="text-sm font-bold text-blue-400 uppercase tracking-wider px-2">Terminal 1</span>
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+    </div>
+    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-10 gap-2">
+      {GATES.filter(g => {
+        const num = parseInt(g);
+        return num >= 2 && num <= 6;
+      }).map(g => {
+        const occupied = gateAssignments.find(a => a.resourceId === g);
+        return (
+          <div
+            key={g}
+            className={`rounded-lg p-2 text-center border text-xs font-bold cursor-default ${
+              occupied
+                ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+            }`}
+            title={occupied ? occupied.flightNumber : 'Free'}
+          >
+            <div className="text-sm font-black">{g}</div>
+            {occupied ? (
+              <div className="truncate text-[10px] mt-0.5">{occupied.flightNumber}</div>
+            ) : (
+              <div className="text-[10px] mt-0.5 opacity-50">free</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  </div>
+
+  {/* Terminal 2 – gateovi 21..31 */}
+  <div>
+    <div className="flex items-center gap-2 mb-3">
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent" />
+      <span className="text-sm font-bold text-purple-400 uppercase tracking-wider px-2">Terminal 2</span>
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-purple-500/50 to-transparent" />
+    </div>
+    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-10 gap-2">
+      {GATES.filter(g => {
+        const num = parseInt(g);
+        return num >= 21 && num <= 28;
+      }).map(g => {
+        const occupied = gateAssignments.find(a => a.resourceId === g);
+        return (
+          <div
+            key={g}
+            className={`rounded-lg p-2 text-center border text-xs font-bold cursor-default ${
+              occupied
+                ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+            }`}
+            title={occupied ? occupied.flightNumber : 'Free'}
+          >
+            <div className="text-sm font-black">{g}</div>
+            {occupied ? (
+              <div className="truncate text-[10px] mt-0.5">{occupied.flightNumber}</div>
+            ) : (
+              <div className="text-[10px] mt-0.5 opacity-50">free</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  </div>
+</div>
+          </>
+        )}
+
+        {/* Footer */}
+        <div className="mt-6 text-center text-xs text-slate-500">
+          Last update: {lastUpdate} | FIDS screens update automatically
+          {isDevelopment && (
+            <div className="text-yellow-400 mt-1">🧪 Mock API – no Redis changes</div>
+          )}
+        </div>
+      </div>
+        <style jsx global>{`
+      html, body {
+        overflow: auto !important;
+      }
+    `}</style>
+    </div>
+  );
+}
+
+// ── Assignment Card ──────────────────────────────────────────
+function AssignmentCard({
+  label,
+  assignment,
+  accentColor,
+  onRemove,
+}: {
+  label: 'Desk' | 'Gate';
+  assignment: Assignment;
+  accentColor: 'blue' | 'emerald';
+  onRemove: () => void;
+}) {
+  const accent =
+    accentColor === 'blue'
+      ? { text: 'text-cyan-400', bg: 'bg-blue-500/10', border: 'border-blue-500/20' }
+      : { text: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' };
+
+  return (
+    <div
+      className={`rounded-xl p-4 border ${accent.bg} ${accent.border} flex flex-col gap-2`}
+    >
+      <div className="flex justify-between items-start">
+        <div className={`text-2xl font-black ${accent.text}`}>
+          {label} {assignment.resourceId}
+        </div>
+        <button
+          onClick={onRemove}
+          className="p-1 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded transition-colors"
+          title="Remove assignment"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="text-white font-bold text-lg leading-tight">
+        {assignment.flightNumber}
+      </div>
+      {assignment.airlineName && (
+        <div className="text-slate-400 text-sm">{assignment.airlineName}</div>
+      )}
+      {assignment.destinationCity && (
+        <div className={`font-semibold ${accent.text}`}>{assignment.destinationCity}</div>
+      )}
+      {assignment.scheduledTime && (
+        <div className="text-xs text-slate-500 flex items-center gap-1">
+          <span className="text-slate-400">STD:</span>
+          <span className="font-mono text-white/70">{assignment.scheduledTime}</span>
+        </div>
+      )}
+      <div className="text-xs text-slate-600 mt-auto pt-1 border-t border-white/5">
+        Assigned: {assignment.assignedAt}
+      </div>
+    </div>
+  );
+}

@@ -445,7 +445,7 @@ const loadFlights = useCallback(async () => {
           <div style={styles.chargerWarning} className="fids-charger-warning">
             <span style={styles.chargerIcon}>⚠</span>
 <span style={styles.chargerText}>
-Power banks: no overhead bins; keep under seat or in seat pocket. Do not use during flight.
+ ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals.
 
 </span>
           </div>

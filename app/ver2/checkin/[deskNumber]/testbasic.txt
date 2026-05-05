@@ -1,0 +1,239 @@
+'use client';
+
+import { useEffect, useState, useCallback } from 'react';
+import { useParams } from 'next/navigation';
+import Image from 'next/image';
+import { CheckCircle, Clock, MapPin, AlertCircle, XCircle, Plane } from 'lucide-react';
+
+// ============================================================
+// MOCK LETOVI – isti kao u produkciji (dovoljno za test)
+// ============================================================
+interface MockFlight {
+  FlightNumber: string;
+  AirlineName: string;
+  AirlineCode: string;
+  DestinationCityName: string;
+  DestinationAirportCode: string;
+  ScheduledDepartureTime: string;
+  GateNumber: string;
+  StatusEN: string;
+  AirlineLogo?: string;
+  CityImage?: string;
+}
+
+const MOCK_FLIGHTS: Record<string, MockFlight> = {
+  'JU681': {
+    FlightNumber: 'JU681',
+    AirlineName: 'Air Serbia',
+    AirlineCode: 'JU',
+    DestinationCityName: 'Belgrade',
+    DestinationAirportCode: 'BEG',
+    ScheduledDepartureTime: '08:25',
+    GateNumber: 'A1',
+    StatusEN: 'On Time',
+  },
+  'W6567': {
+    FlightNumber: 'W6567',
+    AirlineName: 'Wizz Air',
+    AirlineCode: 'W6',
+    DestinationCityName: 'London Luton',
+    DestinationAirportCode: 'LTN',
+    ScheduledDepartureTime: '11:00',
+    GateNumber: 'B2',
+    StatusEN: 'On Time',
+  },
+  'KL888': {
+    FlightNumber: 'KL888',
+    AirlineName: 'KLM',
+    AirlineCode: 'KL',
+    DestinationCityName: 'Amsterdam',
+    DestinationAirportCode: 'AMS',
+    ScheduledDepartureTime: '12:00',
+    GateNumber: 'C3',
+    StatusEN: 'On Time',
+  },
+};
+
+// ============================================================
+// GLAVNA TEST KOMPONENTA
+// ============================================================
+export default function TestCheckinPage() {
+  const params = useParams();
+  const deskNumber = params.deskNumber as string;
+
+  const [assignedFlight, setAssignedFlight] = useState<MockFlight | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState('');
+  const [isPortrait, setIsPortrait] = useState(false);
+
+  // Dohvati dodjelu iz mock API-ja
+  const fetchAssignment = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumber}`);
+      const data = await res.json();
+      if (data.status === 'open' && data.flightNumber && MOCK_FLIGHTS[data.flightNumber]) {
+        setAssignedFlight(MOCK_FLIGHTS[data.flightNumber]);
+      } else {
+        setAssignedFlight(null);
+      }
+      setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
+    } catch (err) {
+      console.error('Error fetching assignment:', err);
+      setAssignedFlight(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [deskNumber]);
+
+  // Osvježavanje na interval (svakih 5 sekundi za test)
+  useEffect(() => {
+    fetchAssignment();
+    const interval = setInterval(fetchAssignment, 5000);
+    return () => clearInterval(interval);
+  }, [fetchAssignment]);
+
+  // Detekcija orijentacije (samo za responzivnost)
+  useEffect(() => {
+    const checkOrientation = () => setIsPortrait(window.innerHeight > window.innerWidth);
+    checkOrientation();
+    window.addEventListener('resize', checkOrientation);
+    return () => window.removeEventListener('resize', checkOrientation);
+  }, []);
+
+  // Loading
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center">
+        <div className="text-white text-xl">Loading test FIDS...</div>
+      </div>
+    );
+  }
+
+  // INACTIVE SCREEN (nema dodijeljenog leta)
+  if (!assignedFlight) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center p-4">
+        <div className="text-center bg-black/50 rounded-3xl p-12 max-w-2xl">
+          <XCircle className="w-24 h-24 text-white/30 mx-auto mb-6" />
+          <div className="text-6xl font-bold text-white/80 mb-4">Check-in</div>
+          <div className="text-8xl font-black text-orange-400 mb-6">{deskNumber}</div>
+          <div className="text-2xl text-white/70">No flight assigned</div>
+          <div className="text-sm text-white/40 mt-8">Last update: {lastUpdate}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // AKTIVNI EKRAN (prikaz leta)
+  const flight = assignedFlight;
+
+  if (isPortrait) {
+    return (
+      <div className="h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white flex flex-col p-4">
+        <div className="text-center mb-6">
+          <div className="text-4xl font-bold bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent">
+            CHECK-IN {deskNumber}
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center justify-center space-y-6">
+          {/* Logo (placeholder) */}
+          <div className="w-48 h-24 bg-white rounded-xl flex items-center justify-center text-black font-bold text-xl">
+            {flight.AirlineCode}
+          </div>
+
+          {/* Flight number */}
+          <div className="text-7xl font-black">
+            <span className="text-yellow-200">{flight.FlightNumber.slice(0,2)}</span>
+            <span className="text-yellow-500">{flight.FlightNumber.slice(2)}</span>
+          </div>
+
+          {/* Destination */}
+          <div className="text-center">
+            <div className="text-5xl font-bold text-white mb-2">{flight.DestinationCityName}</div>
+            <div className="text-3xl text-cyan-400">{flight.DestinationAirportCode}</div>
+          </div>
+
+          {/* Time */}
+          <div className="text-center">
+            <div className="text-6xl font-mono font-bold">{flight.ScheduledDepartureTime}</div>
+            <div className="text-sm text-slate-400 mt-1">Scheduled departure</div>
+          </div>
+
+          {/* Gate */}
+          <div className="text-center bg-slate-800/50 rounded-xl p-4">
+            <div className="text-lg text-slate-400">Gate</div>
+            <div className="text-4xl font-bold">{flight.GateNumber}</div>
+          </div>
+
+          {/* Status */}
+          <div className="flex items-center gap-2 bg-green-500/20 px-4 py-2 rounded-full">
+            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <span className="text-green-400 font-semibold">CHECK-IN ACTIVE</span>
+          </div>
+        </div>
+
+        <div className="text-center text-xs text-slate-500 mt-4">
+          Updated: {lastUpdate}
+        </div>
+      </div>
+    );
+  }
+
+  // Landscape (široki ekran)
+  return (
+    <div className="h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white p-6">
+      <div className="h-full grid grid-cols-12 gap-6">
+        {/* Lijeva strana – info o letu */}
+        <div className="col-span-7 flex flex-col justify-between">
+          <div>
+            <h1 className="text-6xl font-bold bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent mb-6">
+              CHECK-IN {deskNumber}
+            </h1>
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-64 h-32 bg-white rounded-xl flex items-center justify-center text-black font-bold text-3xl">
+                {flight.AirlineCode}
+              </div>
+              <div>
+                <div className="text-7xl font-black text-yellow-500">{flight.FlightNumber}</div>
+                <div className="text-xl text-slate-400">{flight.AirlineName}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="w-48 h-48 bg-slate-700 rounded-2xl flex items-center justify-center text-6xl">
+                ✈️
+              </div>
+              <div>
+                <div className="text-6xl font-bold text-white mb-2">{flight.DestinationCityName}</div>
+                <div className="text-4xl text-cyan-400">{flight.DestinationAirportCode}</div>
+              </div>
+            </div>
+          </div>
+          <div className="text-slate-400 text-sm">Last updated: {lastUpdate}</div>
+        </div>
+
+        {/* Desna strana – status i gate */}
+        <div className="col-span-5 border-l border-white/20 pl-6 flex flex-col justify-between">
+          <div className="text-right">
+            <div className="flex items-center justify-end gap-3 mb-4">
+              <Clock className="w-8 h-8 text-slate-400" />
+              <span className="text-xl text-slate-400">Scheduled departure</span>
+            </div>
+            <div className="text-6xl font-mono font-bold">{flight.ScheduledDepartureTime}</div>
+          </div>
+
+          <div className="text-right">
+            <div className="bg-slate-800/50 rounded-xl p-4 mb-6">
+              <div className="text-lg text-slate-400">Gate</div>
+              <div className="text-5xl font-bold">{flight.GateNumber}</div>
+            </div>
+            <div>
+              <div className="text-5xl font-bold text-green-400 animate-pulse mb-2">CHECK-IN OPEN</div>
+              <div className="text-xl text-green-400">Please proceed to check-in</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
