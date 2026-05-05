@@ -190,11 +190,26 @@ function GateDisplay() {
 // }, []);
 const shouldDisplayFlight = useCallback((f: Flight): boolean => {
   if (manualGateStatusRef.current === 'open') return true;
+
   const s = (f.StatusEN || '').toLowerCase().trim();
 
+  // Otkazani / preusmjereni – odmah sakrij
   if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
-  if (s.includes('departed')  || s.includes('poletio')) return false;  // ← odmah sakri
+  if (s.includes('diverted') || s.includes('preusmjeren')) return false;
+
+  // Eksplicitno departed – odmah sakrij
+  if (s.includes('departed') || s.includes('poletio')) return false;
+
+  // ✨ NOVO: Sakrij ako je prošlo više od 15 minuta od polaska (STD ili ETD)
+  const refTimeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime;
+  if (refTimeStr) {
+    const depTime = parseDepartureTime(refTimeStr);
+    if (depTime) {
+      const minutesSinceDeparture = (Date.now() - depTime.getTime()) / 60_000;
+      // Nakon 15 minuta od planiranog/varijantnog polaska – let je sigurno otišao
+      if (minutesSinceDeparture > 5) return false;
+    }
+  }
 
   return true;
 }, []);
@@ -304,20 +319,28 @@ const loadFlights = useCallback(async () => {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
 
-  useEffect(() => {
-    if (stdSwitchTimerRef.current) { clearTimeout(stdSwitchTimerRef.current); stdSwitchTimerRef.current = null; }
-    if (!display.flight?.ScheduledDepartureTime) return;
-    const dep = parseDepartureTime(display.flight.ScheduledDepartureTime);
-    if (!dep) return;
-    const ms = dep.getTime() - Date.now();
-    if (ms > 0) {
-      stdSwitchTimerRef.current = setTimeout(async () => {
-        await new Promise(r => setTimeout(r, 1000));
-        if (isMountedRef.current) loadFlights();
-      }, ms);
-    }
-    return () => { if (stdSwitchTimerRef.current) { clearTimeout(stdSwitchTimerRef.current); stdSwitchTimerRef.current = null; } };
-  }, [display.flight?.ScheduledDepartureTime, display.flight?.FlightNumber, gateNumber, loadFlights]);
+useEffect(() => {
+  if (stdSwitchTimerRef.current) clearTimeout(stdSwitchTimerRef.current);
+  if (!display.flight) return;
+
+  const refTimeStr = display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime;
+  if (!refTimeStr) return;
+  const dep = parseDepartureTime(refTimeStr);
+  if (!dep) return;
+
+  const ms = dep.getTime() - Date.now();
+  if (ms > 0) {
+    stdSwitchTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) loadFlights();
+    }, ms);
+  } else {
+    loadFlights();
+  }
+
+  return () => {
+    if (stdSwitchTimerRef.current) clearTimeout(stdSwitchTimerRef.current);
+  };
+}, [display.flight, loadFlights]);
 
   useEffect(() => {
     const poll = async () => {
