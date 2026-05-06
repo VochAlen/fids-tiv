@@ -911,14 +911,28 @@ function CheckInDisplay() {
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
+      // const future = sorted.filter(
+      //   (f) =>
+      //     f.isToday &&
+      //     f.departureTime > now &&
+      //     !f.StatusEN?.toLowerCase().includes('cancelled') &&
+      //     !f.StatusEN?.toLowerCase().includes('departed') &&
+      //     !f.StatusEN?.toLowerCase().includes('poletio')
+      // );
       const future = sorted.filter(
-        (f) =>
-          f.isToday &&
-          f.departureTime > now &&
-          !f.StatusEN?.toLowerCase().includes('cancelled') &&
-          !f.StatusEN?.toLowerCase().includes('departed') &&
-          !f.StatusEN?.toLowerCase().includes('poletio')
-      );
+  (f) =>
+    f.isToday &&
+    f.departureTime > now &&                                  // polazak u budućnosti
+    (f.departureTime.getTime() - 30 * 60 * 1000) > now.getTime() && // check‑in nije zatvoren (više od 30 min do polaska)
+    !f.StatusEN?.toLowerCase().includes('cancelled') &&
+    !f.StatusEN?.toLowerCase().includes('departed') &&
+    !f.StatusEN?.toLowerCase().includes('poletio')
+);
+// Let koji je ušao u STD – 30 minuta više ne ispunjava uslov (departureTime - 30 min) > now, pa ne ulazi u future.
+
+// Kada nema letova u future, currentFlight ostaje null – ekran prelazi u inactive stanje (prikazuje "No flights...").
+
+// Ako admin pritisne FORCE OPEN, override se postavlja, ali pošto zatvorenog leta nema u listi, sistem će uzeti prvi sljedeći let (ako postoji) ili ostati neaktivan. Time se izbjegava prikazivanje leta čiji je check‑in već završen.
 
       let currentFlight: EnhancedFlight | null = null;
       for (const f of future) {
