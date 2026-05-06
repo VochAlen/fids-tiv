@@ -29,7 +29,7 @@ let configLoadPromise: Promise<void> | null = null;
 // Mapa za brzi pristup
 const AIRLINE_CONFIG_MAP = new Map<string, CheckInConfig>();
 
-// In-memory storage za ručno otvorene check-in-ove
+// In-memory storage za ručno otvorene check-in-ove (po letu)
 const manuallyOpenedCheckIns: Record<string, { isOpen: boolean; openedAt: Date }> = {};
 
 // Keš za parsirana vremena
@@ -37,12 +37,10 @@ const timeParseCache = new Map<string, Date>();
 
 // Funkcija za učitavanje konfiguracije sa servera
 export async function loadCheckInConfig(): Promise<void> {
-  // Ako se već učitava, vrati postojeći promise
   if (configLoadPromise) {
     return configLoadPromise;
   }
 
-  // Ako je već učitano, samo vrati
   if (configLoaded) {
     return;
   }
@@ -58,17 +56,12 @@ export async function loadCheckInConfig(): Promise<void> {
       
       const data = await response.json();
       
-      // Konvertuj u niz CheckInConfig objekata
       const configs: CheckInConfig[] = [];
-      
-      // Default vrijednosti
       const defaultMinutes = data.default || 120;
       
       Object.keys(data).forEach(key => {
         if (key === 'default') return;
-        
         const minutes = data[key];
-        
         configs.push({
           airlineIata: key,
           airlineName: getAirlineName(key),
@@ -81,8 +74,6 @@ export async function loadCheckInConfig(): Promise<void> {
       });
       
       airlineConfigs = configs;
-      
-      // Ažuriraj mapu za brzi pristup
       AIRLINE_CONFIG_MAP.clear();
       airlineConfigs.forEach(config => {
         AIRLINE_CONFIG_MAP.set(config.airlineIata, config);
@@ -96,7 +87,6 @@ export async function loadCheckInConfig(): Promise<void> {
       
     } catch (error) {
       console.error('❌ Failed to load check-in config:', error);
-      // Fallback na hardkodirane vrijednosti ako API ne radi
       createFallbackConfig();
     } finally {
       configLoadPromise = null;
@@ -183,9 +173,6 @@ function createFallbackConfig() {
       minCloseBeforeDeparture: 30,
       daysOfWeek: [],
     },
-    // ═══════════════════════════════════════════════════════════
-    // NOVE KOMPANIJE SA 150 MINUTA
-    // ═══════════════════════════════════════════════════════════
     {
       airlineIata: 'LS',
       airlineName: 'Jet2.com',
@@ -222,7 +209,7 @@ function createFallbackConfig() {
       minCloseBeforeDeparture: 30,
       daysOfWeek: [],
     },
-       {
+    {
       airlineIata: 'LY',
       airlineName: 'EL AL',
       checkInOpenMinutes: 180,
@@ -231,7 +218,7 @@ function createFallbackConfig() {
       minCloseBeforeDeparture: 30,
       daysOfWeek: [],
     },
-           {
+    {
       airlineIata: 'IZ',
       airlineName: 'ARKIA',
       checkInOpenMinutes: 180,
@@ -265,9 +252,6 @@ function getAirlineName(iataCode: string): string {
     'EK': 'Emirates',
     'QR': 'Qatar Airways',
     'D8': 'Norwegian',
-    // ═══════════════════════════════════════════════════════════
-    // NOVE KOMPANIJE
-    // ═══════════════════════════════════════════════════════════
     'LS': 'Jet2.com',
     'U2': 'easyJet',
     'EC': 'Eurowings',
@@ -330,8 +314,6 @@ function parseDepartureTime(timeString: string): Date | null {
     if (timeString.includes('T')) {
       const date = new Date(timeString);
       if (!isNaN(date.getTime())) {
-        // NOVA PROVJERA: odbaci ISO timestamp koji je stariji od 12 sati unazad
-        // Ovo sprječava Redis override-e od juče da otvaraju check-in prerano
         const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
         if (date < twelveHoursAgo) {
           console.warn(`⚠️ parseDepartureTime: odbačen stari ISO timestamp: ${timeString}`);
@@ -371,7 +353,7 @@ function getCheckInConfig(airlineIata: string): CheckInConfig | null {
   return AIRLINE_CONFIG_MAP.get(airlineIata.toUpperCase()) || null;
 }
 
-// Postavi ručni status check-in-a
+// Postavi ručni status check-in-a (po letu)
 export function setManualCheckInStatus(
   flightNumber: string,
   scheduledTime: string,
@@ -381,13 +363,13 @@ export function setManualCheckInStatus(
   manuallyOpenedCheckIns[key] = { isOpen, openedAt: new Date() };
 }
 
-// Provjeri da li je check-in ručno otvoren
+// Provjeri da li je check-in ručno otvoren (po letu)
 export function isManuallyOpened(flightNumber: string, scheduledTime: string): boolean {
   const key = generateCheckInKey(flightNumber, scheduledTime);
   return !!manuallyOpenedCheckIns[key]?.isOpen;
 }
 
-// Poništi ručno otvaranje
+// Poništi ručno otvaranje (po letu)
 export function clearManualCheckInStatus(flightNumber: string, scheduledTime: string): void {
   const key = generateCheckInKey(flightNumber, scheduledTime);
   delete manuallyOpenedCheckIns[key];
@@ -415,12 +397,10 @@ function calculateCheckInStatus(
     };
   }
 
-  // Izračunaj minuta do polaska
   const minutesBeforeDeparture = Math.floor(
     (departureTime.getTime() - now.getTime()) / (1000 * 60)
   );
 
-  // PRVO: Provjeri da li je let otkazan ili diverted
   const { isCancelled, isDiverted } = checkFlightStatus(currentStatus);
 
   if (isCancelled) {
@@ -447,22 +427,17 @@ function calculateCheckInStatus(
     };
   }
 
-  // DRUGO: Odredi koliko sati prije se otvara check-in
-  let checkInOpenMinutes = 120; // default 2 sata
-  
+  let checkInOpenMinutes = 120;
   if (config) {
     checkInOpenMinutes = config.checkInOpenMinutes;
   }
 
-  // Izračunaj vrijeme otvaranja check-in-a
   const checkInOpenTime = new Date(departureTime);
   checkInOpenTime.setMinutes(checkInOpenTime.getMinutes() - checkInOpenMinutes);
   
-  // Izračunaj vrijeme zatvaranja check-in-a (UVIJEK 30 minuta prije)
   const checkInCloseTime = new Date(departureTime);
   checkInCloseTime.setMinutes(checkInCloseTime.getMinutes() - 30);
 
-  // TREĆE: Provjeri da li je već prošlo vrijeme zatvaranja
   if (now >= checkInCloseTime) {
     return {
       shouldBeOpen: false,
@@ -475,7 +450,6 @@ function calculateCheckInStatus(
     };
   }
 
-  // ČETVRTO: Provjeri da li je otvoreno
   if (now >= checkInOpenTime) {
     return {
       shouldBeOpen: true,
@@ -488,7 +462,6 @@ function calculateCheckInStatus(
     };
   }
 
-  // PETO: Još nije otvoreno
   const minutesUntilOpen = Math.floor((checkInOpenTime.getTime() - now.getTime()) / (1000 * 60));
   
   return {
@@ -502,11 +475,12 @@ function calculateCheckInStatus(
   };
 }
 
-// Glavna funkcija za određivanje statusa check-in-a
+// ⭐ GLAVNA FUNKCIJA – proširena sa deskStatusOverride
 export async function getEnhancedCheckInStatus(
   flightNumber: string,
   scheduledTime: string,
-  currentStatus: string
+  currentStatus: string,
+  deskStatusOverride?: 'open' | 'closed' | null      // 👈 novi parametar
 ): Promise<CheckInStatus> {
   // Osiguraj da je konfiguracija učitana
   await loadCheckInConfig();
@@ -541,7 +515,40 @@ export async function getEnhancedCheckInStatus(
     };
   }
 
-  // 2. Provjeri da li je check-in ručno otvoren (admin override)
+  // ─────────────────────────────────────────────────────────
+  // 2. OVERRIDE PO ŠALTERU (ima prioritet ispred svega)
+  // ─────────────────────────────────────────────────────────
+  if (deskStatusOverride === 'open') {
+    const departureTime = parseDepartureTime(scheduledTime);
+    let checkInCloseTime: Date | null = null;
+    let minsBefore = 0;
+    if (departureTime) {
+      checkInCloseTime = new Date(departureTime.getTime() - 30 * 60 * 1000);
+      minsBefore = Math.floor((departureTime.getTime() - Date.now()) / 60000);
+    }
+    return {
+      shouldBeOpen: true,
+      status: 'open',
+      reason: 'Manually opened from admin panel (desk override)',
+      minutesBeforeDeparture: minsBefore,
+      isAutoOpened: false,
+      checkInOpenTime: null,
+      checkInCloseTime,
+    };
+  }
+  if (deskStatusOverride === 'closed') {
+    return {
+      shouldBeOpen: false,
+      status: 'closed',
+      reason: 'Manually closed from admin panel',
+      minutesBeforeDeparture: 0,
+      isAutoOpened: false,
+      checkInOpenTime: null,
+      checkInCloseTime: null,
+    };
+  }
+
+  // 3. Provjeri da li je check-in ručno otvoren (in-memory, po letu)
   if (isManuallyOpened(flightNumber, scheduledTime)) {
     const departureTime = parseDepartureTime(scheduledTime);
     if (departureTime) {
@@ -565,7 +572,7 @@ export async function getEnhancedCheckInStatus(
     return {
       shouldBeOpen: true,
       status: 'open',
-      reason: 'Manually opened from admin panel',
+      reason: 'Manually opened from admin panel (flight override)',
       minutesBeforeDeparture: 0,
       isAutoOpened: false,
       checkInOpenTime: manuallyOpenedCheckIns[key]?.openedAt || null,
@@ -573,10 +580,10 @@ export async function getEnhancedCheckInStatus(
     };
   }
 
-  // 3. Dobavi konfiguraciju za aviokompaniju
+  // 4. Dobavi konfiguraciju za aviokompaniju
   const config = getCheckInConfig(airlineIata);
 
-  // 4. Izračunaj status
+  // 5. Izračunaj status po automatskoj logici
   return calculateCheckInStatus(scheduledTime, currentStatus, airlineIata, config);
 }
 
@@ -586,7 +593,6 @@ export async function quickCheckInStatus(
   scheduledTime: string,
   currentStatus: string
 ): Promise<{ shouldShowCheckIn: boolean }> {
-  // Ako konfiguracija nije učitana, pokušaj je učitati (ne čekaj)
   if (!configLoaded) {
     loadCheckInConfig().catch(() => {});
   }
@@ -615,11 +621,9 @@ export function shouldDisplayCheckIn(checkInStatus: CheckInStatus): boolean {
   if (checkInStatus.status === 'cancelled' || checkInStatus.status === 'diverted') {
     return false;
   }
-  
   if (checkInStatus.status === 'closed') {
     return false;
   }
-  
   return checkInStatus.shouldBeOpen === true;
 }
 
@@ -649,7 +653,7 @@ export async function debugCheckInLogic(
   const now = new Date();
   const parsedTime = parseDepartureTime(scheduledTime);
   const config = getCheckInConfig(airlineIata);
-  const isManuallyOpened = !!manuallyOpenedCheckIns[generateCheckInKey(flightNumber, scheduledTime)];
+  const isManuallyOpenedFlag = !!manuallyOpenedCheckIns[generateCheckInKey(flightNumber, scheduledTime)];
   
   const minutesBeforeDeparture = parsedTime 
     ? Math.floor((parsedTime.getTime() - now.getTime()) / (1000 * 60))
@@ -665,7 +669,7 @@ export async function debugCheckInLogic(
     debugInfo: {
       airlineIata,
       config,
-      isManuallyOpened,
+      isManuallyOpened: isManuallyOpenedFlag,
       parsedTime,
       now,
       minutesBeforeDeparture,
@@ -677,23 +681,17 @@ export async function debugCheckInLogic(
   };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// FUNKCIJA ZA RELOAD KONFIGURACIJE
-// ═══════════════════════════════════════════════════════════════
+// Reload konfiguracije
 export async function reloadCheckInConfig(): Promise<void> {
   console.log('🔄 Reloading check-in configuration...');
   configLoaded = false;
   configLoadPromise = null;
   AIRLINE_CONFIG_MAP.clear();
-  
-  // Opciono: očisti i ručno otvorene check-in-ove
-  // Object.keys(manuallyOpenedCheckIns).forEach(key => delete manuallyOpenedCheckIns[key]);
-  
   await loadCheckInConfig();
   console.log('✅ Check-in configuration reloaded');
 }
 
-// Čisti cache svaki sat — spriječava beskonačan rast
+// Čisti cache svaki sat
 if (typeof window !== 'undefined') {
   setInterval(() => {
     timeParseCache.clear();

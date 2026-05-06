@@ -30,6 +30,14 @@ async function getFlightScheduledTimeForDesk(deskNumber: string): Promise<string
     return null;
   }
 }
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const deskNumber = searchParams.get('deskNumber');
+  if (!deskNumber) return NextResponse.json({ message: 'Missing deskNumber' }, { status: 400 });
+  const client = getRedisClient();
+  const status = await client.get(`desk-status:${deskNumber}`);
+  return NextResponse.json({ status: status || null });
+}
 
 export async function POST(request: Request) {
   try {
@@ -63,7 +71,9 @@ export async function POST(request: Request) {
           
           if (secondsUntilSTD > 0) {
             // TTL = STD + 5 minuta (300 sekundi)
-            ttlSeconds = secondsUntilSTD + 300;
+            // ttlSeconds = secondsUntilSTD + 300;
+            ttlSeconds = secondsUntilSTD - 30 * 60;
+if (ttlSeconds <= 0) ttlSeconds = 120; // već prošlo, brzo briši
             console.log(`[desk-status-override] Desk ${deskNumber} - STD: ${scheduledTime}, TTL: ${ttlSeconds}s (${Math.floor(ttlSeconds / 60)}min, do ${new Date(Date.now() + ttlSeconds * 1000).toLocaleTimeString()})`);
           }
         }

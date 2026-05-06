@@ -167,7 +167,7 @@ interface FlightDisplayState {
   logoUrl: string;
   cityUrl: string;
   classType: string | null;
-  manualDeskStatus: string | null; // Popravljeno za TypeScript
+  manualDeskStatus: string | null;
   airlineName: string;
   destinationCity: string;
   flightNumber: string;
@@ -186,7 +186,7 @@ const EMPTY_DISPLAY: FlightDisplayState = {
   logoUrl: '',
   cityUrl: '',
   classType: null,
-    manualDeskStatus: null, // DODANO
+  manualDeskStatus: null,
   airlineName: '',
   destinationCity: '',
   flightNumber: '',
@@ -527,7 +527,7 @@ function CheckInDisplay() {
   const { adImages } = useAdImages();
   const currentTheme = useSeasonalTheme();
 
-    // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
+  // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
   const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
       const res = await fetch(`/api/desk-class/${desk}`);
@@ -538,38 +538,38 @@ function CheckInDisplay() {
     }
   }, []);
 
-    // ── Helper: dohvati ručni status saltera (Open/Close) ──────
+  // ── Helper: dohvati ručni status saltera (Open/Close) ──────
   const fetchDeskStatusOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
-      const res = await fetch(`/api/desk-status/${desk}`);
+      const res = await fetch(`/api/admin/desk-status-override?deskNumber=${desk}`);
+      if (!res.ok) return null;
       const data = await res.json();
-      return data.status;
+      return data.status; // pretpostavka da API vraća { status: 'open'|'closed' }
     } catch {
       return null;
     }
   }, []);
 
   // ── Helper: brisanje ručnog statusa šaltera ──────────────────
-const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
-  try {
-    // Pretpostavka: endpoint prima { action: 'clear' }
-    await fetch(`/api/desk-status/${desk}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'clear' }),
-    });
-    if (DEVELOPMENT) console.log(`✅ Cleared manual override for desk ${desk}`);
-  } catch (err) {
-    console.error(`Failed to clear override for desk ${desk}:`, err);
-  }
-}, []);
+  const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
+    try {
+      await fetch(`/api/admin/desk-status-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deskNumber: desk, action: 'clear' }),
+      });
+      if (DEVELOPMENT) console.log(`✅ Cleared manual override for desk ${desk}`);
+    } catch (err) {
+      console.error(`Failed to clear override for desk ${desk}:`, err);
+    }
+  }, []);
 
   // ── Sync currentFlightRef s aktualnim state-om ──────────────
   useEffect(() => {
     currentFlightRef.current = flightDisplay.flight;
   }, [flightDisplay.flight]);
 
-  // ── ✅ #4: Kiosk Hard Reset (6h) ──────────────────────────
+  // ── Kiosk Hard Reset (6h) ──────────────────────────
   useEffect(() => {
     const id = setTimeout(() => {
       console.log("🔄 Check-in kiosk scheduled hard reset (6h)...");
@@ -635,36 +635,30 @@ const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // ── Helper: airline logo sa cache-om ───────────────────────
-  // ── Helper: airline logo sa cache-om (Lokalni > FlightAware) ───────────────────────
+  // ── Helper: airline logo sa cache-om (Lokalni > FlightAware) ──
   const getAirlineLogoUrl = useCallback(async (flight: EnhancedFlight | null): Promise<string> => {
     if (!flight) return '/airlines/placeholder.jpg';
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
     if (!icao) return '/airlines/placeholder.jpg';
     
-    // Ako je već u cache-u za ovu sesiju, vrati odmah (sprečava ponovno provjeravanje)
     if (logoCacheRef.current.has(icao)) return logoCacheRef.current.get(icao)!;
     
-    // Pomoćna funkcija koja simulira "file_exists" preko browsera
     const checkLocalImage = (src: string): Promise<boolean> =>
       new Promise((resolve) => {
         if (typeof window === 'undefined') return resolve(false);
         const img = new window.Image();
         img.onload = () => resolve(true);
         img.onerror = () => resolve(false);
-        // Timeout od 1s: ako Next.js dev server sporo vraća 404, ne blokiramo dalje
         setTimeout(() => resolve(false), 1000);
         img.src = src;
       });
 
     try {
-      // Provjeravamo .jpg i .png ISTOVREMENO da ne gubimo vrijeme
       const [hasJpg, hasPng] = await Promise.all([
         checkLocalImage(`/airlines/${icao}.jpg`),
         checkLocalImage(`/airlines/${icao}.png`),
       ]);
 
-      // Ako pronađe lokalnu, zapiši u cache i vrati
       if (hasJpg) {
         logoCacheRef.current.set(icao, `/airlines/${icao}.jpg`);
         return `/airlines/${icao}.jpg`;
@@ -674,7 +668,6 @@ const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
         return `/airlines/${icao}.png`;
       }
 
-      // Ako nema lokalno, fallback na FlightAware preko tvog postojećeg helpera
       const url = await getLogoURLWithFallback(icao, flight.AirlineLogoURL);
       logoCacheRef.current.set(icao, url);
       return url;
@@ -696,9 +689,7 @@ const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
   // ── Helper: preload slika za let ───────────────────────────
   const preloadFlightImages = useCallback(
     async (flight: EnhancedFlight): Promise<{ logoUrl: string; cityUrl: string }> => {
-      const [logoUrl] = await Promise.all([
-        getAirlineLogoUrl(flight),
-      ]);
+      const [logoUrl] = await Promise.all([getAirlineLogoUrl(flight)]);
       const cityUrl = getCityImageUrl(flight);
 
       const loads: Promise<void>[] = [];
@@ -720,26 +711,25 @@ const clearDeskOverride = useCallback(async (desk: string): Promise<void> => {
   );
 
   // ── Countdown ───────────────────────────────────────────────
-// Ova funkcija samo računa i postavlja countdowne — bez loadFlights
-const updateCountdowns = useCallback((status: CheckInStatus) => {
-  const now = new Date();
+  const updateCountdowns = useCallback((status: CheckInStatus) => {
+    const now = new Date();
 
-  if (status.status === 'scheduled' && status.checkInOpenTime) {
-    setTimeUntilCheckIn(
-      Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
-    );
-  } else {
-    setTimeUntilCheckIn(null);
-  }
+    if (status.status === 'scheduled' && status.checkInOpenTime) {
+      setTimeUntilCheckIn(
+        Math.max(0, Math.floor((status.checkInOpenTime.getTime() - now.getTime()) / 60_000))
+      );
+    } else {
+      setTimeUntilCheckIn(null);
+    }
 
-  if (status.shouldBeOpen && status.checkInCloseTime) {
-    setTimeUntilClose(
-      Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
-    );
-  } else {
-    setTimeUntilClose(null);
-  }
-}, []);
+    if (status.shouldBeOpen && status.checkInCloseTime) {
+      setTimeUntilClose(
+        Math.max(0, Math.floor((status.checkInCloseTime.getTime() - now.getTime()) / 60_000))
+      );
+    } else {
+      setTimeUntilClose(null);
+    }
+  }, []);
 
   // ── Transition queue processor ──────────────────────────────
   const processTransitionQueue = useCallback(async () => {
@@ -768,21 +758,26 @@ const updateCountdowns = useCallback((status: CheckInStatus) => {
         return;
       }
 
-const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] = await Promise.all([
+      // 1. Prvo paralelno dohvatimo sve podatke osim checkInStatus (jer ovisi o overrideStatus)
+      const [logoCityResult, fallbackClass, overrideClass, overrideStatus] = await Promise.all([
         preloadFlightImages(nextFlight),
         getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
         fetchDeskClassOverride(deskNumberParam),
-        fetchDeskStatusOverride(deskNumberParam), 
-        getEnhancedCheckInStatus(
-          nextFlight.FlightNumber,
-          nextFlight.ScheduledDepartureTime || '',
-          nextFlight.StatusEN || ''
-        ),
+        fetchDeskStatusOverride(deskNumberParam),
       ]);
 
-      // Admin override ima apsolutni prioritet nad automatskom klasom
-      const finalClassType = overrideClass || fallbackClass;
+      const { logoUrl, cityUrl } = logoCityResult;
 
+      // 2. Zatim pozovemo getEnhancedCheckInStatus sa dobijenim overrideStatus
+      const checkInStatus = await getEnhancedCheckInStatus(
+        nextFlight.FlightNumber,
+        nextFlight.ScheduledDepartureTime || '',
+        nextFlight.StatusEN || '',
+    overrideStatus as 'open' | 'closed' | null   // ✅ dodan "as"
+      );
+
+      // Admin override za klasu ima prioritet
+      const finalClassType = overrideClass || fallbackClass;
       const { isCancelled, isDiverted } = checkFlightStatus(nextFlight.StatusEN || '');
 
       if (!isMountedRef.current) return;
@@ -792,7 +787,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         logoUrl,
         cityUrl,
         classType: finalClassType,
-        manualDeskStatus: overrideStatus, 
+        manualDeskStatus: overrideStatus,
         airlineName: nextFlight.AirlineName || '',
         destinationCity: nextFlight.DestinationCityName || '',
         flightNumber: nextFlight.FlightNumber || '',
@@ -800,7 +795,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
         scheduledTime: nextFlight.ScheduledDepartureTime || '',
         estimatedTime: nextFlight.EstimatedDepartureTime || '',
         gateNumber: nextFlight.GateNumber || '',
-        checkInStatus: checkInStatus || EMPTY_DISPLAY.checkInStatus, // Sigurnosni fallback protiv null
+        checkInStatus: checkInStatus || EMPTY_DISPLAY.checkInStatus,
         isCancelled,
         isDiverted,
         flightStatus: nextFlight.StatusEN || '',
@@ -839,17 +834,7 @@ const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, check
   );
 
   // ── loadFlights ─────────────────────────────────────────────
-// ── loadFlights ─────────────────────────────────────────────
-  // Zamijeni cijelu loadFlights funkciju u CheckInDisplay komponenti.
-  //
-  // KLJUČNA PROMJENA:
-  //   Stara verzija je uvijek uzimala future[0] kao currentFlight.
-  //   Nova verzija dohvata SVE Redis override-e jednim pozivom,
-  //   pa iterira kroz future listu i preskače letove čiji je
-  //   CheckInDesk override = '__EMPTY__' (admin ih ugasio).
-  //   Tako se automatski prelazi na sljedeći let (npr. YM152).
-  // ─────────────────────────────────────────────────────────────
-const loadFlights = useCallback(async () => {
+  const loadFlights = useCallback(async () => {
     if (!isMountedRef.current || transitionGuardRef.current) return;
 
     try {
@@ -857,30 +842,24 @@ const loadFlights = useCallback(async () => {
       const now = new Date();
       const today = now.toDateString();
 
-      // ── Dohvati sve Redis override-e jednim pozivom ──────────
+      // Dohvati sve Redis override-e jednim pozivom
       let allOverrides: Record<string, Record<string, string>> = {};
       try {
         const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
         if (res.ok) allOverrides = await res.json();
       } catch {
-        // Redis nedostupan — nastavljamo bez override provjere,
-        // prikazat će se future[0] kao fallback
+        // Redis nedostupan
       }
 
-      // ── NOVA PROVJERA: odbaci override-e od juče ili starije ─
-      // Redis override-i nemaju automatski TTL pa zaostaju i otvaraju
-      // check-in 5+ sati prerano jer parseDepartureTime dobija stari ISO timestamp
+      // Odbaci override-e starije od 12 sati
       const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
-
       for (const flightNum in allOverrides) {
         const ov = allOverrides[flightNum];
         if (ov.ScheduledDepartureTime) {
           let ovDate: Date | null = null;
-
           if (ov.ScheduledDepartureTime.includes('T')) {
             ovDate = new Date(ov.ScheduledDepartureTime);
           } else {
-            // HH:MM format — konstruiši datum za danas
             const [h, m] = ov.ScheduledDepartureTime.split(':').map(Number);
             if (!isNaN(h) && !isNaN(m)) {
               const d = new Date();
@@ -888,14 +867,8 @@ const loadFlights = useCallback(async () => {
               ovDate = d;
             }
           }
-
           if (ovDate && ovDate.getTime() < twelveHoursAgo) {
-            if (DEVELOPMENT) {
-              console.log(
-                `[Override cleanup] Preskačem zaostali override za ${flightNum} ` +
-                `(STD: ${ov.ScheduledDepartureTime}, datum: ${ovDate.toLocaleString()})`
-              );
-            }
+            if (DEVELOPMENT) console.log(`[Override cleanup] Preskačem zaostali override za ${flightNum}`);
             delete allOverrides[flightNum];
           }
         }
@@ -947,24 +920,13 @@ const loadFlights = useCallback(async () => {
           !f.StatusEN?.toLowerCase().includes('poletio')
       );
 
-      // ── Pronađi prvi let koji NIJE blokiran ─────────────────
-      // Let je blokiran ako mu Redis override ima CheckInDesk = '__EMPTY__'
-      // To znači da je admin ručno ugasio check-in za taj let.
-      // U tom slučaju preskočimo ga i gledamo sljedeći u listi.
       let currentFlight: EnhancedFlight | null = null;
-
       for (const f of future) {
         const override = allOverrides[f.FlightNumber];
         if (override?.CheckInDesk === '__EMPTY__') {
-          if (DEVELOPMENT) {
-            console.log(
-              `[CheckIn ${deskNumberParam}] Preskačem ${f.FlightNumber} ` +
-              `(STD: ${f.ScheduledDepartureTime}) — CheckInDesk = __EMPTY__`
-            );
-          }
+          if (DEVELOPMENT) console.log(`[CheckIn ${deskNumberParam}] Preskačem ${f.FlightNumber} — CheckInDesk = __EMPTY__`);
           continue;
         }
-        // Ovaj let nije blokiran — uzimamo ga kao trenutni
         currentFlight = f;
         break;
       }
@@ -982,12 +944,9 @@ const loadFlights = useCallback(async () => {
 
       if (changed) await queueFlightTransition(currentFlight);
 
-      // nextScheduledFlight = sljedeći let u future listi nakon currentFlight
-      // (koristimo future listu, ne filtriranu — da bi se prikazao i sljedeći blokiran)
       const idx = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
       const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
       if (isMountedRef.current) setNextScheduledFlight(next);
-
     } catch (err) {
       if (DEVELOPMENT) console.error('❌ loadFlights error:', err);
       if (isMountedRef.current) {
@@ -998,16 +957,10 @@ const loadFlights = useCallback(async () => {
   }, [deskNumberParam, queueFlightTransition]);
 
   // ── shouldShowCheckIn ───────────────────────────────────────
-  // ── shouldShowCheckIn ───────────────────────────────────────
   const shouldShowCheckIn = useMemo(() => {
-    // 1. RUČNI OVERRIDE IMA APSOLUTNI PRIORITET
     if (flightDisplay.manualDeskStatus === 'open') return true;
     if (flightDisplay.manualDeskStatus === 'closed') return false;
-    
-    // 2. Otkazani/Preusmjereni letovi su uvijek zatvoreni
     if (flightDisplay.isCancelled || flightDisplay.isDiverted) return false;
-    
-    // 3. Ako nema ručnog overridea, koristi automatsku logiku
     return shouldDisplayCheckIn(flightDisplay.checkInStatus);
   }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
@@ -1025,11 +978,9 @@ const loadFlights = useCallback(async () => {
     };
   }, [loadFlights, shouldShowCheckIn]);
 
-    // ── Class Override refresh (Dohvata admin promjene uživo) ──
-  // ── Manual Status Override refresh (Dohvata admin promjene uživo) ──
+  // ── Manual Status Override refresh ─────────────────────────
   useEffect(() => {
     if (!flightDisplay.flight) return;
-    
     const refreshStatus = async () => {
       try {
         const newStatus = await fetchDeskStatusOverride(deskNumberParam);
@@ -1041,33 +992,33 @@ const loadFlights = useCallback(async () => {
         console.error('Status override refresh error:', err);
       }
     };
-    
     refreshStatus();
-    const id = setInterval(refreshStatus, 30_000); // Proverava svakih 30s
+    const id = setInterval(refreshStatus, 30_000);
     return () => clearInterval(id);
   }, [flightDisplay.flight, deskNumberParam, fetchDeskStatusOverride]);
 
-
-  // ── Check-in status refresh svaku minutu ───────────────────
-  useEffect(() => {
-    if (!flightDisplay.flight) return;
-    const refresh = async () => {
-      try {
-        const s = await getEnhancedCheckInStatus(
-          flightDisplay.flight!.FlightNumber,
-          flightDisplay.flight!.ScheduledDepartureTime || '',
-          flightDisplay.flight!.StatusEN || ''
-        );
-        setFlightDisplay((p) => ({ ...p, checkInStatus: s }));
-        updateCountdowns(s);
-      } catch (e) {
-        console.error('Check-in refresh error:', e);
-      }
-    };
-    refresh();
-    const id = setInterval(refresh, CHECKIN_REFRESH_INTERVAL);
-    return () => clearInterval(id);
-  }, [flightDisplay.flight, updateCountdowns]);
+  // ── Check-in status refresh svaku minutu (sa overrideStatus) ──
+// ── Check-in status refresh svaku minutu (sa overrideStatus) ──
+useEffect(() => {
+  if (!flightDisplay.flight) return;
+  const refresh = async () => {
+    try {
+      const s = await getEnhancedCheckInStatus(
+        flightDisplay.flight!.FlightNumber,
+        flightDisplay.flight!.ScheduledDepartureTime || '',
+        flightDisplay.flight!.StatusEN || '',
+        flightDisplay.manualDeskStatus as 'open' | 'closed' | null   // 👈 dodaj as
+      );
+      setFlightDisplay((p) => ({ ...p, checkInStatus: s }));
+      updateCountdowns(s);
+    } catch (e) {
+      console.error('Check-in refresh error:', e);
+    }
+  };
+  refresh();
+  const id = setInterval(refresh, CHECKIN_REFRESH_INTERVAL);
+  return () => clearInterval(id);
+}, [flightDisplay.flight, flightDisplay.manualDeskStatus, updateCountdowns]);
 
   // ── Countdown refresh svaku minutu ─────────────────────────
   useEffect(() => {
@@ -1077,58 +1028,45 @@ const loadFlights = useCallback(async () => {
   }, [flightDisplay.checkInStatus, flightDisplay.flight, updateCountdowns]);
 
   // ── Auto-close timer: osvježi tačno kad istekne STD-30min ──
-useEffect(() => {
-  if (!flightDisplay.flight) return;
-  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-  if (!closeTime) return;
+  useEffect(() => {
+    if (!flightDisplay.flight) return;
+    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+    if (!closeTime) return;
 
-  const msUntilClose = closeTime.getTime() - Date.now();
-  if (msUntilClose <= 0) {
-    // Već je prošlo — odmah refreshaj
-    void loadFlights();
-    return;
-  }
+    const msUntilClose = closeTime.getTime() - Date.now();
+    if (msUntilClose <= 0) {
+      void loadFlights();
+      return;
+    }
 
-  // Postavi timer koji će se okinuti tačno u trenutku zatvaranja
-  const tid = setTimeout(() => {
-    if (isMountedRef.current) void loadFlights();
-  }, msUntilClose);
+    const tid = setTimeout(() => {
+      if (isMountedRef.current) void loadFlights();
+    }, msUntilClose);
+    return () => clearTimeout(tid);
+  }, [flightDisplay.flight?.FlightNumber, flightDisplay.checkInStatus.checkInCloseTime, loadFlights]);
 
-  return () => clearTimeout(tid);
-}, [
-  flightDisplay.flight?.FlightNumber,
-  flightDisplay.checkInStatus.checkInCloseTime,
-  loadFlights,
-]);
+  // ── Auto clear manual override kada check‑in zatvori (STD - 30min) ──
+  useEffect(() => {
+    if (flightDisplay.manualDeskStatus !== 'open') return;
+    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+    if (!closeTime) return;
 
-// ── Auto clear manual override kada check‑in zatvori (STD - 30min) ──
-useEffect(() => {
-  if (flightDisplay.manualDeskStatus !== 'open') return;
-  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-  if (!closeTime) return;
+    const msUntilClose = closeTime.getTime() - Date.now();
+    if (msUntilClose <= 0) {
+      clearDeskOverride(deskNumberParam).then(() => {
+        if (isMountedRef.current) loadFlights();
+      });
+      return;
+    }
 
-  const msUntilClose = closeTime.getTime() - Date.now();
-  if (msUntilClose <= 0) {
-    clearDeskOverride(deskNumberParam).then(() => {
-      if (isMountedRef.current) loadFlights();
-    });
-    return;
-  }
+    const timerId = setTimeout(() => {
+      clearDeskOverride(deskNumberParam).then(() => {
+        if (isMountedRef.current) loadFlights();
+      });
+    }, msUntilClose);
+    return () => clearTimeout(timerId);
+  }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus.checkInCloseTime, deskNumberParam, clearDeskOverride, loadFlights]);
 
-  const timerId = setTimeout(() => {
-    clearDeskOverride(deskNumberParam).then(() => {
-      if (isMountedRef.current) loadFlights();
-    });
-  }, msUntilClose);
-
-  return () => clearTimeout(timerId);
-}, [
-  flightDisplay.manualDeskStatus,
-  flightDisplay.checkInStatus.checkInCloseTime,
-  deskNumberParam,
-  clearDeskOverride,
-  loadFlights,
-]);
   // ── checkin-status-updated event ───────────────────────────
   useEffect(() => {
     const handler = (e: CustomEvent) => {
