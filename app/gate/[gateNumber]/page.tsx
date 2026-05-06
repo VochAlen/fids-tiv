@@ -75,13 +75,19 @@ const AirlineLogo = memo(function AirlineLogo(
 const parseDepartureTime = (t: string): Date | null => {
   if (!t) return null;
   try {
-    if (t.includes('T')) { const d = new Date(t); if (!isNaN(d.getTime())) return d; }
+    if (t.includes('T')) {
+      const d = new Date(t);
+      return isNaN(d.getTime()) ? null : d;
+    }
     const [h, m] = t.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
-    const d = new Date(); d.setHours(h, m, 0, 0);
-    if (Date.now() - d.getTime() > 6 * 60 * 60 * 1000) d.setDate(d.getDate() + 1);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    // NE dodajemo dan više – to je radio pogrešnu stvar
     return d;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 };
 
 const formatTimeRemaining = (min: number): string => {
@@ -309,6 +315,7 @@ const loadFlights = useCallback(async () => {
     console.error('Gate load error:', err);
     if (isMountedRef.current) setLoading(false);
   }
+  
 }, [gateNumber, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
   useEffect(() => {
@@ -340,7 +347,13 @@ useEffect(() => {
   return () => {
     if (stdSwitchTimerRef.current) clearTimeout(stdSwitchTimerRef.current);
   };
-}, [display.flight, loadFlights]);
+}, [
+  display.flight,  // ← dodato
+  display.flight?.EstimatedDepartureTime,
+  display.flight?.ScheduledDepartureTime,
+  display.flight?.FlightNumber,
+  loadFlights
+]);
 
   useEffect(() => {
     const poll = async () => {
