@@ -527,6 +527,22 @@ function CheckInDisplay() {
   const { adImages } = useAdImages();
   const currentTheme = useSeasonalTheme();
 
+  // ⭐ BRITISH AIRWAYS SPECIFIČNE SLIKE UMJESTO REKLAMA
+  const effectiveAdImages = useMemo(() => {
+    const flight = flightDisplay.flight;
+    const flightNumber = flight?.FlightNumber || '';
+    if (flightNumber.startsWith('BA')) {
+      const desks = flight?.CheckInDesk?.split(',').map(d => d.trim()) ?? [];
+      const idx = desks.indexOf(deskNumberParam);
+      if (idx !== -1) {
+        const baImages = ['/british/image1.jpg', '/british/image2.jpg'];
+        const selectedImage = baImages[idx % baImages.length];
+        return [selectedImage];   // niz s jednom slikom – neće rotirati
+      }
+    }
+    return adImages; // inače originalne reklame
+  }, [flightDisplay.flight, deskNumberParam, adImages]);
+
   // ── Helper: dohvati ručno zadanu klasu saltera ─────────────
   const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
@@ -773,7 +789,7 @@ function CheckInDisplay() {
         nextFlight.FlightNumber,
         nextFlight.ScheduledDepartureTime || '',
         nextFlight.StatusEN || '',
-    overrideStatus as 'open' | 'closed' | null   // ✅ dodan "as"
+        overrideStatus as 'open' | 'closed' | null
       );
 
       // Admin override za klasu ima prioritet
@@ -911,28 +927,15 @@ function CheckInDisplay() {
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
-      // const future = sorted.filter(
-      //   (f) =>
-      //     f.isToday &&
-      //     f.departureTime > now &&
-      //     !f.StatusEN?.toLowerCase().includes('cancelled') &&
-      //     !f.StatusEN?.toLowerCase().includes('departed') &&
-      //     !f.StatusEN?.toLowerCase().includes('poletio')
-      // );
       const future = sorted.filter(
-  (f) =>
-    f.isToday &&
-    f.departureTime > now &&                                  // polazak u budućnosti
-    (f.departureTime.getTime() - 30 * 60 * 1000) > now.getTime() && // check‑in nije zatvoren (više od 30 min do polaska)
-    !f.StatusEN?.toLowerCase().includes('cancelled') &&
-    !f.StatusEN?.toLowerCase().includes('departed') &&
-    !f.StatusEN?.toLowerCase().includes('poletio')
-);
-// Let koji je ušao u STD – 30 minuta više ne ispunjava uslov (departureTime - 30 min) > now, pa ne ulazi u future.
-
-// Kada nema letova u future, currentFlight ostaje null – ekran prelazi u inactive stanje (prikazuje "No flights...").
-
-// Ako admin pritisne FORCE OPEN, override se postavlja, ali pošto zatvorenog leta nema u listi, sistem će uzeti prvi sljedeći let (ako postoji) ili ostati neaktivan. Time se izbjegava prikazivanje leta čiji je check‑in već završen.
+        (f) =>
+          f.isToday &&
+          f.departureTime > now &&
+          (f.departureTime.getTime() - 30 * 60 * 1000) > now.getTime() &&
+          !f.StatusEN?.toLowerCase().includes('cancelled') &&
+          !f.StatusEN?.toLowerCase().includes('departed') &&
+          !f.StatusEN?.toLowerCase().includes('poletio')
+      );
 
       let currentFlight: EnhancedFlight | null = null;
       for (const f of future) {
@@ -1012,27 +1015,26 @@ function CheckInDisplay() {
   }, [flightDisplay.flight, deskNumberParam, fetchDeskStatusOverride]);
 
   // ── Check-in status refresh svaku minutu (sa overrideStatus) ──
-// ── Check-in status refresh svaku minutu (sa overrideStatus) ──
-useEffect(() => {
-  if (!flightDisplay.flight) return;
-  const refresh = async () => {
-    try {
-      const s = await getEnhancedCheckInStatus(
-        flightDisplay.flight!.FlightNumber,
-        flightDisplay.flight!.ScheduledDepartureTime || '',
-        flightDisplay.flight!.StatusEN || '',
-        flightDisplay.manualDeskStatus as 'open' | 'closed' | null   // 👈 dodaj as
-      );
-      setFlightDisplay((p) => ({ ...p, checkInStatus: s }));
-      updateCountdowns(s);
-    } catch (e) {
-      console.error('Check-in refresh error:', e);
-    }
-  };
-  refresh();
-  const id = setInterval(refresh, CHECKIN_REFRESH_INTERVAL);
-  return () => clearInterval(id);
-}, [flightDisplay.flight, flightDisplay.manualDeskStatus, updateCountdowns]);
+  useEffect(() => {
+    if (!flightDisplay.flight) return;
+    const refresh = async () => {
+      try {
+        const s = await getEnhancedCheckInStatus(
+          flightDisplay.flight!.FlightNumber,
+          flightDisplay.flight!.ScheduledDepartureTime || '',
+          flightDisplay.flight!.StatusEN || '',
+          flightDisplay.manualDeskStatus as 'open' | 'closed' | null
+        );
+        setFlightDisplay((p) => ({ ...p, checkInStatus: s }));
+        updateCountdowns(s);
+      } catch (e) {
+        console.error('Check-in refresh error:', e);
+      }
+    };
+    refresh();
+    const id = setInterval(refresh, CHECKIN_REFRESH_INTERVAL);
+    return () => clearInterval(id);
+  }, [flightDisplay.flight, flightDisplay.manualDeskStatus, updateCountdowns]);
 
   // ── Countdown refresh svaku minutu ─────────────────────────
   useEffect(() => {
@@ -1092,21 +1094,21 @@ useEffect(() => {
 
   // ── Ad crossfade ────────────────────────────────────────────
   useEffect(() => {
-    if (adImages.length < 2) return;
+    if (effectiveAdImages.length < 2) return; // za BA neće rotirati
     const id = setInterval(() => {
       setIsAdTransitioning(true);
-      const next = (currentAdIndex + 2) % adImages.length;
-      if (adImages[next]) void preloadImage(adImages[next]);
+      const next = (currentAdIndex + 2) % effectiveAdImages.length;
+      if (effectiveAdImages[next]) void preloadImage(effectiveAdImages[next]);
       setTimeout(() => {
-        setNextAdIndex((currentAdIndex + 1) % adImages.length);
+        setNextAdIndex((currentAdIndex + 1) % effectiveAdImages.length);
         setTimeout(() => {
-          setCurrentAdIndex((p) => (p + 1) % adImages.length);
+          setCurrentAdIndex((p) => (p + 1) % effectiveAdImages.length);
           setIsAdTransitioning(false);
         }, 300);
       }, 100);
     }, AD_SWITCH_INTERVAL);
     return () => clearInterval(id);
-  }, [adImages, currentAdIndex]);
+  }, [effectiveAdImages, currentAdIndex]);
 
   // ── Debug info update ───────────────────────────────────────
   useEffect(() => {
@@ -1221,7 +1223,6 @@ useEffect(() => {
                 <div>Upcoming flight: {flightDisplay.flightNumber} to {flightDisplay.destinationCity}</div>
                 <br />
                 <span className="text-yellow-300">Scheduled: {flightDisplay.scheduledTime}</span>
-                {/* <div className="text-sm text-white/50 mt-2">(Check-in closed, waiting for departure)</div> */}
               </div>
             ) : null}
 
@@ -1303,7 +1304,7 @@ useEffect(() => {
             <div className="flex flex-col items-center mb-4">
               <AirlineLogo logoUrl={flightDisplay.logoUrl} airlineName={flightDisplay.airlineName} portrait />
 
-                    {flightDisplay.classType && (
+              {flightDisplay.classType && (
                 <div className="w-full max-w-[90vw] mb-3">
                   <div
                     className={`rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
@@ -1324,23 +1325,21 @@ useEffect(() => {
               )}
 
               <div className="text-center w-full">
-                {/* PORTRAIT BOJA BROJA LETA + DESTINACIJA */}
-       <div className="text-[13rem] font-black leading-tight flight-number-transition">
-  {(() => {
-    const flightNum = flightDisplay.flightNumber || '';
-    const iataCode = flightNum.substring(0, 2);
-    const restNumber = flightNum.substring(2);
-    
-    return (
-      <>
-        <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
-          {iataCode}
-        </span>
-        <span className="text-yellow-500">{restNumber}</span>
-      </>
-    );
-  })()}
-</div>
+                <div className="text-[13rem] font-black leading-tight flight-number-transition">
+                  {(() => {
+                    const flightNum = flightDisplay.flightNumber || '';
+                    const iataCode = flightNum.substring(0, 2);
+                    const restNumber = flightNum.substring(2);
+                    return (
+                      <>
+                        <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
+                          {iataCode}
+                        </span>
+                        <span className="text-yellow-500">{restNumber}</span>
+                      </>
+                    );
+                  })()}
+                </div>
               </div>
             </div>
 
@@ -1361,28 +1360,27 @@ useEffect(() => {
                 destinationCity={flightDisplay.destinationCity}
                 portrait
               />
-<div className="flex-1 text-right min-w-0">
-  <div
-    className="font-bold text-white mb-1 leading-tight city-name-transition"
-    style={{
-      fontSize:
-        flightDisplay.destinationCity.length > 14
-          ? '4rem'
-          : flightDisplay.destinationCity.length > 11
-          ? '5.5rem'
-          : flightDisplay.destinationCity.length > 8
-          ? '7rem'
-          : '8.5rem',
-      wordBreak: 'break-word',
-      overflowWrap: 'anywhere',
-      hyphens: 'auto',
-    }}
-  >
-    {flightDisplay.destinationCity}
-  </div>
+              <div className="flex-1 text-right min-w-0">
+                <div
+                  className="font-bold text-white mb-1 leading-tight city-name-transition"
+                  style={{
+                    fontSize:
+                      flightDisplay.destinationCity.length > 14
+                        ? '4rem'
+                        : flightDisplay.destinationCity.length > 11
+                        ? '5.5rem'
+                        : flightDisplay.destinationCity.length > 8
+                        ? '7rem'
+                        : '8.5rem',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
+                    hyphens: 'auto',
+                  }}
+                >
+                  {flightDisplay.destinationCity}
+                </div>
 
-
-<div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
+                <div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
                   <span className="text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold">
                     Airport IATA code:
                   </span>
@@ -1403,11 +1401,10 @@ useEffect(() => {
 
             <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
               <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-         <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
+              <div className="text-[1.2rem] font-bold text-yellow-300 text-center">
                 ⚡ Power banks: CABIN ONLY (max 2). No recharging or use during flight. Protect terminals.{' '}
                 <span className="text-yellow-400/80 ml-1">(valid from 27.03.2026.)</span>
               </div>
-
             </div>
           </div>
 
@@ -1446,44 +1443,45 @@ useEffect(() => {
             </div>
           </div>
 
+          {/* Ad Banner - sada koristi effectiveAdImages */}
           <AdBanner
-            adImages={adImages}
+            adImages={effectiveAdImages}
             currentIndex={currentAdIndex}
             nextIndex={nextAdIndex}
             isTransitioning={isAdTransitioning}
           />
-          {/* ── NEXT FLIGHT INFO (GATE style) ── */}
-<div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
-  <div className="flex items-center justify-between">
-    <div className="flex items-center gap-4">
-      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">NEXT FLIGHT</span>
-      {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
-        <>
-          <span className="text-2xl font-bold text-yellow-400">{nextScheduledFlight.FlightNumber}</span>
-          <span className="text-lg text-white/60">
-            {nextScheduledFlight.DestinationAirportCode} — {nextScheduledFlight.DestinationCityName}
-          </span>
-          <div className="flex items-center gap-1">
-            <Clock className="w-4 h-4 text-slate-400" />
-            <span className="text-xl font-mono font-bold text-cyan-400">{nextScheduledFlight.ScheduledDepartureTime}</span>
-          </div>
-        </>
-      ) : (
-        <span className="text-sm text-white/40">No upcoming flights</span>
-      )}
-    </div>
-    <div className="flex items-center gap-3 text-xs text-slate-500">
-      <span>LAST UPDATE {lastUpdate}</span>
-      <span className="opacity-35">|</span>
-      <span>NEXT UPDATE ...</span>
-    </div>
-  </div>
-</div>
 
+          {/* NEXT FLIGHT INFO */}
+          <div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">NEXT FLIGHT</span>
+                {nextScheduledFlight && !nextScheduledFlight.StatusEN?.toLowerCase().includes('cancelled') ? (
+                  <>
+                    <span className="text-2xl font-bold text-yellow-400">{nextScheduledFlight.FlightNumber}</span>
+                    <span className="text-lg text-white/60">
+                      {nextScheduledFlight.DestinationAirportCode} — {nextScheduledFlight.DestinationCityName}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Clock className="w-4 h-4 text-slate-400" />
+                      <span className="text-xl font-mono font-bold text-cyan-400">{nextScheduledFlight.ScheduledDepartureTime}</span>
+                    </div>
+                  </>
+                ) : (
+                  <span className="text-sm text-white/40">No upcoming flights</span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 text-xs text-slate-500">
+                <span>LAST UPDATE {lastUpdate}</span>
+                <span className="opacity-35">|</span>
+                <span>NEXT UPDATE ...</span>
+              </div>
+            </div>
+          </div>
 
           <div className="flex-shrink-0 flex justify-center items-center space-x-2 text-xs font-inter py-1">
             <Image
-              src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAACXBIWXMAAAsTAAALEwEAmpwYAAACz0lEQVR4nO2YPWhUQRDHYzSRREHUiILRxspCBIUYC20sxMJSEtTC1lYJfqWwUGOTIGiIYieIiBiEoI1WgoWFoBIRRBD8ACV+gaA5Nf5k4hiGx91l571971K8Hxy8e7s7O/+73Z3ZaWoqKSnJDDAf2AocB24Cz4DPwE/9yPO4tkmfbqB5Lji+BjgLvMXPH2AA6GwE4xuAS0CF7FSAEaCjKOf3Ap+Iz0egN0/HW4DL5M9FmSu28+3AHYrjtswZ85cv0vn/3AVaYwgoYtnUYiSr8/toPD1pnV8PtDNae/6deP4jVs/5usJwmggbI0hV4xjwSFOKUCZdEVvTg7yYPolmAhc5xA57EzNvbHAHagL7ZOibm8vA6KAHUrNLLTOQEouchgOhKESBZm9MkxvdA7wP7evkaImDUa7WKjd0hffFzI0TAeFYBaudKDgKehghxp8o17CzTjRdTwESIAPf5nxi/yjzvAv5EFDBZhICxeslgRgHfc19C+uqA+S5R96Xpvj+DgHe5b2J99VXSEfNuh1lKX4C1eW7i0QgChHvAPPP+gmm7rxHfy9UiApnlYOJa+sK0HXa7D30hArojCvgGrDTt24Apk2F62RwioLna+Z1SgPBApotpHyQdr+ySnE2EVMxipsiHjG3JWp+nEHAqyHmdpNMZD2TfLAZO1Gj/Aay39rcAvx32ZfzKYAE6iZT7YvIQWGDsn3GMPe9yXidYlsOlvt/ybwWeBIyR1HypW4BO0htZgCzLjcb+Ji2/72NPKufNJFKrjMljW3EDTtbpO5TJeVNalFplTE4n7D+q0mfM7pmsItiji/hl77fAhkRguxWlLpoQ0RL5ZJJY0GbsS71InC6y8ZrwZ59uR8auJHf7cnO8St10OGU+Y/kCtHvd6kz/Zs8AAAAASUVORK5CYII="
+              src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAACXBIWXMAAAsTAAALEwEAmpwYAAACz0lEQVR4nO2YPWhUQRDHYzSRBEHUiILRxspCBIUYC20sxMJSEtTC1lYJfqWwUGOTIGiIYieIiBiEoI1WgoWFoBIRRBD8ACV+gaA5Nf5k4hiGx91l571971K8Hxy8e7s7O/+73Z3ZaWoqKSnJDDAf2AocB24Cz4DPwE/9yPO4tkmfbqB5Lji+BjgLvMXPH2AA6GwE4xuAS0CF7FSAEaCjKOf3Ap+Iz0egN0/HW4DL5M9FmSu28+3AHYrjtswZ85cv0vn/3AVaYwgoYtnUYiSr8/toPD1pnV8PtDNae/6deP4jVs/5usJwmggbI0hV4xjwSFOKUCZdEVvTg7yYPolmAhc5xA57EzNvbHAHagL7ZOibm8vA6KAHUrNLLTOQEouchgOhKESBZm9MkxvdA7wP7evkaImDUa7WKjd0hffFzI0TAeFYBaudKDgKehghxp8o17CzTjRdTwESIAPf5nxi/yjzvAv5EFDBZhICxeslgRgHfc19C+uqA+S5R96Xpvj+DgHe5b2J99VXSEfNuh1lKX4C1eW7i0QgChHvAPPP+gmm7rxHfy9UiApnlYOJa+sK0HXa7D30hArojCvgGrDTt24Apk2F62RwioLna+Z1SgPBApotpHyQdr+ySnE2EVMxipsiHjG3JWp+nEHAqyHmdpNMZD2TfLAZO1Gj/Aay39rcAvx32ZfzKYAE6iZT7YvIQWGDsn3GMPe9yXidYlsOlvt/ybwWeBIyR1HypW4BO0htZgCzLjcb+Ji2/72NPKufNJFKrjMljW3EDTtbpO5TJeVNalFplTE4n7D+q0mfM7pmsItiji/hl77fAhkRguxWlLpoQ0RL5ZJJY0GbsS71InC6y8ZrwZ59uR8auJHf7cnO8St10OGU+Y/kCtHvd6kz/Zs8AAAAASUVORK5CYII="
               alt="nextjs"
               width={20}
               height={20}
@@ -1535,7 +1533,6 @@ useEffect(() => {
       )}
 
       <div className="h-full grid grid-cols-12 gap-8 p-3 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
-
         <div className="col-span-7 flex flex-col justify-between">
           <div className="mb-8">
             <div className="flex items-center gap-6 mb-6">
@@ -1557,8 +1554,6 @@ useEffect(() => {
                 portrait={false}
               />
               <div className="flex-1">
-                
-                {/* DODATO: Klasa saltera za Landscape rezim */}
                 {flightDisplay.classType && (
                   <div className="mb-4">
                     <div
