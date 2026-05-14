@@ -1174,7 +1174,6 @@
 //     </div>
 //   );
 // }
-
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
@@ -1199,8 +1198,7 @@ import type { Flight } from '@/types/flight';
 // Konstante
 // ─────────────────────────────────────────────
 
-const isDevelopment = process.env.NODE_ENV === 'development';
-const API_PREFIX = '/api/test'; // UVIJEK test za verziju 2
+const API_PREFIX = '/api/test';
 
 const DESKS = [
   ...Array.from({ length: 12 }, (_, i) => String(i + 1)),
@@ -1210,7 +1208,16 @@ const GATES = ['2', '3', '4', '5', '6', '21', '22', '23', '24', '25', '26', '27'
 
 const REFRESH_INTERVAL_MS = 60_000;
 const TOUCH_TIMEOUT_MS = 8000;
-const MIN_TOUCH_TARGET = 44; // px - Apple minimum
+
+// Klase putnika
+const PASSENGER_CLASSES = [
+  { key: 'ECONOMY',  label: 'Economy',  emoji: '💺', dark: 'bg-blue-600 border-blue-400 text-white',   light: 'bg-blue-600 border-blue-400 text-white'   },
+  { key: 'BUSINESS', label: 'Business', emoji: '💼', dark: 'bg-orange-600 border-orange-400 text-white', light: 'bg-orange-600 border-orange-400 text-white' },
+  { key: 'PREMIUM',  label: 'Premium',  emoji: '👑', dark: 'bg-purple-600 border-purple-400 text-white', light: 'bg-purple-600 border-purple-400 text-white' },
+  { key: 'PRIORITY', label: 'Priority', emoji: '⭐', dark: 'bg-green-600 border-green-400 text-white',  light: 'bg-green-600 border-green-400 text-white'  },
+] as const;
+
+type ClassKey = typeof PASSENGER_CLASSES[number]['key'];
 
 // ─────────────────────────────────────────────
 // Tipovi
@@ -1223,6 +1230,7 @@ interface Assignment {
   destinationCity: string;
   scheduledTime: string;
   assignedAt: string;
+  classType: string | null;
 }
 
 type TabType = 'checkin' | 'gate';
@@ -1235,7 +1243,7 @@ interface PendingOverride {
 }
 
 // ─────────────────────────────────────────────
-// Helper funkcije
+// Helpers
 // ─────────────────────────────────────────────
 
 const isDeparted = (flight: Flight): boolean => {
@@ -1249,10 +1257,24 @@ const sortBySTD = (a: Flight, b: Flight) =>
 const processFlights = (departures: Flight[]): Flight[] =>
   departures.filter(f => !isDeparted(f)).sort(sortBySTD);
 
+const classBadgeStyle = (classType: string | null, isDark: boolean): string => {
+  const found = PASSENGER_CLASSES.find(c => c.key === classType);
+  if (!found) return isDark ? 'bg-white/10 text-white/40' : 'bg-gray-200 text-gray-500';
+  return isDark ? found.dark : found.light;
+};
+
 // ─────────────────────────────────────────────
-// Komponenta: TouchFeedback (haptic like)
+// TouchFeedback
 // ─────────────────────────────────────────────
-const TouchFeedback = ({ children, onTap, disabled }: { children: React.ReactNode; onTap: () => void; disabled?: boolean }) => {
+const TouchFeedback = ({
+  children,
+  onTap,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onTap: () => void;
+  disabled?: boolean;
+}) => {
   const [ripple, setRipple] = useState(false);
 
   const handleTouch = (e: React.TouchEvent) => {
@@ -1272,7 +1294,10 @@ const TouchFeedback = ({ children, onTap, disabled }: { children: React.ReactNod
       style={{ touchAction: 'manipulation' }}
     >
       {ripple && (
-        <div className="absolute inset-0 bg-white/20 rounded-xl animate-ping" style={{ animationDuration: '300ms' }} />
+        <div
+          className="absolute inset-0 bg-white/20 rounded-xl animate-ping"
+          style={{ animationDuration: '300ms' }}
+        />
       )}
       {children}
     </div>
@@ -1280,7 +1305,7 @@ const TouchFeedback = ({ children, onTap, disabled }: { children: React.ReactNod
 };
 
 // ─────────────────────────────────────────────
-// Komponenta: ResourceCell (povećan za touch)
+// ResourceCell
 // ─────────────────────────────────────────────
 interface ResourceCellProps {
   id: string;
@@ -1294,12 +1319,12 @@ interface ResourceCellProps {
 const ResourceCell: React.FC<ResourceCellProps> = ({
   id, occupied, type, flightReady, onAssign, isDark,
 }) => {
+  const baseClasses =
+    'relative rounded-xl border text-center cursor-pointer transition-all duration-200 touch-manipulation select-none min-h-[70px] flex flex-col items-center justify-center';
+
   let variantClasses = '';
   let textColor = '';
   let subTextColor = '';
-
-  // Touch optimizacija - minimalna visina
-  const baseClasses = 'relative rounded-xl border text-center cursor-pointer transition-all duration-200 touch-manipulation select-none min-h-[70px] flex flex-col items-center justify-center';
 
   if (isDark) {
     if (occupied) {
@@ -1307,15 +1332,17 @@ const ResourceCell: React.FC<ResourceCellProps> = ({
       textColor = 'text-red-300';
       subTextColor = 'text-red-400/80';
     } else if (flightReady) {
-      variantClasses = type === 'desk'
-        ? 'bg-sky-500/30 border-sky-400/70 shadow-lg shadow-sky-500/30 animate-pulse-subtle'
-        : 'bg-emerald-500/30 border-emerald-400/70 shadow-lg shadow-emerald-500/30 animate-pulse-subtle';
+      variantClasses =
+        type === 'desk'
+          ? 'bg-sky-500/30 border-sky-400/70 shadow-lg shadow-sky-500/30 animate-pulse-subtle'
+          : 'bg-emerald-500/30 border-emerald-400/70 shadow-lg shadow-emerald-500/30 animate-pulse-subtle';
       textColor = type === 'desk' ? 'text-sky-200' : 'text-emerald-200';
       subTextColor = 'text-white/70';
     } else {
-      variantClasses = type === 'desk'
-        ? 'bg-sky-500/10 border-sky-500/30'
-        : 'bg-emerald-500/10 border-emerald-500/30';
+      variantClasses =
+        type === 'desk'
+          ? 'bg-sky-500/10 border-sky-500/30'
+          : 'bg-emerald-500/10 border-emerald-500/30';
       textColor = type === 'desk' ? 'text-sky-400/80' : 'text-emerald-400/80';
       subTextColor = 'text-white/30';
     }
@@ -1325,15 +1352,17 @@ const ResourceCell: React.FC<ResourceCellProps> = ({
       textColor = 'text-red-900';
       subTextColor = 'text-red-800';
     } else if (flightReady) {
-      variantClasses = type === 'desk'
-        ? 'bg-sky-300 border-sky-600 shadow-lg'
-        : 'bg-emerald-300 border-emerald-600 shadow-lg';
+      variantClasses =
+        type === 'desk'
+          ? 'bg-sky-300 border-sky-600 shadow-lg'
+          : 'bg-emerald-300 border-emerald-600 shadow-lg';
       textColor = type === 'desk' ? 'text-sky-900' : 'text-emerald-900';
       subTextColor = 'text-gray-800';
     } else {
-      variantClasses = type === 'desk'
-        ? 'bg-sky-100 border-sky-300'
-        : 'bg-emerald-100 border-emerald-300';
+      variantClasses =
+        type === 'desk'
+          ? 'bg-sky-100 border-sky-300'
+          : 'bg-emerald-100 border-emerald-300';
       textColor = type === 'desk' ? 'text-sky-800' : 'text-emerald-800';
       subTextColor = 'text-gray-600';
     }
@@ -1343,11 +1372,14 @@ const ResourceCell: React.FC<ResourceCellProps> = ({
     <TouchFeedback onTap={onAssign} disabled={!!occupied}>
       <div className={`${baseClasses} ${variantClasses}`} style={{ padding: '12px 4px' }}>
         {flightReady && !occupied && (
-          <div className={`absolute inset-0 rounded-xl opacity-40 animate-ping ${type === 'desk' ? 'bg-sky-400' : 'bg-emerald-400'}`} style={{ animationDuration: '1.5s' }} />
+          <div
+            className={`absolute inset-0 rounded-xl opacity-40 animate-ping ${
+              type === 'desk' ? 'bg-sky-400' : 'bg-emerald-400'
+            }`}
+            style={{ animationDuration: '1.5s' }}
+          />
         )}
-        <div className={`relative text-xl font-black leading-none ${textColor}`}>
-          {id}
-        </div>
+        <div className={`relative text-xl font-black leading-none ${textColor}`}>{id}</div>
         <div className={`relative text-[10px] mt-1.5 font-mono truncate max-w-full px-1 ${subTextColor}`}>
           {occupied ? occupied.flightNumber : flightReady ? '📱 TAPNI' : '⚫'}
         </div>
@@ -1360,7 +1392,7 @@ const ResourceCell: React.FC<ResourceCellProps> = ({
 };
 
 // ─────────────────────────────────────────────
-// Komponenta: FlightRow (povećan za touch)
+// FlightRow
 // ─────────────────────────────────────────────
 interface FlightRowProps {
   flight: Flight;
@@ -1373,7 +1405,8 @@ interface FlightRowProps {
 const FlightRow: React.FC<FlightRowProps> = ({
   flight, assigned, selected, onSelect, isDark,
 }) => {
-  let containerClasses = 'cursor-pointer rounded-xl border transition-all duration-150 select-none relative overflow-hidden min-h-[85px] ';
+  let containerClasses =
+    'cursor-pointer rounded-xl border transition-all duration-150 select-none relative overflow-hidden min-h-[85px] ';
   let flightNumberColor = '';
   let timeColor = '';
   let destColor = '';
@@ -1381,7 +1414,8 @@ const FlightRow: React.FC<FlightRowProps> = ({
 
   if (isDark) {
     if (selected) {
-      containerClasses += 'ring-2 ring-amber-400 bg-amber-500/20 border-amber-400/70 shadow-lg shadow-amber-500/30';
+      containerClasses +=
+        'ring-2 ring-amber-400 bg-amber-500/20 border-amber-400/70 shadow-lg shadow-amber-500/30';
       flightNumberColor = 'text-amber-200';
       timeColor = 'text-amber-400/80';
       destColor = 'text-amber-300/90';
@@ -1424,7 +1458,9 @@ const FlightRow: React.FC<FlightRowProps> = ({
   return (
     <TouchFeedback onTap={onSelect}>
       <div className={containerClasses} style={{ padding: '12px 16px' }}>
-        {selected && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-amber-400 rounded-l-xl" />}
+        {selected && (
+          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-amber-400 rounded-l-xl" />
+        )}
         <div className="flex items-center justify-between gap-3">
           <span className={`font-mono font-bold text-base tracking-tight ${flightNumberColor}`}>
             {flight.FlightNumber}
@@ -1438,9 +1474,7 @@ const FlightRow: React.FC<FlightRowProps> = ({
           {flight.DestinationCityName || flight.DestinationAirportCode}
         </div>
         <div className="flex items-center justify-between mt-1.5">
-          <span className={`text-[11px] truncate ${airlineColor}`}>
-            {flight.AirlineName}
-          </span>
+          <span className={`text-[11px] truncate ${airlineColor}`}>{flight.AirlineName}</span>
           {selected && (
             <span className="text-[11px] font-bold text-amber-900 bg-amber-300 px-2.5 py-1 rounded-full flex-shrink-0 shadow-sm">
               ✓ ODABRAN
@@ -1458,56 +1492,157 @@ const FlightRow: React.FC<FlightRowProps> = ({
 };
 
 // ─────────────────────────────────────────────
-// Komponenta: AssignmentCard
+// AssignmentCard — sa selektorom klase
 // ─────────────────────────────────────────────
-const AssignmentCard: React.FC<{ a: Assignment; type: 'desk' | 'gate'; onRemove: () => void; isDark: boolean }> = ({ a, type, onRemove, isDark }) => (
-  <div className={`
-    flex justify-between items-center rounded-xl border p-3 min-h-[75px]
-    ${type === 'desk'
-      ? isDark ? 'bg-sky-500/10 border-sky-500/30' : 'bg-sky-100 border-sky-400'
-      : isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-100 border-emerald-400'
-    }
-  `}>
-    <div className="min-w-0 flex-1">
-      <div className={`text-xs font-bold tracking-wider mb-1 ${type === 'desk' ? (isDark ? 'text-sky-400' : 'text-sky-800') : (isDark ? 'text-emerald-400' : 'text-emerald-800')}`}>
-        {type === 'desk' ? 'ŠALTER' : 'GATE'} {a.resourceId}
+interface AssignmentCardProps {
+  a: Assignment;
+  type: 'desk' | 'gate';
+  onRemove: () => void;
+  onSetClass: (classType: string | null) => void;
+  isDark: boolean;
+}
+
+const AssignmentCard: React.FC<AssignmentCardProps> = ({
+  a, type, onRemove, onSetClass, isDark,
+}) => {
+  const borderColor =
+    type === 'desk'
+      ? isDark ? 'bg-sky-500/10 border-sky-500/30' : 'bg-sky-50 border-sky-300'
+      : isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-50 border-emerald-300';
+
+  const labelColor =
+    type === 'desk'
+      ? isDark ? 'text-sky-400' : 'text-sky-800'
+      : isDark ? 'text-emerald-400' : 'text-emerald-800';
+
+  return (
+    <div className={`rounded-xl border p-4 ${borderColor}`}>
+      {/* Gornji red: info + brisanje */}
+      <div className="flex items-start justify-between gap-2 mb-4">
+        <div className="min-w-0">
+          <div className={`text-xs font-bold tracking-wider mb-1 ${labelColor}`}>
+            {type === 'desk' ? 'ŠALTER' : 'GATE'} {a.resourceId}
+          </div>
+          <div className={`font-mono font-bold text-base leading-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
+            {a.flightNumber}
+          </div>
+          <div className={`text-xs mt-0.5 truncate ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
+            {a.destinationCity} · {a.scheduledTime}
+          </div>
+          {/* Trenutna klasa badge */}
+          {a.classType && (
+            <span
+              className={`inline-block mt-2 text-[10px] font-bold px-2.5 py-0.5 rounded-full ${classBadgeStyle(a.classType, isDark)}`}
+            >
+              {a.classType}
+            </span>
+          )}
+        </div>
+        <TouchFeedback onTap={onRemove}>
+          <button className="p-2 rounded-lg text-gray-400 hover:text-red-500 transition-colors flex-shrink-0">
+            <Trash2 size={16} />
+          </button>
+        </TouchFeedback>
       </div>
-      <div className={`font-mono font-bold text-base ${isDark ? 'text-white' : 'text-gray-900'}`}>
-        {a.flightNumber}
+
+      {/* ── Selektor klase ── */}
+      <div className={`text-[10px] font-bold tracking-wider uppercase mb-2 ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
+        Klasa putnika
       </div>
-      <div className={`text-xs truncate ${isDark ? 'text-white/50' : 'text-gray-600'}`}>
-        {a.destinationCity} · {a.scheduledTime}
+      <div className="grid grid-cols-4 gap-2">
+        {PASSENGER_CLASSES.map(({ key, label, emoji }) => {
+          const isActive = a.classType === key;
+          return (
+            <TouchFeedback key={key} onTap={() => onSetClass(isActive ? null : key)}>
+              <button
+                className={`w-full py-3 rounded-xl border-2 text-center transition-all ${
+                  isActive
+                    ? isDark
+                      ? PASSENGER_CLASSES.find(c => c.key === key)!.dark
+                      : PASSENGER_CLASSES.find(c => c.key === key)!.light
+                    : isDark
+                      ? 'bg-white/5 border-white/15 text-white/50'
+                      : 'bg-white border-gray-200 text-gray-400'
+                }`}
+              >
+                <div className="text-xl leading-none">{emoji}</div>
+                <div className="text-[11px] font-semibold mt-1 leading-tight">{label}</div>
+              </button>
+            </TouchFeedback>
+          );
+        })}
       </div>
+
+      {/* Obriši klasu — prikazuje se samo kad je klasa postavljena */}
+      {a.classType && (
+        <TouchFeedback onTap={() => onSetClass(null)}>
+          <button
+            className={`w-full mt-2 py-2 rounded-xl border text-xs font-medium transition-all ${
+              isDark
+                ? 'bg-white/5 border-white/10 text-white/40 hover:text-white/70'
+                : 'bg-gray-100 border-gray-200 text-gray-400 hover:text-gray-600'
+            }`}
+          >
+            ✕ Obriši klasu
+          </button>
+        </TouchFeedback>
+      )}
     </div>
-    <TouchFeedback onTap={onRemove}>
-      <button className="p-2 rounded-lg text-gray-400 hover:text-red-500 transition-colors flex-shrink-0">
-        <Trash2 size={16} />
-      </button>
-    </TouchFeedback>
-  </div>
-);
+  );
+};
 
 // ─────────────────────────────────────────────
-// Komponenta: ConfirmOverlay (touch optimizovan)
+// ConfirmOverlay
 // ─────────────────────────────────────────────
-const ConfirmOverlay: React.FC<{ pending: PendingOverride; onConfirm: () => void; onCancel: () => void; isDark: boolean }> = ({ pending, onConfirm, onCancel, isDark }) => (
-  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onCancel}>
-    <div className={`rounded-2xl border p-6 max-w-sm w-full shadow-2xl ${isDark ? 'bg-slate-900 border-white/20' : 'bg-white border-gray-200'}`} onClick={(e) => e.stopPropagation()}>
+const ConfirmOverlay: React.FC<{
+  pending: PendingOverride;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isDark: boolean;
+}> = ({ pending, onConfirm, onCancel, isDark }) => (
+  <div
+    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+    onClick={onCancel}
+  >
+    <div
+      className={`rounded-2xl border p-6 max-w-sm w-full shadow-2xl ${
+        isDark ? 'bg-slate-900 border-white/20' : 'bg-white border-gray-200'
+      }`}
+      onClick={e => e.stopPropagation()}
+    >
       <div className={`font-bold text-lg mb-3 text-center ${isDark ? 'text-white' : 'text-gray-900'}`}>
         Zamijeniti dodjelu?
       </div>
-      <div className={`text-sm mb-6 text-center leading-relaxed ${isDark ? 'text-white/70' : 'text-gray-600'}`}>
-        {pending.resourceType === 'desk' ? 'Šalter' : 'Gate'} {pending.resourceId} je već dodijeljen letu{' '}
-        <span className={`font-mono font-bold ${isDark ? 'text-red-400' : 'text-red-700'}`}>{pending.existingFlight}</span>.
-        <br />
+      <div
+        className={`text-sm mb-6 text-center leading-relaxed ${isDark ? 'text-white/70' : 'text-gray-600'}`}
+      >
+        {pending.resourceType === 'desk' ? 'Šalter' : 'Gate'} {pending.resourceId} je već dodijeljen
+        letu{' '}
+        <span className={`font-mono font-bold ${isDark ? 'text-red-400' : 'text-red-700'}`}>
+          {pending.existingFlight}
+        </span>
+        .<br />
         Zamijeniti sa{' '}
-        <span className={`font-mono font-bold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>{pending.flight.FlightNumber}</span>?
+        <span className={`font-mono font-bold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
+          {pending.flight.FlightNumber}
+        </span>
+        ?
       </div>
       <div className="flex gap-3">
-        <button onClick={onCancel} className={`flex-1 py-3 rounded-xl text-sm font-medium border transition-colors ${isDark ? 'bg-white/10 border-white/20 text-white/80 active:bg-white/20' : 'bg-gray-100 border-gray-200 text-gray-600 active:bg-gray-200'}`}>
+        <button
+          onClick={onCancel}
+          className={`flex-1 py-3 rounded-xl text-sm font-medium border transition-colors ${
+            isDark
+              ? 'bg-white/10 border-white/20 text-white/80 active:bg-white/20'
+              : 'bg-gray-100 border-gray-200 text-gray-600 active:bg-gray-200'
+          }`}
+        >
           Odustani
         </button>
-        <button onClick={onConfirm} className="flex-1 py-3 rounded-xl text-sm font-bold bg-red-500 text-white active:bg-red-600 transition-colors shadow-lg">
+        <button
+          onClick={onConfirm}
+          className="flex-1 py-3 rounded-xl text-sm font-bold bg-red-500 text-white active:bg-red-600 transition-colors shadow-lg"
+        >
           Zamijeni
         </button>
       </div>
@@ -1533,14 +1668,12 @@ export default function AssignPanel() {
   const [pendingOverride, setPendingOverride] = useState<PendingOverride | null>(null);
   const [isDark, setIsDark] = useState(true);
 
-  // Refs
   const flightsRef = useRef<Flight[]>([]);
   const selectedFlightRef = useRef<Flight | null>(null);
   const checkinAssignmentsRef = useRef<Assignment[]>([]);
   const gateAssignmentsRef = useRef<Assignment[]>([]);
   const touchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync refs
   useEffect(() => { flightsRef.current = flights; }, [flights]);
   useEffect(() => { checkinAssignmentsRef.current = checkinAssignments; }, [checkinAssignments]);
   useEffect(() => { gateAssignmentsRef.current = gateAssignments; }, [gateAssignments]);
@@ -1550,7 +1683,7 @@ export default function AssignPanel() {
     setSelectedFlightForTouch(flight);
   }, []);
 
-  // Tema
+  // ── Tema ──────────────────────────────────────────────────
   useEffect(() => {
     const stored = localStorage.getItem('theme');
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -1566,7 +1699,7 @@ export default function AssignPanel() {
     localStorage.setItem('theme', newDark ? 'dark' : 'light');
   };
 
-  // API pozivi
+  // ── API: Letovi ───────────────────────────────────────────
   const fetchFlightsData = useCallback(async (): Promise<Flight[]> => {
     const res = await fetch('/api/flights?nocache=' + Date.now());
     const data = await res.json();
@@ -1585,11 +1718,37 @@ export default function AssignPanel() {
     }
   }, [fetchFlightsData]);
 
+  // ── API: Check-in dodjele (sa klasom) ────────────────────
   const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
     try {
       const res = await fetch(`${API_PREFIX}/desk-status-override`);
       if (!res.ok) return;
       const data = await res.json();
+
+      // Dohvati klase za sve šaltere paralelno
+      const deskNumbers = Object.entries(data)
+        .filter(([, value]) => {
+          const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
+          return parsed.flightNumber && parsed.status === 'open';
+        })
+        .map(([deskNumber]) => deskNumber);
+
+      const classResults = await Promise.allSettled(
+        deskNumbers.map(async (deskNumber) => {
+          const classRes = await fetch(`${API_PREFIX}/desk-class/${deskNumber}`);
+          if (!classRes.ok) return { deskNumber, classType: null };
+          const classData = await classRes.json();
+          return { deskNumber, classType: classData.classType ?? null };
+        })
+      );
+
+      const classMap: Record<string, string | null> = {};
+      classResults.forEach(result => {
+        if (result.status === 'fulfilled') {
+          classMap[result.value.deskNumber] = result.value.classType;
+        }
+      });
+
       const list: Assignment[] = [];
       for (const [deskNumber, value] of Object.entries(data)) {
         const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
@@ -1602,6 +1761,7 @@ export default function AssignPanel() {
             destinationCity: flight?.DestinationCityName || '',
             scheduledTime: flight?.ScheduledDepartureTime || '',
             assignedAt: parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+            classType: classMap[deskNumber] ?? null,
           });
         }
       }
@@ -1609,29 +1769,56 @@ export default function AssignPanel() {
     } catch (err) { console.error(err); }
   }, []);
 
-  const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res = await fetch(`${API_PREFIX}/gate-status-override`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [gateNumber, value] of Object.entries(data)) {
+  // ── API: Gate dodjele ─────────────────────────────────────
+const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
+  try {
+    const res = await fetch(`${API_PREFIX}/gate-status-override`);
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const gateNumbers = Object.entries(data)
+      .filter(([, value]) => {
         const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId: gateNumber,
-            flightNumber: parsed.flightNumber as string,
-            airlineName: flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime: flight?.ScheduledDepartureTime || '',
-            assignedAt: parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-          });
-        }
+        return parsed.flightNumber && parsed.status === 'open';
+      })
+      .map(([gateNumber]) => gateNumber);
+
+    // Dohvati klase za sve gate-ove paralelno
+    const classResults = await Promise.allSettled(
+      gateNumbers.map(async (gateNumber) => {
+        const classRes = await fetch(`${API_PREFIX}/gate-class/${gateNumber}`);
+        if (!classRes.ok) return { gateNumber, classType: null };
+        const classData = await classRes.json();
+        return { gateNumber, classType: classData.classType ?? null };
+      })
+    );
+
+    const classMap: Record<string, string | null> = {};
+    classResults.forEach(result => {
+      if (result.status === 'fulfilled') {
+        classMap[result.value.gateNumber] = result.value.classType;
       }
-      setGateAssignments(list);
-    } catch (err) { console.error(err); }
-  }, []);
+    });
+
+    const list: Assignment[] = [];
+    for (const [gateNumber, value] of Object.entries(data)) {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
+      if (parsed.flightNumber && parsed.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
+        list.push({
+          resourceId: gateNumber,
+          flightNumber: parsed.flightNumber as string,
+          airlineName: flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime: flight?.ScheduledDepartureTime || '',
+          assignedAt: parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+          classType: classMap[gateNumber] ?? null,
+        });
+      }
+    }
+    setGateAssignments(list);
+  } catch (err) { console.error(err); }
+}, []);
 
   const refreshAll = useCallback(async (currentFlights: Flight[]) => {
     await Promise.all([
@@ -1644,9 +1831,12 @@ export default function AssignPanel() {
     fetchFlights().then(() => refreshAll(flightsRef.current));
   }, [fetchFlights, refreshAll]);
 
-  // Auto-refresh timer
+  // ── Auto-refresh ──────────────────────────────────────────
   useEffect(() => {
-    const ticker = setInterval(() => setTickSec(prev => prev <= 1 ? REFRESH_INTERVAL_MS / 1000 : prev - 1), 1000);
+    const ticker = setInterval(
+      () => setTickSec(prev => (prev <= 1 ? REFRESH_INTERVAL_MS / 1000 : prev - 1)),
+      1000
+    );
     const interval = setInterval(async () => {
       setTickSec(REFRESH_INTERVAL_MS / 1000);
       try {
@@ -1671,15 +1861,24 @@ export default function AssignPanel() {
     finally { setRefreshing(false); }
   }, [fetchFlightsData, refreshAll]);
 
-  // Centralna logika dodjele
-  const assignFlightToResource = useCallback(async (flight: Flight, resourceId: string, resourceType: 'desk' | 'gate'): Promise<boolean> => {
+  // ── Dodjela šaltera/gate ──────────────────────────────────
+  const assignFlightToResource = useCallback(async (
+    flight: Flight,
+    resourceId: string,
+    resourceType: 'desk' | 'gate',
+  ): Promise<boolean> => {
     const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
-    const payload = resourceType === 'desk'
-      ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber }
-      : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
+    const payload =
+      resourceType === 'desk'
+        ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber }
+        : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
 
     try {
-      const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       await refreshAll(flightsRef.current);
       return true;
@@ -1689,12 +1888,15 @@ export default function AssignPanel() {
     }
   }, [refreshAll]);
 
-  // Touch assign
-  const handleResourceTouchAssign = useCallback(async (resourceId: string, resourceType: 'desk' | 'gate') => {
+  const handleResourceTouchAssign = useCallback(async (
+    resourceId: string,
+    resourceType: 'desk' | 'gate',
+  ) => {
     const flight = selectedFlightRef.current;
     if (!flight) return;
 
-    const assignments = resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
+    const assignments =
+      resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
     const existing = assignments.find(a => a.resourceId === resourceId);
 
     if (existing) {
@@ -1722,6 +1924,7 @@ export default function AssignPanel() {
     touchTimeoutRef.current = setTimeout(() => setSelectedFlight(null), TOUCH_TIMEOUT_MS);
   }, [setSelectedFlight]);
 
+  // ── Brisanje dodjela ──────────────────────────────────────
   const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     try {
       await fetch(`${API_PREFIX}/desk-status-override`, {
@@ -1729,42 +1932,89 @@ export default function AssignPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deskNumber, action: 'clear' }),
       });
+      // Očisti i klasu kad se obriše šalter
+      await fetch(`${API_PREFIX}/desk-class/${deskNumber}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ classType: null }),
+      });
       await fetchCheckinAssignments(flightsRef.current);
     } catch { console.error('Greška pri brisanju šaltera', deskNumber); }
   }, [fetchCheckinAssignments]);
 
-  const handleRemoveGate = useCallback(async (gateNumber: string) => {
+const handleRemoveGate = useCallback(async (gateNumber: string) => {
+  try {
+    await fetch(`${API_PREFIX}/gate-status-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gateNumber, action: 'clear' }),
+    });
+    // Očisti klasu zajedno sa gate dodjelom
+    await fetch(`${API_PREFIX}/gate-class/${gateNumber}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ classType: null }),
+    });
+    await fetchGateAssignments(flightsRef.current);
+  } catch { console.error('Greška pri brisanju gate-a', gateNumber); }
+}, [fetchGateAssignments]);
+
+  // ── Postavljanje klase ────────────────────────────────────
+  const handleSetClass = useCallback(async (deskNumber: string, classType: string | null) => {
+    // Optimistički update — odmah se vidi promjena bez čekanja API-ja
+    setCheckinAssignments(prev =>
+      prev.map(a => a.resourceId === deskNumber ? { ...a, classType } : a)
+    );
+
     try {
-      await fetch(`${API_PREFIX}/gate-status-override`, {
+      await fetch(`${API_PREFIX}/desk-class/${deskNumber}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gateNumber, action: 'clear' }),
+        body: JSON.stringify({ classType }),
       });
-      await fetchGateAssignments(flightsRef.current);
-    } catch { console.error('Greška pri brisanju gate-a', gateNumber); }
-  }, [fetchGateAssignments]);
+    } catch {
+      console.error('Greška pri postavljanju klase za šalter', deskNumber);
+      // Rollback — ponovo učitaj iz servera ako API padne
+      await fetchCheckinAssignments(flightsRef.current);
+    }
+  }, [fetchCheckinAssignments]);
+  const handleSetGateClass = useCallback(async (gateNumber: string, classType: string | null) => {
+  setGateAssignments(prev =>
+    prev.map(a => a.resourceId === gateNumber ? { ...a, classType } : a)
+  );
+  try {
+    await fetch(`${API_PREFIX}/gate-class/${gateNumber}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ classType }),
+    });
+  } catch {
+    console.error('Greška pri postavljanju klase za gate', gateNumber);
+    await fetchGateAssignments(flightsRef.current);
+  }
+}, [fetchGateAssignments]);
 
-  const handleLogout = async () => {
-    await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
-    router.push('/admin/login');
-  };
-
+  // ── Helpers ───────────────────────────────────────────────
   const isFlightAssigned = (flightNumber: string, tab: TabType) =>
     tab === 'checkin'
       ? checkinAssignments.some(a => a.flightNumber === flightNumber)
       : gateAssignments.some(a => a.flightNumber === flightNumber);
 
+  // ── Loading ───────────────────────────────────────────────
   if (loadingFlights) {
     return (
       <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-slate-950' : 'bg-white'}`}>
         <div className="text-center space-y-4">
           <div className="w-12 h-12 border-3 border-sky-500 border-t-transparent rounded-full animate-spin mx-auto" />
-          <div className={`text-sm tracking-widest uppercase ${isDark ? 'text-white/50' : 'text-gray-500'}`}>Učitavanje</div>
+          <div className={`text-sm tracking-widest uppercase ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
+            Učitavanje
+          </div>
         </div>
       </div>
     );
   }
 
+  // ── Render helpers ────────────────────────────────────────
   const flightList = (tab: TabType) => (
     <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-1 scrollbar-thin">
       {flights.length === 0 && (
@@ -1802,14 +2052,24 @@ export default function AssignPanel() {
     </div>
   );
 
+  // ── JSX ───────────────────────────────────────────────────
   return (
-    <div className={`min-h-screen p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-gray-900'}`}>
+    <div
+      className={`min-h-screen p-4 overflow-y-auto ${
+        isDark ? 'bg-slate-950 text-white' : 'bg-white text-gray-900'
+      }`}
+    >
       {pendingOverride && (
-        <ConfirmOverlay pending={pendingOverride} onConfirm={handleConfirmOverride} onCancel={() => setPendingOverride(null)} isDark={isDark} />
+        <ConfirmOverlay
+          pending={pendingOverride}
+          onConfirm={handleConfirmOverride}
+          onCancel={() => setPendingOverride(null)}
+          isDark={isDark}
+        />
       )}
 
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
+        {/* ── Header ── */}
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
           <div>
             <div className="flex items-center gap-2 mb-2">
@@ -1817,30 +2077,69 @@ export default function AssignPanel() {
               <h1 className="text-xl font-bold tracking-tight">TIV · Check-in &amp; Gate</h1>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
-              <span className={isDark ? 'text-white/30' : 'text-gray-500'}>✈️ Letovi: {flights.length}</span>
+              <span className={isDark ? 'text-white/30' : 'text-gray-500'}>
+                ✈️ Letovi: {flights.length}
+              </span>
               <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
-              <span className={isDark ? 'text-white/30' : 'text-gray-500'}>🕐 Ažurirano: {lastUpdate || '—'}</span>
+              <span className={isDark ? 'text-white/30' : 'text-gray-500'}>
+                🕐 Ažurirano: {lastUpdate || '—'}
+              </span>
               <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
-              <span className={`tabular-nums ${isDark ? 'text-white/25' : 'text-gray-500'}`}>🔄 Refresh za {tickSec}s</span>
+              <span className={`tabular-nums ${isDark ? 'text-white/25' : 'text-gray-500'}`}>
+                🔄 Refresh za {tickSec}s
+              </span>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={handleRefresh} disabled={refreshing} className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
-              <RefreshCw size={16} className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`} />
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${
+                isDark
+                  ? 'bg-white/5 hover:bg-white/10 border-white/10'
+                  : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
+              }`}
+            >
+              <RefreshCw
+                size={16}
+                className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`}
+              />
             </button>
-            <button onClick={() => router.push('/admin')} className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
+            <button
+              onClick={() => router.push('/admin')}
+              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${
+                isDark
+                  ? 'bg-white/5 hover:bg-white/10 border-white/10'
+                  : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
+              }`}
+            >
               <Home size={16} className={isDark ? 'text-white/60' : 'text-gray-600'} />
             </button>
-            <button onClick={toggleTheme} className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
-              {isDark ? <Sun size={16} className="text-yellow-400" /> : <Moon size={16} className="text-slate-700" />}
+            <button
+              onClick={toggleTheme}
+              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${
+                isDark
+                  ? 'bg-white/5 hover:bg-white/10 border-white/10'
+                  : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
+              }`}
+            >
+              {isDark
+                ? <Sun size={16} className="text-yellow-400" />
+                : <Moon size={16} className="text-slate-700" />}
             </button>
-            <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/25 text-red-400 text-xs font-medium transition-all active:scale-95">
+            <button
+              onClick={async () => {
+                await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
+                router.push('/admin/login');
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/25 text-red-400 text-xs font-medium transition-all active:scale-95"
+            >
               <LogOut size={14} /> Odjava
             </button>
           </div>
         </div>
 
-        {/* Tabovi - veći za touch */}
+        {/* ── Tabovi ── */}
         <div className="flex gap-3 mb-6">
           {[
             { id: 'checkin' as TabType, label: '🏷️ Check-in', icon: CheckSquare, count: checkinAssignments.length },
@@ -1848,10 +2147,28 @@ export default function AssignPanel() {
           ].map(tab => {
             const isActive = activeTab === tab.id;
             return (
-              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${isActive ? (isDark ? 'bg-sky-500/20 border-sky-500/50 text-sky-300 shadow-lg' : 'bg-sky-200 border-sky-500 text-sky-900 shadow-md') : (isDark ? 'bg-white/5 border-white/10 text-white/50 hover:bg-white/10' : 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200')}`}>
-                {tab.icon && <tab.icon size={16} />}
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${
+                  isActive
+                    ? isDark
+                      ? 'bg-sky-500/20 border-sky-500/50 text-sky-300 shadow-lg'
+                      : 'bg-sky-200 border-sky-500 text-sky-900 shadow-md'
+                    : isDark
+                      ? 'bg-white/5 border-white/10 text-white/50 hover:bg-white/10'
+                      : 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                <tab.icon size={16} />
                 <span>{tab.label}</span>
-                <span className={`text-[11px] px-2 py-0.5 rounded-full font-bold ${isActive ? (isDark ? 'bg-white/20 text-white' : 'bg-white/80 text-gray-800') : (isDark ? 'bg-white/10 text-white/40' : 'bg-gray-300 text-gray-600')}`}>
+                <span
+                  className={`text-[11px] px-2 py-0.5 rounded-full font-bold ${
+                    isActive
+                      ? isDark ? 'bg-white/20 text-white' : 'bg-white/80 text-gray-800'
+                      : isDark ? 'bg-white/10 text-white/40' : 'bg-gray-300 text-gray-600'
+                  }`}
+                >
                   {tab.count}
                 </span>
               </button>
@@ -1859,7 +2176,7 @@ export default function AssignPanel() {
           })}
         </div>
 
-        {/* Selected Flight Banner */}
+        {/* ── Selected Flight Banner ── */}
         {selectedFlightForTouch && (
           <div className="mb-5 p-4 rounded-xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20">
             <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1872,50 +2189,90 @@ export default function AssignPanel() {
                   → {selectedFlightForTouch.DestinationCityName || selectedFlightForTouch.DestinationAirportCode}
                 </span>
               </div>
-              <button onClick={() => setSelectedFlight(null)} className="flex items-center gap-1.5 text-sm text-amber-400/70 hover:text-amber-300 px-3 py-1.5 rounded-lg hover:bg-amber-500/10 transition-colors">
+              <button
+                onClick={() => setSelectedFlight(null)}
+                className="flex items-center gap-1.5 text-sm text-amber-400/70 hover:text-amber-300 px-3 py-1.5 rounded-lg hover:bg-amber-500/10 transition-colors"
+              >
                 <X size={14} /> Odustani
               </button>
             </div>
           </div>
         )}
 
-        {/* CHECK-IN TAB */}
+        {/* ── CHECK-IN TAB ── */}
         {activeTab === 'checkin' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            {/* Lista letova */}
             <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-              <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>✈️ Letovi ({flights.length})</div>
+              <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                ✈️ Letovi ({flights.length})
+              </div>
               {flightList('checkin')}
             </div>
+
             <div className="lg:col-span-2 space-y-5">
+              {/* Grid šaltera */}
               <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-                <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>📋 Šalteri</div>
+                <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                  📋 Šalteri
+                </div>
                 <div className="mb-5">
-                  <div className="text-center text-sm font-medium mb-3 text-sky-400">Terminal 1</div>
+                  <div className="text-center text-sm font-medium mb-3 text-sky-400">
+                    Terminal 1
+                  </div>
                   {resourceGrid('desk', DESKS.filter(d => parseInt(d) <= 12), checkinAssignments)}
                 </div>
                 <div>
-                  <div className="text-center text-sm font-medium mb-3 text-emerald-400">Terminal 2</div>
+                  <div className="text-center text-sm font-medium mb-3 text-emerald-400">
+                    Terminal 2
+                  </div>
                   {resourceGrid('desk', DESKS.filter(d => parseInt(d) >= 21), checkinAssignments)}
                 </div>
               </div>
+
+              {/* Aktivne dodjele sa selektorom klase */}
               <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-                <div className={`text-xs font-bold tracking-wider uppercase mb-3 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>✅ Aktivne dodjele ({checkinAssignments.length})</div>
-                {checkinAssignments.length === 0 ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div> : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{checkinAssignments.map(a => <AssignmentCard key={a.resourceId} a={a} type="desk" onRemove={() => handleRemoveCheckin(a.resourceId)} isDark={isDark} />)}</div>}
+                <div className={`text-xs font-bold tracking-wider uppercase mb-3 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                  ✅ Aktivne dodjele ({checkinAssignments.length})
+                </div>
+
+                {checkinAssignments.length === 0 ? (
+                  <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
+                    Nema dodjela
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {checkinAssignments.map(a => (
+                      <AssignmentCard
+                        key={a.resourceId}
+                        a={a}
+                        type="desk"
+                        onRemove={() => handleRemoveCheckin(a.resourceId)}
+                        onSetClass={(classType) => handleSetClass(a.resourceId, classType)}
+                        isDark={isDark}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
         )}
 
-        {/* GATE TAB */}
+        {/* ── GATE TAB ── */}
         {activeTab === 'gate' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-              <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>✈️ Letovi ({flights.length})</div>
+              <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                ✈️ Letovi ({flights.length})
+              </div>
               {flightList('gate')}
             </div>
             <div className="lg:col-span-2 space-y-5">
               <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-                <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>🚪 Gate-ovi</div>
+                <div className={`text-xs font-bold tracking-wider uppercase mb-4 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                  🚪 Gate-ovi
+                </div>
                 <div className="mb-5">
                   <div className="text-center text-sm font-medium mb-3 text-sky-400">Terminal 1</div>
                   {resourceGrid('gate', GATES.filter(g => parseInt(g) >= 2 && parseInt(g) <= 6), gateAssignments)}
@@ -1926,8 +2283,27 @@ export default function AssignPanel() {
                 </div>
               </div>
               <div className={`rounded-xl border p-4 ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
-                <div className={`text-xs font-bold tracking-wider uppercase mb-3 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>✅ Aktivne dodjele ({gateAssignments.length})</div>
-                {gateAssignments.length === 0 ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div> : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{gateAssignments.map(a => <AssignmentCard key={a.resourceId} a={a} type="gate" onRemove={() => handleRemoveGate(a.resourceId)} isDark={isDark} />)}</div>}
+                <div className={`text-xs font-bold tracking-wider uppercase mb-3 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+                  ✅ Aktivne dodjele ({gateAssignments.length})
+                </div>
+                {gateAssignments.length === 0 ? (
+                  <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
+                    Nema dodjela
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+     {gateAssignments.map(a => (
+  <AssignmentCard
+    key={a.resourceId}
+    a={a}
+    type="gate"
+    onRemove={() => handleRemoveGate(a.resourceId)}
+    onSetClass={(classType) => handleSetGateClass(a.resourceId, classType)}  // ← ovo je izmjena
+    isDark={isDark}
+  />
+))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1940,7 +2316,10 @@ export default function AssignPanel() {
         .touch-manipulation { touch-action: manipulation; }
         .scrollbar-thin::-webkit-scrollbar { width: 4px; }
         .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-        .scrollbar-thin::-webkit-scrollbar-thumb { background: ${isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.2)'}; border-radius: 4px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+          background: ${isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.2)'};
+          border-radius: 4px;
+        }
         @keyframes pulse-subtle { 0%, 100% { opacity: 0.8; } 50% { opacity: 1; } }
         .animate-pulse-subtle { animation: pulse-subtle 1.2s ease-in-out infinite; }
         .active\\:scale-95:active { transform: scale(0.95); }
