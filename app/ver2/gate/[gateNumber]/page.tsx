@@ -16,8 +16,23 @@ import { useWeather } from '@/hooks/use-weather';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 20_000;
+const REFRESH_INTERVAL_MS    = 10_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+// Klasa → boja (isti sistem kao u check-in display-u)
+const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
+  ECONOMY:  { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
+  BUSINESS: { bg: 'rgba(194,65,12,0.25)',  border: '#f97316', text: '#fdba74' },
+  PREMIUM:  { bg: 'rgba(109,40,217,0.25)', border: '#a855f7', text: '#d8b4fe' },
+  PRIORITY: { bg: 'rgba(22,101,52,0.25)',  border: '#22c55e', text: '#86efac' },
+};
+
+const CLASS_EMOJI: Record<string, string> = {
+  ECONOMY:  '💺',
+  BUSINESS: '💼',
+  PREMIUM:  '👑',
+  PRIORITY: '⭐',
+};
 
 // ------------------------------------------------------------
 // Error Boundary
@@ -44,6 +59,37 @@ class GateErrorBoundary extends Component<{ children: ReactNode }, EBState> {
     return this.props.children;
   }
 }
+
+// ------------------------------------------------------------
+// ClassBadge — prikazuje klasu putnika na gate ekranu
+// ------------------------------------------------------------
+const ClassBadge = memo(function ClassBadge({ classType }: { classType: string | null }) {
+  if (!classType) return null;
+  const key = classType.toUpperCase();
+  const style = CLASS_STYLES[key] ?? { bg: 'rgba(255,255,255,0.1)', border: '#ffffff44', text: '#ffffff' };
+  const emoji = CLASS_EMOJI[key] ?? '✈️';
+
+  return (
+    <div style={{
+      display:        'inline-flex',
+      alignItems:     'center',
+      gap:            '0.6rem',
+      background:     style.bg,
+      border:         `2px solid ${style.border}`,
+      borderRadius:   '10px',
+      padding:        '0.5rem 1.4rem',
+      color:          style.text,
+      fontSize:       'clamp(1.8rem, 3.5vw, 3rem)',
+      fontWeight:     700,
+      letterSpacing:  '.12em',
+      fontFamily:     FONT_DISPLAY,
+      lineHeight:     1,
+    }} className="fids-class-badge">
+      <span style={{ fontSize: 'clamp(1.5rem, 3vw, 2.5rem)', lineHeight: 1 }}>{emoji}</span>
+      <span>{key}</span>
+    </div>
+  );
+});
 
 // ------------------------------------------------------------
 // Airline Logo
@@ -135,12 +181,12 @@ const flightChanged = (a: Flight | null, b: Flight | null): boolean =>
 // ------------------------------------------------------------
 function getStatusConfig(raw: string): { label: string; color: string; pulse: boolean; priority: boolean } {
   const s = (raw || '').toLowerCase().trim();
-  if (s.includes('final call'))                                               return { label: raw, color: '#ef4444', pulse: true,  priority: true  };
-  if (s.includes('boarding') || s.includes('gate open'))                     return { label: raw, color: '#22c55e', pulse: false, priority: true  };
-  if (s.includes('delay')    || s.includes('kasni'))                         return { label: raw, color: '#f59e0b', pulse: false, priority: false };
+  if (s.includes('final call'))                                                    return { label: raw, color: '#ef4444', pulse: true,  priority: true  };
+  if (s.includes('boarding') || s.includes('gate open'))                          return { label: raw, color: '#22c55e', pulse: false, priority: true  };
+  if (s.includes('delay')    || s.includes('kasni'))                              return { label: raw, color: '#f59e0b', pulse: false, priority: false };
   if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return { label: raw, color: '#ef4444', pulse: false, priority: false };
-  if (s.includes('diverted') || s.includes('preusmjeren'))                   return { label: raw, color: '#f97316', pulse: false, priority: false };
-  if (s.includes('departed') || s.includes('poletio'))                       return { label: raw, color: '#6b7280', pulse: false, priority: false };
+  if (s.includes('diverted') || s.includes('preusmjeren'))                        return { label: raw, color: '#f97316', pulse: false, priority: false };
+  if (s.includes('departed') || s.includes('poletio'))                            return { label: raw, color: '#6b7280', pulse: false, priority: false };
   return { label: raw, color: '#eab308', pulse: false, priority: false };
 }
 
@@ -160,21 +206,23 @@ function getWeatherIcon(code: number): string {
 // Tipovi
 // ------------------------------------------------------------
 interface FlightDisplayState {
-  flight:           Flight | null;
-  checkInStatus:    CheckInStatus | null;
-  nextFlight:       Flight | null;
-  gateChangedAt:    number | undefined;
-  manualGateStatus: string | null;       // 'open' | 'closed' | null
-  overrideFlightNumber: string | null;   // ručno dodijeljen let
+  flight:               Flight | null;
+  checkInStatus:        CheckInStatus | null;
+  nextFlight:           Flight | null;
+  gateChangedAt:        number | undefined;
+  manualGateStatus:     string | null;
+  overrideFlightNumber: string | null;
+  classType:            string | null;   // ← NOVO
 }
 
 const EMPTY_STATE: FlightDisplayState = {
-  flight: null,
-  checkInStatus: null,
-  nextFlight: null,
-  gateChangedAt: undefined,
-  manualGateStatus: null,
+  flight:               null,
+  checkInStatus:        null,
+  nextFlight:           null,
+  gateChangedAt:        undefined,
+  manualGateStatus:     null,
   overrideFlightNumber: null,
+  classType:            null,            // ← NOVO
 };
 
 // ------------------------------------------------------------
@@ -224,7 +272,7 @@ function GateDisplay() {
   const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ------------------------------------------------------------
-  // Dohvatanje gate status override-a sa ispravnim API prefixom
+  // Dohvatanje gate status override-a
   // ------------------------------------------------------------
   const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null } | null> => {
     try {
@@ -239,7 +287,21 @@ function GateDisplay() {
   }, []);
 
   // ------------------------------------------------------------
-  // Provjera da li let (po svom GateNumber polju) odgovara traženom gate-u
+  // Dohvatanje klase za gate  ← NOVO
+  // ------------------------------------------------------------
+  const fetchGateClass = useCallback(async (gate: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`/api/test/gate-class/${gate}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.classType ?? null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // ------------------------------------------------------------
+  // Provjera da li let odgovara gate-u
   // ------------------------------------------------------------
   const flightMatchesGate = useCallback((f: Flight, gate: string): boolean => {
     if (!f.GateNumber) return false;
@@ -255,35 +317,27 @@ function GateDisplay() {
   }, []);
 
   // ------------------------------------------------------------
-  // Odluka da li se let uopšte treba prikazivati (vremenski prag)
+  // Odluka da li se let prikazuje
   // ------------------------------------------------------------
   const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     const s = (f.StatusEN || '').toLowerCase().trim();
-
     if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
     if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
-
-    // Manual override 'open' – prikazujemo čak i ako je STD prošao (osim ako nije departed)
     if (manualGateStatusRef.current === 'open') {
       if (s.includes('departed') || s.includes('poletio')) return false;
       return true;
     }
-
-    // Automatski mod: sakrij let 1 minutu PRIJE STDa
     if (s.includes('departed') || s.includes('poletio')) return false;
-
     const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
     if (stdDep) {
       const ONE_MIN_MS = 60 * 1000;
-      if (Date.now() >= stdDep.getTime() - ONE_MIN_MS) {
-        return false;
-      }
+      if (Date.now() >= stdDep.getTime() - ONE_MIN_MS) return false;
     }
     return true;
   }, []);
 
   // ------------------------------------------------------------
-  // Dohvatanje check-in statusa za let
+  // Check-in status za let
   // ------------------------------------------------------------
   const getFlightCheckInStatus = useCallback(async (f: Flight): Promise<CheckInStatus | null> => {
     try {
@@ -309,9 +363,13 @@ function GateDisplay() {
   const loadFlights = useCallback(async () => {
     if (!isMountedRef.current) return;
     try {
-      const data = await fetchFlightData();
+      // Paralelno dohvati letove i klasu gate-a  ← NOVO
+      const [data, classType] = await Promise.all([
+        fetchFlightData(),
+        fetchGateClass(gateNumber),
+      ]);
 
-      // 1. Dohvati override za ovaj gate
+      // 1. Override za ovaj gate
       let overrideStatus: string | null = null;
       let overrideFlightNumber: string | null = null;
       try {
@@ -338,6 +396,7 @@ function GateDisplay() {
           gateChangedAt: undefined,
           manualGateStatus: 'closed',
           overrideFlightNumber: null,
+          classType,                    // ← NOVO (čuva klasu čak i kad je closed)
         });
         setLastUpdate(new Date().toLocaleTimeString('en-GB'));
         setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
@@ -345,23 +404,16 @@ function GateDisplay() {
         return;
       }
 
-      // 3. Pripremi listu letova koji su potencijalno za ovaj gate
+      // 3. Kandidati za prikaz
       let candidates: Flight[] = [];
       if (overrideStatus === 'open' && overrideFlightNumber) {
-        // Ručno dodijeljen let – uzimamo taj jedan let, bez obzira na GateNumber
         const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-        if (overriddenFlight) {
-          candidates = [overriddenFlight];
-        } else {
-          // Let nije pronađen u trenutnom spisku (možda već poletio ili greška)
-          candidates = [];
-        }
+        if (overriddenFlight) candidates = [overriddenFlight];
       } else {
-        // Automatski mod – filtriraj po GateNumber polju
         candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
       }
 
-      // 4. Dohvati check-in status za svakog kandidata
+      // 4. Check-in status za svakog kandidata
       const withStatus = await Promise.all(
         candidates.map(async (f) => ({
           ...f,
@@ -372,17 +424,14 @@ function GateDisplay() {
       // 5. Sortiranje
       const sorted = [...withStatus].sort((a, b) => {
         if (overrideStatus === 'open') {
-          // Manual open: sortiraj po STD (ne po ETD)
           const ta = parseDepartureTime(a.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
           const tb = parseDepartureTime(b.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
           return ta - tb;
-        } else {
-          // Automatski: po efektivnom vremenu (ETD > STD)
-          return getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b);
         }
+        return getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b);
       });
 
-      // 6. Odaberi "current" let
+      // 6. Odaberi current let
       let current: (typeof sorted)[number] | null = null;
       if (overrideStatus === 'open') {
         current = sorted[0] ?? null;
@@ -390,20 +439,19 @@ function GateDisplay() {
         current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
       }
 
-      // 7. Odaberi "nextFlight" – prvi nakon current koji prolazi filter
+      // 7. Next flight
       let nextFlight: (typeof sorted)[number] | null = null;
       const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
       if (idx >= 0) {
         for (let i = idx + 1; i < sorted.length; i++) {
-          const candidate = sorted[i];
-          if (overrideStatus === 'open' || shouldDisplayFlight(candidate)) {
-            nextFlight = candidate;
+          if (overrideStatus === 'open' || shouldDisplayFlight(sorted[i])) {
+            nextFlight = sorted[i];
             break;
           }
         }
       }
 
-      // 8. Detekcija promjene gate-a (samo za automatski mod)
+      // 8. Detekcija promjene gate-a
       let gateChangedAt: number | undefined;
       if (
         overrideStatus !== 'open' &&
@@ -416,7 +464,7 @@ function GateDisplay() {
 
       if (!isMountedRef.current) return;
 
-      // 9. Ažuriranje state-a samo ako se nešto promijenilo
+      // 9. Ažuriranje state-a
       if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
         currentFlightRef.current = current;
         currentStatusRef.current = current?.checkInStatus ?? null;
@@ -426,9 +474,13 @@ function GateDisplay() {
           nextFlight,
           gateChangedAt,
           manualGateStatus: overrideStatus,
-          overrideFlightNumber: overrideFlightNumber,
+          overrideFlightNumber,
+          classType,                    // ← NOVO
         });
         updateCountdown(current);
+      } else {
+        // Klasa se može promijeniti bez promjene leta — uvijek ažuriraj
+        setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
       }
 
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
@@ -438,7 +490,7 @@ function GateDisplay() {
       console.error('Gate load error:', err);
       if (isMountedRef.current) setLoading(false);
     }
-  }, [gateNumber, fetchGateStatusOverride, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
+  }, [gateNumber, fetchGateStatusOverride, fetchGateClass, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
   // ------------------------------------------------------------
   // Polling interval
@@ -456,7 +508,7 @@ function GateDisplay() {
   }, [loadFlights]);
 
   // ------------------------------------------------------------
-  // Timer za automatsko prebacivanje na STD-1min (samo u auto modu)
+  // Timer za automatsko prebacivanje na STD-1min
   // ------------------------------------------------------------
   useEffect(() => {
     if (stdSwitchTimerRef.current) {
@@ -464,8 +516,7 @@ function GateDisplay() {
       stdSwitchTimerRef.current = null;
     }
     if (!display.flight) return;
-    if (manualGateStatusRef.current === 'open') return; // ručni mod – ne prekidamo
-
+    if (manualGateStatusRef.current === 'open') return;
     const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
     if (!stdDep) return;
     const triggerAt = stdDep.getTime() - 60 * 1000;
@@ -486,7 +537,7 @@ function GateDisplay() {
   }, [display.flight, loadFlights]);
 
   // ------------------------------------------------------------
-  // Polling gate status override-a (svakih 30 sekundi)
+  // Polling gate status override-a (svakih 30s)
   // ------------------------------------------------------------
   useEffect(() => {
     const poll = async () => {
@@ -508,13 +559,24 @@ function GateDisplay() {
   }, [gateNumber, fetchGateStatusOverride, loadFlights, display.overrideFlightNumber]);
 
   // ------------------------------------------------------------
+  // Polling klase gate-a (svakih 15s — brže od glavnog refresh-a)  ← NOVO
+  // ------------------------------------------------------------
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const classType = await fetchGateClass(gateNumber);
+        setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+      } catch { /* ignoriši */ }
+    };
+    const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, [gateNumber, fetchGateClass]);
+
+  // ------------------------------------------------------------
   // Countdown ticker
   // ------------------------------------------------------------
   useEffect(() => {
-    const id = setInterval(
-      () => updateCountdown(currentFlightRef.current),
-      30_000
-    );
+    const id = setInterval(() => updateCountdown(currentFlightRef.current), 30_000);
     return () => clearInterval(id);
   }, [updateCountdown]);
 
@@ -527,7 +589,7 @@ function GateDisplay() {
   }, []);
 
   // ------------------------------------------------------------
-  // Kiosk mode (onemogući kontekst meni, selekciju, drag)
+  // Kiosk mode
   // ------------------------------------------------------------
   useEffect(() => {
     const prevent = (e: Event) => e.preventDefault();
@@ -584,7 +646,7 @@ function GateDisplay() {
   );
 
   // ------------------------------------------------------------
-  // RENDER: Nema leta (prazan ekran ili closed)
+  // RENDER: Nema leta
   // ------------------------------------------------------------
   if (!display.flight) {
     const closed = display.manualGateStatus === 'closed';
@@ -628,6 +690,13 @@ function GateDisplay() {
               <span style={styles.topBarTerminal}>{f.Terminal.replace('T0', 'T')}</span>
             </>
           )}
+          {/* Klasa u top baru — odmah vidljiva  ← NOVO */}
+          {display.classType && (
+            <>
+              <span style={styles.topBarSep}>|</span>
+              <ClassBadge classType={display.classType} />
+            </>
+          )}
         </div>
         <LiveClock />
       </div>
@@ -644,6 +713,13 @@ function GateDisplay() {
             flightNumber={f.FlightNumber}
             name={f.AirlineName}
           />
+
+          {/* Klasa ispod logoa — velika, uočljiva  ← NOVO */}
+          {display.classType && (
+            <div style={{ marginTop: '0.3rem', marginBottom: '0.2rem' }}>
+              <ClassBadge classType={display.classType} />
+            </div>
+          )}
 
           <div style={styles.flightNumber} className="fids-flight-number">
             {f.FlightNumber}
@@ -811,7 +887,7 @@ function GateDisplay() {
         )}
       </div>
 
-      {/* GLOBAL STYLES (inline, za keyframes) */}
+      {/* GLOBAL STYLES */}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@500;600;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -819,7 +895,6 @@ function GateDisplay() {
         @keyframes spin { to { transform: rotate(360deg); } }
         html,body,#__next { width:100vw; height:100vh; overflow:hidden; background:#070d1a; }
 
-        /* Responsive rules (kraće verzije) */
         @media (max-width: 1024px) {
           .fids-topbar { padding: 0.6rem 1.5rem !important; }
           .fids-main { padding: 1rem 1.5rem !important; }
@@ -832,6 +907,7 @@ function GateDisplay() {
           html, body, #__next { overflow: auto !important; height: auto !important; min-height: 100vh !important; }
           .fids-root { overflow-y: auto !important; overflow-x: hidden !important; height: auto !important; min-height: 100vh !important; }
           .fids-topbar { padding: 0.5rem 1rem !important; flex-wrap: wrap !important; position: sticky !important; top: 0 !important; z-index: 10 !important; }
+          .fids-class-badge { font-size: 1.2rem !important; padding: 0.3rem 0.8rem !important; }
           .fids-main { flex-direction: column !important; padding: 0.8rem 1rem !important; gap: 1rem !important; }
           .fids-left-col { flex: none !important; width: 100% !important; padding-right: 0 !important; }
           .fids-logo-card { height: 70px !important; }
@@ -856,6 +932,7 @@ function GateDisplay() {
           .fids-dest-city { font-size: 2rem !important; }
           .fids-time-value { font-size: 2.2rem !important; }
           .fids-status-badge { font-size: 1.2rem !important; }
+          .fids-class-badge { font-size: 1rem !important; }
           .fids-dgr-wrapper img { max-height: 70px !important; }
           .fids-next-fn, .fids-next-time { font-size: 1.3rem !important; }
           .fids-next-dest { font-size: 1.1rem !important; }
@@ -866,7 +943,7 @@ function GateDisplay() {
 }
 
 // ------------------------------------------------------------
-// Stilovi objekat (CSS-in-JS)
+// Stilovi
 // ------------------------------------------------------------
 const FONT_DISPLAY = `'Rajdhani', 'Share Tech Mono', monospace`;
 const FONT_MONO    = `'Share Tech Mono', 'Courier New', monospace`;
@@ -884,17 +961,17 @@ const C = {
 const styles: Record<string, React.CSSProperties> = {
   root: { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, padding: '0', overflow: 'hidden' },
   topBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.9rem 2.5rem', background: C.panel, borderBottom: `1px solid ${C.border}`, flexShrink: 0 },
-  topBarLeft: { display: 'flex', alignItems: 'baseline', gap: '0.7rem' },
+  topBarLeft: { display: 'flex', alignItems: 'baseline', gap: '0.7rem', flexWrap: 'wrap' as const },
   topBarLabel: { fontSize: '0.95rem', fontWeight: 600, letterSpacing: '.18em', color: C.textMuted, fontFamily: FONT_MONO },
   topBarGate: { fontSize: '3.2rem', fontWeight: 700, lineHeight: 1, color: C.gold, letterSpacing: '.04em' },
   topBarTerminal: { fontSize: '2rem', fontWeight: 600, color: C.text, letterSpacing: '.06em' },
   topBarSep: { color: C.border, fontSize: '1.8rem', margin: '0 0.4rem' },
-  clock: { fontFamily: FONT_MONO, fontSize: '2.2rem', fontWeight: 400, color: C.accent, letterSpacing: '.08em' },
+  clock: { fontFamily: FONT_MONO, fontSize: '2.2rem', fontWeight: 400, color: C.accent, letterSpacing: '.08em', flexShrink: 0 },
   divider: { height: '1px', background: `linear-gradient(90deg, transparent 0%, ${C.border} 20%, ${C.border} 80%, transparent 100%)`, flexShrink: 0 },
   main: { display: 'flex', flex: 1, overflow: 'visible', padding: '1.5rem 2.5rem', gap: '0', minHeight: 0 },
   leftCol: { display: 'flex', flexDirection: 'column', justifyContent: 'space-evenly', flex: '0 0 52%', gap: '.8rem', paddingRight: '2.5rem', overflow: 'visible' },
   logoCard: { width: '100%', height: 'clamp(120px, 14vh, 200px)', background: '#ffffff', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxShadow: `0 0 0 1px ${C.border}, 0 4px 40px rgba(30,144,255,0.12)`, flexShrink: 0 },
-  logoImg: { width: '100%', height: '100%', objectFit: 'contain', padding: '10px 20px' },
+  logoImg: { width: '100%', height: '100%', objectFit: 'contain' as const, padding: '10px 20px' },
   logoFallback: { color: '#6b7280', fontSize: '14px', fontFamily: FONT_MONO, fontWeight: 600, letterSpacing: '.12em' },
   flightNumber: { fontSize: 'clamp(4.5rem, 9vw, 8rem)', fontWeight: 700, letterSpacing: '.05em', color: C.white, lineHeight: 1 },
   codeshare: { fontSize: '1rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_MONO },
@@ -920,7 +997,7 @@ const styles: Record<string, React.CSSProperties> = {
   gateChangedBanner: { background: '#431407', border: '1px solid #ea580c', borderRadius: '8px', padding: '.6rem 1.2rem', color: '#fed7aa', fontSize: '1.1rem', fontWeight: 700, letterSpacing: '.12em', fontFamily: FONT_MONO },
   checkInBanner: { background: '#3b0764', border: '1px solid #a855f7', borderRadius: '8px', padding: '.5rem 1.2rem', color: '#e9d5ff', fontSize: '1rem', fontWeight: 600, letterSpacing: '.1em', fontFamily: FONT_MONO },
   dangerousGoodsWrapper: { flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end', paddingTop: '0.5rem', minHeight: 0 },
-  dangerousGoodsImg: { maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: '8px' },
+  dangerousGoodsImg: { maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain' as const, borderRadius: '8px' },
   footer: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 2.5rem', background: C.panel, borderTop: `1px solid ${C.border}`, flexShrink: 0, gap: '2rem' },
   footerMeta: { display: 'flex', gap: '1.2rem', alignItems: 'center', color: C.textMuted, fontSize: '.8rem', letterSpacing: '.12em', fontFamily: FONT_MONO, flexShrink: 0 },
   nextFlight: { display: 'flex', alignItems: 'center', gap: '1.8rem', overflow: 'hidden' },

@@ -5,13 +5,15 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { 
   Plane, 
-  Settings, 
+  Settings, UserCheck,
   LogOut, 
   Building,
   MapPin,
   Calendar,
   BarChart3,
   Clock,
+   PlaneTakeoff,   // nova ikona za odlaske
+  PlaneLanding,   // nova ikona za dolaske
   Users,
   Activity,
   RefreshCw
@@ -43,6 +45,10 @@ const formatTime = (timeString: string): string => {
 
 // Tipovi za letove
 interface Flight {
+  AirlineName: string;
+  ScheduledDepartureTime(ScheduledDepartureTime: any): import("react").ReactNode;
+  OriginAirportCode: string;
+  DestinationAirportCode: string;
   FlightNumber: string;
   Airline: string;
   Destination?: string;
@@ -128,16 +134,33 @@ export default function AdminDashboard() {
           flight.Status.toLowerCase().includes('odložen')
         )
       ).length;
+      const timeStringToDate = (timeStr: string): Date | null => {
+  if (!timeStr || timeStr.trim() === '') return null;
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  if (isNaN(hours) || isNaN(minutes)) return null;
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date;
+};
       
       // Skupljamo najnovije letove za prikaz
-      const sortedFlights = allFlights
-        .filter(flight => flight.ScheduleTime)
-        .sort((a, b) => {
-          const timeA = a.ScheduleTime || '';
-          const timeB = b.ScheduleTime || '';
-          return timeB.localeCompare(timeA);
-        })
-        .slice(0, 5);
+const now = new Date();
+const nowMinus120 = new Date(now.getTime() - 120 * 60 * 1000);
+const nowPlus10 = new Date(now.getTime() + 10 * 60 * 1000);
+
+// Filtriraj letove koji imaju vrijeme i nalaze se u vremenskom prozoru
+const timeFilteredFlights = allFlights.filter(flight => {
+  const flightTime = timeStringToDate(flight.ScheduledDepartureTime);
+  if (!flightTime) return false;
+  return flightTime >= nowMinus120 && flightTime <= nowPlus10;
+});
+
+// Sortiraj po vremenu (od najranijeg do najkasnijeg)
+const sortedFlights = timeFilteredFlights.sort((a, b) => {
+  const timeA = a.ScheduledDepartureTime || '';
+  const timeB = b.ScheduledDepartureTime || '';
+  return timeA.localeCompare(timeB); // uzlazno
+});
       
       setStats({
         totalFlights,
@@ -376,7 +399,7 @@ const handleLogout = useCallback(async () => {
 
         {/* Main Navigation */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-          <Link
+          {/* <Link
             href="/admin/business-class"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
           >
@@ -391,7 +414,30 @@ const handleLogout = useCallback(async () => {
                 </p>
               </div>
             </div>
-          </Link>
+          </Link> */}
+           {/* NOVA KARTICA: Assign Check-in */}
+<Link
+  href="/admin/assign-checkin"
+  className="bg-gradient-to-br from-indigo-600/20 to-purple-600/20 backdrop-blur-sm rounded-xl p-6 border-2 border-indigo-500/50 hover:border-indigo-400 hover:bg-indigo-600/30 transition-all duration-200 group"
+>
+  <div className="flex items-start gap-4">
+    <div className="p-3 bg-indigo-600/30 rounded-lg text-indigo-300 group-hover:bg-indigo-600/50 transition-colors">
+      <UserCheck className="w-6 h-6" />
+    </div>
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <h3 className="font-bold text-lg text-white">Dodijela Check-in-a i Gate-ova</h3>
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-500/30 text-indigo-200 border border-indigo-400/50 whitespace-nowrap">
+          u funkciji od 18.05.2026
+        </span>
+      </div>
+      <p className="text-white/80 text-sm">
+        Dodijelite letove na check-in i upravljajte gate-ovima
+      </p>
+    </div>
+  </div>
+</Link>
+
 
           <Link
             href="/admin/flights"
@@ -410,7 +456,7 @@ const handleLogout = useCallback(async () => {
             </div>
           </Link>
 
-          <Link
+          {/* <Link
             href="/admin/airlines"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
           >
@@ -425,9 +471,9 @@ const handleLogout = useCallback(async () => {
                 </p>
               </div>
             </div>
-          </Link>
+          </Link> */}
 
-          <Link
+          {/* <Link
             href="/admin/destinations"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
           >
@@ -442,9 +488,9 @@ const handleLogout = useCallback(async () => {
                 </p>
               </div>
             </div>
-          </Link>
+          </Link> */}
 
-          <Link
+          {/* <Link
             href="/admin/analytics"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
           >
@@ -459,7 +505,7 @@ const handleLogout = useCallback(async () => {
                 </p>
               </div>
             </div>
-          </Link>
+          </Link> */}
 
           <Link
             href="/admin/settings"
@@ -535,12 +581,12 @@ const handleLogout = useCallback(async () => {
                   {refreshing ? (
                     <>
                       <div className="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin" />
-                      <span>Osvežava se...</span>
+                      <span>Osvježava se...</span>
                     </>
                   ) : (
                     <>
                       <RefreshCw size={14} />
-                      <span>Osveži</span>
+                      <span>Osvježi</span>
                     </>
                   )}
                 </button>
@@ -561,16 +607,24 @@ const handleLogout = useCallback(async () => {
                 {recentFlights.map((flight, index) => (
                   <div key={index} className="flex items-center justify-between p-3 bg-white/5 rounded-lg hover:bg-white/10 transition-colors">
                     <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full ${flight.FlightType === 'departure' ? 'bg-blue-500' : 'bg-green-500'}`} />
-                      <div>
+{flight.FlightType === 'departure' ? (
+  <PlaneTakeoff className="w-4 h-4 text-blue-400" />
+) : (
+  <PlaneLanding className="w-4 h-4 text-green-400" />
+)}                      <div>
                         <div className="text-white font-medium">{flight.FlightNumber}</div>
-                        <div className="text-white/60 text-sm">
-                          {flight.Airline} • {flight.FlightType === 'departure' ? 'za ' + (flight.Destination || 'Nepoznato') : 'iz ' + (flight.Origin || 'Nepoznato')}
-                        </div>
+<div className="text-white/60 text-sm">
+  {flight.Airline || flight.AirlineName} • 
+  {flight.FlightType === 'departure' 
+    ? ' za ' + (flight.DestinationAirportCode || flight.Destination || 'Nepoznato')
+    : ' iz ' + (flight.DestinationAirportCode || flight.Origin || 'Nepoznato')}
+</div>
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="text-white/90">{formatTime(flight.ScheduleTime)}</div>
+<div className="text-white/90">
+  {formatTime(String(flight.ScheduledDepartureTime ?? ''))}
+</div>
                       {flight.Gate && (
                         <div className="text-white/60 text-xs">GATE {flight.Gate}</div>
                       )}
