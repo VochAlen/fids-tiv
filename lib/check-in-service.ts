@@ -182,6 +182,15 @@ function createFallbackConfig() {
       minCloseBeforeDeparture: 30,
       daysOfWeek: [],
     },
+      {
+      airlineIata: 'BA',
+      airlineName: 'British Airways',
+      checkInOpenMinutes: 150,
+      useAutoCheckIn: true,
+      maxAutoOpenMinutes: 150,
+      minCloseBeforeDeparture: 30,
+      daysOfWeek: [],
+    },
     {
       airlineIata: 'U2',
       airlineName: 'easyJet',

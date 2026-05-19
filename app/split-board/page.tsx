@@ -193,7 +193,7 @@ const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] =
 // AUTO-STATUS (isti)
 // ============================================================
 const CHECKIN_OFFSETS: Record<string, number> = {
-  "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180,
+  "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180,"BA": 150,
 };
 
 function getAutoStatus(flight: Flight): string | null {
