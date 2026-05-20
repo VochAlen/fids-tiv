@@ -112,3 +112,43 @@ export async function safeRedisHGetAll(key: string): Promise<Record<string, stri
     return null;
   }
 }
+
+// lib/redis.ts – dodati nakon safeRedisHGetAll
+
+export async function safeRedisSet(key: string, value: string, ttlSeconds?: number): Promise<boolean> {
+  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
+    return false;
+  }
+  circuitOpen = false;
+
+  try {
+    const client = getRedisClient();
+    if (ttlSeconds) {
+      await client.setex(key, ttlSeconds, value);
+    } else {
+      await client.set(key, value);
+    }
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Redis] safeRedisSet("${key}") failed: ${msg}`);
+    return false;
+  }
+}
+
+export async function safeRedisDel(key: string): Promise<boolean> {
+  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
+    return false;
+  }
+  circuitOpen = false;
+
+  try {
+    const client = getRedisClient();
+    await client.del(key);
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Redis] safeRedisDel("${key}") failed: ${msg}`);
+    return false;
+  }
+}
