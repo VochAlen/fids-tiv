@@ -378,6 +378,19 @@ function GateDisplay() {
     };
   }, []);
 
+  // ⚡ Trenutno sakrij let čim status postane "departed" / "poletio"
+const flightStatus = display.flight?.StatusEN;
+const flightNumber = display.flight?.FlightNumber;
+
+useEffect(() => {
+  if (!flightStatus) return;
+  const status = flightStatus.toLowerCase();
+  if (status.includes('departed') || status.includes('poletio')) {
+    console.log(`✈️ Flight ${flightNumber} just departed – reloading flights`);
+    loadFlights();
+  }
+}, [flightStatus, flightNumber, loadFlights]);
+
   // ── DERIVED STATE ────────────────────────────────────────────
   const { isCancelled, isDiverted } = checkFlightStatus(display.flight?.StatusEN || '');
   const isGateChanged = !!(display.gateChangedAt && (Date.now() - display.gateChangedAt < 15_000));
