@@ -340,8 +340,8 @@ function parseDepartureTime(timeString: string): Date | null {
     const d = new Date(now);
     d.setHours(hours, minutes, 0, 0);
 
-    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
-    if (now.getTime() - d.getTime() > SIX_HOURS_MS) {
+    const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000; // ← PROMJENA: bilo 6h
+    if (now.getTime() - d.getTime() > EIGHT_HOURS_MS) {
       d.setDate(d.getDate() + 1);
     }
 
@@ -701,11 +701,28 @@ export async function reloadCheckInConfig(): Promise<void> {
 }
 
 // Čisti cache svaki sat
+// Čisti cache svaki sat
 if (typeof window !== 'undefined') {
   setInterval(() => {
     timeParseCache.clear();
     console.log('🧹 timeParseCache očišćen');
   }, 60 * 60 * 1000);
+
+  // ── Briši cache tačno u ponoć (novi dan = novi ključevi) ──
+  const scheduleMidnightClear = () => {
+    const now = new Date();
+    const midnight = new Date(now);
+    midnight.setHours(24, 0, 0, 0);
+    const msUntilMidnight = midnight.getTime() - now.getTime();
+
+    setTimeout(() => {
+      timeParseCache.clear();
+      console.log('🕛 timeParseCache cleared at midnight');
+      scheduleMidnightClear(); // planira sljedeću ponoć
+    }, msUntilMidnight);
+  };
+
+  scheduleMidnightClear();
 }
 
 // Pojednostavljena verzija za automatski check-in
