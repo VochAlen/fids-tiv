@@ -16,6 +16,27 @@ import Redis from 'ioredis';
 let lastRedisCleanup = 0;
 const REDIS_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 
+// Dodaj ovo na vrh fajla, ispod konstanti
+const FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/javascript, */*; q=0.01',
+  'Accept-Language': 'en-US,en;q=0.9,hr;q=0.8',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Referer': 'https://montenegroairports.com/tivat/en/flights/departures',
+  'Origin': 'https://montenegroairports.com',
+  'X-Requested-With': 'XMLHttpRequest',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-origin',
+  'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  'Sec-Ch-Ua-Mobile': '?0',
+  'Sec-Ch-Ua-Platform': '"Windows"',
+  'Connection': 'keep-alive',
+  'DNT': '1',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+} as const;
+
 async function runRedisCleanupIfNeeded(): Promise<void> {
   if (Date.now() - lastRedisCleanup < REDIS_CLEANUP_INTERVAL_MS) return;
   lastRedisCleanup = Date.now();
@@ -138,54 +159,54 @@ async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
     return flights;
   }
 }
-
-async function fetchWithQuickRetry(url: string, options: RequestInit, retries = MAX_RETRIES): Promise<Response> {
+async function fetchWithQuickRetry(
+  url: string,
+  options: RequestInit,
+  retries = MAX_RETRIES
+): Promise<Response> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
-      
+
       const response = await fetch(url, {
         ...options,
-        signal: controller.signal
+        signal: controller.signal,
       });
-      
+
       clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        return response;
-      }
-      
+
+      if (response.ok) return response;
+
+      // DODAJ OVO — loguj HTTP status ako server odgovori ali s greškom
+      console.error(`❌ HTTP ${response.status} ${response.statusText} on attempt ${attempt}/${retries}`);
+
       if (attempt < retries) {
-        console.log(`Quick retry ${attempt}/${retries}...`);
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
       }
     } catch (error) {
-      if (attempt === retries) {
-        throw error;
+      // DODAJ OVO — loguj tačan error tip
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const errName = error instanceof Error ? error.name : 'UnknownError';
+      console.error(`❌ Fetch attempt ${attempt}/${retries} failed: [${errName}] ${errMsg}`);
+
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
       }
-      console.log(`Quick retry after error ${attempt}/${retries}...`);
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
     }
   }
-  
+
   throw new Error(`Live API fetch failed after ${retries} attempts`);
 }
 
 async function performEmergencyFetch(): Promise<Flight[] | null> {
   try {
-    const emergencyResponse = await fetch(FLIGHT_API_URL, {
-      method: 'GET',
-      headers: {
-        'User-Agent': userAgents.chrome,
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://montenegroairports.com/',
-        'Origin': 'https://montenegroairports.com',
-      },
-      signal: AbortSignal.timeout(10000)
-    });
-
+const emergencyResponse = await fetch(FLIGHT_API_URL, {
+  method: 'GET',
+  cache: 'no-store',
+  headers: FETCH_HEADERS,
+  signal: AbortSignal.timeout(10000),
+});
     if (!emergencyResponse.ok) {
       return null;
     }
@@ -246,18 +267,11 @@ export async function GET(): Promise<NextResponse> {
   try {
     console.log('🔄 Attempting LIVE API fetch from Montenegro Airports...');
     
-    const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
-      method: 'GET',
-      headers: {
-        'User-Agent': userAgents.chrome,
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://montenegroairports.com/',
-        'Origin': 'https://montenegroairports.com',
-        'Connection': 'keep-alive',
-        'DNT': '1'
-      }
-    });
+const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
+  method: 'GET',
+  cache: 'no-store',
+  headers: FETCH_HEADERS,
+});
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
