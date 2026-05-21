@@ -250,7 +250,7 @@ export default function GatePage() {
 // ─────────────────────────────────────────────────────────────
 
 // Grace period: 45 min nakon STD, prikazujemo let čak i bez API statusa
-const GATE_CLOSE_BEFORE_MS = 3 * 60 * 1000;  // 3 minute prije STD
+const GATE_CLOSE_BEFORE_MS = 6 * 60 * 1000;  // 3 minute prije STD
 
 // ─────────────────────────────────────────────────────────────
 // Glavna komponenta
@@ -305,20 +305,26 @@ function GateDisplay() {
     // Prikazujemo let sve dok je: now < STD + 45min
 // ── VREMENSKI BACKUP ─────────────────────────────────────
 // Sakrij let 3 minute prije planiranog polaska (STD)
-const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
-if (stdDep) {
-  const hideFrom = stdDep.getTime() - GATE_CLOSE_BEFORE_MS;
-  if (Date.now() >= hideFrom) {
-    console.log(
-      `[shouldDisplayFlight] ${f.FlightNumber} sakriveno — ` +
-      `gate se zatvara 3min prije STD ${f.ScheduledDepartureTime}`
-    );
-    return false;
+//── VREMENSKI BACKUP ─────────────────────────────────────
+  // Sakrij let 3 minute prije polaska (ETD ako postoji, inače STD)
+  let departureTimeStr = f.ScheduledDepartureTime || '';
+  if (f.EstimatedDepartureTime) {
+    departureTimeStr = f.EstimatedDepartureTime;  // koristi ETD ako postoji
   }
-}
+  const dep = parseDepartureTime(departureTimeStr);
+  if (dep) {
+    const hideFrom = dep.getTime() - GATE_CLOSE_BEFORE_MS;
+    if (Date.now() >= hideFrom) {
+      console.log(
+        `[shouldDisplayFlight] ${f.FlightNumber} sakriveno — ` +
+        `gate se zatvara 3min prije polaska u ${departureTimeStr}`
+      );
+      return false;
+    }
+  }
 
-    return true;
-  }, []);
+  return true;
+}, []);
 
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
@@ -539,11 +545,15 @@ useEffect(() => {
   if (!display.flight) return;
   if (manualGateStatusRef.current === 'open') return;
 
-  const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
-  if (!stdDep) return;
+let departureTimeStr = display.flight.ScheduledDepartureTime || '';
+if (display.flight.EstimatedDepartureTime) {
+  departureTimeStr = display.flight.EstimatedDepartureTime;
+}
+const dep = parseDepartureTime(departureTimeStr);
+if (!dep) return;
 
-  // Okidamo refresh tačno kad se gate treba zatvoriti (STD - 3min)
-  const triggerAt = stdDep.getTime() - GATE_CLOSE_BEFORE_MS;
+// Okidamo refresh tačno kad se gate treba zatvoriti (ETD - 3min ili STD - 3min)
+const triggerAt = dep.getTime() - GATE_CLOSE_BEFORE_MS;
   const ms = triggerAt - Date.now();
 
   if (ms > 0) {
@@ -633,27 +643,144 @@ useEffect(() => {
   // Render: nema leta
   // ─────────────────────────────────────────────────────────────
 
-  if (!display.flight) {
-    const closed = display.manualGateStatus === 'closed';
-    return (
-      <div style={styles.splash} className="fids-splash">
-        <div style={{ ...styles.gateLabel, fontSize: 'clamp(5rem,18vw,14rem)', lineHeight: 1 }}>
+// ─────────────────────────────────────────────────────────────
+// Render: nema leta (redizajnirano)
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Render: nema leta (redizajnirano sa više jezika)
+// ─────────────────────────────────────────────────────────────
+
+if (!display.flight) {
+  const closed = display.manualGateStatus === 'closed';
+  
+  // Višejezični tekstovi
+const translations = {
+  closed: {
+    me: 'GATE ZATVOREN',
+    de: 'GATE GESCHLOSSEN',
+    fr: 'PORTE FERMÉE',
+    he: 'השער סגור',
+    en: 'GATE CLOSED'
+  },
+  noFlights: {
+    me: 'NEMA LETOVA',
+    de: 'KEINE FLÜGE',
+    fr: 'AUCUN VOL',
+    he: 'אין טיסות',
+    en: 'NO FLIGHTS SCHEDULED'
+  },
+  subtext: {
+    me: 'Provjerite info ekrane za ažuriranja',
+    de: 'Bitte überprüfen Sie die Info-Bildschirme für Updates',
+    fr: 'Veuillez consulter les écrans d\'information pour les mises à jour',
+    he: 'אנא בדוק את לוחות המידע לעדכונים',
+    en: 'Please check departure boards for updates'
+  },
+  footerClosed: {
+    me: 'Ovaj gate je trenutno zatvoren',
+    de: 'Dieses Gate ist derzeit geschlossen',
+    fr: 'Cette porte est actuellement fermée',
+    he: 'שער זה סגור כרגע',
+    en: 'This gate is currently closed'
+  },
+  footerIdle: {
+    me: 'Molimo pričekajte sljedeći let',
+    de: 'Bitte warten Sie auf den nächsten Flug',
+    fr: 'Veuillez attendre le prochain vol',
+    he: 'אנא המתן לטיסה הבאה',
+    en: 'Please wait for next flight assignment'
+  }
+};
+  
+  // Odaberi jezik (možeš dodati detekciju iz browsera ili parama)
+  // Za sada koristimo sve jezike u stacku
+  const languages = ['me', 'de', 'fr', 'he', 'en'] as const;
+  
+  return (
+    <div style={styles.emptyRoot} className="fids-empty-root">
+      {/* Top bar */}
+      <div style={styles.topBar} className="fids-topbar">
+        <div style={styles.topBarLeft} className="fids-topbar-left">
+          <span style={styles.topBarLabel}>GATE</span>
+          <span style={styles.topBarGate}>{gateNumber}</span>
+        </div>
+        <LiveClock />
+      </div>
+      
+      <Divider />
+      
+      {/* Glavni sadržaj */}
+      <div style={styles.emptyMain} className="fids-empty-main">
+        {/* Veliki broj gate-a */}
+        <div style={styles.emptyGateNumber} className="fids-empty-gate">
           {gateNumber}
         </div>
-        <div style={{
-          fontSize: '2rem', fontWeight: 600, letterSpacing: '.08em',
-          color: closed ? '#ef4444' : '#475569', marginTop: '1rem',
-        }}>
-          {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
+        
+        {/* Status poruka - stack na više jezika */}
+        <div style={styles.emptyStatusWrapper}>
+          {/* Ikona - sada veća i vidljivija */}
+          <div style={styles.emptyStatusIcon}>
+            {closed ? '🔒' : '✈️'}
+          </div>
+          
+          {/* Višejezični stack */}
+          <div style={styles.emptyLanguageStack}>
+            {languages.map((lang, idx) => (
+              <div key={lang} style={styles.emptyLanguageRow}>
+                <span style={styles.emptyLanguageCode}>
+                  {lang.toUpperCase()}
+                </span>
+                <span style={styles.emptyLanguageText}>
+                  {closed ? translations.closed[lang] : translations.noFlights[lang]}
+                </span>
+              </div>
+            ))}
+          </div>
+          
+          {/* Subtext - također višejezični */}
+          <div style={styles.emptySubtextStack}>
+            {languages.map((lang, idx) => (
+              <div key={lang} style={styles.emptySubtextRow}>
+                <span style={styles.emptySubtextCode}>{lang.toUpperCase()}</span>
+                <span style={styles.emptySubtextText}>
+                  {translations.subtext[lang]}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
-        <div style={styles.metaRow}>
-          <span>Updated {lastUpdate}</span>
-          <span style={{ opacity: .4 }}>•</span>
-          <span>Next {nextUpdate}</span>
+        
+        {/* Meta info */}
+        <div style={styles.emptyMeta}>
+          <div style={styles.emptyMetaItem}>
+            <span style={styles.emptyMetaLabel}>LAST UPDATE</span>
+            <span style={styles.emptyMetaValue}>{lastUpdate}</span>
+          </div>
+          <div style={styles.emptyMetaDivider} />
+          <div style={styles.emptyMetaItem}>
+            <span style={styles.emptyMetaLabel}>NEXT UPDATE</span>
+            <span style={styles.emptyMetaValue}>{nextUpdate}</span>
+          </div>
         </div>
       </div>
-    );
-  }
+      
+      <Divider />
+      
+      {/* Footer - višejezični */}
+      <div style={styles.emptyFooter} className="fids-empty-footer">
+        <div style={styles.emptyFooterStack}>
+          {languages.map((lang, idx) => (
+            <span key={lang} style={styles.emptyFooterText}>
+              {closed ? translations.footerClosed[lang] : translations.footerIdle[lang]}
+              {idx < languages.length - 1 && <span style={styles.emptyFooterSeparator}> • </span>}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
   // ─────────────────────────────────────────────────────────────
   // Render: aktivni let
@@ -857,6 +984,33 @@ useEffect(() => {
         @keyframes fidsPulse { 0%,100%{opacity:1} 50%{opacity:.55} }
         @keyframes spin { to { transform: rotate(360deg); } }
         html,body,#__next { width:100vw; height:100vh; overflow:hidden; background:#070d1a; }
+        /* Empty state responsive - kompaktno */
+.fids-empty-gate { font-size: clamp(8rem, 18vw, 16rem) !important; }
+.fids-empty-status-icon { font-size: 2.5rem !important; }
+.fids-empty-language-text { font-size: clamp(1rem, 2vw, 1.4rem) !important; }
+.fids-empty-subtext-text { font-size: clamp(0.65rem, 1vw, 0.8rem) !important; }
+
+@media (max-width: 768px) {
+  .fids-empty-gate { font-size: clamp(6rem, 15vw, 12rem) !important; }
+  .fids-empty-status-icon { font-size: 2rem !important; }
+  .fids-empty-language-row { gap: 0.3rem !important; }
+  .fids-empty-language-code { font-size: 0.55rem !important; }
+  .fids-empty-language-text { font-size: 0.9rem !important; }
+  .fids-empty-subtext-row { gap: 0.3rem !important; }
+  .fids-empty-subtext-text { font-size: 0.55rem !important; }
+  .fids-empty-meta { flex-direction: column !important; gap: 0.3rem !important; padding: 0.4rem 0.8rem !important; margin-top: 0.5rem !important; }
+  .fids-empty-meta-divider { display: none !important; }
+  .fids-empty-footer { padding: 0.3rem 0.8rem !important; }
+  .fids-empty-footer-text { font-size: 0.5rem !important; }
+}
+
+@media (max-width: 480px) {
+  .fids-empty-gate { font-size: clamp(5rem, 12vw, 10rem) !important; }
+  .fids-empty-language-stack { gap: 0.15rem !important; }
+  .fids-empty-language-text { font-size: 0.75rem !important; }
+  .fids-empty-subtext-stack { gap: 0.1rem !important; }
+  .fids-empty-subtext-text { font-size: 0.45rem !important; }
+}
 
         @media (max-width: 1024px) {
           .fids-topbar { padding: 0.6rem 1.5rem !important; }
@@ -915,6 +1069,20 @@ useEffect(() => {
           .fids-next-dest { font-size: 1.1rem !important; }
           .fids-gate-changed-banner, .fids-checkin-banner { font-size: 0.8rem !important; padding: 0.3rem 0.6rem !important; }
         }
+          /* Empty state responsive */
+.fids-empty-gate { font-size: clamp(12rem, 25vw, 22rem) !important; }
+.fids-empty-status-text { font-size: clamp(2rem, 5vw, 4rem) !important; }
+.fids-empty-meta { gap: 1rem !important; padding: 0.8rem 1.2rem !important; }
+
+@media (max-width: 768px) {
+  .fids-empty-gate { font-size: clamp(8rem, 20vw, 14rem) !important; }
+  .fids-empty-status-text { font-size: clamp(1.6rem, 4vw, 2.5rem) !important; }
+  .fids-empty-status-icon { font-size: 2.5rem !important; }
+  .fids-empty-meta { flex-direction: column !important; gap: 0.5rem !important; }
+  .fids-empty-meta-divider { display: none !important; }
+  .fids-empty-footer-text { font-size: 0.7rem !important; }
+}
+  
         @media (max-height: 600px) and (min-width: 769px) {
           .fids-main { padding: 0.6rem 1.5rem !important; gap: 0.5rem !important; }
           .fids-left-col { gap: 0.4rem !important; }
@@ -996,6 +1164,154 @@ const styles: Record<string, React.CSSProperties> = {
   nextFN: { fontSize: '2.5rem', fontWeight: 700, color: C.text, letterSpacing: '.08em', flexShrink: 0 },
   nextDest: { fontSize: '2.3rem', fontWeight: 600, color: C.textMuted, letterSpacing: '.04em', overflow: 'hidden', whiteSpace: 'nowrap' as const, textOverflow: 'ellipsis' },
   nextTime: { fontFamily: FONT_MONO, fontSize: '2.3rem', color: C.gold, letterSpacing: '.08em', flexShrink: 0 },
+  // ─── EMPTY STATE (NO FLIGHTS) STYLES ──────────────────────────
+emptyMain: { 
+  flex: 1, 
+  display: 'flex', 
+  flexDirection: 'column', 
+  alignItems: 'center', 
+  justifyContent: 'center', 
+  gap: '0.8rem',  // SMANJENO sa 2rem
+  padding: '1rem',  // SMANJENO sa 2rem
+  overflow: 'hidden'  // PROMIJENJENO sa 'auto' - nema scrolla
+},
+emptyGateNumber: { 
+  fontSize: 'clamp(10rem, 20vw, 18rem)',  // SMANJENO (bilo 22rem max)
+  fontWeight: 800, 
+  color: C.gold, 
+  letterSpacing: '.06em', 
+  fontFamily: FONT_DISPLAY,
+  textShadow: `0 0 30px rgba(230,168,23,0.3)`,
+  lineHeight: 1,
+  marginBottom: '0.25rem'  // SMANJENO sa 1rem
+},
+emptyStatusWrapper: { 
+  display: 'flex', 
+  flexDirection: 'column', 
+  alignItems: 'center', 
+  gap: '0.6rem',  // SMANJENO sa 1.5rem
+  maxWidth: '90vw'
+},
+emptyStatusIcon: { 
+  fontSize: '3rem',  // SMANJENO sa 5rem
+  opacity: 0.9,
+  filter: 'drop-shadow(0 0 10px rgba(230,168,23,0.4))',
+  marginBottom: '0'  // UKLONJENO
+},
+emptyLanguageStack: {
+  display: 'flex',
+  flexDirection: 'column' as const,
+  gap: '0.25rem',  // SMANJENO sa 0.6rem
+  alignItems: 'center'
+},
+emptyLanguageRow: {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '0.6rem',  // SMANJENO sa 1rem
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center'
+},
+emptyLanguageCode: {
+  fontSize: '0.7rem',  // SMANJENO sa 0.8rem
+  fontWeight: 700,
+  color: C.accent,
+  letterSpacing: '.1em',
+  fontFamily: FONT_MONO,
+  background: 'rgba(30,144,255,0.15)',
+  padding: '0.15rem 0.4rem',  // SMANJENO
+  borderRadius: '4px'
+},
+emptyLanguageText: {
+  fontSize: 'clamp(1.1rem, 2.2vw, 1.6rem)',  // SMANJENO (bilo 1.4-2.2rem)
+  fontWeight: 600,
+  color: '#cfe4ff',
+  letterSpacing: '.05em'
+},
+emptySubtextStack: {
+  display: 'flex',
+  flexDirection: 'column' as const,
+  gap: '0.2rem',  // SMANJENO sa 0.4rem
+  alignItems: 'center',
+  marginTop: '0'  // UKLONJENO
+},
+emptySubtextRow: {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '0.5rem',  // SMANJENO sa 0.8rem
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center'
+},
+emptySubtextCode: {
+  fontSize: '0.55rem',  // SMANJENO sa 0.65rem
+  fontWeight: 600,
+  color: C.textMuted,
+  fontFamily: FONT_MONO,
+  opacity: 0.7
+},
+emptySubtextText: {
+  fontSize: 'clamp(0.7rem, 1.2vw, 0.85rem)',  // SMANJENO (bilo 0.85-1.1rem)
+  color: C.textMuted,
+  letterSpacing: '.03em'
+},
+emptyMeta: { 
+  display: 'flex', 
+  gap: '1.5rem',  // SMANJENO sa 2rem
+  alignItems: 'center', 
+  marginTop: '0.8rem',  // SMANJENO sa 2rem
+  padding: '0.5rem 1.2rem',  // SMANJENO
+  background: 'rgba(13,22,41,0.8)',
+  borderRadius: '10px',
+  backdropFilter: 'blur(8px)',
+  border: `1px solid ${C.border}`
+},
+emptyMetaItem: { 
+  display: 'flex', 
+  flexDirection: 'column' as const, 
+  alignItems: 'center', 
+  gap: '0.2rem'  // SMANJENO sa 0.3rem
+},
+emptyMetaLabel: { 
+  fontSize: '0.6rem',  // SMANJENO sa 0.7rem
+  fontWeight: 600, 
+  letterSpacing: '.12em', 
+  color: C.textMuted, 
+  fontFamily: FONT_MONO 
+},
+emptyMetaValue: { 
+  fontSize: '0.9rem',  // SMANJENO sa 1.1rem
+  fontWeight: 500, 
+  fontFamily: FONT_MONO, 
+  color: C.accent 
+},
+emptyMetaDivider: { 
+  width: '1px', 
+  height: '1.5rem',  // SMANJENO sa 2rem
+  background: C.border 
+},
+emptyFooter: { 
+  padding: '0.4rem 2rem',  // SMANJENO
+  textAlign: 'center' as const, 
+  background: C.panel, 
+  borderTop: `1px solid ${C.border}` 
+},
+emptyFooterStack: {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center',
+  gap: '0.1rem'  // SMANJENO
+},
+emptyFooterText: { 
+  fontSize: '0.65rem',  // SMANJENO sa 0.75rem
+  color: C.textMuted, 
+  letterSpacing: '.04em', 
+  fontFamily: FONT_MONO 
+},
+emptyFooterSeparator: {
+  color: C.border,
+  margin: '0 0.2rem'
+},
+
+
   splash: { width: '100vw', height: '100vh', background: C.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_DISPLAY, gap: '1rem' },
   splashIcon: { fontSize: '4rem', color: C.gold, opacity: .6 },
   splashTitle: { fontSize: '2.2rem', color: C.text, fontWeight: 600, letterSpacing: '.1em' },
