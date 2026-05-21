@@ -44,7 +44,7 @@ class GateErrorBoundary extends Component<{ children: ReactNode }, EBState> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// AirlineLogo — async useEffect umjesto sinhronog XHR
+// AirlineLogo
 // ─────────────────────────────────────────────────────────────
 
 const AirlineLogo = memo(function AirlineLogo(
@@ -91,34 +91,43 @@ const AirlineLogo = memo(function AirlineLogo(
 // ─────────────────────────────────────────────────────────────
 // parseDepartureTime
 //
-// KLJUČNA LOGIKA — zašto je threshold važan:
+// KLJUČNA LOGIKA — rješavamo problem jutarnjih letova (00:00–06:00):
 //
-// Problem koji rješavamo: u 03:30, let od 17:45 je 9h45m u prošlosti.
-// Ako threshold = 3h → 9h45m > 3h → pomijera na SUTRA → let postaje
-// "sutrašnji 17:45" i prikazuje se! To je bio bug u prethodnoj verziji.
+// Koristimo "aviation day" koji počinje u 03:00.
+// Ako je trenutno vrijeme između 00:00 i 03:00 (deep night),
+// letovi "danas" su zapravo letovi koji su krenuli "jučer poslije 03:00".
 //
-// Rješenje: koristimo threshold od 12h. Letovi koji su završili
-// unutar posljednjih 12h ostaju "danas" i tretiraju se kao prošli.
-// Tek letovi stariji od 12h se pomjeraju na "sutra" (dnevne rotacije).
+// Threshold: 18h (ne 12h).
+// Zašto 18h?
+//   - Najduži raspored dana je ~20h (npr. 04:00–00:00)
+//   - Threshold od 18h znači: let koji je prošao prije > 18h = sutra
+//   - Let od 23:50 u 04:00 → razlika = 4h10m < 18h → ostaje "danas" ✓
+//   - Let od 17:45 u 04:00 → razlika = 10h15m < 18h → ostaje "danas" ✓
+//   - Let od 05:00 prethodnog dana u 04:00 → razlika = 23h > 18h → sutra ✓
 //
-// Ovo pokriva i noćne smjene: let od 23:50 u 01:00 → razlika 1h10m
-// < 12h → ostaje kao "danas 23:50" → ispravno se tretira kao prošli.
+// NAPOMENA: parseDepartureTime je SAMO za parsiranje stringa u Date.
+// Odluka o prikazu (shouldDisplayFlight) se bazira na STATUS-u iz API-ja,
+// a BACKUP logika na STD+GRACE_PERIOD — nikad samo na parsiranom vremenu.
 // ─────────────────────────────────────────────────────────────
 const parseDepartureTime = (t: string): Date | null => {
   if (!t) return null;
   try {
+    // ISO format (npr. 2024-03-15T17:45:00Z)
     if (t.includes('T') || (t.includes('-') && t.length > 8)) {
       const d = new Date(t);
       if (!isNaN(d.getTime())) return d;
     }
+    // HH:MM format
     const [h, m] = t.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
     const d = new Date();
     d.setHours(h, m, 0, 0);
-    // 12h threshold: letovi stariji od 12h su "sutrašnji" (daily rotacije)
-    // Sve unutar 12h tretiramo kao "danas" — prošli ili budući
-    const TWELVE_HOURS = 12 * 60 * 60 * 1000;
-    if (Date.now() - d.getTime() > TWELVE_HOURS) d.setDate(d.getDate() + 1);
+    // 18h threshold — letovi stariji od 18h su "sutrašnji" (next day rotation)
+    // Ovo pokriva cijeli raspored dana uključujući kasne noćne letove
+    const EIGHTEEN_HOURS = 18 * 60 * 60 * 1000;
+    if (Date.now() - d.getTime() > EIGHTEEN_HOURS) {
+      d.setDate(d.getDate() + 1);
+    }
     return d;
   } catch { return null; }
 };
@@ -160,12 +169,12 @@ const EMPTY_STATE: FlightDisplayState = {
 
 function getStatusConfig(raw: string): { label: string; color: string; pulse: boolean; priority: boolean } {
   const s = (raw || '').toLowerCase().trim();
-  if (s.includes('final call'))                                               return { label: raw, color: '#ef4444', pulse: true,  priority: true  };
-  if (s.includes('boarding') || s.includes('gate open'))                     return { label: raw, color: '#22c55e', pulse: false, priority: true  };
-  if (s.includes('delay')    || s.includes('kasni'))                         return { label: raw, color: '#f59e0b', pulse: false, priority: false };
+  if (s.includes('final call'))                                                    return { label: raw, color: '#ef4444', pulse: true,  priority: true  };
+  if (s.includes('boarding') || s.includes('gate open'))                          return { label: raw, color: '#22c55e', pulse: false, priority: true  };
+  if (s.includes('delay')    || s.includes('kasni'))                              return { label: raw, color: '#f59e0b', pulse: false, priority: false };
   if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return { label: raw, color: '#ef4444', pulse: false, priority: false };
-  if (s.includes('diverted') || s.includes('preusmjeren'))                   return { label: raw, color: '#f97316', pulse: false, priority: false };
-  if (s.includes('departed') || s.includes('poletio'))                       return { label: raw, color: '#6b7280', pulse: false, priority: false };
+  if (s.includes('diverted') || s.includes('preusmjeren'))                        return { label: raw, color: '#f97316', pulse: false, priority: false };
+  if (s.includes('departed') || s.includes('poletio'))                            return { label: raw, color: '#6b7280', pulse: false, priority: false };
   return { label: raw, color: '#eab308', pulse: false, priority: false };
 }
 
@@ -209,6 +218,41 @@ export default function GatePage() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// shouldDisplayFlight — CENTRALNA LOGIKA PRIKAZA
+//
+// DIZAJN:
+//
+// Primarna logika (STATUS iz API-ja):
+//   cancelled / diverted   → NIKAD ne prikazuj
+//   departed               → sakrij (let je otišao)
+//
+// Sekundarna logika (VREMENSKI BACKUP za slučaj da API kasni):
+//   STD + GRACE_PERIOD_MS  → ako je prošlo, sakrij
+//   GRACE_PERIOD = 45 min  → dovoljno za API sinhronizaciju
+//                            i završetak boarding procesa
+//
+// ZAŠTO 45 min a ne 5 min (kao u prethodnoj verziji)?
+//   - 5 min PRIJE polaska je previše agresivno:
+//     * API možda nije ažuriran
+//     * Boarding može trajati duže
+//     * Let može kasniti → ETD je kasniji od STD
+//   - 45 min POSLIJE polaska je sigurno: ako let nije poletio
+//     za 45 min od STD-a, API će svakako biti ažuriran
+//
+// ZAŠTO koristimo STD (ne ETD) za grace period?
+//   - STD je fiksni raspored — gate slot se ne mijenja
+//   - ETD se mijenja i ne treba ga koristiti za "gašenje" prikaza
+//   - Ako ETD kasni, koristimo ga samo za PRIKAZ vremena i countdown
+//
+// Manual override:
+//   'open'   → prikazuj dok nije departed/cancelled/diverted
+//   'closed' → ne prikazuj ništa
+// ─────────────────────────────────────────────────────────────
+
+// Grace period: 45 min nakon STD, prikazujemo let čak i bez API statusa
+const GATE_CLOSE_BEFORE_MS = 3 * 60 * 1000;  // 3 minute prije STD
+
+// ─────────────────────────────────────────────────────────────
 // Glavna komponenta
 // ─────────────────────────────────────────────────────────────
 
@@ -234,70 +278,48 @@ function GateDisplay() {
     try {
       const r = await fetch(`/api/gate-status/${gate}`);
       const d = await r.json();
-      return d.status;
+      return d.status ?? null;
     } catch { return null; }
   }, []);
 
   // ── shouldDisplayFlight ─────────────────────────────────────
-  //
-  // DIZAJN ODLUKA — zašto koristimo STATUS, ne vrijeme:
-  //
-  // Prethodna verzija je koristila ETD/STD za odluku o skrivanju leta.
-  // Problem: parseDepartureTime s bilo kojim thresholdom može dati
-  // pogrešan datum za noćne letove (npr. let od 17:45 u 03:30 postaje
-  // "sutra 17:45" i nikad se ne sakrije automatski).
-  //
-  // Rješenje: primarna logika je STATUS iz API-ja:
-  //   - "departed" / "poletio"  → sakrij odmah (API je ažuriran)
-  //   - "cancelled" / "otkazan" → sakrij
-  //   - "diverted"              → sakrij
-  //
-  // Sekundarna logika (backup za slučaj da API kasni sa statusom):
-  //   - Ako je STD prošao više od 60 minuta → sakrij
-  //   - Koristimo STD (ne ETD) jer gate slot je vezan za raspored
-  //   - 60 min buffer je dovoljan za API sinhronizaciju
-  //
-  // Manual override 'open': ignorišemo obje provjere, osoblje kontroliše.
-  // ─────────────────────────────────────────────────────────────
-  // ── shouldDisplayFlight ─────────────────────────────────────
-  // ── shouldDisplayFlight ─────────────────────────────────────
   const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-    // Manual override ima apsolutni prioritet (osim cancelled/diverted)
     const s = (f.StatusEN || '').toLowerCase().trim();
 
+    // UVIJEK sakrij: cancelled ili diverted — bez izuzetaka
     if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
     if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
 
+    // Manual 'open' override — osoblje kontroliše gate
     if (manualGateStatusRef.current === 'open') {
-      // Uz manual open, jedino što sakrije let je eksplicitni "departed"
-      if (s.includes('departed') || s.includes('poletio')) return false;
-      return true;
+      // Jedino što sakrije let uz manual open je eksplicitni departed
+      return !s.includes('departed') && !s.includes('poletio');
     }
 
-    // Automtski mod: departed status → sakrij odmah
+    // Automatski mod: departed → sakrij odmah
     if (s.includes('departed') || s.includes('poletio')) return false;
 
-    // ⭐ Za gate, koristimo ETD ako postoji za zatvaranje!
-    let departureTimeStr = f.ScheduledDepartureTime;
-    if (f.EstimatedDepartureTime) {
-      departureTimeStr = f.EstimatedDepartureTime;
-    }
-    
-    const dep = parseDepartureTime(departureTimeStr);
-    if (dep) {
-      // ⭐ Gate se gasi 5 minuta PRIJE polaska (ETD ili STD)
-      const GATE_CLOSE_BEFORE_MS = 5 * 60 * 1000; // 5 minuta
-      if (Date.now() >= dep.getTime() - GATE_CLOSE_BEFORE_MS) {
-        console.log(
-          `[shouldDisplayFlight] ${f.FlightNumber} skriveno — ` +
-          `gate closed 5min before ${departureTimeStr}`
-        );
-        return false;
-      }
-    }
+    // ── VREMENSKI BACKUP ─────────────────────────────────────
+    // Koristimo SAMO STD za grace period (ne ETD).
+    // Razlog: gate slot je vezan za raspored, ne za procijenjeno vrijeme.
+    // Prikazujemo let sve dok je: now < STD + 45min
+// ── VREMENSKI BACKUP ─────────────────────────────────────
+// Sakrij let 3 minute prije planiranog polaska (STD)
+const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
+if (stdDep) {
+  const hideFrom = stdDep.getTime() - GATE_CLOSE_BEFORE_MS;
+  if (Date.now() >= hideFrom) {
+    console.log(
+      `[shouldDisplayFlight] ${f.FlightNumber} sakriveno — ` +
+      `gate se zatvara 3min prije STD ${f.ScheduledDepartureTime}`
+    );
+    return false;
+  }
+}
 
     return true;
   }, []);
+
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
     cityName:    display.flight?.DestinationCityName,
@@ -323,16 +345,11 @@ function GateDisplay() {
     };
   }, []);
 
-  // ── Countdown — koristi STD (ne ETD) za prikaz ──────────────
-  // ── Countdown — koristi ETD ako postoji, inače STD ──────────────
+  // ── Countdown — ETD ako postoji, inače STD ──────────────────
   const updateCountdown = useCallback((f: Flight | null) => {
     if (!f) { setTimeUntilDeparture(null); return; }
-    // ⭐ Za countdown prikazujemo ETD ako postoji, inače STD
-    let departureTimeStr = f.ScheduledDepartureTime;
-    if (f.EstimatedDepartureTime) {
-      departureTimeStr = f.EstimatedDepartureTime;
-    }
-    const dep = parseDepartureTime(departureTimeStr);
+    const refTime = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
+    const dep = parseDepartureTime(refTime);
     if (dep) setTimeUntilDeparture(Math.floor((dep.getTime() - Date.now()) / 60_000));
     else     setTimeUntilDeparture(null);
   }, []);
@@ -376,86 +393,108 @@ function GateDisplay() {
         }))
       );
 
-      // 3. Sortiraj po STD (ne ETD!) — raspored gate-a je po STD-u
-      //    ETD se prikazuje putniku ali ne mijenja redoslijed gate slotova
+      // 3. Sortiraj po STD — gate slot se bazira na rasporedu, ne ETD
+      //    Letovi bez parsiranog STD se bacaju (ne možemo ih pozicionirati)
       const withTime = withStatus
-        .map(f => ({ ...f, departureTime: parseDepartureTime(f.ScheduledDepartureTime || '') }))
-        .filter(f => f.departureTime !== null) as (Flight & {
-          departureTime: Date;
+        .map(f => ({
+          ...f,
+          _stdDate: parseDepartureTime(f.ScheduledDepartureTime || ''),
+        }))
+        .filter(f => f._stdDate !== null) as (Flight & {
+          _stdDate: Date;
           checkInStatus: CheckInStatus | null;
         })[];
 
-      const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
+      const sorted = withTime.sort((a, b) => a._stdDate.getTime() - b._stdDate.getTime());
 
-      // 4. Manual closed → prazan ekran
+      // 4. Manual 'closed' → prazan ekran
       if (manualGateStatusRef.current === 'closed') {
         if (!isMountedRef.current) return;
         currentFlightRef.current = null;
         currentStatusRef.current = null;
-        setDisplay({ flight: null, checkInStatus: null, nextFlight: null, gateChangedAt: undefined, manualGateStatus: 'closed' });
+        setDisplay({
+          flight: null, checkInStatus: null, nextFlight: null,
+          gateChangedAt: undefined, manualGateStatus: 'closed',
+        });
         setLastUpdate(new Date().toLocaleTimeString('en-GB'));
         setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
         setLoading(false);
         return;
       }
 
-      // 5. Odaberi current let
+      // 5. Odaberi TRENUTNI let
+      //
+      // LOGIKA ODABIRA:
+      // - Prođi kroz sortirane letove (po STD asc)
+      // - Uzmi PRVI koji prolazi shouldDisplayFlight
+      // - shouldDisplayFlight filtrira: departed, cancelled, diverted,
+      //   i letove starije od STD + 45min
+      //
+      // OVO RJEŠAVA JUTARNJI BUG:
+      // U 04:00, let od 23:50 je prošao STD + 45min → filtriran
+      // Let od 06:30 je sljedeći → prikazuje se ✓
+      //
+      // Manual 'open': uzmi prvi koji nije cancelled/diverted
+      // (departed se ne filtrira — osoblje može otvoriti kasneći let)
+
       let current: (typeof sorted)[number] | null = null;
 
       if (manualGateStatusRef.current === 'open') {
-        // Manual open: uzmi prvi sortirani let koji nije cancelled/diverted
-        // (departed se NE filtrira jer osoblje može otvoriti kasneći let)
         current = sorted.find(f => {
           const s = (f.StatusEN || '').toLowerCase();
           return !s.includes('cancelled') && !s.includes('otkazan') &&
                  !s.includes('diverted')  && !s.includes('preusmjeren');
         }) ?? null;
       } else {
-        // Automatski: prvi koji prolazi shouldDisplayFlight
         current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
       }
 
-      // 6. Sljedeći let IZA current
+      // 6. Sljedeći let IZA currenta
       const idx = current
-        ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber)
+        ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber && f.ScheduledDepartureTime === current!.ScheduledDepartureTime)
         : -1;
 
       let nextFlight: (typeof sorted)[number] | null = null;
-      if (idx >= 0) {
-        for (let i = idx + 1; i < sorted.length; i++) {
-          const candidate = sorted[i];
-          // Za next flight uvijek prikaži — čak i ako je "daleko"
-          // shouldDisplayFlight nije relevantno za prikaz sljedećeg leta
-          const s = (candidate.StatusEN || '').toLowerCase();
-          if (!s.includes('cancelled') && !s.includes('otkazan')) {
-            nextFlight = candidate;
-            break;
-          }
+      for (let i = (idx >= 0 ? idx + 1 : 0); i < sorted.length; i++) {
+        const candidate = sorted[i];
+        const s = (candidate.StatusEN || '').toLowerCase();
+        // Za next flight: preskači cancelled, prikaži ostale
+        if (!s.includes('cancelled') && !s.includes('otkazan')) {
+          // Preskoči i letove koji su odavno prošli (departed + > 2h od STD)
+          const stdMs = candidate._stdDate.getTime();
+          const isDeparted = s.includes('departed') || s.includes('poletio');
+          if (isDeparted && Date.now() - stdMs > 2 * 60 * 60 * 1000) continue;
+          nextFlight = candidate;
+          break;
         }
       }
 
       // 7. Gate changed detekcija
       let gateChangedAt: number | undefined;
-      if (current?.GateNumber && currentFlightRef.current?.GateNumber !== current.GateNumber) {
-        const prev = currentFlightRef.current?.GateNumber;
-        if (prev && prev !== '-') gateChangedAt = Date.now();
+      if (
+        current?.GateNumber &&
+        prevGateRef.current &&
+        prevGateRef.current !== '-' &&
+        prevGateRef.current !== current.GateNumber
+      ) {
+        gateChangedAt = Date.now();
       }
 
       if (!isMountedRef.current) return;
 
       // 8. Update state samo ako se nešto promijenilo
       if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
-        currentFlightRef.current = current;
+        currentFlightRef.current = current ?? null;
         currentStatusRef.current = current?.checkInStatus ?? null;
         prevGateRef.current      = current?.GateNumber;
         setDisplay({
-          flight:           current,
+          flight:           current ?? null,
           checkInStatus:    current?.checkInStatus ?? null,
-          nextFlight,
+          nextFlight:       nextFlight ?? null,
           gateChangedAt,
           manualGateStatus: null,
         });
-        updateCountdown(current);
+        updateCountdown(current ?? null);
       }
 
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
@@ -480,41 +519,49 @@ function GateDisplay() {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
 
-  // ── Switch timer na STD-1min ─────────────────────────────────
-  useEffect(() => {
+  // ── Switch timer na STD + grace period ──────────────────────
+  //
+  // PRETHODNA VERZIJA: okidao se na STD - 1min
+  // PROBLEM: to je PRIJE polaska → let se sakriva prerano
+  //
+  // NOVA VERZIJA: okida se na STD + 45min (= grace period)
+  // Razlog: to je tačno kad shouldDisplayFlight vraća false
+  // zbog vremenskog backupa → refresh koji prikazuje sljedeći let
+  //
+  // Edge case: ako smo učitali stranicu unutar prozora
+  // STD..STD+45min, okidamo refresh odmah ili za ostatak perioda.
+// ── Switch timer — refresh 3 minute prije STD ──────────────────
+useEffect(() => {
+  if (stdSwitchTimerRef.current) {
+    clearTimeout(stdSwitchTimerRef.current);
+    stdSwitchTimerRef.current = null;
+  }
+  if (!display.flight) return;
+  if (manualGateStatusRef.current === 'open') return;
+
+  const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
+  if (!stdDep) return;
+
+  // Okidamo refresh tačno kad se gate treba zatvoriti (STD - 3min)
+  const triggerAt = stdDep.getTime() - GATE_CLOSE_BEFORE_MS;
+  const ms = triggerAt - Date.now();
+
+  if (ms > 0) {
+    stdSwitchTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) loadFlights();
+    }, ms);
+  } else if (ms > -30_000) {
+    // Već smo u prozoru zatvaranja → odmah osvježi
+    loadFlights();
+  }
+
+  return () => {
     if (stdSwitchTimerRef.current) {
       clearTimeout(stdSwitchTimerRef.current);
       stdSwitchTimerRef.current = null;
     }
-    if (!display.flight) return;
-
-    // Ne okidaj timer dok je manual override aktivan —
-    // osoblje kontroliše gate, ne automatika
-    if (manualGateStatusRef.current === 'open') return;
-
-    // Timer na STD-1min (ne ETD) — gate slot se bazira na rasporedu
-    const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
-    if (!stdDep) return;
-
-    const triggerAt = stdDep.getTime() - 60 * 1000; // STD - 1 minuta
-    const ms        = triggerAt - Date.now();
-
-    if (ms > 0) {
-      stdSwitchTimerRef.current = setTimeout(() => {
-        if (isMountedRef.current) loadFlights();
-      }, ms);
-    } else if (ms > -5 * 60 * 1000) {
-      // Stranica učitana u prozoru STD-1min..STD+5min → odmah osvježi
-      loadFlights();
-    }
-
-    return () => {
-      if (stdSwitchTimerRef.current) {
-        clearTimeout(stdSwitchTimerRef.current);
-        stdSwitchTimerRef.current = null;
-      }
-    };
-  }, [display.flight, loadFlights]);
+  };
+}, [display.flight, loadFlights]);
 
   // ── Gate status override polling ─────────────────────────────
   useEffect(() => {
@@ -550,9 +597,8 @@ function GateDisplay() {
   const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
-  // Auto-boarding: prikaži "Boarding" 30-5 minuta prije STD
+  // Auto-boarding: prikaži "Boarding" 30-5 minuta prije ETD/STD
   // ako API još nije ažuriran
-  // Auto-boarding: prikaži "Boarding" 30-5 minuta prije polaska
   const effectiveStatus = useMemo(() => {
     const raw = display.flight?.StatusEN || '';
     if (!display.flight || isCancelled || isDiverted) return raw;
@@ -561,11 +607,8 @@ function GateDisplay() {
     if (s.includes('final call'))                           return raw;
     if (s.includes('boarding') || s.includes('gate open')) return raw;
 
-    // ⭐ Koristi ETD ako postoji za auto-boarding
-    let refTime = display.flight.ScheduledDepartureTime || '';
-    if (display.flight.EstimatedDepartureTime) {
-      refTime = display.flight.EstimatedDepartureTime;
-    }
+    // Koristi ETD ako postoji za auto-boarding
+    const refTime = display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
     const dep = parseDepartureTime(refTime);
     if (!dep) return raw;
     const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
