@@ -300,6 +300,7 @@ const CHECKIN_OFFSETS: Record<string, number> = {
   "LS": 150, // <-- dodato
   "LY": 180, // <-- dodato
   "IZ": 180, // <-- dodato
+  "BA": 150, // <-- dodato
  
 
 }

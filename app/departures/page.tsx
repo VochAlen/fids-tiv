@@ -202,7 +202,7 @@ const checkStatus = {
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
 const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ', 'IZ', 'LY']);
-const EXTRA_EARLY_CHECKIN_AIRLINES = new Set(['LS']); // 150 min
+const EXTRA_EARLY_CHECKIN_AIRLINES = new Set(['LS','BA']); // 150 min
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? '').trim();
