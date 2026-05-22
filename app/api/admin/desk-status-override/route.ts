@@ -44,9 +44,8 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
     const [flightsRes, checkInConfig] = await Promise.all([
-      fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
-        cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache' },
+      fetch(`${baseUrl}/api/flights`, {  // ← ukloni ?nocache, koristi Redis cache!
+        cache: 'force-cache',
       }),
       loadCheckInConfig(baseUrl),
     ]);
@@ -56,13 +55,33 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
 
     const DEFAULT_CHECKIN_MINS: number = checkInConfig['default'] ?? 120;
 
-    const parseHHMM = (t: string): number | null => {
-      const m = t?.match(/^(\d{1,2}):(\d{2})$/);
-      if (!m) return null;
-      const d = new Date();
-      d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
-      return d.getTime();
-    };
+    // ── ISPRAVLJEN parseHHMM sa 18h threshold ──────────────────
+// Najjednostavnije i najispravnije rješenje:
+const parseHHMM = (t: string): number | null => {
+  if (!t) return null;
+  
+  // Ako već ima datum, koristi ga
+  if (t.includes('T') || t.includes('-')) {
+    const d = new Date(t);
+    if (!isNaN(d.getTime())) return d.getTime();
+  }
+  
+  // Samo HH:MM format
+  const [h, m] = t.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
+  
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  
+  // Ako je trenutno između 00:00 i 03:00, koriguj za aviation day
+  const currentHour = new Date().getHours();
+  if (currentHour >= 0 && currentHour < 3 && h >= 3) {
+    // Let iz "jučerašnjeg" dana koji je poletio poslije 03:00
+    d.setDate(d.getDate() - 1);
+  }
+  
+  return d.getTime();
+};
 
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
 
@@ -70,25 +89,52 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
       const deskField = f.CheckInDesk;
       if (!deskField) return false;
       const desks = deskField.split(',').map((d: string) => d.trim());
+      const normalizedDesk = deskNumber.replace(/^0+/, '');
+      const paddedDesk = deskNumber.padStart(2, '0');
       return desks.includes(deskNumber) ||
-             desks.includes(deskNumber.replace(/^0+/, '')) ||
-             desks.includes(deskNumber.padStart(2, '0'));
+             desks.includes(normalizedDesk) ||
+             desks.includes(paddedDesk);
     });
 
     if (relevant.length === 0) return [];
 
     const result: DeskFlightInfo[] = [];
+    const now = Date.now();
 
     for (const f of relevant) {
       const stdMs = parseHHMM(f.ScheduledDepartureTime);
       if (!stdMs) continue;
 
+      // ── DODATNA PROVJERA: Preskoči letove koji su već poletjeli ──
+      const status = (f.StatusEN || '').toLowerCase();
+      const isDeparted = status.includes('departed') || status.includes('poletio');
+      const isCancelled = status.includes('cancelled') || status.includes('otkazan');
+      
+      if (isDeparted || isCancelled) {
+        console.log(`[desk-helper] Skipping ${f.FlightNumber} - status: ${status}`);
+        continue;
+      }
+
+      // ── PRESKOČI LETOVE KOJI SU ZATVORENI (__EMPTY__) ──
+      if (f.CheckInDesk === '__EMPTY__') {
+        console.log(`[desk-helper] Skipping ${f.FlightNumber} - manually closed (__EMPTY__)`);
+        continue;
+      }
+
       const airlineIata: string = (f.AirlineCode || f.FlightNumber || '')
         .substring(0, 2)
         .toUpperCase();
 
-      const checkInOpenMins: number =
-        checkInConfig[airlineIata] ?? DEFAULT_CHECKIN_MINS;
+      const checkInOpenMins: number = checkInConfig[airlineIata] ?? DEFAULT_CHECKIN_MINS;
+
+      const checkInOpensAt = stdMs - checkInOpenMins * 60 * 1000;
+      const checkInClosesAt = stdMs - 30 * 60 * 1000;
+
+      // ── PRESKOČI LETOVE KOJIMA JE CHECK-IN VEĆ ZATVOREN ──
+      if (checkInClosesAt < now) {
+        console.log(`[desk-helper] Skipping ${f.FlightNumber} - check-in closed at ${new Date(checkInClosesAt).toLocaleTimeString()}`);
+        continue;
+      }
 
       result.push({
         flightNumber:    f.FlightNumber,
@@ -96,8 +142,8 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
         scheduledTime:   f.ScheduledDepartureTime,
         estimatedTime:   f.EstimatedDepartureTime || null,
         checkInOpenMins,
-        checkInOpensAt:  stdMs - checkInOpenMins * 60 * 1000,
-        checkInClosesAt: stdMs - 30 * 60 * 1000,
+        checkInOpensAt,
+        checkInClosesAt,
       });
     }
 
@@ -108,7 +154,7 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
     });
 
     console.log(
-      `[desk-helper] Desk ${deskNumber} — pronađeno ${result.length} letova:`,
+      `[desk-helper] Desk ${deskNumber} — pronađeno ${result.length} aktivnih letova:`,
       result.map(f =>
         `${f.flightNumber} (${f.airlineIata}) STD ${f.scheduledTime} ` +
         `opens=${f.checkInOpenMins}min closes=STD-30min`
@@ -121,7 +167,6 @@ async function getFlightsForDesk(deskNumber: string): Promise<DeskFlightInfo[]> 
     return [];
   }
 }
-
 // ─────────────────────────────────────────────
 // Helper: Postavi/obriši CheckInDesk override za let
 // ─────────────────────────────────────────────

@@ -284,6 +284,19 @@ function GateDisplay() {
 
   // ── shouldDisplayFlight ─────────────────────────────────────
   const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+
+
+     // Ako imamo pravi timestamp iz API-ja, koristi njega!
+  if (f._sortTime) {
+    const now = Date.now();
+    const fiveMinutesAgo = 5 * 60 * 1000;
+    
+    // Ako je let poletio prije više od 5 minuta → sakrij
+    if (now - f._sortTime > fiveMinutesAgo) {
+      return false;
+    }
+  }
+  
     const s = (f.StatusEN || '').toLowerCase().trim();
 
     // UVIJEK sakrij: cancelled ili diverted — bez izuzetaka

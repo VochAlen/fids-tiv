@@ -259,7 +259,36 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
   // Kreiraj deterministički ID
   const flightId = `${raw.Kompanija}${raw.BrojLeta}_${raw.Planirano}_${raw.IATA}`;
 
-  console.log(`📝 Mapping flight: ${raw.Kompanija}${raw.BrojLeta} | TipLeta: ${raw.TipLeta} → FlightType: ${flightType}`);
+  // ── NOVO: Parsiraj datum za sortiranje ──────────────────────────
+  // API vraća Datum u formatu "22-05-2026" (dan-mjesec-godina)
+  let sortTime: number | undefined = undefined;
+  
+  if (raw.Datum && raw.Planirano) {
+    try {
+      const [day, month, year] = raw.Datum.split('-').map(Number);
+      // Parsiraj vrijeme (može biti "1115" ili "11:15")
+      let hours: number, minutes: number;
+      if (raw.Planirano.includes(':')) {
+        [hours, minutes] = raw.Planirano.split(':').map(Number);
+      } else if (raw.Planirano.length === 4) {
+        hours = parseInt(raw.Planirano.substring(0, 2));
+        minutes = parseInt(raw.Planirano.substring(2, 4));
+      } else {
+        hours = 0;
+        minutes = 0;
+      }
+      
+      if (!isNaN(day) && !isNaN(month) && !isNaN(year) && !isNaN(hours) && !isNaN(minutes)) {
+        // month je 0-indexed u JavaScript Date
+        const scheduledDate = new Date(year, month - 1, day, hours, minutes, 0, 0);
+        sortTime = scheduledDate.getTime();
+      }
+    } catch (err) {
+      console.warn(`⚠️ Failed to parse date for ${raw.Kompanija}${raw.BrojLeta}:`, err);
+    }
+  }
+
+  console.log(`📝 Mapping flight: ${raw.Kompanija}${raw.BrojLeta} | TipLeta: ${raw.TipLeta} → FlightType: ${flightType} | SortTime: ${sortTime ? new Date(sortTime).toLocaleString() : 'N/A'}`);
 
   return {
     id: flightId,
@@ -284,6 +313,9 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
     AirlineLogoURL: airlineLogoURL,
     FlightType: flightType,
     DestinationCityName: raw.Grad || raw.Aerodrom?.split(' ')[0] || '',
+    
+    // ── NOVO POLJE ZA SORTIRANJE ──────────────────────────────
+    _sortTime: sortTime,
     
     // MongoDB polja
     _id: undefined,

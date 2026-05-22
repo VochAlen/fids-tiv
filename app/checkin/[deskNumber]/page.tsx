@@ -44,7 +44,7 @@ import ChristmasInactiveScreen from '@/components/ChristmasInactiveScreen';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const INTERVAL_ACTIVE              = 40_000;
+const INTERVAL_ACTIVE              = 45_000;
 const INTERVAL_INACTIVE            = 60_000;   // ✅ OPT: neaktivni ekrani pollaju rjeđe
 const AD_SWITCH_INTERVAL           = 15_000;
 const CACHE_CLEANUP_INTERVAL       = 4 * 60 * 60 * 1_000;
@@ -377,15 +377,25 @@ const AirlineLogo = memo(function AirlineLogo({
 // CITY IMAGE
 // ============================================================
 const CityImage = memo(function CityImage({
-  cityUrl, destinationCity, portrait,
-}: { cityUrl: string; destinationCity: string; portrait: boolean }) {
+  cityUrl, destinationCity, portrait, isPriority = false,
+}: { cityUrl: string; destinationCity: string; portrait: boolean; isPriority?: boolean }) {
   if (!cityUrl) return null;
   const sizeClass = portrait ? 'w-56 h-56' : 'w-80 h-80';
   return (
     <div className={`relative ${sizeClass} rounded-3xl overflow-hidden border-4 border-white/30 shadow-2xl flex-shrink-0 aspect-ratio-box`}>
-      <Image src={cityUrl} alt={destinationCity} fill className="object-cover" priority
-        quality={90} sizes={portrait ? '224px' : '320px'} placeholder="blur"
-        blurDataURL={BLUR_DATA_URL} decoding="async" />
+      <Image 
+        src={cityUrl} 
+        alt={destinationCity} 
+        fill 
+        className="object-cover" 
+        priority={isPriority}           // ← SAMO prva slika prioritetna
+        loading={isPriority ? 'eager' : 'lazy'}  // ← LAZY LOAD za ostale
+        quality={90} 
+        sizes={portrait ? '224px' : '320px'} 
+        placeholder="blur"
+        blurDataURL={BLUR_DATA_URL} 
+        decoding="async" 
+      />
       <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
     </div>
   );
@@ -785,27 +795,53 @@ function CheckInDisplay() {
       });
 
       // ── Dodaj departureTime
-      const withTime = allForDesk
-        .map((flight) => {
-          let departureTime: Date | null = null;
-          let isToday = true;
-          if (flight.ScheduledDepartureTime) {
-            if (flight.ScheduledDepartureTime.includes('T')) {
-              departureTime = new Date(flight.ScheduledDepartureTime);
-              isToday       = departureTime.toDateString() === today;
-            } else {
-              const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
-              departureTime = new Date(now);
-              departureTime.setHours(h, m, 0, 0);
-              if (departureTime.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
-                departureTime.setDate(departureTime.getDate() + 1);
-              }
-              if ((now.getTime() - departureTime.getTime()) / 60_000 > 30) isToday = false;
-            }
-          }
-          return { ...flight, departureTime, isToday };
-        })
-        .filter((f) => f.departureTime !== null) as (EnhancedFlight & { departureTime: Date; isToday: boolean })[];
+   // ── NOVA LOGIKA: Koristi _sortTime iz Flight objekta ──────────
+
+
+const withTime = allForDesk
+  .map((flight) => {
+    let departureTime: Date | null = null;
+    let isToday = true;
+    
+    // 1. Prvo pokušaj sa _sortTime (timestamp iz API-ja) - NAJTAČNIJE!
+    if (flight._sortTime && flight._sortTime > 0) {
+      departureTime = new Date(flight._sortTime);
+      isToday = departureTime.toDateString() === today;
+    } 
+    // 2. Fallback: ISO string
+    else if (flight.ScheduledDepartureTime?.includes('T')) {
+      departureTime = new Date(flight.ScheduledDepartureTime);
+      isToday = departureTime.toDateString() === today;
+    } 
+    // 3. Fallback: samo HH:MM (stara logika)
+    else if (flight.ScheduledDepartureTime) {
+      const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
+      if (!isNaN(h) && !isNaN(m)) {
+        departureTime = new Date(now);
+        departureTime.setHours(h, m, 0, 0);
+        
+        // Aviation day korekcija za noćne letove
+        const currentHour = now.getHours();
+        if (currentHour >= 0 && currentHour < 3 && h >= 3) {
+          departureTime.setDate(departureTime.getDate() - 1);
+        }
+        
+        isToday = departureTime.toDateString() === today;
+      }
+    }
+    
+    // Preskoči letove koji su već poletjeli (departed)
+    const status = (flight.StatusEN || '').toLowerCase();
+    const isDeparted = status.includes('departed') || status.includes('poletio');
+    const isCancelled = status.includes('cancelled') || status.includes('otkazan');
+    
+    return { 
+      ...flight, 
+      departureTime, 
+      isToday: isToday && !isDeparted && !isCancelled
+    };
+  })
+  .filter((f) => f.departureTime !== null && f.isToday) as (EnhancedFlight & { departureTime: Date; isToday: boolean })[];
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
@@ -1257,7 +1293,7 @@ if (currentManualStatus === 'open') {
             )}
 
             <div className="flex items-end gap-4 mb-3">
-              <CityImage cityUrl={flightDisplay.cityUrl} destinationCity={flightDisplay.destinationCity} portrait />
+              <CityImage cityUrl={flightDisplay.cityUrl} destinationCity={flightDisplay.destinationCity} portrait isPriority={currentAdIndex === 0}  />
               <div className="flex-1 text-right min-w-0">
                 <div className="font-bold text-white mb-1 leading-tight city-name-transition"
                   style={{
@@ -1434,7 +1470,7 @@ if (currentManualStatus === 'open') {
             )}
 
             <div className="flex items-center gap-8">
-              <CityImage cityUrl={flightDisplay.cityUrl} destinationCity={flightDisplay.destinationCity} portrait={false} />
+              <CityImage cityUrl={flightDisplay.cityUrl} destinationCity={flightDisplay.destinationCity} portrait={false} isPriority={currentAdIndex === 0} />
               <div className="flex-1">
                 <div className="text-8xl font-bold text-white mb-2 city-name-transition">{flightDisplay.destinationCity}</div>
                 <div className="text-8xl font-bold text-cyan-400">{flightDisplay.destinationCode}</div>

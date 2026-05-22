@@ -12,18 +12,16 @@
 //   • Kad vanjski API pukne → svi ekrani vide zadnje podatke iz Redisa
 //   • Nema localStorage grešaka — sve je server-side
 //
-// INSTALACIJA:
-//   1. Kopiraj u app/api/flights-cached/route.ts
-//   2. lib/flight-service.ts već ima: const FLIGHT_API_URL = '/api/flights-cached'
 
 import { NextResponse } from 'next/server';
 import { safeRedisGet } from '@/lib/redis';
 import { getRedisClient } from '@/lib/redis';
+import type { Flight, FlightData } from '@/types/flight';
 
 // ── Konfiguracija ────────────────────────────────────────────
 const REDIS_KEY      = 'cache:flights';
-const FRESH_SECONDS  = 45;   // 45s — vrati iz Redisa bez vanjskog poziva
-const STALE_SECONDS  = 90;   // 90s — vrati stale + revaliduj u pozadini
+const FRESH_SECONDS  = 60;   // 45s — vrati iz Redisa bez vanjskog poziva
+const STALE_SECONDS  = 120;   // 90s — vrati stale + revaliduj u pozadini
 const FETCH_TIMEOUT  = 8_000; // 8s  — maks čekanje na /api/flights
 
 // ── BaseUrl helper ───────────────────────────────────────────
@@ -34,8 +32,24 @@ function getBaseUrl(): string {
   return 'http://localhost:3000';
 }
 
+// ── Osiguraj da svaki flight ima _sortTime ───────────────────
+function ensureSortTime(data: FlightData): FlightData {
+  const processFlights = (flights: Flight[]): Flight[] => {
+    return flights.map(flight => ({
+      ...flight,
+      _sortTime: flight._sortTime || undefined,
+    }));
+  };
+  
+  return {
+    ...data,
+    departures: processFlights(data.departures || []),
+    arrivals:   processFlights(data.arrivals || []),
+  };
+}
+
 // ── Fetch od vanjskog /api/flights sa timeoutom ──────────────
-async function fetchFromSource(): Promise<unknown> {
+async function fetchFromSource(): Promise<FlightData> {
   const controller = new AbortController();
   const timeout    = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
   try {
@@ -45,7 +59,10 @@ async function fetchFromSource(): Promise<unknown> {
       headers: { 'Cache-Control': 'no-cache' },
     });
     if (!res.ok) throw new Error(`/api/flights returned ${res.status}`);
-    return await res.json();
+    const data = await res.json() as FlightData;
+    
+    // ✅ Osiguraj da _sortTime postoji
+    return ensureSortTime(data);
   } finally {
     clearTimeout(timeout);
   }
@@ -81,13 +98,16 @@ export async function GET() {
     const raw = await safeRedisGet(REDIS_KEY);
 
     if (raw) {
-      const cached = JSON.parse(raw) as { data: unknown; fetchedAt: number };
+      const cached = JSON.parse(raw) as { data: FlightData; fetchedAt: number };
       const ageMs  = now - cached.fetchedAt;
       const ageSec = Math.round(ageMs / 1000);
+      
+      // ✅ Osiguraj da cached data ima _sortTime
+      const data = ensureSortTime(cached.data);
 
       // FRESH — vrati odmah
       if (ageMs < FRESH_SECONDS * 1000) {
-        return NextResponse.json(cached.data, {
+        return NextResponse.json(data, {
           headers: { 'X-Cache': 'HIT', 'X-Cache-Age': `${ageSec}s` },
         });
       }
@@ -95,15 +115,14 @@ export async function GET() {
       // STALE — vrati stari podatak, revaliduj u pozadini
       if (ageMs < STALE_SECONDS * 1000) {
         revalidateInBackground();
-        return NextResponse.json(cached.data, {
+        return NextResponse.json(data, {
           headers: { 'X-Cache': 'STALE', 'X-Cache-Age': `${ageSec}s` },
         });
       }
 
-      // EXPIRED u Redisu ali postoji — koristi kao fallback dok fetchujemo
-      // (ovo se dešava ako Redis TTL još nije istekao ali naš soft-stale jeste)
+      // EXPIRED — koristi kao fallback dok fetchujemo
       revalidateInBackground();
-      return NextResponse.json(cached.data, {
+      return NextResponse.json(data, {
         headers: { 'X-Cache': 'EXPIRED', 'X-Cache-Age': `${ageSec}s` },
       });
     }
@@ -116,7 +135,7 @@ export async function GET() {
   try {
     const data = await fetchFromSource();
 
-    // Sačuvaj u Redis asinhorno (ne čekamo)
+    // Sačuvaj u Redis asinhrono (ne čekamo)
     try {
       const client = getRedisClient();
       client.set(
@@ -133,16 +152,18 @@ export async function GET() {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[flights-cached] Direct fetch failed:', msg);
 
-    return NextResponse.json(
-      {
-        departures:   [],
-        arrivals:     [],
-        totalFlights: 0,
-        source:       'fallback',
-        error:        msg,
-        isOfflineMode: true,
-      },
-      { status: 503 }
-    );
+
+return NextResponse.json(
+  {
+    departures:   [],
+    arrivals:     [],
+    totalFlights: 0,
+    lastUpdated:  new Date().toISOString(),  // ← DODAJ OVO
+    source:       'fallback',
+    error:        msg,
+    isOfflineMode: true,
+  } as FlightData,
+  { status: 503 }
+);
   }
 }

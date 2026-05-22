@@ -1,12 +1,21 @@
 // lib/flight-service.ts
 import type { Flight, FlightData } from '@/types/flight';
 
+
 import {
   hasBusinessClass,
   getAirlineByIata,
   getAllSpecificFlights,
   getCurrentSeason,
 } from '@/lib/business-class-service';
+
+// ── DODAJ OVO NA VRH FAJLA (poslije importova) ──────────────
+let lastKnownHash: string | null = null;
+let lastKnownData: FlightData | null = null;
+let lastHashCheckTime = 0;
+const HASH_CHECK_INTERVAL = 10_000; // 10 sekundi minimalno između provjera
+
+
 
 // ─────────────────────────────────────────────────────────────
 // IZMJENA 1: Koristi /api/flights-cached umjesto /api/flights
@@ -53,16 +62,59 @@ function getCachedData(): FlightData {
     isOfflineMode: true,
   };
 }
+async function checkForChanges(): Promise<boolean> {
+  // Ne provjeravaj prečesto
+  if (Date.now() - lastHashCheckTime < HASH_CHECK_INTERVAL) {
+    return false;
+  }
+  lastHashCheckTime = Date.now();
+  
+  try {
+    const statusRes = await fetch('/api/flights/status', {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    });
+    if (!statusRes.ok) return false;
+    
+    const status = await statusRes.json();
+    
+    // Ako se hash nije promijenio, nema novih podataka
+    if (lastKnownHash === status.hash && lastKnownHash !== null) {
+      console.log('🔄 No changes detected (hash match)');
+      return false;
+    }
+    
+    // Hash se promijenio ili je prvi put
+    lastKnownHash = status.hash;
+    console.log(`🔄 Changes detected! New hash: ${status.hash?.substring(0, 8)}...`);
+    return true;
+  } catch (err) {
+    console.warn('⚠️ Failed to check /api/flights/status:', err);
+    return true; // U slučaju greške, dohvati podatke (safe fallback)
+  }
+}
 
+
+// ── IZMIJENJENA fetchFlightData FUNKCIJA ────────────────────
 export async function fetchFlightData(): Promise<FlightData> {
+  // Prvo provjeri da li ima promjena preko status endpointa
+  const hasChanges = await checkForChanges();
+  
+  // Ako nema promjena i imamo keširane podatke, vrati ih odmah
+  if (!hasChanges && lastKnownData) {
+    console.log('📦 Returning cached flight data (no changes)');
+    return { ...lastKnownData, source: 'cached' };
+  }
+  
+  // Ograničenje učestalosti fetch-a (dodatna zaštita)
   const now = Date.now();
-  if (now - lastFetchTime < MIN_FETCH_INTERVAL) {
-    console.log('Skipping fetch - too soon after last request');
-    return getCachedData();
+  if (now - lastFetchTime < MIN_FETCH_INTERVAL && lastKnownData) {
+    console.log('⏱️ Skipping fetch - too soon after last request');
+    return { ...lastKnownData, source: 'cached' };
   }
 
   try {
-    console.log('Fetching flight data from API...');
+    console.log('🛫 Fetching flight data from API...');
 
     const response = await fetch(FLIGHT_API_URL, {
       method: 'GET',
@@ -96,17 +148,21 @@ export async function fetchFlightData(): Promise<FlightData> {
         autoProcessedCount: data.autoProcessedCount,
       };
 
+      // Sačuvaj u memorijski cache
       cacheData(flightData);
+      lastKnownData = flightData;
+      
+      console.log(`✅ Flight data fetched: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
       return flightData;
     } else {
       throw new Error('Invalid data format received from API');
     }
   } catch (error) {
-    console.error('Error fetching flight data:', error);
+    console.error('❌ Error fetching flight data:', error);
 
     const cached = getCachedData();
     if (cached.departures.length > 0 || cached.arrivals.length > 0) {
-      console.log('Returning cached data due to error');
+      console.log('📦 Returning cached data due to error');
       return {
         ...cached,
         source: 'cached',
