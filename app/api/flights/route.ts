@@ -23,7 +23,7 @@ const OVERRIDE_CACHE_MS = 30_000; // 30 sekundi
 
 // ── REDIS CLEANUP ─────────────────────────────────────────────
 let lastRedisCleanup = 0;
-const REDIS_CLEANUP_INTERVAL_MS = 5 * 60 * 60 * 1000; // 12h umjesto 6h
+const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h umjesto 6h
 
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -52,12 +52,14 @@ async function runRedisCleanupIfNeeded(): Promise<void> {
 
   try {
     const client = getRedisClient();
+
+    // ── 1. TTL CLEANUP: ključevi koji nemaju expiry dobijaju ga ──
     const TTL_RULES: Record<string, number> = {
-      'cache:flights':  180,
-      'override:':      21_600,
-      'gate-status:':   21_600,
-      'desk-status:':   21_600,
-      'desk-class:':    21_600,
+      'cache:flights': 180,
+      'override:':     21_600,
+      'gate-status:':  21_600,
+      'desk-status:':  21_600,
+      'desk-class:':   21_600,
     };
 
     let cursor = '0';
@@ -76,8 +78,55 @@ async function runRedisCleanupIfNeeded(): Promise<void> {
     } while (cursor !== '0');
 
     if (fixed > 0) console.log(`🧹 Redis cleanup: ${fixed} keys fixed`);
+
+    // ── 2. DESK-STATUS CLEANUP: briši override-e starije od 12h ──
+    // Rješava jutarnji bug gdje zaostali 'closed' status blokira
+    // prikaz jutarnjih letova na check-in ekranima.
+    const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+    let desksCleaned = 0;
+    let cursor2 = '0';
+    do {
+      const [next, keys] = await client.scan(cursor2, 'MATCH', 'desk-status:*', 'COUNT', 100);
+      cursor2 = next;
+      for (const key of keys) {
+        const raw = await client.get(key);
+        if (!raw) continue;
+        try {
+          const data = JSON.parse(raw) as { setAt?: number };
+          if (data.setAt && Date.now() - data.setAt > TWELVE_HOURS) {
+            await client.del(key);
+            desksCleaned++;
+          }
+        } catch {
+          // Oštećeni key (ne može se parsirati) — briši ga
+          await client.del(key);
+          desksCleaned++;
+        }
+      }
+    } while (cursor2 !== '0');
+
+    if (desksCleaned > 0) console.log(`🧹 Cleaned ${desksCleaned} stale desk-status overrides`);
+
+    // ── 3. JUTARNJI RESET (03:00–04:00): briši sve desk-status ključeve ──
+    // Backup mehanizam — osigurava čist slate svako jutro čak i ako
+    // desk-status nema setAt timestamp (stariji format podataka).
+    const nowH = new Date().getHours();
+    if (nowH === 3) {
+      let cursor3 = '0';
+      let morningReset = 0;
+      do {
+        const [next, keys] = await client.scan(cursor3, 'MATCH', 'desk-status:*', 'COUNT', 100);
+        cursor3 = next;
+        for (const key of keys) {
+          await client.del(key);
+          morningReset++;
+        }
+      } while (cursor3 !== '0');
+      if (morningReset > 0) console.log(`🌅 Morning reset: cleared ${morningReset} desk-status keys`);
+    }
+
   } catch (e) {
-    console.error('⚠️ Redis cleanup failed:', e);
+    console.error('⚠️ Redis cleanup failed (non-critical):', e);
   }
 }
 
@@ -339,29 +388,10 @@ export async function GET(): Promise<NextResponse> {
       console.error('⚠️ Backup save failed:', e);
     }
 
-const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
+    const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
 
-// ── DODAJ OVO OVDJE ──────────────────────────────────────────
-// Spremi metadata za status endpoint
-try {
-  const client = getRedisClient();
-  const hash = Buffer.from(JSON.stringify({
-    dCount: flightData.departures.length,
-    aCount: flightData.arrivals.length,
-    source: 'live',
-  })).toString('base64').substring(0, 32);
-  
-  await Promise.all([
-    client.set('cache:flights:hash', hash, 'EX', 60),
-    client.set('cache:flights:count', String(flightData.totalFlights), 'EX', 60),
-    client.set('cache:flights:last_modified', new Date().toISOString(), 'EX', 60),
-    client.set('cache:flights:source', 'live', 'EX', 60),
-  ]);
-} catch(e) {}
-// ── KRAJ DODATOG KODA ────────────────────────────────────────
-
-// Sačuvaj u Redis cache za narednih 60 sekundi
-await saveFlightDataToCache(flightData);
+    // Sačuvaj u Redis cache za narednih 60 sekundi
+    await saveFlightDataToCache(flightData);
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
