@@ -16,6 +16,12 @@ import Redis from 'ioredis';
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
 const FLIGHT_CACHE_TTL_SECONDS = 60; // 1 minuta — smanjuje broj invokacija za ~60x
 
+// ── METADATA CACHE ─────────────────────────────────────────────
+const FLIGHT_HASH_KEY = 'cache:flights:hash';
+const FLIGHT_COUNT_KEY = 'cache:flights:count';
+const FLIGHT_MODIFIED_KEY = 'cache:flights:last_modified';
+const FLIGHT_SOURCE_KEY = 'cache:flights:source';
+
 // ── IN-PROCESS OVERRIDE CACHE (izbjegava Redis round-trip na svakom requestu) ──
 let overrideCacheData: Record<string, Record<string, string>> = {};
 let overrideCacheExpiry = 0;
@@ -52,14 +58,12 @@ async function runRedisCleanupIfNeeded(): Promise<void> {
 
   try {
     const client = getRedisClient();
-
-    // ── 1. TTL CLEANUP: ključevi koji nemaju expiry dobijaju ga ──
     const TTL_RULES: Record<string, number> = {
-      'cache:flights': 180,
-      'override:':     21_600,
-      'gate-status:':  21_600,
-      'desk-status:':  21_600,
-      'desk-class:':   21_600,
+      'cache:flights':  180,
+      'override:':      21_600,
+      'gate-status:':   21_600,
+      'desk-status:':   21_600,
+      'desk-class:':    21_600,
     };
 
     let cursor = '0';
@@ -78,55 +82,8 @@ async function runRedisCleanupIfNeeded(): Promise<void> {
     } while (cursor !== '0');
 
     if (fixed > 0) console.log(`🧹 Redis cleanup: ${fixed} keys fixed`);
-
-    // ── 2. DESK-STATUS CLEANUP: briši override-e starije od 12h ──
-    // Rješava jutarnji bug gdje zaostali 'closed' status blokira
-    // prikaz jutarnjih letova na check-in ekranima.
-    const TWELVE_HOURS = 12 * 60 * 60 * 1000;
-    let desksCleaned = 0;
-    let cursor2 = '0';
-    do {
-      const [next, keys] = await client.scan(cursor2, 'MATCH', 'desk-status:*', 'COUNT', 100);
-      cursor2 = next;
-      for (const key of keys) {
-        const raw = await client.get(key);
-        if (!raw) continue;
-        try {
-          const data = JSON.parse(raw) as { setAt?: number };
-          if (data.setAt && Date.now() - data.setAt > TWELVE_HOURS) {
-            await client.del(key);
-            desksCleaned++;
-          }
-        } catch {
-          // Oštećeni key (ne može se parsirati) — briši ga
-          await client.del(key);
-          desksCleaned++;
-        }
-      }
-    } while (cursor2 !== '0');
-
-    if (desksCleaned > 0) console.log(`🧹 Cleaned ${desksCleaned} stale desk-status overrides`);
-
-    // ── 3. JUTARNJI RESET (03:00–04:00): briši sve desk-status ključeve ──
-    // Backup mehanizam — osigurava čist slate svako jutro čak i ako
-    // desk-status nema setAt timestamp (stariji format podataka).
-    const nowH = new Date().getHours();
-    if (nowH === 3) {
-      let cursor3 = '0';
-      let morningReset = 0;
-      do {
-        const [next, keys] = await client.scan(cursor3, 'MATCH', 'desk-status:*', 'COUNT', 100);
-        cursor3 = next;
-        for (const key of keys) {
-          await client.del(key);
-          morningReset++;
-        }
-      } while (cursor3 !== '0');
-      if (morningReset > 0) console.log(`🌅 Morning reset: cleared ${morningReset} desk-status keys`);
-    }
-
   } catch (e) {
-    console.error('⚠️ Redis cleanup failed (non-critical):', e);
+    console.error('⚠️ Redis cleanup failed:', e);
   }
 }
 
@@ -152,6 +109,28 @@ async function saveFlightDataToCache(data: FlightData): Promise<void> {
     await client.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(data));
   } catch {
     // Non-critical, nastavi
+  }
+}
+
+// ── METADATA FUNCTIONS ────────────────────────────────────────
+async function saveFlightMetadata(departures: Flight[], arrivals: Flight[], source: string): Promise<void> {
+  try {
+    const client = getRedisClient();
+    const hash = Buffer.from(JSON.stringify({
+      dCount: departures.length,
+      aCount: arrivals.length,
+      source: source,
+      timestamp: new Date().toISOString(),
+    })).toString('base64').substring(0, 32);
+    
+    await Promise.all([
+      client.setex(FLIGHT_HASH_KEY, 60, hash),
+      client.setex(FLIGHT_COUNT_KEY, 60, String(departures.length + arrivals.length)),
+      client.setex(FLIGHT_MODIFIED_KEY, 60, new Date().toISOString()),
+      client.setex(FLIGHT_SOURCE_KEY, 60, source),
+    ]);
+  } catch (e) {
+    console.warn('⚠️ Failed to save flight metadata:', e);
   }
 }
 
@@ -390,6 +369,9 @@ export async function GET(): Promise<NextResponse> {
 
     const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
 
+    // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
+    await saveFlightMetadata(flightData.departures, flightData.arrivals, 'live');
+
     // Sačuvaj u Redis cache za narednih 60 sekundi
     await saveFlightDataToCache(flightData);
 
@@ -434,6 +416,9 @@ export async function GET(): Promise<NextResponse> {
         }
       );
 
+      // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
+      await saveFlightMetadata(flightData.departures, flightData.arrivals, source);
+
       await saveFlightDataToCache(flightData);
 
       return NextResponse.json(flightData, {
@@ -463,6 +448,9 @@ export async function GET(): Promise<NextResponse> {
       new Date().toISOString(),
       { isOfflineMode: true, warning: 'Emergency mode: Using directly fetched data.' }
     );
+
+    // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
+    await saveFlightMetadata(flightData.departures, flightData.arrivals, 'emergency');
 
     return NextResponse.json(flightData, {
       headers: {
