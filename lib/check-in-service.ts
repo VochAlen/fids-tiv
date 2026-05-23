@@ -174,7 +174,7 @@ function createFallbackConfig() {
     {
       airlineIata: 'BA',
       airlineName: 'British Airways',
-      checkInOpenMinutes: 120,
+      checkInOpenMinutes: 150,
       useAutoCheckIn: true,
       maxAutoOpenMinutes: 240,
       minCloseBeforeDeparture: 30,
