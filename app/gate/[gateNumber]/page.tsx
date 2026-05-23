@@ -284,15 +284,6 @@ function GateDisplay() {
 
   // ── shouldDisplayFlight ─────────────────────────────────────
 const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-  // ❌ UKLONI OVO CIJELO:
-  // if (f._sortTime) {
-  //   const now = Date.now();
-  //   const fiveMinutesAgo = 5 * 60 * 1000;
-  //   if (now - f._sortTime > fiveMinutesAgo) {
-  //     return false;
-  //   }
-  // }
-
   const s = (f.StatusEN || '').toLowerCase().trim();
 
   if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
@@ -304,16 +295,19 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
 
   if (s.includes('departed') || s.includes('poletio')) return false;
 
-  let departureTimeStr = f.ScheduledDepartureTime || '';
-  if (f.EstimatedDepartureTime) {
-    departureTimeStr = f.EstimatedDepartureTime;
-  }
+  // Za delayed let (ima ETD različit od STD): koristi ETD za gašenje
+  // Za normalan let: koristi STD ili ETD (što god postoji)
+  const isDelayed = f.EstimatedDepartureTime && 
+    f.EstimatedDepartureTime !== f.ScheduledDepartureTime;
+
+  const departureTimeStr = isDelayed 
+    ? f.EstimatedDepartureTime! 
+    : (f.EstimatedDepartureTime || f.ScheduledDepartureTime || '');
+
   const dep = parseDepartureTime(departureTimeStr);
   if (dep) {
     const hideFrom = dep.getTime() - GATE_CLOSE_BEFORE_MS;
-    if (Date.now() >= hideFrom) {
-      return false;
-    }
+    if (Date.now() >= hideFrom) return false;
   }
 
   return true;
@@ -394,15 +388,18 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
 
       // 3. Sortiraj po STD — gate slot se bazira na rasporedu, ne ETD
       //    Letovi bez parsiranog STD se bacaju (ne možemo ih pozicionirati)
-      const withTime = withStatus
-        .map(f => ({
-          ...f,
-          _stdDate: parseDepartureTime(f.ScheduledDepartureTime || ''),
-        }))
-        .filter(f => f._stdDate !== null) as (Flight & {
-          _stdDate: Date;
-          checkInStatus: CheckInStatus | null;
-        })[];
+  const withTime = withStatus
+  .map(f => ({
+    ...f,
+    // Za sortiranje: koristi _sortTime ako postoji, inače STD
+    _stdDate: f._sortTime 
+      ? new Date(f._sortTime)
+      : parseDepartureTime(f.ScheduledDepartureTime || ''),
+  }))
+  .filter(f => f._stdDate !== null) as (Flight & {
+    _stdDate: Date;
+    checkInStatus: CheckInStatus | null;
+  })[];
 
       const sorted = withTime.sort((a, b) => a._stdDate.getTime() - b._stdDate.getTime());
 
