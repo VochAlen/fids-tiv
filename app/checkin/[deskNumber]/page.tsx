@@ -684,6 +684,7 @@ function CheckInDisplay() {
         ]);
 
       const finalClassType = overrideClass || fallbackClass;
+      
       const { isCancelled, isDiverted } = checkFlightStatusHelper(nextFlight.StatusEN || '');
 
       if (!isMountedRef.current) return;

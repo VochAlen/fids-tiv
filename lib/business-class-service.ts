@@ -656,7 +656,7 @@ export async function initializeDefaultData(): Promise<void> {
       // ⭐ DODATA DESTINACIJA ZA BRITISH AIRWAYS (npr. London Heathrow)
       {
         destinationCode: 'LHR',
-        destinationName: 'London Heathrow',
+        destinationName: 'London LHR',
         airlineIata: 'BA',
         hasBusinessClass: true,
         winterSchedule: {
