@@ -61,6 +61,7 @@ const SPECIAL_AIRLINES_LOOKAHEAD: Record<string, number> = {
   'LY': 180,
   'IZ': 180,
   'LS': 150,
+  'BA': 150,
 };
 
 const getCheckInLookaheadMs = (flightNumber: string): number => {
