@@ -804,7 +804,7 @@ const withTime = allForDesk
     let isToday = true;
     
     // 1. Prvo pokušaj sa _sortTime (timestamp iz API-ja) - NAJTAČNIJE!
-    if (flight._sortTime && flight._sortTime > 0) {
+if (flight._sortTime != null && flight._sortTime > 0) {
       departureTime = new Date(flight._sortTime);
       isToday = departureTime.toDateString() === today;
     } 
@@ -814,21 +814,25 @@ const withTime = allForDesk
       isToday = departureTime.toDateString() === today;
     } 
     // 3. Fallback: samo HH:MM (stara logika)
-    else if (flight.ScheduledDepartureTime) {
-      const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
-      if (!isNaN(h) && !isNaN(m)) {
-        departureTime = new Date(now);
-        departureTime.setHours(h, m, 0, 0);
-        
-        // Aviation day korekcija za noćne letove
-        const currentHour = now.getHours();
-        if (currentHour >= 0 && currentHour < 3 && h >= 3) {
-          departureTime.setDate(departureTime.getDate() - 1);
-        }
-        
-        isToday = departureTime.toDateString() === today;
-      }
+ // Zamijeni cijeli fallback HH:MM blok ovim:
+// page.tsx — zamijeni cijeli HH:MM blok
+else if (flight.ScheduledDepartureTime) {
+  const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
+  if (!isNaN(h) && !isNaN(m)) {
+    departureTime = new Date(now);
+    departureTime.setHours(h, m, 0, 0);
+
+    // Ako je departurTime više od 20h u budućnosti,
+    // to znači da je zapravo bio jučer (noćni let koji je prešao ponoć)
+    // Stara logika (0-3h && h>=3) je brisala JUTARNJE letove!
+    const msToDep = departureTime.getTime() - now.getTime();
+    if (msToDep > 20 * 60 * 60 * 1000) {
+      departureTime.setDate(departureTime.getDate() - 1);
     }
+
+    isToday = departureTime.toDateString() === today;
+  }
+}
     
     // Preskoči letove koji su već poletjeli (departed)
     const status = (flight.StatusEN || '').toLowerCase();

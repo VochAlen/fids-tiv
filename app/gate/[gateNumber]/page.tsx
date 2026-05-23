@@ -283,55 +283,35 @@ function GateDisplay() {
   }, []);
 
   // ── shouldDisplayFlight ─────────────────────────────────────
-  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+  // ❌ UKLONI OVO CIJELO:
+  // if (f._sortTime) {
+  //   const now = Date.now();
+  //   const fiveMinutesAgo = 5 * 60 * 1000;
+  //   if (now - f._sortTime > fiveMinutesAgo) {
+  //     return false;
+  //   }
+  // }
 
+  const s = (f.StatusEN || '').toLowerCase().trim();
 
-     // Ako imamo pravi timestamp iz API-ja, koristi njega!
-  if (f._sortTime) {
-    const now = Date.now();
-    const fiveMinutesAgo = 5 * 60 * 1000;
-    
-    // Ako je let poletio prije više od 5 minuta → sakrij
-    if (now - f._sortTime > fiveMinutesAgo) {
-      return false;
-    }
+  if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+
+  if (manualGateStatusRef.current === 'open') {
+    return !s.includes('departed') && !s.includes('poletio');
   }
-  
-    const s = (f.StatusEN || '').toLowerCase().trim();
 
-    // UVIJEK sakrij: cancelled ili diverted — bez izuzetaka
-    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+  if (s.includes('departed') || s.includes('poletio')) return false;
 
-    // Manual 'open' override — osoblje kontroliše gate
-    if (manualGateStatusRef.current === 'open') {
-      // Jedino što sakrije let uz manual open je eksplicitni departed
-      return !s.includes('departed') && !s.includes('poletio');
-    }
-
-    // Automatski mod: departed → sakrij odmah
-    if (s.includes('departed') || s.includes('poletio')) return false;
-
-    // ── VREMENSKI BACKUP ─────────────────────────────────────
-    // Koristimo SAMO STD za grace period (ne ETD).
-    // Razlog: gate slot je vezan za raspored, ne za procijenjeno vrijeme.
-    // Prikazujemo let sve dok je: now < STD + 45min
-// ── VREMENSKI BACKUP ─────────────────────────────────────
-// Sakrij let 3 minute prije planiranog polaska (STD)
-//── VREMENSKI BACKUP ─────────────────────────────────────
-  // Sakrij let 3 minute prije polaska (ETD ako postoji, inače STD)
   let departureTimeStr = f.ScheduledDepartureTime || '';
   if (f.EstimatedDepartureTime) {
-    departureTimeStr = f.EstimatedDepartureTime;  // koristi ETD ako postoji
+    departureTimeStr = f.EstimatedDepartureTime;
   }
   const dep = parseDepartureTime(departureTimeStr);
   if (dep) {
     const hideFrom = dep.getTime() - GATE_CLOSE_BEFORE_MS;
     if (Date.now() >= hideFrom) {
-      console.log(
-        `[shouldDisplayFlight] ${f.FlightNumber} sakriveno — ` +
-        `gate se zatvara 3min prije polaska u ${departureTimeStr}`
-      );
       return false;
     }
   }

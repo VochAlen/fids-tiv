@@ -349,14 +349,14 @@ export function expandFlightForMultipleGates(flight: Flight): Flight[] {
   return flights;
 }
 
+// lib/flight-api-helpers.ts
 export function sortFlightsByTime(flights: Flight[]): Flight[] {
-  return flights.sort((a, b) => {
-    const timeA = a.EstimatedDepartureTime || a.ScheduledDepartureTime;
-    const timeB = b.EstimatedDepartureTime || b.ScheduledDepartureTime;
-    
-    if (!timeA) return 1;
-    if (!timeB) return -1;
-    
+  return [...flights].sort((a, b) => {
+    if (a._sortTime && b._sortTime) return a._sortTime - b._sortTime;
+    if (a._sortTime) return -1;
+    if (b._sortTime) return 1;
+    const timeA = a.EstimatedDepartureTime || a.ScheduledDepartureTime || '';
+    const timeB = b.EstimatedDepartureTime || b.ScheduledDepartureTime || '';
     return timeA.localeCompare(timeB);
   });
 }

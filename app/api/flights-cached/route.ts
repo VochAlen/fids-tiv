@@ -37,7 +37,7 @@ function ensureSortTime(data: FlightData): FlightData {
   const processFlights = (flights: Flight[]): Flight[] => {
     return flights.map(flight => ({
       ...flight,
-      _sortTime: flight._sortTime || undefined,
+    _sortTime: flight._sortTime != null ? flight._sortTime : undefined,
     }));
   };
   
