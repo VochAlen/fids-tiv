@@ -504,6 +504,9 @@ export async function initializeDefaultData(): Promise<void> {
       return;
     }
     
+    // ============================================================
+    // 1. Air Serbia
+    // ============================================================
     const airSerbiaData: CreateAirlineData = {
       iataCode: 'JU',
       airlineName: 'Air Serbia',
@@ -523,9 +526,11 @@ export async function initializeDefaultData(): Promise<void> {
         endDate: null
       }
     };
-    
     await createAirline(airSerbiaData);
-    
+
+    // ============================================================
+    // 2. Turkish Airlines
+    // ============================================================
     const turkishAirlinesData: CreateAirlineData = {
       iataCode: 'TK',
       airlineName: 'Turkish Airlines',
@@ -545,9 +550,35 @@ export async function initializeDefaultData(): Promise<void> {
         endDate: null
       }
     };
-    
     await createAirline(turkishAirlinesData);
-    
+
+    // ============================================================
+    // 3. ⭐ BRITISH AIRWAYS (DODATO)
+    // ============================================================
+    const britishAirwaysData: CreateAirlineData = {
+      iataCode: 'BA',
+      airlineName: 'British Airways',
+      hasBusinessClass: true,
+      winterSchedule: {
+        hasBusinessClass: true,
+        specificFlights: ['BA625'],
+        daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+        startDate: null,
+        endDate: null
+      },
+      summerSchedule: {
+        hasBusinessClass: true,
+        specificFlights: ['BA625'],
+        daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+        startDate: null,
+        endDate: null
+      }
+    };
+    await createAirline(britishAirwaysData);
+
+    // ============================================================
+    // SPECIFIČNI LETOVI
+    // ============================================================
     const defaultFlights: CreateFlightData[] = [
       {
         flightNumber: 'JU683',
@@ -568,6 +599,17 @@ export async function initializeDefaultData(): Promise<void> {
         daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
         validFrom: null,
         validUntil: null
+      },
+      // ⭐ DODATI LET ZA BRITISH AIRWAYS
+      {
+        flightNumber: 'BA625',
+        airlineIata: 'BA',
+        alwaysBusinessClass: true,
+        winterOnly: false,
+        summerOnly: false,
+        daysOfWeek: [0, 1, 2, 3, 4, 5, 6],  // svaki dan
+        validFrom: null,
+        validUntil: null
       }
     ];
     
@@ -575,6 +617,9 @@ export async function initializeDefaultData(): Promise<void> {
       await createSpecificFlight(flightData);
     }
     
+    // ============================================================
+    // DESTINACIJE
+    // ============================================================
     const defaultDestinations: CreateDestinationData[] = [
       {
         destinationCode: 'BEG',
@@ -607,6 +652,23 @@ export async function initializeDefaultData(): Promise<void> {
           startDate: null,
           endDate: null
         }
+      },
+      // ⭐ DODATA DESTINACIJA ZA BRITISH AIRWAYS (npr. London Heathrow)
+      {
+        destinationCode: 'LHR',
+        destinationName: 'London Heathrow',
+        airlineIata: 'BA',
+        hasBusinessClass: true,
+        winterSchedule: {
+          hasBusinessClass: true,
+          startDate: null,
+          endDate: null
+        },
+        summerSchedule: {
+          hasBusinessClass: true,
+          startDate: null,
+          endDate: null
+        }
       }
     ];
     
@@ -614,7 +676,7 @@ export async function initializeDefaultData(): Promise<void> {
       await createDestination(destinationData);
     }
     
-    console.log('Default data initialized successfully');
+    console.log('Default data initialized successfully (British Airways added)');
   } catch (error) {
     console.error('Error initializing default data:', error);
     throw error;
