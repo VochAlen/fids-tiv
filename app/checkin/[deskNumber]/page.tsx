@@ -52,8 +52,18 @@ const CHECKIN_REFRESH_INTERVAL     = 60_000;
 const COUNTDOWN_REFRESH_INTERVAL   = 60_000;
 const DESK_STATUS_REFRESH_INTERVAL = 30_000;   // ✅ OPT: smanjeno sa 15s na 30s
 const DEVELOPMENT                  = process.env.NODE_ENV === 'development';
+const LARGE_DELAY_THRESHOLD_MIN = 180; 
 
 const DEFAULT_CHECKIN_OPEN_MINUTES = 120;
+
+// Mapping: koji redni broj šaltera (1-based) dobija koju klasu
+// 1 = prvi dodjeljeni šalter, 2 = drugi, itd.
+const DESK_POSITION_CLASS: Record<number, string> = {
+  1: 'BUSINESS',
+  2: 'BUSINESS', 
+  3: 'ECONOMY',
+  4: 'ECONOMY',
+};
 
 const SPECIAL_AIRLINES_LOOKAHEAD: Record<string, number> = {
   '6H': 180,
@@ -480,6 +490,7 @@ function CheckInDisplay() {
   const isProcessingQueueRef  = useRef(false);
   const transitionGuardRef    = useRef(false);
   const queueLenRef           = useRef(0);
+  const precisionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { adImages }    = useAdImages();
   const currentTheme    = useSeasonalTheme();
@@ -505,11 +516,17 @@ function CheckInDisplay() {
   // ── Sync currentFlightRef
   useEffect(() => { currentFlightRef.current = flightDisplay.flight; }, [flightDisplay.flight]);
 
-  // ── Kiosk Hard Reset (6h)
-  useEffect(() => {
-    const id = setTimeout(() => window.location.reload(), 6 * 60 * 60 * 1000);
-    return () => clearTimeout(id);
-  }, []);
+
+// U CheckInDisplay i GateDisplay — zamijeni postojeći hard reset:
+useEffect(() => {
+  const now = new Date();
+  const reset = new Date();
+  reset.setHours(3, 0, 0, 0);
+  if (reset <= now) reset.setDate(reset.getDate() + 1);
+  const ms = reset.getTime() - now.getTime();
+  const id = setTimeout(() => window.location.reload(), ms);
+  return () => clearTimeout(id);
+}, []);
 
   // ── CSS injection
   useEffect(() => {
@@ -643,82 +660,94 @@ function CheckInDisplay() {
   }, []);
 
   // ── Transition queue processor
-  const processTransitionQueue = useCallback(async () => {
-    if (isProcessingQueueRef.current || transitionGuardRef.current) return;
-    if (transitionQueueRef.current.length === 0) return;
+const processTransitionQueue = useCallback(async () => {
+  if (isProcessingQueueRef.current || transitionGuardRef.current) return;
+  if (transitionQueueRef.current.length === 0) return;
 
-    isProcessingQueueRef.current = true;
-    transitionGuardRef.current   = true;
-    setIsTransitioning(true);
+  isProcessingQueueRef.current = true;
+  transitionGuardRef.current   = true;
+  setIsTransitioning(true);
 
-    const releaseLocks = () => {
-      isProcessingQueueRef.current = false;
-      transitionGuardRef.current   = false;
-      setIsTransitioning(false);
-      queueLenRef.current = transitionQueueRef.current.length;
-    };
+  const releaseLocks = () => {
+    isProcessingQueueRef.current = false;
+    transitionGuardRef.current   = false;
+    setIsTransitioning(false);
+    queueLenRef.current = transitionQueueRef.current.length;
+  };
 
-    try {
-      const nextFlight = transitionQueueRef.current.shift();
-      queueLenRef.current = transitionQueueRef.current.length;
+  try {
+    const nextFlight = transitionQueueRef.current.shift();
+    queueLenRef.current = transitionQueueRef.current.length;
 
-      if (!nextFlight) {
-        setFlightDisplay(EMPTY_DISPLAY);
-        setTimeUntilCheckIn(null);
-        setTimeUntilClose(null);
-        return;
-      }
-
-      const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] =
-        await Promise.all([
-          preloadFlightImages(nextFlight),
-          getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
-          fetchDeskClassOverride(deskNumberParam),
-          fetchDeskStatusOverride(deskNumberParam),
-          getEnhancedCheckInStatus(
-            nextFlight.FlightNumber,
-            nextFlight.ScheduledDepartureTime || '',
-            nextFlight.StatusEN || '',
-            deskNumberParam
-          ),
-        ]);
-
-      const finalClassType = overrideClass || fallbackClass;
-      
-      const { isCancelled, isDiverted } = checkFlightStatusHelper(nextFlight.StatusEN || '');
-
-      if (!isMountedRef.current) return;
-
-      setFlightDisplay({
-        flight:           nextFlight,
-        logoUrl, cityUrl,
-        classType:        finalClassType,
-        manualDeskStatus: overrideStatus,
-        airlineName:      nextFlight.AirlineName || '',
-        destinationCity:  nextFlight.DestinationCityName || '',
-        flightNumber:     nextFlight.FlightNumber || '',
-        destinationCode:  nextFlight.DestinationAirportCode || '',
-        scheduledTime:    nextFlight.ScheduledDepartureTime || '',
-        estimatedTime:    nextFlight.EstimatedDepartureTime || '',
-        gateNumber:       nextFlight.GateNumber || '',
-        checkInStatus:    checkInStatus || EMPTY_DISPLAY.checkInStatus,
-        isCancelled, isDiverted,
-        flightStatus:     nextFlight.StatusEN || '',
-      });
-
-      updateCountdowns(checkInStatus);
-      await new Promise((r) => setTimeout(r, 300));
-    } catch (err) {
-      console.error('Error processing transition queue:', err);
-    } finally {
-      setTimeout(() => {
-        releaseLocks();
-        if (transitionQueueRef.current.length > 0) {
-          setTimeout(() => void processTransitionQueue(), 100);
-        }
-      }, 500);
+    if (!nextFlight) {
+      setFlightDisplay(EMPTY_DISPLAY);
+      setTimeUntilCheckIn(null);
+      setTimeUntilClose(null);
+      return;
     }
-  }, [deskNumberParam, preloadFlightImages, updateCountdowns, fetchDeskClassOverride, fetchDeskStatusOverride]);
+
+    const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] =
+      await Promise.all([
+        preloadFlightImages(nextFlight),
+        getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
+        fetchDeskClassOverride(deskNumberParam),
+        fetchDeskStatusOverride(deskNumberParam),
+        getEnhancedCheckInStatus(
+          nextFlight.FlightNumber,
+          nextFlight.ScheduledDepartureTime || '',
+          nextFlight.StatusEN || '',
+          deskNumberParam
+        ),
+      ]);
+
+    const finalClassType = overrideClass || fallbackClass;
+    const positionClassType = (() => {
+      if (!nextFlight.CheckInDesk) return finalClassType;
+      const allDesks = nextFlight.CheckInDesk.split(',').map((d: string) => d.trim()).filter(Boolean);
+      if (allDesks.length < 2) return finalClassType; // jedan šalter → ne mijenjaj
+      const deskIndex = allDesks.findIndex(d =>
+        d === deskNumberParam ||
+        d === deskNumberParam.replace(/^0+/, '') ||
+        d === deskNumberParam.padStart(2, '0')
+      );
+      const position = deskIndex + 1; // 1-based
+      return DESK_POSITION_CLASS[position] ?? finalClassType;
+    })();
+
+    const { isCancelled, isDiverted } = checkFlightStatusHelper(nextFlight.StatusEN || '');
+
+    if (!isMountedRef.current) return;
+
+    setFlightDisplay({
+      flight:           nextFlight,
+      logoUrl, cityUrl,
+      classType:        positionClassType,  // ← zamijenjeno
+      manualDeskStatus: overrideStatus,
+      airlineName:      nextFlight.AirlineName || '',
+      destinationCity:  nextFlight.DestinationCityName || '',
+      flightNumber:     nextFlight.FlightNumber || '',
+      destinationCode:  nextFlight.DestinationAirportCode || '',
+      scheduledTime:    nextFlight.ScheduledDepartureTime || '',
+      estimatedTime:    nextFlight.EstimatedDepartureTime || '',
+      gateNumber:       nextFlight.GateNumber || '',
+      checkInStatus:    checkInStatus || EMPTY_DISPLAY.checkInStatus,
+      isCancelled, isDiverted,
+      flightStatus:     nextFlight.StatusEN || '',
+    });
+
+    updateCountdowns(checkInStatus);
+    await new Promise((r) => setTimeout(r, 300));
+  } catch (err) {
+    console.error('Error processing transition queue:', err);
+  } finally {
+    setTimeout(() => {
+      releaseLocks();
+      if (transitionQueueRef.current.length > 0) {
+        setTimeout(() => void processTransitionQueue(), 100);
+      }
+    }, 500);
+  }
+}, [deskNumberParam, preloadFlightImages, updateCountdowns, fetchDeskClassOverride, fetchDeskStatusOverride]);
 
   // ── Queue novog flighta
   const queueFlightTransition = useCallback(
@@ -745,193 +774,261 @@ function CheckInDisplay() {
   //   2. Direktni fetch allOverrides → zamjenjen sa fetchAllOverridesCached()
   //   3. Direktni fetch desk-status → ostaje jer je per-desk
   // ============================================================
-  const loadFlights = useCallback(async () => {
-    if (!isMountedRef.current || transitionGuardRef.current) return;
 
-    try {
-      const data = await fetchFlightData();
-      const now   = new Date();
-      const today = now.toDateString();
 
-      // ✅ OPT: Cached override fetch — jedan poziv svakih 30s umjesto na svakom loadFlights()
-      const allOverrides = await fetchAllOverridesCached();
+const loadFlights = useCallback(async () => {
+  if (!isMountedRef.current || transitionGuardRef.current) return;
 
-      // ✅ OPT: Cleanup __EMPTY__ markera ostaje (lokalan, bez server fetch-a)
-      for (const [flightNum, override] of Object.entries(allOverrides)) {
-        if (override.CheckInDesk === '__EMPTY__') {
-          const flightInList = data.departures.find((f: any) => f.FlightNumber === flightNum);
-          const stdTime = flightInList?.ScheduledDepartureTime;
-          let shouldClean = false;
+  try {
+    const data = await fetchFlightData();
+    const now   = new Date();
 
-          if (stdTime) {
-            const [h, m] = stdTime.split(':').map(Number);
-            const stdDate = new Date();
-            stdDate.setHours(h, m, 0, 0);
-            if (stdDate < now) shouldClean = true;
-          } else {
-            shouldClean = true;
-          }
+    const allOverrides = await fetchAllOverridesCached();
 
-          if (shouldClean) {
-            delete allOverrides[flightNum];
-            // Fire-and-forget — ne čekamo response
-            fetch('/api/admin/flight-override', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ flightNumber: flightNum, field: 'CheckInDesk', action: 'clear' }),
-            }).catch(() => {});
-            if (DEVELOPMENT) console.log(`🧹 Cleaned __EMPTY__ marker for ${flightNum}`);
-          }
+    // ── Cleanup __EMPTY__ markera
+    for (const [flightNum, override] of Object.entries(allOverrides)) {
+      if (override.CheckInDesk === '__EMPTY__') {
+        const flightInList = data.departures.find((f: any) => f.FlightNumber === flightNum);
+        const stdTime = flightInList?.ScheduledDepartureTime;
+        let shouldClean = false;
+
+        if (stdTime) {
+          const [h, m] = stdTime.split(':').map(Number);
+          const stdDate = new Date();
+          stdDate.setHours(h, m, 0, 0);
+          if (stdDate < now) shouldClean = true;
+        } else {
+          shouldClean = true;
+        }
+
+        if (shouldClean) {
+          delete allOverrides[flightNum];
+          fetch('/api/admin/flight-override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightNumber: flightNum, field: 'CheckInDesk', action: 'clear' }),
+          }).catch(() => {});
+          if (DEVELOPMENT) console.log(`🧹 Cleaned __EMPTY__ marker for ${flightNum}`);
         }
       }
+    }
 
-      // ── Filtriraj letove za ovaj šalter
-      const allForDesk = data.departures.filter((f) => {
-        if (!f.CheckInDesk) return false;
-        const desks = f.CheckInDesk.split(',').map((d: string) => d.trim());
-        return (
-          desks.includes(deskNumberParam) ||
-          desks.includes(deskNumberParam.replace(/^0+/, '')) ||
-          desks.includes(deskNumberParam.padStart(2, '0'))
-        );
-      });
-
-      // ── Dodaj departureTime
-   // ── NOVA LOGIKA: Koristi _sortTime iz Flight objekta ──────────
+    // ── Filtriraj letove za ovaj šalter
+    const allForDesk = data.departures.filter((f) => {
+      if (!f.CheckInDesk) return false;
+      const desks = f.CheckInDesk.split(',').map((d: string) => d.trim());
+      return (
+        desks.includes(deskNumberParam) ||
+        desks.includes(deskNumberParam.replace(/^0+/, '')) ||
+        desks.includes(deskNumberParam.padStart(2, '0'))
+      );
+    });
 
 
+
+// PRIVREMENI DEBUG — obriši nakon provjere za TK1098 24.05.2026
+// if (DEVELOPMENT) {
+//   console.log(`[CheckIn] Desk ${deskNumberParam} — svi letovi za ovaj šalter:`);
+//   console.table(data.departures
+//     .filter(f => f.FlightNumber === 'TK1098')
+//     .map(f => ({
+//       fn: f.FlightNumber,
+//       checkInDesk: f.CheckInDesk,
+//       status: f.StatusEN,
+//       std: f.ScheduledDepartureTime,
+//     }))
+//   );
+// }
+
+    // ── Dodaj departureTime
 const withTime = allForDesk
   .map((flight) => {
     let departureTime: Date | null = null;
-    let isToday = true;
 
-    if (flight._sortTime != null && flight._sortTime > 0) {
-      departureTime = new Date(flight._sortTime);
-      isToday = departureTime.toDateString() === today;
-    } else if (flight.ScheduledDepartureTime?.includes('T')) {
+    if (flight.ScheduledDepartureTime?.includes('T')) {
       departureTime = new Date(flight.ScheduledDepartureTime);
-      isToday = departureTime.toDateString() === today;
     } else if (flight.ScheduledDepartureTime) {
       const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
       if (!isNaN(h) && !isNaN(m)) {
         departureTime = new Date(now);
         departureTime.setHours(h, m, 0, 0);
-        if (departureTime.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
-          departureTime.setDate(departureTime.getDate() + 1);
-        }
-        // ✅ KLJUČNO: let koji je prošao više od 30 min nije "today"
-        if ((now.getTime() - departureTime.getTime()) / 60_000 > 30) isToday = false;
       }
     }
 
     const status = (flight.StatusEN || '').toLowerCase();
-    const isDeparted = status.includes('departed') || status.includes('poletio');
+    const isDeparted  = status.includes('departed')  || status.includes('poletio');
     const isCancelled = status.includes('cancelled') || status.includes('otkazan');
 
-    return {
-      ...flight,
-      departureTime,
-      isToday: isToday && !isDeparted && !isCancelled,
-    };
+    // ── Pozicija trenutnog šaltera među dodijeljenim šalterima
+    const allDesks = (flight.CheckInDesk || '')
+      .split(',')
+      .map((d: string) => d.trim())
+      .filter(Boolean);
+    const deskIndex = allDesks.findIndex(d =>
+      d === deskNumberParam ||
+      d === deskNumberParam.replace(/^0+/, '') ||
+      d === deskNumberParam.padStart(2, '0')
+    );
+    const deskPosition = deskIndex + 1; // 1-based
+
+    return { ...flight, departureTime, isActive: !isDeparted && !isCancelled, deskPosition };
   })
-  .filter((f) => f.departureTime !== null && f.isToday) as (EnhancedFlight & {
+  .filter((f) => f.departureTime !== null && f.isActive) as (EnhancedFlight & {
     departureTime: Date;
-    isToday: boolean;
+    isActive: boolean;
+    deskPosition: number;
   })[];
 
-      const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
+const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
-      // ── Future letovi (dinamički lookahead)
-      const future = sorted.filter((f) => {
-        if (!f.isToday) return false;
-        if (f.departureTime <= now) return false;
-        const s = (f.StatusEN || '').toLowerCase();
-        if (s.includes('cancelled') || s.includes('departed') || s.includes('poletio')) return false;
-        const lookaheadMs      = getCheckInLookaheadMs(f.FlightNumber);
-        const checkInWindowStart = f.departureTime.getTime() - lookaheadMs;
-        if (DEVELOPMENT) {
-          const minutesBefore = Math.floor((f.departureTime.getTime() - now.getTime()) / 60000);
-          console.log(`[CheckIn] ${f.FlightNumber}: ${minutesBefore}min prije, lookahead ${lookaheadMs / 60000}min, ulazi: ${Date.now() >= checkInWindowStart}`);
-        }
-        return Date.now() >= checkInWindowStart;
-      });
+    // ── Future letovi (dinamički lookahead)
+const future = sorted.filter((f) => {
+  // Provjeri status
+  const s = (f.StatusEN || '').toLowerCase();
+  if (s.includes('cancelled') || s.includes('departed') || s.includes('poletio')) return false;
 
-      // ── Manual status za ovaj desk
-      let currentManualStatus: string | null = null;
-      try {
-        const statusRes  = await fetch(`/api/desk-status/${deskNumberParam}`);
-        const statusData = await statusRes.json();
-        currentManualStatus = statusData.status;
-        if (DEVELOPMENT) console.log(`[CheckIn] Manual status desk ${deskNumberParam}: ${currentManualStatus}`);
-      } catch {
-        if (DEVELOPMENT) console.warn('[CheckIn] Failed to fetch manual status');
-      }
+  // Let mora biti u budućnosti
+  if (f.departureTime <= now) return false;
 
-      // ── Odaberi trenutni let
-      let currentFlight: EnhancedFlight | null = null;
-
-      const isBlockedByEmpty = (f: EnhancedFlight & { departureTime: Date }): boolean => {
-        const override = allOverrides[f.FlightNumber];
-        if (override?.CheckInDesk !== '__EMPTY__') return false;
-        const stdMs = (() => {
-          const [h, m] = (f.ScheduledDepartureTime || '').split(':').map(Number);
-          if (isNaN(h)) return null;
-          const d = new Date(); d.setHours(h, m, 0, 0);
-          return d.getTime();
-        })();
-        // __EMPTY__ koji je stariji od 4h ignorišemo
-        return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
-      };
-
-if (currentManualStatus === 'open') {
-  for (const f of sorted) {
-    const s = (f.StatusEN || '').toLowerCase();
-    if (s.includes('cancelled') || s.includes('otkazan') ||
-        s.includes('diverted')  || s.includes('preusmjeren') ||
-        s.includes('departed')  || s.includes('poletio')) continue;
-    if (isBlockedByEmpty(f)) continue;
-    // ✅ Preskoči letove koji su prošli više od 60 minuta
-    if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
-    currentFlight = f;
-    break;
-  }
-}
-
-      if (!currentFlight && currentManualStatus !== 'closed') {
-        for (const f of future) {
-          if (isBlockedByEmpty(f)) continue;
-          currentFlight = f;
-          break;
-        }
-      }
-
-      if (currentManualStatus === 'closed') currentFlight = null;
-
-      if (!isMountedRef.current) return;
-
-      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-      setLoading(false);
-
-      const prevFlight = currentFlightRef.current;
-      const changed =
-        !prevFlight ||
-        prevFlight.FlightNumber           !== currentFlight?.FlightNumber ||
-        prevFlight.ScheduledDepartureTime !== currentFlight?.ScheduledDepartureTime;
-
-      if (changed) await queueFlightTransition(currentFlight);
-
-      const idx  = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
-      const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
-      if (isMountedRef.current) setNextScheduledFlight(next);
-
-    } catch (err) {
-      if (DEVELOPMENT) console.error('❌ loadFlights error:', err);
-      if (isMountedRef.current) {
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        setLoading(false);
+  // ── NOVO: Check-in se zatvara STD-30min
+  // Ako je prošlo više od STD-30min, ne prikazuj
+// NOVO: STD-30min, osim ako je kašnjenje > 60min → ETD-30min
+const closeReferenceTime = (() => {
+  const etd = f.EstimatedDepartureTime;
+  if (etd && etd !== f.ScheduledDepartureTime) {
+    const [eh, em] = etd.split(':').map(Number);
+    const [sh, sm] = (f.ScheduledDepartureTime || '').split(':').map(Number);
+    if (!isNaN(eh) && !isNaN(sh)) {
+      let delayMinutes = (eh * 60 + em) - (sh * 60 + sm);
+      if (delayMinutes < 0) delayMinutes += 1440;
+      if (delayMinutes > LARGE_DELAY_THRESHOLD_MIN) {
+        const d = new Date(now);
+        d.setHours(eh, em, 0, 0);
+        return d.getTime();
       }
     }
-  }, [deskNumberParam, queueFlightTransition]);
+  }
+  return f.departureTime.getTime();
+})();
+
+const checkInCloseTime = closeReferenceTime - 30 * 60 * 1000;
+if (Date.now() >= checkInCloseTime) return false;
+
+  // Lookahead provjera
+  const lookaheadMs = getCheckInLookaheadMs(f.FlightNumber);
+  const checkInWindowStart = f.departureTime.getTime() - lookaheadMs;
+  if (DEVELOPMENT) {
+    const minutesBefore = Math.floor((f.departureTime.getTime() - now.getTime()) / 60000);
+    console.log(`[CheckIn] ${f.FlightNumber}: ${minutesBefore}min prije, lookahead ${lookaheadMs / 60000}min, ulazi: ${Date.now() >= checkInWindowStart}`);
+  }
+  return Date.now() >= checkInWindowStart;
+});
+
+    // ── Precision timer za sledeći check-in opening
+    // Pokriva sve specijalne kompanije iz SPECIAL_AIRLINES_LOOKAHEAD,
+    // ne samo 6H — traži let koji će se otvoriti unutar sljedećeg sata
+    if (precisionTimerRef.current) {
+      clearTimeout(precisionTimerRef.current);
+      precisionTimerRef.current = null;
+    }
+
+    const nextToOpen = sorted.find((f) => {
+      if (f.departureTime <= now) return false;
+      const s = (f.StatusEN || '').toLowerCase();
+      if (s.includes('cancelled') || s.includes('departed') || s.includes('poletio')) return false;
+      const lookaheadMs = getCheckInLookaheadMs(f.FlightNumber);
+      const openTime = f.departureTime.getTime() - lookaheadMs;
+      const msUntilOpen = openTime - Date.now();
+      // Samo letovi koji se otvaraju u sljedećih 60 minuta
+      // i još nisu u future[] listi (check-in još nije otvoren)
+      return msUntilOpen > 0 && msUntilOpen < 60 * 60 * 1000 &&
+             !future.find(ff => ff.FlightNumber === f.FlightNumber);
+    });
+
+    if (nextToOpen && isMountedRef.current) {
+      const lookaheadMs  = getCheckInLookaheadMs(nextToOpen.FlightNumber);
+      const openTime     = nextToOpen.departureTime.getTime() - lookaheadMs;
+      const msUntilOpen  = openTime - Date.now();
+      if (DEVELOPMENT) console.log(`⏰ Precision timer: ${nextToOpen.FlightNumber} otvara za ${Math.round(msUntilOpen / 1000 / 60)}min`);
+      precisionTimerRef.current = setTimeout(() => {
+        if (isMountedRef.current) void loadFlights();
+      }, msUntilOpen + 1000); // +1s buffer
+    }
+
+    // ── Manual status za ovaj desk
+    let currentManualStatus: string | null = null;
+    try {
+      const statusRes  = await fetch(`/api/desk-status/${deskNumberParam}`);
+      const statusData = await statusRes.json();
+      currentManualStatus = statusData.status;
+      if (DEVELOPMENT) console.log(`[CheckIn] Manual status desk ${deskNumberParam}: ${currentManualStatus}`);
+    } catch {
+      if (DEVELOPMENT) console.warn('[CheckIn] Failed to fetch manual status');
+    }
+
+    // ── Odaberi trenutni let
+    let currentFlight: EnhancedFlight | null = null;
+
+    const isBlockedByEmpty = (f: EnhancedFlight & { departureTime: Date }): boolean => {
+      const override = allOverrides[f.FlightNumber];
+      if (override?.CheckInDesk !== '__EMPTY__') return false;
+      const stdMs = (() => {
+        const [h, m] = (f.ScheduledDepartureTime || '').split(':').map(Number);
+        if (isNaN(h)) return null;
+        const d = new Date(); d.setHours(h, m, 0, 0);
+        return d.getTime();
+      })();
+      return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
+    };
+
+    if (currentManualStatus === 'open') {
+      for (const f of sorted) {
+        const s = (f.StatusEN || '').toLowerCase();
+        if (s.includes('cancelled') || s.includes('otkazan') ||
+            s.includes('diverted')  || s.includes('preusmjeren') ||
+            s.includes('departed')  || s.includes('poletio')) continue;
+        if (isBlockedByEmpty(f)) continue;
+        if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
+        currentFlight = f;
+        break;
+      }
+    }
+
+    if (!currentFlight && currentManualStatus !== 'closed') {
+      for (const f of future) {
+        if (isBlockedByEmpty(f)) continue;
+        currentFlight = f;
+        break;
+      }
+    }
+
+    if (currentManualStatus === 'closed') currentFlight = null;
+
+    if (!isMountedRef.current) return;
+
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setLoading(false);
+
+    const prevFlight = currentFlightRef.current;
+    const changed =
+      !prevFlight ||
+      prevFlight.FlightNumber           !== currentFlight?.FlightNumber ||
+      prevFlight.ScheduledDepartureTime !== currentFlight?.ScheduledDepartureTime;
+
+    if (changed) await queueFlightTransition(currentFlight);
+
+    const idx  = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
+    const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
+    if (isMountedRef.current) setNextScheduledFlight(next);
+
+  } catch (err) {
+    if (DEVELOPMENT) console.error('❌ loadFlights error:', err);
+    if (isMountedRef.current) {
+      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      setLoading(false);
+    }
+  }
+}, [deskNumberParam, queueFlightTransition]);
 
   // ── shouldShowCheckIn
   const shouldShowCheckIn = useMemo(() => {
@@ -943,13 +1040,22 @@ if (currentManualStatus === 'open') {
 
   // ── Main data load interval
   // ✅ OPT: neaktivni ekrani koriste INTERVAL_INACTIVE (60s) umjesto 40s
-  useEffect(() => {
-    isMountedRef.current = true;
-    void loadFlights();
-    const intervalMs = shouldShowCheckIn ? INTERVAL_ACTIVE : INTERVAL_INACTIVE;
-    const id = setInterval(() => { void loadFlights(); }, intervalMs);
-    return () => { isMountedRef.current = false; clearInterval(id); };
-  }, [loadFlights, shouldShowCheckIn]);
+// Dodaj uz ostale ref-ove na vrhu komponente:
+
+
+// Dodaj u cleanup useEffect gdje imaš isMountedRef:
+useEffect(() => {
+  isMountedRef.current = true;
+  void loadFlights();
+  const intervalMs = shouldShowCheckIn ? INTERVAL_ACTIVE : INTERVAL_INACTIVE;
+  const id = setInterval(() => { void loadFlights(); }, intervalMs);
+  return () => {
+    isMountedRef.current = false;
+    clearInterval(id);
+    // ← DODAJ OVO:
+    if (precisionTimerRef.current) clearTimeout(precisionTimerRef.current);
+  };
+}, [loadFlights, shouldShowCheckIn]);
 
   // ── Manual Status Override refresh
   // ✅ OPT: interval smanjen na DESK_STATUS_REFRESH_INTERVAL (30s umjesto 15s)

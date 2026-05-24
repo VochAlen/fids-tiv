@@ -344,11 +344,6 @@ function parseDepartureTime(timeString: string): Date | null {
     if (timeString.includes('T')) {
       const date = new Date(timeString);
       if (!isNaN(date.getTime())) {
-        const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
-        if (date < twelveHoursAgo) {
-          console.warn(`⚠️ parseDepartureTime: odbačen stari ISO timestamp: ${timeString}`);
-          return null;
-        }
         timeParseCache.set(cacheKey, date);
         return date;
       }
@@ -357,16 +352,8 @@ function parseDepartureTime(timeString: string): Date | null {
     const [hours, minutes] = timeString.split(':').map(Number);
     if (isNaN(hours) || isNaN(minutes)) return null;
 
-    const now = new Date();
-    const d = new Date(now);
+    const d = new Date();
     d.setHours(hours, minutes, 0, 0);
-
-    // 🔧 POPRAVLJENA LOGIKA: Ako je vrijeme već prošlo danas, dodaj sutra
-    // Tolerancija 30 minuta za letove koji su upravo poletjeli
-    const THIRTY_MIN_MS = 30 * 60 * 1000;
-    if (d.getTime() < now.getTime() - THIRTY_MIN_MS) {
-      d.setDate(d.getDate() + 1);
-    }
 
     timeParseCache.set(cacheKey, d);
     return d;

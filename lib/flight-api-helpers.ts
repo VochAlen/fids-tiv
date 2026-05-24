@@ -277,10 +277,17 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
         hours = 0;
         minutes = 0;
       }
+      console.log(`RAW Planirano za HN2392: "${raw.Planirano}", BrojLeta: "${raw.BrojLeta}"`);
+
       
       if (!isNaN(day) && !isNaN(month) && !isNaN(year) && !isNaN(hours) && !isNaN(minutes)) {
         // month je 0-indexed u JavaScript Date
-        const scheduledDate = new Date(year, month - 1, day, hours, minutes, 0, 0);
+// Kreiraj timestamp kao da je UTC, ali zapravo su sati lokalni
+// Offset u minutama (npr. UTC+2 = -120)
+const tzOffset = new Date().getTimezoneOffset() * 60 * 1000;
+const scheduledDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0, 0));
+sortTime = scheduledDate.getTime() + tzOffset;
+console.log(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduledDate.getHours()}:${scheduledDate.getMinutes()} | timestamp=${sortTime}`);
         sortTime = scheduledDate.getTime();
       }
     } catch (err) {
@@ -362,5 +369,9 @@ export function sortFlightsByTime(flights: Flight[]): Flight[] {
 }
 
 export function filterTodayFlights(flights: Flight[]): Flight[] {
-  return flights;
+  const today = new Date().toDateString();
+  return flights.filter(f => {
+    if (!f._sortTime) return true;
+    return new Date(f._sortTime).toDateString() === today;
+  });
 }

@@ -117,8 +117,6 @@ const parseDepartureTime = (t: string): Date | null => {
     if (isNaN(h) || isNaN(m)) return null;
     const d = new Date();
     d.setHours(h, m, 0, 0);
-    // ✅ 6h threshold — prošli letovi idu na sutra, ali s minutesSinceDep logikom
-    if (Date.now() - d.getTime() > 6 * 60 * 60 * 1000) d.setDate(d.getDate() + 1);
     return d;
   } catch { return null; }
 };
@@ -241,7 +239,7 @@ export default function GatePage() {
 // ─────────────────────────────────────────────────────────────
 
 // Grace period: 45 min nakon STD, prikazujemo let čak i bez API statusa
-const GATE_CLOSE_BEFORE_MS = 6 * 60 * 1000;  // 3 minute prije STD
+const GATE_CLOSE_BEFORE_MS = 5 * 60 * 1000;  // 5 minute prije STD
 
 // ─────────────────────────────────────────────────────────────
 // Glavna komponenta
@@ -311,10 +309,16 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
   }, 0);
 
   // ── Hard reset ───────────────────────────────────────────────
-  useEffect(() => {
-    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS);
-    return () => clearTimeout(id);
-  }, []);
+// U CheckInDisplay i GateDisplay — zamijeni postojeći hard reset:
+useEffect(() => {
+  const now = new Date();
+  const reset = new Date();
+  reset.setHours(3, 0, 0, 0);
+  if (reset <= now) reset.setDate(reset.getDate() + 1);
+  const ms = reset.getTime() - now.getTime();
+  const id = setTimeout(() => window.location.reload(), ms);
+  return () => clearTimeout(id);
+}, []);
 
   // ── Kiosk mode ───────────────────────────────────────────────
   useEffect(() => {
@@ -383,9 +387,8 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
   .map(f => ({
     ...f,
     // Za sortiranje: koristi _sortTime ako postoji, inače STD
-    _stdDate: f._sortTime 
-      ? new Date(f._sortTime)
-      : parseDepartureTime(f.ScheduledDepartureTime || ''),
+ // ISPRAVNO — uvijek koristi lokalno STD na klijentu:
+_stdDate: parseDepartureTime(f.ScheduledDepartureTime || ''),
   }))
   .filter(f => f._stdDate !== null) as (Flight & {
     _stdDate: Date;
