@@ -56,35 +56,54 @@ async function runRedisCleanupIfNeeded(): Promise<void> {
   if (Date.now() - lastRedisCleanup < REDIS_CLEANUP_INTERVAL_MS) return;
   lastRedisCleanup = Date.now();
 
-  try {
-    const client = getRedisClient();
-    const TTL_RULES: Record<string, number> = {
-      'cache:flights':  180,
-      'override:':      21_600,
-      'gate-status:':   21_600,
-      'desk-status:':   21_600,
-      'desk-class:':    21_600,
-    };
+  const TTL_RULES: Record<string, number> = {
+    'cache:flights':  180,
+    'override:':      21_600,
+    'gate-status:':   21_600,
+    'desk-status:':   21_600,
+    'desk-class:':    21_600,
+  };
 
-    let cursor = '0';
-    let fixed = 0;
-    do {
-      const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 100);
-      cursor = nextCursor;
-      for (const key of keys) {
-        const ttl = await client.ttl(key);
-        if (ttl === -1) {
-          const rule = Object.entries(TTL_RULES).find(([prefix]) => key.startsWith(prefix));
-          await client.expire(key, rule ? rule[1] : 3_600);
-          fixed++;
+  // ✅ Fire-and-forget sa hard timeout 5s — nikad ne blokira main request
+  Promise.race([
+    (async () => {
+      try {
+        const client = getRedisClient();
+        const keysToFix: string[] = [];
+        let cursor = '0';
+
+        do {
+          const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 100);
+          cursor = nextCursor;
+
+          if (keys.length > 0) {
+            // ✅ Pipeline umjesto sekvencijalnih ttl() poziva
+            const pipeline = client.pipeline();
+            keys.forEach(key => pipeline.ttl(key));
+            const results = await pipeline.exec();
+            results?.forEach((result, i) => {
+              if (!result[0] && result[1] === -1) keysToFix.push(keys[i]);
+            });
+          }
+
+          if (keysToFix.length > 200) break;
+        } while (cursor !== '0');
+
+        if (keysToFix.length > 0) {
+          const fixPipeline = client.pipeline();
+          keysToFix.forEach(key => {
+            const rule = Object.entries(TTL_RULES).find(([p]) => key.startsWith(p));
+            fixPipeline.expire(key, rule ? rule[1] : 3_600);
+          });
+          await fixPipeline.exec();
+          console.log(`🧹 Redis cleanup: ${keysToFix.length} keys fixed`);
         }
+      } catch (e) {
+        console.error('⚠️ Redis cleanup failed (non-critical):', e);
       }
-    } while (cursor !== '0');
-
-    if (fixed > 0) console.log(`🧹 Redis cleanup: ${fixed} keys fixed`);
-  } catch (e) {
-    console.error('⚠️ Redis cleanup failed:', e);
-  }
+    })(),
+    new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+  ]);
 }
 
 // ── REDIS FLIGHT CACHE ────────────────────────────────────────
@@ -142,44 +161,60 @@ async function loadOverridesMap(): Promise<Record<string, Record<string, string>
     return overrideCacheData;
   }
 
-  try {
-    const client = getRedisClient();
-    const keys: string[] = [];
-    let cursor = '0';
+  // ✅ Hard timeout 3s — ako Redis ne odgovori, vrati stari cache
+  const timeoutPromise = new Promise<null>(resolve => 
+    setTimeout(() => resolve(null), 3_000)
+  );
 
-    do {
-      const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
-      cursor = scanResult[0];
-      keys.push(...scanResult[1]);
-      if (keys.length > 200) break;
-    } while (cursor !== '0');
+  const fetchPromise = (async () => {
+    try {
+      const client = getRedisClient();
+      const keys: string[] = [];
+      let cursor = '0';
 
-    if (keys.length === 0) {
-      overrideCacheData = {};
+      do {
+        const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
+        cursor = scanResult[0];
+        keys.push(...scanResult[1]);
+        if (keys.length > 200) break;
+      } while (cursor !== '0');
+
+      if (keys.length === 0) {
+        overrideCacheData = {};
+        overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
+        return overrideCacheData;
+      }
+
+      const pipeline = client.pipeline();
+      keys.forEach(key => pipeline.hgetall(key));
+      const results = await pipeline.exec();
+
+      const map: Record<string, Record<string, string>> = {};
+      if (results) {
+        keys.forEach((key, i) => {
+          const result = results[i];
+          if (result && !result[0] && result[1]) {
+            const flightNumber = key.replace('override:', '');
+            const data = result[1] as Record<string, string>;
+            if (Object.keys(data).length > 0) map[flightNumber] = data;
+          }
+        });
+      }
+
+      overrideCacheData = map;
       overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
       return overrideCacheData;
+    } catch {
+      return null; // timeout handler će vratiti stari cache
     }
+  })();
 
-    const pipeline = client.pipeline();
-    keys.forEach(key => pipeline.hgetall(key));
-    const results = await pipeline.exec();
+  const result = await Promise.race([fetchPromise, timeoutPromise]);
 
-    const map: Record<string, Record<string, string>> = {};
-    if (results) {
-      keys.forEach((key, i) => {
-        const result = results[i];
-        if (result && !result[0] && result[1]) {
-          const flightNumber = key.replace('override:', '');
-          const data = result[1] as Record<string, string>;
-          if (Object.keys(data).length > 0) map[flightNumber] = data;
-        }
-      });
-    }
-
-    overrideCacheData = map;
+  if (result === null) {
+    console.warn('[loadOverridesMap] Timeout ili greška — vraćam stari cache');
+    // Produžimo expiry da ne hammera Redis svaki request dok je down
     overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-  } catch {
-    // Vrati stari cache ili prazan map
   }
 
   return overrideCacheData;

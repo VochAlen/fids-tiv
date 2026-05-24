@@ -22,7 +22,8 @@ import type { Flight, FlightData } from '@/types/flight';
 const REDIS_KEY      = 'cache:flights';
 const FRESH_SECONDS  = 60;   // 45s — vrati iz Redisa bez vanjskog poziva
 const STALE_SECONDS  = 120;   // 90s — vrati stale + revaliduj u pozadini
-const FETCH_TIMEOUT  = 8_000; // 8s  — maks čekanje na /api/flights
+const FETCH_TIMEOUT     = 8_000;  // za normalne requeste
+const BG_FETCH_TIMEOUT  = 15_000; // za background — ima više vremena
 
 // ── BaseUrl helper ───────────────────────────────────────────
 function getBaseUrl(): string {
@@ -49,9 +50,12 @@ function ensureSortTime(data: FlightData): FlightData {
 }
 
 // ── Fetch od vanjskog /api/flights sa timeoutom ──────────────
-async function fetchFromSource(): Promise<FlightData> {
+// Povećaj timeout za background revalidaciju
+
+
+async function fetchFromSource(timeoutMs = FETCH_TIMEOUT): Promise<FlightData> {
   const controller = new AbortController();
-  const timeout    = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+  const timeout    = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${getBaseUrl()}/api/flights`, {
       signal:  controller.signal,
@@ -60,32 +64,42 @@ async function fetchFromSource(): Promise<FlightData> {
     });
     if (!res.ok) throw new Error(`/api/flights returned ${res.status}`);
     const data = await res.json() as FlightData;
-    
-    // ✅ Osiguraj da _sortTime postoji
     return ensureSortTime(data);
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// ── Revalidacija u pozadini (ne blokira response) ────────────
 function revalidateInBackground(): void {
-  fetchFromSource()
+  fetchFromSource(BG_FETCH_TIMEOUT)
     .then(async (data) => {
       try {
         const client = getRedisClient();
-        await client.set(
-          REDIS_KEY,
-          JSON.stringify({ data, fetchedAt: Date.now() }),
-          'EX',
-          STALE_SECONDS * 2  // Redis TTL = 3 minute (duplo od stale)
-        );
-      } catch (err) {
-        console.error('[flights-cached] Redis write failed:', err);
+        await Promise.race([
+          client.set(
+            REDIS_KEY,
+            JSON.stringify({ data, fetchedAt: Date.now() }),
+            'EX',
+            STALE_SECONDS * 2
+          ),
+          // ✅ Redis write timeout — ne čekaj beskonačno
+          new Promise<void>((_, reject) => 
+            setTimeout(() => reject(new Error('Redis write timeout')), 3_000)
+          ),
+        ]);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[flights-cached] Redis write failed:', msg);
       }
     })
-    .catch((err) => {
-      console.error('[flights-cached] Background revalidation failed:', err.message);
+    .catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      // ✅ Ne logiraj "aborted" kao error — to je normalno ponašanje
+      if (msg.includes('aborted') || msg.includes('abort')) {
+        console.log('[flights-cached] Background revalidation cancelled (normal)');
+      } else {
+        console.error('[flights-cached] Background revalidation failed:', msg);
+      }
     });
 }
 

@@ -112,22 +112,13 @@ const AirlineLogo = memo(function AirlineLogo(
 const parseDepartureTime = (t: string): Date | null => {
   if (!t) return null;
   try {
-    // ISO format (npr. 2024-03-15T17:45:00Z)
-    if (t.includes('T') || (t.includes('-') && t.length > 8)) {
-      const d = new Date(t);
-      if (!isNaN(d.getTime())) return d;
-    }
-    // HH:MM format
+    if (t.includes('T')) { const d = new Date(t); if (!isNaN(d.getTime())) return d; }
     const [h, m] = t.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
     const d = new Date();
     d.setHours(h, m, 0, 0);
-    // 18h threshold — letovi stariji od 18h su "sutrašnji" (next day rotation)
-    // Ovo pokriva cijeli raspored dana uključujući kasne noćne letove
-    const EIGHTEEN_HOURS = 18 * 60 * 60 * 1000;
-    if (Date.now() - d.getTime() > EIGHTEEN_HOURS) {
-      d.setDate(d.getDate() + 1);
-    }
+    // ✅ 6h threshold — prošli letovi idu na sutra, ali s minutesSinceDep logikom
+    if (Date.now() - d.getTime() > 6 * 60 * 60 * 1000) d.setDate(d.getDate() + 1);
     return d;
   } catch { return null; }
 };
@@ -432,8 +423,7 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
       //
       // Manual 'open': uzmi prvi koji nije cancelled/diverted
       // (departed se ne filtrira — osoblje može otvoriti kasneći let)
-
-      let current: (typeof sorted)[number] | null = null;
+let current: (typeof sorted)[number] | null = null;
 
       if (manualGateStatusRef.current === 'open') {
         current = sorted.find(f => {
@@ -442,7 +432,31 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
                  !s.includes('diverted')  && !s.includes('preusmjeren');
         }) ?? null;
       } else {
-        current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
+        // Prolaz 1: traži prvi let čiji STD/ETD još NIJE prošao
+        for (const f of sorted) {
+          if (!shouldDisplayFlight(f)) continue;
+
+          // Delayed let: koristi ETD ako postoji
+          const refTimeStr = (f.EstimatedDepartureTime && f.EstimatedDepartureTime !== f.ScheduledDepartureTime)
+            ? f.EstimatedDepartureTime
+            : f.ScheduledDepartureTime || '';
+
+          const dep = parseDepartureTime(refTimeStr);
+          if (!dep) continue;
+
+          const minutesSinceDep = Math.floor((Date.now() - dep.getTime()) / 60_000);
+          // Ako je prošlo više od 3 min od ETD/STD → preskoči, uzmi sljedeći
+          if (minutesSinceDep >= 0) continue;
+
+          current = f;
+          break;
+        }
+
+        // Fallback: nema budućeg leta → uzmi prvi koji je aktivan ali kasni
+        // (API možda još nije ažurirao status na "departed")
+        if (!current) {
+          current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
+        }
       }
 
       // 6. Sljedeći let IZA currenta

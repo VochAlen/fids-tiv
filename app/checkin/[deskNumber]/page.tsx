@@ -804,50 +804,40 @@ const withTime = allForDesk
   .map((flight) => {
     let departureTime: Date | null = null;
     let isToday = true;
-    
-    // 1. Prvo pokušaj sa _sortTime (timestamp iz API-ja) - NAJTAČNIJE!
-if (flight._sortTime != null && flight._sortTime > 0) {
+
+    if (flight._sortTime != null && flight._sortTime > 0) {
       departureTime = new Date(flight._sortTime);
       isToday = departureTime.toDateString() === today;
-    } 
-    // 2. Fallback: ISO string
-    else if (flight.ScheduledDepartureTime?.includes('T')) {
+    } else if (flight.ScheduledDepartureTime?.includes('T')) {
       departureTime = new Date(flight.ScheduledDepartureTime);
       isToday = departureTime.toDateString() === today;
-    } 
-    // 3. Fallback: samo HH:MM (stara logika)
- // Zamijeni cijeli fallback HH:MM blok ovim:
-// page.tsx — zamijeni cijeli HH:MM blok
-else if (flight.ScheduledDepartureTime) {
-  const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
-  if (!isNaN(h) && !isNaN(m)) {
-    departureTime = new Date(now);
-    departureTime.setHours(h, m, 0, 0);
-
-    // Ako je departurTime više od 20h u budućnosti,
-    // to znači da je zapravo bio jučer (noćni let koji je prešao ponoć)
-    // Stara logika (0-3h && h>=3) je brisala JUTARNJE letove!
-    const msToDep = departureTime.getTime() - now.getTime();
-    if (msToDep > 20 * 60 * 60 * 1000) {
-      departureTime.setDate(departureTime.getDate() - 1);
+    } else if (flight.ScheduledDepartureTime) {
+      const [h, m] = flight.ScheduledDepartureTime.split(':').map(Number);
+      if (!isNaN(h) && !isNaN(m)) {
+        departureTime = new Date(now);
+        departureTime.setHours(h, m, 0, 0);
+        if (departureTime.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
+          departureTime.setDate(departureTime.getDate() + 1);
+        }
+        // ✅ KLJUČNO: let koji je prošao više od 30 min nije "today"
+        if ((now.getTime() - departureTime.getTime()) / 60_000 > 30) isToday = false;
+      }
     }
 
-    isToday = departureTime.toDateString() === today;
-  }
-}
-    
-    // Preskoči letove koji su već poletjeli (departed)
     const status = (flight.StatusEN || '').toLowerCase();
     const isDeparted = status.includes('departed') || status.includes('poletio');
     const isCancelled = status.includes('cancelled') || status.includes('otkazan');
-    
-    return { 
-      ...flight, 
-      departureTime, 
-      isToday: isToday && !isDeparted && !isCancelled
+
+    return {
+      ...flight,
+      departureTime,
+      isToday: isToday && !isDeparted && !isCancelled,
     };
   })
-  .filter((f) => f.departureTime !== null && f.isToday) as (EnhancedFlight & { departureTime: Date; isToday: boolean })[];
+  .filter((f) => f.departureTime !== null && f.isToday) as (EnhancedFlight & {
+    departureTime: Date;
+    isToday: boolean;
+  })[];
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
