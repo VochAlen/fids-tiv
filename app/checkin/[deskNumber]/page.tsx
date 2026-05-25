@@ -4,7 +4,7 @@ import {
   useEffect,
   useState,
   useRef,
-  useMemo,
+  // useMemo,
   useCallback,
   memo,
   Component,
@@ -55,6 +55,7 @@ const DEVELOPMENT                  = process.env.NODE_ENV === 'development';
 const LARGE_DELAY_THRESHOLD_MIN = 180; 
 
 const DEFAULT_CHECKIN_OPEN_MINUTES = 120;
+
 
 // Mapping: koji redni broj šaltera (1-based) dobija koju klasu
 // 1 = prvi dodjeljeni šalter, 2 = drugi, itd.
@@ -479,7 +480,8 @@ function CheckInDisplay() {
   const [isPortrait,          setIsPortrait]          = useState(false);
   const [nextScheduledFlight, setNextScheduledFlight] = useState<Flight | null>(null);
   const [showDebug,           setShowDebug]           = useState(false);
-  const [isTransitioning,     setIsTransitioning]     = useState(false);
+const [isTransitioning,     setIsTransitioning]     = useState(false);
+const [shouldShowCheckIn,   setShouldShowCheckIn]   = useState(false)
 
   const isMountedRef          = useRef(true);
   const currentFlightRef      = useRef<EnhancedFlight | null>(null);
@@ -491,6 +493,7 @@ function CheckInDisplay() {
   const transitionGuardRef    = useRef(false);
   const queueLenRef           = useRef(0);
   const precisionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const delayResetSentRef = useRef<string | null>(null);
 
   const { adImages }    = useAdImages();
   const currentTheme    = useSeasonalTheme();
@@ -987,18 +990,41 @@ if (Date.now() >= checkInCloseTime) return false;
       return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
     };
 
-    if (currentManualStatus === 'open') {
-      for (const f of sorted) {
-        const s = (f.StatusEN || '').toLowerCase();
-        if (s.includes('cancelled') || s.includes('otkazan') ||
-            s.includes('diverted')  || s.includes('preusmjeren') ||
-            s.includes('departed')  || s.includes('poletio')) continue;
-        if (isBlockedByEmpty(f)) continue;
-        if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
-        currentFlight = f;
-        break;
+if (currentManualStatus === 'open') {
+  for (const f of sorted) {
+    const s = (f.StatusEN || '').toLowerCase();
+    if (s.includes('cancelled') || s.includes('otkazan') ||
+        s.includes('diverted')  || s.includes('preusmjeren') ||
+        s.includes('departed')  || s.includes('poletio')) continue;
+    if (isBlockedByEmpty(f)) continue;
+    if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
+
+    // ── STD-30min: ne prikazuj čak ni za manual open ──
+// NOVO — ista logika kao u future filteru:
+const closeReferenceMs = (() => {
+  const etd = f.EstimatedDepartureTime;
+  if (etd && etd !== f.ScheduledDepartureTime) {
+    const [eh, em] = etd.split(':').map(Number);
+    const [sh, sm] = (f.ScheduledDepartureTime || '').split(':').map(Number);
+    if (!isNaN(eh) && !isNaN(sh)) {
+      let delay = (eh * 60 + em) - (sh * 60 + sm);
+      if (delay < 0) delay += 1440;
+      if (delay > LARGE_DELAY_THRESHOLD_MIN) {
+        const d = new Date(); d.setHours(eh, em, 0, 0);
+        return d.getTime();
       }
     }
+  }
+  return f.departureTime.getTime();
+})();
+const checkInCloseMs = closeReferenceMs - 30 * 60 * 1000;
+if (Date.now() >= checkInCloseMs) continue;
+
+
+    currentFlight = f;
+    break;
+  }
+}
 
     if (!currentFlight && currentManualStatus !== 'closed') {
       for (const f of future) {
@@ -1037,12 +1063,25 @@ if (Date.now() >= checkInCloseTime) return false;
 }, [deskNumberParam, queueFlightTransition]);
 
   // ── shouldShowCheckIn
-  const shouldShowCheckIn = useMemo(() => {
-    if (flightDisplay.manualDeskStatus === 'open')   return true;
-    if (flightDisplay.manualDeskStatus === 'closed')  return false;
-    if (flightDisplay.isCancelled || flightDisplay.isDiverted) return false;
-    return shouldDisplayCheckIn(flightDisplay.checkInStatus);
-  }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus, flightDisplay.isCancelled, flightDisplay.isDiverted]);
+// ── shouldShowCheckIn — reaktivan, re-evaluira svake minute
+useEffect(() => {
+  const compute = () => {
+    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+    if (closeTime && Date.now() >= closeTime.getTime()) {
+      setShouldShowCheckIn(false);
+      return;
+    }
+    if (flightDisplay.manualDeskStatus === 'open')   { setShouldShowCheckIn(true);  return; }
+    if (flightDisplay.manualDeskStatus === 'closed')  { setShouldShowCheckIn(false); return; }
+    if (flightDisplay.isCancelled || flightDisplay.isDiverted) { setShouldShowCheckIn(false); return; }
+    setShouldShowCheckIn(shouldDisplayCheckIn(flightDisplay.checkInStatus));
+  };
+
+  compute();
+  const id = setInterval(compute, 60_000); // re-evaluiraj svake minute
+  return () => clearInterval(id);
+}, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus,
+    flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
   // ── Main data load interval
   // ✅ OPT: neaktivni ekrani koriste INTERVAL_INACTIVE (60s) umjesto 40s
@@ -1122,42 +1161,58 @@ useEffect(() => {
   }, [flightDisplay.flight?.FlightNumber, flightDisplay.checkInStatus.checkInCloseTime, loadFlights]);
 
   // ── Auto-close timer za manual open
-  useEffect(() => {
-    if (flightDisplay.manualDeskStatus !== 'open') return;
-    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-    if (!closeTime) return;
-    const msUntilClose = closeTime.getTime() - Date.now();
-    const doRefresh = () => {
-      void fetchDeskStatusOverride(deskNumberParam).then((newStatus) => {
-        setFlightDisplay((prev) => ({ ...prev, manualDeskStatus: newStatus }));
-      });
-    };
-    if (msUntilClose <= 0) { doRefresh(); return; }
-    const tid = setTimeout(() => { if (isMountedRef.current) doRefresh(); }, msUntilClose + 2000);
-    return () => clearTimeout(tid);
-  }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus.checkInCloseTime, deskNumberParam, fetchDeskStatusOverride]);
+  // useEffect(() => {
+  //   if (flightDisplay.manualDeskStatus !== 'open') return;
+  //   const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+  //   if (!closeTime) return;
+  //   const msUntilClose = closeTime.getTime() - Date.now();
+  //   const doRefresh = () => {
+  //     void fetchDeskStatusOverride(deskNumberParam).then((newStatus) => {
+  //       setFlightDisplay((prev) => ({ ...prev, manualDeskStatus: newStatus }));
+  //     });
+  //   };
+  //   if (msUntilClose <= 0) { doRefresh(); return; }
+  //   const tid = setTimeout(() => { if (isMountedRef.current) doRefresh(); }, msUntilClose + 2000);
+  //   return () => clearTimeout(tid);
+  // }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus.checkInCloseTime, deskNumberParam, fetchDeskStatusOverride]);
 
   // ── Reset manual override ako let kasni > 2h
-  useEffect(() => {
-    if (flightDisplay.manualDeskStatus !== 'open') return;
-    if (!flightDisplay.flight) return;
-    if (!flightDisplay.checkInStatus.shouldBeOpen) return;
-    const { EstimatedDepartureTime: etd, ScheduledDepartureTime: std } = flightDisplay.flight;
-    if (!etd || !std) return;
-    const [estH, estM] = etd.split(':').map(Number);
-    const [schH, schM] = std.split(':').map(Number);
-    if (isNaN(estH) || isNaN(schH)) return;
-    let delayMinutes = (estH * 60 + estM) - (schH * 60 + schM);
-    if (delayMinutes < 0) delayMinutes += 1440;
-    if (delayMinutes > 120) {
-      console.log(`[CheckIn] ${flightDisplay.flight.FlightNumber} kasni ${delayMinutes}min (>2h), resetujem override`);
-      void fetch('/api/admin/desk-status-override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: deskNumberParam, action: 'clear' }),
-      }).catch((err) => console.error('Failed to reset override:', err));
-    }
-  }, [flightDisplay.manualDeskStatus, flightDisplay.flight, flightDisplay.checkInStatus.shouldBeOpen, deskNumberParam]);
+ // ── Reset manual override ako let kasni > 2h
+useEffect(() => {
+  if (flightDisplay.manualDeskStatus !== 'open') return;
+  if (!flightDisplay.flight) return;
+  if (!flightDisplay.checkInStatus.shouldBeOpen) return;
+
+  const { EstimatedDepartureTime: etd, ScheduledDepartureTime: std,
+          FlightNumber: fn } = flightDisplay.flight;
+  if (!etd || !std) return;
+
+  const [estH, estM] = etd.split(':').map(Number);
+  const [schH, schM] = std.split(':').map(Number);
+  if (isNaN(estH) || isNaN(schH)) return;
+
+  let delayMinutes = (estH * 60 + estM) - (schH * 60 + schM);
+  if (delayMinutes < 0) delayMinutes += 1440;
+
+  const resetKey = `${fn}_${std}`;
+
+  // Pošalji samo jednom po letu — ne svaki put kad se re-renderiše
+  if (delayMinutes > 120 && delayResetSentRef.current !== resetKey) {
+    delayResetSentRef.current = resetKey;
+    console.log(`[CheckIn] ${fn} kasni ${delayMinutes}min (>2h), resetujem override`);
+    void fetch('/api/admin/desk-status-override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deskNumber: deskNumberParam, action: 'clear' }),
+    }).catch((err) => console.error('Failed to reset override:', err));
+  }
+
+  // Resetuj guard kad se let promijeni
+if (delayResetSentRef.current && !delayResetSentRef.current.startsWith(`${fn}_`)) {
+  delayResetSentRef.current = null;
+}
+}, [flightDisplay.manualDeskStatus, flightDisplay.flight,
+    flightDisplay.checkInStatus.shouldBeOpen, deskNumberParam]);
 
   // ── Force open auto-close na checkInCloseTime
   useEffect(() => {
