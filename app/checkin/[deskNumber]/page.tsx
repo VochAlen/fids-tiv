@@ -1150,15 +1150,22 @@ useEffect(() => {
   }, [flightDisplay.checkInStatus, flightDisplay.flight, updateCountdowns]);
 
   // ── Auto-close timer (STD-30min)
-  useEffect(() => {
-    if (!flightDisplay.flight) return;
-    const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
-    if (!closeTime) return;
-    const msUntilClose = closeTime.getTime() - Date.now();
-    if (msUntilClose <= 0) { void loadFlights(); return; }
-    const tid = setTimeout(() => { if (isMountedRef.current) void loadFlights(); }, msUntilClose);
-    return () => clearTimeout(tid);
-  }, [flightDisplay.flight?.FlightNumber, flightDisplay.checkInStatus.checkInCloseTime, loadFlights]);
+
+useEffect(() => {
+  if (!flightDisplay.flight) return;
+  const closeTime = flightDisplay.checkInStatus.checkInCloseTime;
+  if (!closeTime) return;
+  const msUntilClose = closeTime.getTime() - Date.now();
+  if (msUntilClose <= 0) { void loadFlights(); return; }
+  const tid = setTimeout(() => {
+    if (isMountedRef.current) {
+      // Invaliduj override cache da sljedeći loadFlights dobije svježe podatke
+      _overrideCache = null;
+      void loadFlights();
+    }
+  }, msUntilClose);
+  return () => clearTimeout(tid);
+}, [flightDisplay.flight, flightDisplay.checkInStatus.checkInCloseTime, loadFlights]);
 
   // ── Auto-close timer za manual open
   // useEffect(() => {
