@@ -701,18 +701,24 @@ const processTransitionQueue = useCallback(async () => {
       ]);
 
     const finalClassType = overrideClass || fallbackClass;
-    const positionClassType = (() => {
-      if (!nextFlight.CheckInDesk) return finalClassType;
-      const allDesks = nextFlight.CheckInDesk.split(',').map((d: string) => d.trim()).filter(Boolean);
-      if (allDesks.length < 2) return finalClassType; // jedan šalter → ne mijenjaj
-      const deskIndex = allDesks.findIndex(d =>
-        d === deskNumberParam ||
-        d === deskNumberParam.replace(/^0+/, '') ||
-        d === deskNumberParam.padStart(2, '0')
-      );
-      const position = deskIndex + 1; // 1-based
-      return DESK_POSITION_CLASS[position] ?? finalClassType;
-    })();
+const positionClassType = (() => {
+  // DESK_POSITION_CLASS logika SAMO za British Airways
+  const isBA = nextFlight.FlightNumber?.toUpperCase().startsWith('BA');
+  if (isBA) {
+    if (!nextFlight.CheckInDesk) return finalClassType;
+    const allDesks = nextFlight.CheckInDesk.split(',').map((d: string) => d.trim()).filter(Boolean);
+    if (allDesks.length < 2) return finalClassType;
+    const deskIndex = allDesks.findIndex(d =>
+      d === deskNumberParam ||
+      d === deskNumberParam.replace(/^0+/, '') ||
+      d === deskNumberParam.padStart(2, '0')
+    );
+    const position = deskIndex + 1;
+    return DESK_POSITION_CLASS[position] ?? finalClassType;
+  }
+  // Svi ostali — kao i do sada
+  return finalClassType;
+})();
 
     const { isCancelled, isDiverted } = checkFlightStatusHelper(nextFlight.StatusEN || '');
 
