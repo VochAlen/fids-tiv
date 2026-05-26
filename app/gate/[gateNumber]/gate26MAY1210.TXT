@@ -14,7 +14,7 @@ import {
 import { useWeather } from '@/hooks/use-weather';
 
 const REFRESH_INTERVAL_MS    = 20_000;
-const GRACE_AFTER_DEPARTURE_MS = 1 * 60 * 1000; // 1 minuta nakon polaska
+const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // ─────────────────────────────────────────────────────────────
 // Error Boundary
@@ -97,9 +97,17 @@ const AirlineLogo = memo(function AirlineLogo(
 // Ako je trenutno vrijeme između 00:00 i 03:00 (deep night),
 // letovi "danas" su zapravo letovi koji su krenuli "jučer poslije 03:00".
 //
+// Threshold: 18h (ne 12h).
+// Zašto 18h?
+//   - Najduži raspored dana je ~20h (npr. 04:00–00:00)
+//   - Threshold od 18h znači: let koji je prošao prije > 18h = sutra
+//   - Let od 23:50 u 04:00 → razlika = 4h10m < 18h → ostaje "danas" ✓
+//   - Let od 17:45 u 04:00 → razlika = 10h15m < 18h → ostaje "danas" ✓
+//   - Let od 05:00 prethodnog dana u 04:00 → razlika = 23h > 18h → sutra ✓
+//
 // NAPOMENA: parseDepartureTime je SAMO za parsiranje stringa u Date.
 // Odluka o prikazu (shouldDisplayFlight) se bazira na STATUS-u iz API-ja,
-// a BACKUP logika na ETD/STD + GRACE_AFTER_DEPARTURE_MS.
+// a BACKUP logika na STD+GRACE_PERIOD — nikad samo na parsiranom vremenu.
 // ─────────────────────────────────────────────────────────────
 const parseDepartureTime = (t: string): Date | null => {
   if (!t) return null;
@@ -123,12 +131,10 @@ const formatTimeRemaining = (min: number): string => {
   return `${min}m`;
 };
 
-// FIX: dodana provjera EstimatedDepartureTime
 const flightChanged = (a: Flight | null, b: Flight | null): boolean =>
   a?.FlightNumber !== b?.FlightNumber ||
   a?.ScheduledDepartureTime !== b?.ScheduledDepartureTime ||
-  a?.StatusEN !== b?.StatusEN ||
-  a?.EstimatedDepartureTime !== b?.EstimatedDepartureTime;
+  a?.StatusEN !== b?.StatusEN;
 
 // ─────────────────────────────────────────────────────────────
 // Tipovi
@@ -210,17 +216,30 @@ export default function GatePage() {
 //   departed               → sakrij (let je otišao)
 //
 // Sekundarna logika (VREMENSKI BACKUP za slučaj da API kasni):
-//   ETD/STD + GRACE_AFTER_DEPARTURE_MS → ako je prošlo, sakrij
-//   GRACE = 1 minuta → kratko, ali dovoljno za API sinhronizaciju
+//   STD + GRACE_PERIOD_MS  → ako je prošlo, sakrij
+//   GRACE_PERIOD = 45 min  → dovoljno za API sinhronizaciju
+//                            i završetak boarding procesa
 //
-// FIX: Grace period se mjeri NAKON polaska (ne prije).
-// Prethodna verzija koristila je dep - 5min što je gasilo
-// let dok je boarding još bio u toku.
+// ZAŠTO 45 min a ne 5 min (kao u prethodnoj verziji)?
+//   - 5 min PRIJE polaska je previše agresivno:
+//     * API možda nije ažuriran
+//     * Boarding može trajati duže
+//     * Let može kasniti → ETD je kasniji od STD
+//   - 45 min POSLIJE polaska je sigurno: ako let nije poletio
+//     za 45 min od STD-a, API će svakako biti ažuriran
+//
+// ZAŠTO koristimo STD (ne ETD) za grace period?
+//   - STD je fiksni raspored — gate slot se ne mijenja
+//   - ETD se mijenja i ne treba ga koristiti za "gašenje" prikaza
+//   - Ako ETD kasni, koristimo ga samo za PRIKAZ vremena i countdown
 //
 // Manual override:
 //   'open'   → prikazuj dok nije departed/cancelled/diverted
 //   'closed' → ne prikazuj ništa
 // ─────────────────────────────────────────────────────────────
+
+// Grace period: 45 min nakon STD, prikazujemo let čak i bez API statusa
+const GATE_CLOSE_BEFORE_MS = 5 * 60 * 1000;  // 5 minute prije STD
 
 // ─────────────────────────────────────────────────────────────
 // Glavna komponenta
@@ -253,28 +272,35 @@ function GateDisplay() {
   }, []);
 
   // ── shouldDisplayFlight ─────────────────────────────────────
-  // FIX: grace period je sada NAKON polaska, ne prije
-  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-    const s = (f.StatusEN || '').toLowerCase().trim();
+const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+  const s = (f.StatusEN || '').toLowerCase().trim();
 
-    // Cancelled i diverted nikad ne prikazujemo
-    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+  if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
 
-    // Manual 'open': prikazuj sve dok nije departed/cancelled/diverted
-    if (manualGateStatusRef.current === 'open') return true;
+  if (manualGateStatusRef.current === 'open') {
+    return !s.includes('departed') && !s.includes('poletio');
+  }
 
-    // Departed: API kaže da je poletio — sakrij
-    if (s.includes('departed') || s.includes('poletio')) return false;
+  if (s.includes('departed') || s.includes('poletio')) return false;
 
-    // Vremenski backup: sakrij ako je ETD/STD prošao + 1 minuta
-    // Koristimo ETD ako postoji (kasneći let), inače STD
-    const refTime = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
-    const dep = parseDepartureTime(refTime);
-    if (dep && Date.now() > dep.getTime() + GRACE_AFTER_DEPARTURE_MS) return false;
+  // Za delayed let (ima ETD različit od STD): koristi ETD za gašenje
+  // Za normalan let: koristi STD ili ETD (što god postoji)
+  const isDelayed = f.EstimatedDepartureTime && 
+    f.EstimatedDepartureTime !== f.ScheduledDepartureTime;
 
-    return true;
-  }, []);
+  const departureTimeStr = isDelayed 
+    ? f.EstimatedDepartureTime! 
+    : (f.EstimatedDepartureTime || f.ScheduledDepartureTime || '');
+
+  const dep = parseDepartureTime(departureTimeStr);
+  if (dep) {
+    const hideFrom = dep.getTime() - GATE_CLOSE_BEFORE_MS;
+    if (Date.now() >= hideFrom) return false;
+  }
+
+  return true;
+}, []);
 
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
@@ -282,16 +308,17 @@ function GateDisplay() {
     airportCode: display.flight?.DestinationAirportCode,
   }, 0);
 
-  // ── Hard reset u 03:00 ───────────────────────────────────────
-  useEffect(() => {
-    const now = new Date();
-    const reset = new Date();
-    reset.setHours(3, 0, 0, 0);
-    if (reset <= now) reset.setDate(reset.getDate() + 1);
-    const ms = reset.getTime() - now.getTime();
-    const id = setTimeout(() => window.location.reload(), ms);
-    return () => clearTimeout(id);
-  }, []);
+  // ── Hard reset ───────────────────────────────────────────────
+// U CheckInDisplay i GateDisplay — zamijeni postojeći hard reset:
+useEffect(() => {
+  const now = new Date();
+  const reset = new Date();
+  reset.setHours(3, 0, 0, 0);
+  if (reset <= now) reset.setDate(reset.getDate() + 1);
+  const ms = reset.getTime() - now.getTime();
+  const id = setTimeout(() => window.location.reload(), ms);
+  return () => clearTimeout(id);
+}, []);
 
   // ── Kiosk mode ───────────────────────────────────────────────
   useEffect(() => {
@@ -355,15 +382,18 @@ function GateDisplay() {
       );
 
       // 3. Sortiraj po STD — gate slot se bazira na rasporedu, ne ETD
-      const withTime = withStatus
-        .map(f => ({
-          ...f,
-          _stdDate: parseDepartureTime(f.ScheduledDepartureTime || ''),
-        }))
-        .filter(f => f._stdDate !== null) as (Flight & {
-          _stdDate: Date;
-          checkInStatus: CheckInStatus | null;
-        })[];
+      //    Letovi bez parsiranog STD se bacaju (ne možemo ih pozicionirati)
+  const withTime = withStatus
+  .map(f => ({
+    ...f,
+    // Za sortiranje: koristi _sortTime ako postoji, inače STD
+ // ISPRAVNO — uvijek koristi lokalno STD na klijentu:
+_stdDate: parseDepartureTime(f.ScheduledDepartureTime || ''),
+  }))
+  .filter(f => f._stdDate !== null) as (Flight & {
+    _stdDate: Date;
+    checkInStatus: CheckInStatus | null;
+  })[];
 
       const sorted = withTime.sort((a, b) => a._stdDate.getTime() - b._stdDate.getTime());
 
@@ -387,12 +417,16 @@ function GateDisplay() {
       // LOGIKA ODABIRA:
       // - Prođi kroz sortirane letove (po STD asc)
       // - Uzmi PRVI koji prolazi shouldDisplayFlight
+      // - shouldDisplayFlight filtrira: departed, cancelled, diverted,
+      //   i letove starije od STD + 45min
       //
-      // FIX: Prolaz 1 sada dozvoljava letove koji kasne do 30 minuta
-      // (prethodna verzija odbacivala je sve čiji je ETD/STD prošao čak 1 minutu)
+      // OVO RJEŠAVA JUTARNJI BUG:
+      // U 04:00, let od 23:50 je prošao STD + 45min → filtriran
+      // Let od 06:30 je sljedeći → prikazuje se ✓
       //
       // Manual 'open': uzmi prvi koji nije cancelled/diverted
-      let current: (typeof sorted)[number] | null = null;
+      // (departed se ne filtrira — osoblje može otvoriti kasneći let)
+let current: (typeof sorted)[number] | null = null;
 
       if (manualGateStatusRef.current === 'open') {
         current = sorted.find(f => {
@@ -401,10 +435,11 @@ function GateDisplay() {
                  !s.includes('diverted')  && !s.includes('preusmjeren');
         }) ?? null;
       } else {
-        // Prolaz 1: traži prvi let čiji ETD/STD još nije prošao
+        // Prolaz 1: traži prvi let čiji STD/ETD još NIJE prošao
         for (const f of sorted) {
           if (!shouldDisplayFlight(f)) continue;
 
+          // Delayed let: koristi ETD ako postoji
           const refTimeStr = (f.EstimatedDepartureTime && f.EstimatedDepartureTime !== f.ScheduledDepartureTime)
             ? f.EstimatedDepartureTime
             : f.ScheduledDepartureTime || '';
@@ -413,15 +448,14 @@ function GateDisplay() {
           if (!dep) continue;
 
           const minutesSinceDep = Math.floor((Date.now() - dep.getTime()) / 60_000);
-          // FIX: dozvoli kasneće letove do 30 minuta od ETD
-          // (prethodna verzija: minutesSinceDep >= 0 → odmah preskakalo)
-          if (minutesSinceDep > 0) continue;
+          // Ako je prošlo više od 3 min od ETD/STD → preskoči, uzmi sljedeći
+          if (minutesSinceDep >= 0) continue;
 
           current = f;
           break;
         }
 
-        // Fallback: nema budućeg leta → uzmi prvi koji je aktivan
+        // Fallback: nema budućeg leta → uzmi prvi koji je aktivan ali kasni
         // (API možda još nije ažurirao status na "departed")
         if (!current) {
           current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
@@ -430,17 +464,16 @@ function GateDisplay() {
 
       // 6. Sljedeći let IZA currenta
       const idx = current
-        ? sorted.findIndex(f =>
-            f.FlightNumber === current!.FlightNumber &&
-            f.ScheduledDepartureTime === current!.ScheduledDepartureTime
-          )
+        ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber && f.ScheduledDepartureTime === current!.ScheduledDepartureTime)
         : -1;
 
       let nextFlight: (typeof sorted)[number] | null = null;
       for (let i = (idx >= 0 ? idx + 1 : 0); i < sorted.length; i++) {
         const candidate = sorted[i];
         const s = (candidate.StatusEN || '').toLowerCase();
+        // Za next flight: preskači cancelled, prikaži ostale
         if (!s.includes('cancelled') && !s.includes('otkazan')) {
+          // Preskoči i letove koji su odavno prošli (departed + > 2h od STD)
           const stdMs = candidate._stdDate.getTime();
           const isDeparted = s.includes('departed') || s.includes('poletio');
           if (isDeparted && Date.now() - stdMs > 2 * 60 * 60 * 1000) continue;
@@ -499,49 +532,53 @@ function GateDisplay() {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
 
-  // ── Switch timer — refresh NAKON polaska ────────────────────
+  // ── Switch timer na STD + grace period ──────────────────────
   //
-  // FIX: timer se sada okida NAKON ETD + GRACE_AFTER_DEPARTURE_MS
-  // (prethodna verzija: okidao se 5 minuta PRIJE ETD/STD,
-  //  što je pozivalo loadFlights() u trenutku kada shouldDisplayFlight
-  //  još nije vraćao false → ekran se praznio prerano)
+  // PRETHODNA VERZIJA: okidao se na STD - 1min
+  // PROBLEM: to je PRIJE polaska → let se sakriva prerano
   //
-  // Nova logika:
-  //   triggerAt = ETD/STD + 1 minuta = tačno kada shouldDisplay → false
-  //   Max 4h u budućnost (zaštita od pogrešnih podataka)
-  useEffect(() => {
+  // NOVA VERZIJA: okida se na STD + 45min (= grace period)
+  // Razlog: to je tačno kad shouldDisplayFlight vraća false
+  // zbog vremenskog backupa → refresh koji prikazuje sljedeći let
+  //
+  // Edge case: ako smo učitali stranicu unutar prozora
+  // STD..STD+45min, okidamo refresh odmah ili za ostatak perioda.
+// ── Switch timer — refresh 3 minute prije STD ──────────────────
+useEffect(() => {
+  if (stdSwitchTimerRef.current) {
+    clearTimeout(stdSwitchTimerRef.current);
+    stdSwitchTimerRef.current = null;
+  }
+  if (!display.flight) return;
+  if (manualGateStatusRef.current === 'open') return;
+
+let departureTimeStr = display.flight.ScheduledDepartureTime || '';
+if (display.flight.EstimatedDepartureTime) {
+  departureTimeStr = display.flight.EstimatedDepartureTime;
+}
+const dep = parseDepartureTime(departureTimeStr);
+if (!dep) return;
+
+// Okidamo refresh tačno kad se gate treba zatvoriti (ETD - 3min ili STD - 3min)
+const triggerAt = dep.getTime() - GATE_CLOSE_BEFORE_MS;
+  const ms = triggerAt - Date.now();
+
+  if (ms > 0) {
+    stdSwitchTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) loadFlights();
+    }, ms);
+  } else if (ms > -30_000) {
+    // Već smo u prozoru zatvaranja → odmah osvježi
+    loadFlights();
+  }
+
+  return () => {
     if (stdSwitchTimerRef.current) {
       clearTimeout(stdSwitchTimerRef.current);
       stdSwitchTimerRef.current = null;
     }
-    if (!display.flight) return;
-    if (manualGateStatusRef.current === 'open') return;
-
-    const departureTimeStr =
-      display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
-    const dep = parseDepartureTime(departureTimeStr);
-    if (!dep) return;
-
-    // Okidamo refresh tačno kad shouldDisplayFlight vraća false
-    const triggerAt = dep.getTime() + GRACE_AFTER_DEPARTURE_MS;
-    const ms = triggerAt - Date.now();
-
-    if (ms > 0 && ms < 4 * 60 * 60 * 1000) {
-      stdSwitchTimerRef.current = setTimeout(() => {
-        if (isMountedRef.current) loadFlights();
-      }, ms);
-    } else if (ms <= 0 && ms > -30_000) {
-      // Već smo unutar grace perioda → odmah osvježi
-      loadFlights();
-    }
-
-    return () => {
-      if (stdSwitchTimerRef.current) {
-        clearTimeout(stdSwitchTimerRef.current);
-        stdSwitchTimerRef.current = null;
-      }
-    };
-  }, [display.flight, loadFlights]);
+  };
+}, [display.flight, loadFlights]);
 
   // ── Gate status override polling ─────────────────────────────
   useEffect(() => {
@@ -577,12 +614,24 @@ function GateDisplay() {
   const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
-  // effectiveStatus — BEZ auto-boarding
-  // FIX: uklonjena lažna "Boarding" logika koja je mogla prikazivati
-  // pogrešan status za kasneće letove kada API još nije ažuriran
+  // Auto-boarding: prikaži "Boarding" 30-5 minuta prije ETD/STD
+  // ako API još nije ažuriran
   const effectiveStatus = useMemo(() => {
-    return display.flight?.StatusEN || '';
-  }, [display.flight]);
+    const raw = display.flight?.StatusEN || '';
+    if (!display.flight || isCancelled || isDiverted) return raw;
+    const s = raw.toLowerCase();
+    if (s.includes('departed') || s.includes('poletio'))   return raw;
+    if (s.includes('final call'))                           return raw;
+    if (s.includes('boarding') || s.includes('gate open')) return raw;
+
+    // Koristi ETD ako postoji za auto-boarding
+    const refTime = display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
+    const dep = parseDepartureTime(refTime);
+    if (!dep) return raw;
+    const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
+    if (minUntil <= 30 && minUntil > 5) return 'Boarding';
+    return raw;
+  }, [display.flight, isCancelled, isDiverted]);
 
   const statusCfg = getStatusConfig(effectiveStatus);
 
@@ -598,127 +647,147 @@ function GateDisplay() {
   );
 
   // ─────────────────────────────────────────────────────────────
-  // Render: nema leta (višejezično)
+  // Render: nema leta
   // ─────────────────────────────────────────────────────────────
 
-  if (!display.flight) {
-    const closed = display.manualGateStatus === 'closed';
+// ─────────────────────────────────────────────────────────────
+// Render: nema leta (redizajnirano)
+// ─────────────────────────────────────────────────────────────
 
-    const translations = {
-      closed: {
-        me: 'GATE ZATVOREN',
-        de: 'GATE GESCHLOSSEN',
-        fr: 'PORTE FERMÉE',
-        he: 'השער סגור',
-        en: 'GATE CLOSED'
-      },
-      noFlights: {
-        me: 'NEMA LETOVA',
-        de: 'KEINE FLÜGE',
-        fr: 'AUCUN VOL',
-        he: 'אין טיסות',
-        en: 'NO FLIGHTS SCHEDULED'
-      },
-      subtext: {
-        me: 'Provjerite info ekrane za ažuriranja',
-        de: 'Bitte überprüfen Sie die Info-Bildschirme für Updates',
-        fr: 'Veuillez consulter les écrans d\'information pour les mises à jour',
-        he: 'אנא בדוק את לוחות המידע לעדכונים',
-        en: 'Please check departure boards for updates'
-      },
-      footerClosed: {
-        me: 'Ovaj gate je trenutno zatvoren',
-        de: 'Dieses Gate ist derzeit geschlossen',
-        fr: 'Cette porte est actuellement fermée',
-        he: 'שער זה סגור כרגע',
-        en: 'This gate is currently closed'
-      },
-      footerIdle: {
-        me: 'Molimo pričekajte sljedeći let',
-        de: 'Bitte warten Sie auf den nächsten Flug',
-        fr: 'Veuillez attendre le prochain vol',
-        he: 'אנא המתן לטיסה הבאה',
-        en: 'Please wait for next flight assignment'
-      }
-    };
+// ─────────────────────────────────────────────────────────────
+// Render: nema leta (redizajnirano sa više jezika)
+// ─────────────────────────────────────────────────────────────
 
-    const languages = ['me', 'de', 'fr', 'he', 'en'] as const;
-
-    return (
-      <div style={styles.emptyRoot} className="fids-empty-root">
-        <div style={styles.topBar} className="fids-topbar">
-          <div style={styles.topBarLeft} className="fids-topbar-left">
-            <span style={styles.topBarLabel}>GATE</span>
-            <span style={styles.topBarGate}>{gateNumber}</span>
-          </div>
-          <LiveClock />
+if (!display.flight) {
+  const closed = display.manualGateStatus === 'closed';
+  
+  // Višejezični tekstovi
+const translations = {
+  closed: {
+    me: 'GATE ZATVOREN',
+    de: 'GATE GESCHLOSSEN',
+    fr: 'PORTE FERMÉE',
+    he: 'השער סגור',
+    en: 'GATE CLOSED'
+  },
+  noFlights: {
+    me: 'NEMA LETOVA',
+    de: 'KEINE FLÜGE',
+    fr: 'AUCUN VOL',
+    he: 'אין טיסות',
+    en: 'NO FLIGHTS SCHEDULED'
+  },
+  subtext: {
+    me: 'Provjerite info ekrane za ažuriranja',
+    de: 'Bitte überprüfen Sie die Info-Bildschirme für Updates',
+    fr: 'Veuillez consulter les écrans d\'information pour les mises à jour',
+    he: 'אנא בדוק את לוחות המידע לעדכונים',
+    en: 'Please check departure boards for updates'
+  },
+  footerClosed: {
+    me: 'Ovaj gate je trenutno zatvoren',
+    de: 'Dieses Gate ist derzeit geschlossen',
+    fr: 'Cette porte est actuellement fermée',
+    he: 'שער זה סגור כרגע',
+    en: 'This gate is currently closed'
+  },
+  footerIdle: {
+    me: 'Molimo pričekajte sljedeći let',
+    de: 'Bitte warten Sie auf den nächsten Flug',
+    fr: 'Veuillez attendre le prochain vol',
+    he: 'אנא המתן לטיסה הבאה',
+    en: 'Please wait for next flight assignment'
+  }
+};
+  
+  // Odaberi jezik (možeš dodati detekciju iz browsera ili parama)
+  // Za sada koristimo sve jezike u stacku
+  const languages = ['me', 'de', 'fr', 'he', 'en'] as const;
+  
+  return (
+    <div style={styles.emptyRoot} className="fids-empty-root">
+      {/* Top bar */}
+      <div style={styles.topBar} className="fids-topbar">
+        <div style={styles.topBarLeft} className="fids-topbar-left">
+          <span style={styles.topBarLabel}>GATE</span>
+          <span style={styles.topBarGate}>{gateNumber}</span>
         </div>
-
-        <Divider />
-
-        <div style={styles.emptyMain} className="fids-empty-main">
-          <div style={styles.emptyGateNumber} className="fids-empty-gate">
-            {gateNumber}
-          </div>
-
-          <div style={styles.emptyStatusWrapper}>
-            <div style={styles.emptyStatusIcon}>
-              {closed ? '🔒' : '✈️'}
-            </div>
-
-            <div style={styles.emptyLanguageStack}>
-              {languages.map((lang) => (
-                <div key={lang} style={styles.emptyLanguageRow}>
-                  <span style={styles.emptyLanguageCode}>
-                    {lang.toUpperCase()}
-                  </span>
-                  <span style={styles.emptyLanguageText}>
-                    {closed ? translations.closed[lang] : translations.noFlights[lang]}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            <div style={styles.emptySubtextStack}>
-              {languages.map((lang) => (
-                <div key={lang} style={styles.emptySubtextRow}>
-                  <span style={styles.emptySubtextCode}>{lang.toUpperCase()}</span>
-                  <span style={styles.emptySubtextText}>
-                    {translations.subtext[lang]}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div style={styles.emptyMeta}>
-            <div style={styles.emptyMetaItem}>
-              <span style={styles.emptyMetaLabel}>LAST UPDATE</span>
-              <span style={styles.emptyMetaValue}>{lastUpdate}</span>
-            </div>
-            <div style={styles.emptyMetaDivider} />
-            <div style={styles.emptyMetaItem}>
-              <span style={styles.emptyMetaLabel}>NEXT UPDATE</span>
-              <span style={styles.emptyMetaValue}>{nextUpdate}</span>
-            </div>
-          </div>
+        <LiveClock />
+      </div>
+      
+      <Divider />
+      
+      {/* Glavni sadržaj */}
+      <div style={styles.emptyMain} className="fids-empty-main">
+        {/* Veliki broj gate-a */}
+        <div style={styles.emptyGateNumber} className="fids-empty-gate">
+          {gateNumber}
         </div>
-
-        <Divider />
-
-        <div style={styles.emptyFooter} className="fids-empty-footer">
-          <div style={styles.emptyFooterStack}>
+        
+        {/* Status poruka - stack na više jezika */}
+        <div style={styles.emptyStatusWrapper}>
+          {/* Ikona - sada veća i vidljivija */}
+          <div style={styles.emptyStatusIcon}>
+            {closed ? '🔒' : '✈️'}
+          </div>
+          
+          {/* Višejezični stack */}
+          <div style={styles.emptyLanguageStack}>
             {languages.map((lang, idx) => (
-              <span key={lang} style={styles.emptyFooterText}>
-                {closed ? translations.footerClosed[lang] : translations.footerIdle[lang]}
-                {idx < languages.length - 1 && <span style={styles.emptyFooterSeparator}> • </span>}
-              </span>
+              <div key={lang} style={styles.emptyLanguageRow}>
+                <span style={styles.emptyLanguageCode}>
+                  {lang.toUpperCase()}
+                </span>
+                <span style={styles.emptyLanguageText}>
+                  {closed ? translations.closed[lang] : translations.noFlights[lang]}
+                </span>
+              </div>
+            ))}
+          </div>
+          
+          {/* Subtext - također višejezični */}
+          <div style={styles.emptySubtextStack}>
+            {languages.map((lang, idx) => (
+              <div key={lang} style={styles.emptySubtextRow}>
+                <span style={styles.emptySubtextCode}>{lang.toUpperCase()}</span>
+                <span style={styles.emptySubtextText}>
+                  {translations.subtext[lang]}
+                </span>
+              </div>
             ))}
           </div>
         </div>
+        
+        {/* Meta info */}
+        <div style={styles.emptyMeta}>
+          <div style={styles.emptyMetaItem}>
+            <span style={styles.emptyMetaLabel}>LAST UPDATE</span>
+            <span style={styles.emptyMetaValue}>{lastUpdate}</span>
+          </div>
+          <div style={styles.emptyMetaDivider} />
+          <div style={styles.emptyMetaItem}>
+            <span style={styles.emptyMetaLabel}>NEXT UPDATE</span>
+            <span style={styles.emptyMetaValue}>{nextUpdate}</span>
+          </div>
+        </div>
       </div>
-    );
-  }
+      
+      <Divider />
+      
+      {/* Footer - višejezični */}
+      <div style={styles.emptyFooter} className="fids-empty-footer">
+        <div style={styles.emptyFooterStack}>
+          {languages.map((lang, idx) => (
+            <span key={lang} style={styles.emptyFooterText}>
+              {closed ? translations.footerClosed[lang] : translations.footerIdle[lang]}
+              {idx < languages.length - 1 && <span style={styles.emptyFooterSeparator}> • </span>}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
   // ─────────────────────────────────────────────────────────────
   // Render: aktivni let
@@ -922,30 +991,34 @@ function GateDisplay() {
         @keyframes fidsPulse { 0%,100%{opacity:1} 50%{opacity:.55} }
         @keyframes spin { to { transform: rotate(360deg); } }
         html,body,#__next { width:100vw; height:100vh; overflow:hidden; background:#070d1a; }
-        .fids-empty-gate { font-size: clamp(8rem, 18vw, 16rem) !important; }
-        .fids-empty-status-icon { font-size: 2.5rem !important; }
-        .fids-empty-language-text { font-size: clamp(1rem, 2vw, 1.4rem) !important; }
-        .fids-empty-subtext-text { font-size: clamp(0.65rem, 1vw, 0.8rem) !important; }
-        @media (max-width: 768px) {
-          .fids-empty-gate { font-size: clamp(6rem, 15vw, 12rem) !important; }
-          .fids-empty-status-icon { font-size: 2rem !important; }
-          .fids-empty-language-row { gap: 0.3rem !important; }
-          .fids-empty-language-code { font-size: 0.55rem !important; }
-          .fids-empty-language-text { font-size: 0.9rem !important; }
-          .fids-empty-subtext-row { gap: 0.3rem !important; }
-          .fids-empty-subtext-text { font-size: 0.55rem !important; }
-          .fids-empty-meta { flex-direction: column !important; gap: 0.3rem !important; padding: 0.4rem 0.8rem !important; margin-top: 0.5rem !important; }
-          .fids-empty-meta-divider { display: none !important; }
-          .fids-empty-footer { padding: 0.3rem 0.8rem !important; }
-          .fids-empty-footer-text { font-size: 0.5rem !important; }
-        }
-        @media (max-width: 480px) {
-          .fids-empty-gate { font-size: clamp(5rem, 12vw, 10rem) !important; }
-          .fids-empty-language-stack { gap: 0.15rem !important; }
-          .fids-empty-language-text { font-size: 0.75rem !important; }
-          .fids-empty-subtext-stack { gap: 0.1rem !important; }
-          .fids-empty-subtext-text { font-size: 0.45rem !important; }
-        }
+        /* Empty state responsive - kompaktno */
+.fids-empty-gate { font-size: clamp(8rem, 18vw, 16rem) !important; }
+.fids-empty-status-icon { font-size: 2.5rem !important; }
+.fids-empty-language-text { font-size: clamp(1rem, 2vw, 1.4rem) !important; }
+.fids-empty-subtext-text { font-size: clamp(0.65rem, 1vw, 0.8rem) !important; }
+
+@media (max-width: 768px) {
+  .fids-empty-gate { font-size: clamp(6rem, 15vw, 12rem) !important; }
+  .fids-empty-status-icon { font-size: 2rem !important; }
+  .fids-empty-language-row { gap: 0.3rem !important; }
+  .fids-empty-language-code { font-size: 0.55rem !important; }
+  .fids-empty-language-text { font-size: 0.9rem !important; }
+  .fids-empty-subtext-row { gap: 0.3rem !important; }
+  .fids-empty-subtext-text { font-size: 0.55rem !important; }
+  .fids-empty-meta { flex-direction: column !important; gap: 0.3rem !important; padding: 0.4rem 0.8rem !important; margin-top: 0.5rem !important; }
+  .fids-empty-meta-divider { display: none !important; }
+  .fids-empty-footer { padding: 0.3rem 0.8rem !important; }
+  .fids-empty-footer-text { font-size: 0.5rem !important; }
+}
+
+@media (max-width: 480px) {
+  .fids-empty-gate { font-size: clamp(5rem, 12vw, 10rem) !important; }
+  .fids-empty-language-stack { gap: 0.15rem !important; }
+  .fids-empty-language-text { font-size: 0.75rem !important; }
+  .fids-empty-subtext-stack { gap: 0.1rem !important; }
+  .fids-empty-subtext-text { font-size: 0.45rem !important; }
+}
+
         @media (max-width: 1024px) {
           .fids-topbar { padding: 0.6rem 1.5rem !important; }
           .fids-topbar-left { gap: 0.5rem !important; }
@@ -1003,6 +1076,20 @@ function GateDisplay() {
           .fids-next-dest { font-size: 1.1rem !important; }
           .fids-gate-changed-banner, .fids-checkin-banner { font-size: 0.8rem !important; padding: 0.3rem 0.6rem !important; }
         }
+          /* Empty state responsive */
+.fids-empty-gate { font-size: clamp(12rem, 25vw, 22rem) !important; }
+.fids-empty-status-text { font-size: clamp(2rem, 5vw, 4rem) !important; }
+.fids-empty-meta { gap: 1rem !important; padding: 0.8rem 1.2rem !important; }
+
+@media (max-width: 768px) {
+  .fids-empty-gate { font-size: clamp(8rem, 20vw, 14rem) !important; }
+  .fids-empty-status-text { font-size: clamp(1.6rem, 4vw, 2.5rem) !important; }
+  .fids-empty-status-icon { font-size: 2.5rem !important; }
+  .fids-empty-meta { flex-direction: column !important; gap: 0.5rem !important; }
+  .fids-empty-meta-divider { display: none !important; }
+  .fids-empty-footer-text { font-size: 0.7rem !important; }
+}
+  
         @media (max-height: 600px) and (min-width: 769px) {
           .fids-main { padding: 0.6rem 1.5rem !important; gap: 0.5rem !important; }
           .fids-left-col { gap: 0.4rem !important; }
@@ -1084,28 +1171,154 @@ const styles: Record<string, React.CSSProperties> = {
   nextFN: { fontSize: '2.5rem', fontWeight: 700, color: C.text, letterSpacing: '.08em', flexShrink: 0 },
   nextDest: { fontSize: '2.3rem', fontWeight: 600, color: C.textMuted, letterSpacing: '.04em', overflow: 'hidden', whiteSpace: 'nowrap' as const, textOverflow: 'ellipsis' },
   nextTime: { fontFamily: FONT_MONO, fontSize: '2.3rem', color: C.gold, letterSpacing: '.08em', flexShrink: 0 },
-  emptyRoot: { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, overflow: 'hidden' },
-  emptyMain: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '0.8rem', padding: '1rem', overflow: 'hidden' },
-  emptyGateNumber: { fontSize: 'clamp(10rem, 20vw, 18rem)', fontWeight: 800, color: C.gold, letterSpacing: '.06em', fontFamily: FONT_DISPLAY, textShadow: `0 0 30px rgba(230,168,23,0.3)`, lineHeight: 1, marginBottom: '0.25rem' },
-  emptyStatusWrapper: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.6rem', maxWidth: '90vw' },
-  emptyStatusIcon: { fontSize: '3rem', opacity: 0.9, filter: 'drop-shadow(0 0 10px rgba(230,168,23,0.4))', marginBottom: '0' },
-  emptyLanguageStack: { display: 'flex', flexDirection: 'column' as const, gap: '0.25rem', alignItems: 'center' },
-  emptyLanguageRow: { display: 'flex', alignItems: 'baseline', gap: '0.6rem', flexWrap: 'wrap' as const, justifyContent: 'center' },
-  emptyLanguageCode: { fontSize: '0.7rem', fontWeight: 700, color: C.accent, letterSpacing: '.1em', fontFamily: FONT_MONO, background: 'rgba(30,144,255,0.15)', padding: '0.15rem 0.4rem', borderRadius: '4px' },
-  emptyLanguageText: { fontSize: 'clamp(1.1rem, 2.2vw, 1.6rem)', fontWeight: 600, color: '#cfe4ff', letterSpacing: '.05em' },
-  emptySubtextStack: { display: 'flex', flexDirection: 'column' as const, gap: '0.2rem', alignItems: 'center', marginTop: '0' },
-  emptySubtextRow: { display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' as const, justifyContent: 'center' },
-  emptySubtextCode: { fontSize: '0.55rem', fontWeight: 600, color: C.textMuted, fontFamily: FONT_MONO, opacity: 0.7 },
-  emptySubtextText: { fontSize: 'clamp(0.7rem, 1.2vw, 0.85rem)', color: C.textMuted, letterSpacing: '.03em' },
-  emptyMeta: { display: 'flex', gap: '1.5rem', alignItems: 'center', marginTop: '0.8rem', padding: '0.5rem 1.2rem', background: 'rgba(13,22,41,0.8)', borderRadius: '10px', backdropFilter: 'blur(8px)', border: `1px solid ${C.border}` },
-  emptyMetaItem: { display: 'flex', flexDirection: 'column' as const, alignItems: 'center', gap: '0.2rem' },
-  emptyMetaLabel: { fontSize: '0.6rem', fontWeight: 600, letterSpacing: '.12em', color: C.textMuted, fontFamily: FONT_MONO },
-  emptyMetaValue: { fontSize: '0.9rem', fontWeight: 500, fontFamily: FONT_MONO, color: C.accent },
-  emptyMetaDivider: { width: '1px', height: '1.5rem', background: C.border },
-  emptyFooter: { padding: '0.4rem 2rem', textAlign: 'center' as const, background: C.panel, borderTop: `1px solid ${C.border}` },
-  emptyFooterStack: { display: 'flex', flexWrap: 'wrap' as const, justifyContent: 'center', gap: '0.1rem' },
-  emptyFooterText: { fontSize: '0.65rem', color: C.textMuted, letterSpacing: '.04em', fontFamily: FONT_MONO },
-  emptyFooterSeparator: { color: C.border, margin: '0 0.2rem' },
+  // ─── EMPTY STATE (NO FLIGHTS) STYLES ──────────────────────────
+emptyMain: { 
+  flex: 1, 
+  display: 'flex', 
+  flexDirection: 'column', 
+  alignItems: 'center', 
+  justifyContent: 'center', 
+  gap: '0.8rem',  // SMANJENO sa 2rem
+  padding: '1rem',  // SMANJENO sa 2rem
+  overflow: 'hidden'  // PROMIJENJENO sa 'auto' - nema scrolla
+},
+emptyGateNumber: { 
+  fontSize: 'clamp(10rem, 20vw, 18rem)',  // SMANJENO (bilo 22rem max)
+  fontWeight: 800, 
+  color: C.gold, 
+  letterSpacing: '.06em', 
+  fontFamily: FONT_DISPLAY,
+  textShadow: `0 0 30px rgba(230,168,23,0.3)`,
+  lineHeight: 1,
+  marginBottom: '0.25rem'  // SMANJENO sa 1rem
+},
+emptyStatusWrapper: { 
+  display: 'flex', 
+  flexDirection: 'column', 
+  alignItems: 'center', 
+  gap: '0.6rem',  // SMANJENO sa 1.5rem
+  maxWidth: '90vw'
+},
+emptyStatusIcon: { 
+  fontSize: '3rem',  // SMANJENO sa 5rem
+  opacity: 0.9,
+  filter: 'drop-shadow(0 0 10px rgba(230,168,23,0.4))',
+  marginBottom: '0'  // UKLONJENO
+},
+emptyLanguageStack: {
+  display: 'flex',
+  flexDirection: 'column' as const,
+  gap: '0.25rem',  // SMANJENO sa 0.6rem
+  alignItems: 'center'
+},
+emptyLanguageRow: {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '0.6rem',  // SMANJENO sa 1rem
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center'
+},
+emptyLanguageCode: {
+  fontSize: '0.7rem',  // SMANJENO sa 0.8rem
+  fontWeight: 700,
+  color: C.accent,
+  letterSpacing: '.1em',
+  fontFamily: FONT_MONO,
+  background: 'rgba(30,144,255,0.15)',
+  padding: '0.15rem 0.4rem',  // SMANJENO
+  borderRadius: '4px'
+},
+emptyLanguageText: {
+  fontSize: 'clamp(1.1rem, 2.2vw, 1.6rem)',  // SMANJENO (bilo 1.4-2.2rem)
+  fontWeight: 600,
+  color: '#cfe4ff',
+  letterSpacing: '.05em'
+},
+emptySubtextStack: {
+  display: 'flex',
+  flexDirection: 'column' as const,
+  gap: '0.2rem',  // SMANJENO sa 0.4rem
+  alignItems: 'center',
+  marginTop: '0'  // UKLONJENO
+},
+emptySubtextRow: {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '0.5rem',  // SMANJENO sa 0.8rem
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center'
+},
+emptySubtextCode: {
+  fontSize: '0.55rem',  // SMANJENO sa 0.65rem
+  fontWeight: 600,
+  color: C.textMuted,
+  fontFamily: FONT_MONO,
+  opacity: 0.7
+},
+emptySubtextText: {
+  fontSize: 'clamp(0.7rem, 1.2vw, 0.85rem)',  // SMANJENO (bilo 0.85-1.1rem)
+  color: C.textMuted,
+  letterSpacing: '.03em'
+},
+emptyMeta: { 
+  display: 'flex', 
+  gap: '1.5rem',  // SMANJENO sa 2rem
+  alignItems: 'center', 
+  marginTop: '0.8rem',  // SMANJENO sa 2rem
+  padding: '0.5rem 1.2rem',  // SMANJENO
+  background: 'rgba(13,22,41,0.8)',
+  borderRadius: '10px',
+  backdropFilter: 'blur(8px)',
+  border: `1px solid ${C.border}`
+},
+emptyMetaItem: { 
+  display: 'flex', 
+  flexDirection: 'column' as const, 
+  alignItems: 'center', 
+  gap: '0.2rem'  // SMANJENO sa 0.3rem
+},
+emptyMetaLabel: { 
+  fontSize: '0.6rem',  // SMANJENO sa 0.7rem
+  fontWeight: 600, 
+  letterSpacing: '.12em', 
+  color: C.textMuted, 
+  fontFamily: FONT_MONO 
+},
+emptyMetaValue: { 
+  fontSize: '0.9rem',  // SMANJENO sa 1.1rem
+  fontWeight: 500, 
+  fontFamily: FONT_MONO, 
+  color: C.accent 
+},
+emptyMetaDivider: { 
+  width: '1px', 
+  height: '1.5rem',  // SMANJENO sa 2rem
+  background: C.border 
+},
+emptyFooter: { 
+  padding: '0.4rem 2rem',  // SMANJENO
+  textAlign: 'center' as const, 
+  background: C.panel, 
+  borderTop: `1px solid ${C.border}` 
+},
+emptyFooterStack: {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  justifyContent: 'center',
+  gap: '0.1rem'  // SMANJENO
+},
+emptyFooterText: { 
+  fontSize: '0.65rem',  // SMANJENO sa 0.75rem
+  color: C.textMuted, 
+  letterSpacing: '.04em', 
+  fontFamily: FONT_MONO 
+},
+emptyFooterSeparator: {
+  color: C.border,
+  margin: '0 0.2rem'
+},
+
+
   splash: { width: '100vw', height: '100vh', background: C.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_DISPLAY, gap: '1rem' },
   splashIcon: { fontSize: '4rem', color: C.gold, opacity: .6 },
   splashTitle: { fontSize: '2.2rem', color: C.text, fontWeight: 600, letterSpacing: '.1em' },

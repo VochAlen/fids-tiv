@@ -20,18 +20,19 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 60_000
-const FETCH_TIMEOUT_MS             = 15_000
-const MAX_RETRIES                  = 3
-const RETRY_DELAY_MS               = 1_000
-const CACHE_KEY                    = "flight_board_cache"
-const CACHE_DURATION               = 5 * 60 * 1_000
-const HEARTBEAT_TIMEOUT_MS         = 120_000
-const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000
-const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000
-const MAX_FLIGHTS_DISPLAY          = 9
-const MAX_FLIGHTS_MEMORY           = 15
-const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000
+const REFRESH_INTERVAL_MS         = 60_000   // ↑ 60s→90s: -33% Vercel poziva
+const CACHE_DURATION              = 10 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
+const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
+const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
+const MAX_FLIGHTS_DISPLAY         = 9
+const MAX_FLIGHTS_MEMORY          = 15
+const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60_000
+const HEARTBEAT_TIMEOUT_MS        = 120_000
+const HEARTBEAT_CHECK_INTERVAL_MS = 30_000
+
+// UKLONJEN fetchWithRetry i fetchWithTimeout — nisu se koristili,
+// a generirale su retry pozive koji troše Vercel invocations.
+// Sada: jedan fetch, na grešku → keš, na prazno → zadržava staro.
 
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"]
 
@@ -54,7 +55,7 @@ const COLOR_CONFIG = {
     border:     "border-purple-500",
     cardBg:     "bg-[#3a0a30]/80",
   },
-}
+} as const
 
 interface FlightDataResponse {
   departures:  Flight[]
@@ -65,82 +66,86 @@ interface FlightDataResponse {
   warning?:    string
 }
 
-const LANGUAGE_CONFIG = {
+// ============================================================
+// I18N — statički objekt (nema state rotacije po pitanju alociranja)
+// ============================================================
+const LANGUAGE_KEYS = ["en", "bs", "de", "fr", "he", "tr"] as const
+type LangKey = typeof LANGUAGE_KEYS[number]
+
+const LANGUAGE_CONFIG: Record<LangKey, {
+  arrivals: string; departures: string
+  incomingFlights: string; outgoingFlights: string
+  tableHeaders: { scheduled: string; estimated: string; flight: string; from: string; destination: string; checkIn: string; gate: string; status: string }
+}> = {
   en: {
     arrivals: "ARRIVALS", departures: "DEPARTURES",
-    realTimeInfo: "Real-time flight information",
     incomingFlights: "Incoming flights", outgoingFlights: "Outgoing flights",
     tableHeaders: { scheduled: "Scheduled", estimated: "Estimated", flight: "Flight", from: "From", destination: "Destination", checkIn: "Check-In", gate: "Gate", status: "Status" },
   },
   bs: {
     arrivals: "DOLASCI", departures: "POLASCI",
-    realTimeInfo: "Informacije o letovima u realnom vremenu",
     incomingFlights: "Dolazni letovi", outgoingFlights: "Odlazni letovi",
     tableHeaders: { scheduled: "Planirano", estimated: "Očekivano", flight: "Let", from: "Od", destination: "Destinacija", checkIn: "Check-In", gate: "Izlaz", status: "Status" },
   },
   de: {
     arrivals: "ANKÜNFTE", departures: "ABFLÜGE",
-    realTimeInfo: "Echtzeit-Fluginformationen",
     incomingFlights: "Ankommende Flüge", outgoingFlights: "Abfliegende Flüge",
     tableHeaders: { scheduled: "Geplant", estimated: "Geschätzt", flight: "Flug", from: "Von", destination: "Ziel", checkIn: "Check-In", gate: "Gate", status: "Status" },
   },
   fr: {
     arrivals: "ARRIVÉES", departures: "DÉPARTS",
-    realTimeInfo: "Informations de vol en temps réel",
     incomingFlights: "Vols entrants", outgoingFlights: "Vols sortants",
     tableHeaders: { scheduled: "Prévu", estimated: "Estimé", flight: "Vol", from: "De", destination: "Destination", checkIn: "Enregist.", gate: "Porte", status: "Statut" },
   },
   he: {
     arrivals: "טיסות נכנסות", departures: "טיסות יוצאות",
-    realTimeInfo: "מידע טיסות בזמן אמת",
     incomingFlights: "טיסות נכנסות", outgoingFlights: "טיסות יוצאות",
     tableHeaders: { scheduled: "מתוכנן", estimated: "משוער", flight: "טיסה", from: "מ", destination: "יעד", checkIn: "צ׳ק-אין", gate: "שער", status: "סטטוס" },
   },
   tr: {
     arrivals: "Varış", departures: "Kalkış",
-    realTimeInfo: "Gerçek Zamanlı Uçuş Bilgisi",
     incomingFlights: "Varış Uçuşları", outgoingFlights: "Kalkış Uçuşları",
     tableHeaders: { scheduled: "Planlanan", estimated: "Tahmini", flight: "Uçuş", from: "Kalkış Yeri", destination: "Varış Yeri", checkIn: "Check-in", gate: "Kapı", status: "Durum" },
   },
 }
 
 const SECURITY_MESSAGES = [
-  { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
-  { text: "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •", language: "cnr" },
-  { text: "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •", language: "en" },
-  { text: "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •", language: "cnr" },
+  "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •",
+  "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •",
+  "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •",
+  "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •",
 ]
+
+// ============================================================
+// PLACEHOLDER (inline base64 — bez network poziva)
+// ============================================================
+const PLACEHOLDER_IMAGE =
+  "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo="
 
 // ============================================================
 // ERROR BOUNDARY
 // ============================================================
-interface ErrorBoundaryState { hasError: boolean; errorMessage: string }
-
-class FlightBoardErrorBoundary extends Component<
-  { children: ReactNode; fallback?: ReactNode },
-  ErrorBoundaryState
-> {
+interface EBState { hasError: boolean; errorMessage: string }
+class FlightBoardErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, EBState> {
   constructor(props: { children: ReactNode; fallback?: ReactNode }) {
     super(props)
     this.state = { hasError: false, errorMessage: "" }
   }
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): EBState {
     return { hasError: true, errorMessage: error.message }
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("FlightBoard ErrorBoundary caught:", error, info)
+    console.error("FlightBoard ErrorBoundary:", error, info)
     setTimeout(() => this.setState({ hasError: false, errorMessage: "" }), 10_000)
   }
   render() {
-    if (this.state.hasError) {
-      return this.props.fallback || (
-        <div className="h-screen bg-blue-950 flex flex-col items-center justify-center text-white gap-6">
-          <Plane className="w-24 h-24 opacity-30 animate-pulse" />
-          <div className="text-4xl font-bold opacity-70">Reconnecting...</div>
-          <div className="text-xl opacity-40">{this.state.errorMessage}</div>
-        </div>
-      )
-    }
+    if (this.state.hasError) return this.props.fallback || (
+      <div className="h-screen bg-blue-950 flex flex-col items-center justify-center text-white gap-6">
+        <Plane className="w-24 h-24 opacity-30 animate-pulse" />
+        <div className="text-4xl font-bold opacity-70">Reconnecting...</div>
+        <div className="text-xl opacity-40">{this.state.errorMessage}</div>
+      </div>
+    )
     return this.props.children
   }
 }
@@ -148,95 +153,73 @@ class FlightBoardErrorBoundary extends Component<
 // ============================================================
 // HELPER FUNKCIJE
 // ============================================================
-const getFlightawareLogoURL = (icaoCode: string): string =>
-  icaoCode ? `https://www.flightaware.com/images/airline_logos/180px/${icaoCode}.png` : ""
-
-const PLACEHOLDER_IMAGE =
-  "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo="
+const getFlightawareLogoURL = (icao: string): string =>
+  icao ? `https://www.flightaware.com/images/airline_logos/180px/${icao}.png` : ""
 
 function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null {
   if (!timeStr) return null
   const s = timeStr.trim()
   if (!s || s === "-" || s === "--:--") return null
-
   try {
     if (s.includes("T") || (s.includes("-") && s.length > 5)) {
-      const d = new Date(s)
-      return isNaN(d.getTime()) ? null : d
+      const d = new Date(s); return isNaN(d.getTime()) ? null : d
     }
-
     const ampm = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
     if (ampm) {
-      let h = parseInt(ampm[1], 10)
-      const m = parseInt(ampm[2], 10)
+      let h = parseInt(ampm[1], 10); const m = parseInt(ampm[2], 10)
       if (ampm[3].toUpperCase() === "PM" && h !== 12) h += 12
       if (ampm[3].toUpperCase() === "AM" && h === 12) h = 0
       const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60 * 1_000) d.setDate(d.getDate() + 1)
+      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
       return d
     }
-
     const sep = s.match(/^(\d{1,2})[:.](\d{2})$/)
     if (sep) {
-      const h = parseInt(sep[1], 10)
-      const m = parseInt(sep[2], 10)
+      const h = parseInt(sep[1], 10); const m = parseInt(sep[2], 10)
       if (h > 23 || m > 59) return null
       const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60 * 1_000) d.setDate(d.getDate() + 1)
+      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
       return d
     }
-
     const digits = s.replace(/\D/g, "")
     if (digits.length === 4) {
-      const h = parseInt(digits.substring(0, 2), 10)
-      const m = parseInt(digits.substring(2, 4), 10)
+      const h = parseInt(digits.substring(0, 2), 10); const m = parseInt(digits.substring(2, 4), 10)
       if (h > 23 || m > 59) return null
       const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60 * 1_000) d.setDate(d.getDate() + 1)
+      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
       return d
     }
-
     return null
   } catch { return null }
 }
-
-const parseDepartureTimeLocal = parseFlightTimeToDate
 
 function formatTimeString(timeStr: string | null | undefined): string {
   if (!timeStr) return ""
   const s = timeStr.trim()
   if (!s || s === "-" || s === "--:--") return ""
-
   if (s.includes("T")) {
     const d = new Date(s)
     if (!isNaN(d.getTime())) return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
   }
-
   if (/^\d{2}:\d{2}$/.test(s)) return s
-
   const digits = s.replace(/\D/g, "")
   if (digits.length === 4) {
-    const h = digits.substring(0, 2)
-    const m = digits.substring(2, 4)
-    const hi = parseInt(h, 10)
-    const mi = parseInt(m, 10)
-    if (hi > 23 || mi > 59) return ""
-    if (hi === 0 && mi === 0) return ""
-    return `${h}:${m}`
+    const h = parseInt(digits.substring(0, 2), 10); const m = parseInt(digits.substring(2, 4), 10)
+    if (h > 23 || m > 59) return ""
+    if (h === 0 && m === 0) return ""
+    return `${digits.substring(0, 2)}:${digits.substring(2, 4)}`
   }
-
   return ""
 }
 
-function isValidDisplayTime(timeStr: string | null | undefined): boolean {
-  if (!timeStr) return false
-  const formatted = formatTimeString(timeStr)
-  return formatted !== "" && formatted !== "00:00"
+function isValidDisplayTime(t: string | null | undefined): boolean {
+  const f = formatTimeString(t); return f !== "" && f !== "00:00"
 }
 
+// ── Cache helpers ─────────────────────────────────────────────
 const saveToCache = (data: FlightDataResponse) => {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) }
-  catch (e) { console.warn("Failed to save to cache:", e) }
+  catch { /* quota exceeded — ništa */ }
 }
 const loadFromCache = (): FlightDataResponse | null => {
   try {
@@ -247,192 +230,134 @@ const loadFromCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
-
-
-const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
-  const ctrl = new AbortController()
-  const id   = setTimeout(() => ctrl.abort(), ms)
-  try {
-    const r = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { "Cache-Control": "no-cache, no-store, must-revalidate", Pragma: "no-cache", Expires: "0" },
-    })
-    clearTimeout(id); return r
-  } catch (e) { clearTimeout(id); throw e }
-}
-const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_DELAY_MS): Promise<FlightDataResponse> => {
-  let last: Error | null = null
-  for (let i = 0; i < retries; i++) {
-    try {
-      const r = await fetchWithTimeout(url, FETCH_TIMEOUT_MS)
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      return await r.json()
-    } catch (e) {
-      last = e instanceof Error ? e : new Error(String(e))
-      if (i < retries - 1) await new Promise(r => setTimeout(r, delay * Math.pow(2, i)))
-    }
-  }
-  throw last || new Error("All retries failed")
-}
-
-const checkStatus = {
-  isDelayed:     (f: Flight) => /(delay|kasni)/i.test(f.StatusEN ?? ""),
-  isBoarding:    (f: Flight) => /(boarding|gate open)/i.test(f.StatusEN ?? ""),
-  isProcessing:  (f: Flight) => /processing/i.test(f.StatusEN ?? ""),
-  isEarly:       (f: Flight) => /(earlier|ranije)/i.test(f.StatusEN ?? ""),
-  isCancelled:   (f: Flight) => /(cancelled|canceled|otkazan)/i.test(f.StatusEN ?? ""),
-  isOnTime:      (f: Flight) => /(on time|na vrijeme)/i.test(f.StatusEN ?? ""),
-  isDiverted:    (f: Flight) => /(diverted|preusmjeren)/i.test(f.StatusEN ?? ""),
-  isCheckInOpen: (f: Flight) => /(check.?in|check-in)/i.test(f.StatusEN ?? ""),
-  isArrived:     (f: Flight) => /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(f.StatusEN ?? ""),
-  isGoToGate:    (f: Flight) => /(go to gate)/i.test(f.StatusEN ?? ""),
-  isClose:       (f: Flight) => /^close$/i.test((f.StatusEN ?? "").trim()),
-  isFinalCall:   (f: Flight) => /^final call$/i.test((f.StatusEN ?? "").trim()),
-}
-
-// ============================================================
-// AUTO-STATUS ZA DEPARTURES
-// ============================================================
+// ── Auto-status logika ────────────────────────────────────────
 
 const CHECKIN_OFFSETS: Record<string, number> = {
-  "6H": 180,
-  "FZ": 180,
-  "LS": 150, // <-- dodato
-  "LY": 180, // <-- dodato
-  "IZ": 180, // <-- dodato
-  "BA": 150, // <-- dodato
- 
-
+  "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180, "BA": 150,
 }
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim()
   if (status && status !== "-") return null
-
   const scheduled = parseFlightTimeToDate(flight.ScheduledDepartureTime)
   if (!scheduled) return null
-
-  const referenceTime = parseFlightTimeToDate(flight.EstimatedDepartureTime) ?? scheduled
-
-  const now       = Date.now()
-  const minsToRef = (referenceTime.getTime() - now) / 60_000
-  const minsToSTD = (scheduled.getTime()     - now) / 60_000
-
-  if (minsToRef < -5) return null
-  if (minsToRef <= 5)   return "Close"
-  if (minsToRef <= 10)  return "Final Call"
-  if (minsToRef <= 30)  return "Go to Gate"
-
+  const ref        = parseFlightTimeToDate(flight.EstimatedDepartureTime) ?? scheduled
+  const now        = Date.now()
+  const minsToRef  = (ref.getTime() - now) / 60_000
+  const minsToSTD  = (scheduled.getTime() - now) / 60_000
+  if (minsToRef < -5)  return null
+  if (minsToRef <= 5)  return "Close"
+  if (minsToRef <= 10) return "Final Call"
+  if (minsToRef <= 30) return "Go to Gate"
   if (minsToSTD > 30) {
-    const iata = (flight.FlightNumber ?? "")
-      .replace(/\s/g, "")
-      .substring(0, 2)
-      .toUpperCase()
-
-    const checkInMinutesOffset = CHECKIN_OFFSETS[iata] ?? 120
-
-    const checkInDate = new Date(
-      scheduled.getTime() - (checkInMinutesOffset * 60 * 1000)
-    )
-
-    const hh = String(checkInDate.getHours()).padStart(2, "0")
-    const mm = String(checkInDate.getMinutes()).padStart(2, "0")
-
-    return `Check In at ${hh}:${mm}`
+    const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
+    const offset = CHECKIN_OFFSETS[iata] ?? 120
+    const ci = new Date(scheduled.getTime() - offset * 60_000)
+    return `Check In at ${String(ci.getHours()).padStart(2, "0")}:${String(ci.getMinutes()).padStart(2, "0")}`
   }
-
   return null
 }
-// ── Auto-status za ARRIVALS ──────────────────────────────────
+
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()
   if (status && status !== "-") return null
-
-  const scheduledStr = flight.ScheduledDepartureTime
-  const estimatedStr = flight.EstimatedDepartureTime
-
-  if (!scheduledStr) return null
-
-  if (!estimatedStr || !isValidDisplayTime(estimatedStr) || scheduledStr === estimatedStr) {
-    return "Scheduled"
-  }
-
-  const scheduled = parseFlightTimeToDate(scheduledStr)
-  const estimated  = parseFlightTimeToDate(estimatedStr)
-
-  if (!scheduled || !estimated) return "Scheduled"
-
-  const diffMins = (scheduled.getTime() - estimated.getTime()) / 60_000
-
-  if (diffMins > 15)  return `Arriving early – expected at ${fmtTime(estimatedStr)}`
-  if (diffMins < -15) return `Delayed – expected at ${fmtTime(estimatedStr)}`
-
+  const schStr = flight.ScheduledDepartureTime
+  const estStr = flight.EstimatedDepartureTime
+  if (!schStr) return null
+  if (!estStr || !isValidDisplayTime(estStr) || schStr === estStr) return "Scheduled"
+  const sch = parseFlightTimeToDate(schStr); const est = parseFlightTimeToDate(estStr)
+  if (!sch || !est) return "Scheduled"
+  const diff = (sch.getTime() - est.getTime()) / 60_000
+  if (diff > 15)  return `Arriving early – expected at ${fmtTime(estStr)}`
+  if (diff < -15) return `Delayed – expected at ${fmtTime(estStr)}`
   return "On time"
 }
 
+// ── Status pill ───────────────────────────────────────────────
+type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
+
+function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: string) => string) {
+  const auto           = isArrival ? getAutoArrivalStatus(flight, fmtTime) : getAutoStatus(flight)
+  const effectiveStatus = auto !== null ? auto : (flight.StatusEN ?? "")
+  const s = effectiveStatus
+
+  const isCancelled    = /(cancelled|canceled|otkazan)/i.test(s)
+  const isDelayed      = /(delay|kasni)/i.test(s)
+  const isBoarding     = !isArrival && /(boarding|gate open)/i.test(s)
+  const isProcessing   = /processing/i.test(s)
+  const isEarly        = /(earlier|ranije)/i.test(s)
+  const isOnTime       = /(on time|na vrijeme)/i.test(s)
+  const isDiverted     = /(diverted|preusmjeren)/i.test(s)
+  const isCheckInOpen  = /(check.?in|check-in)/i.test(s)
+  const isGoToGate     = !isArrival && /(go to gate)/i.test(s)
+  const isClose        = !isArrival && /^close$/i.test(s.trim())
+  const isFinalCall    = !isArrival && /^final call$/i.test(s.trim())
+  const isArrived      = isArrival  && /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(s)
+
+  let displayText = s
+  if (isProcessing) displayText = "Check-In"
+  if (isArrived) {
+    const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime
+    displayText = `Arrived at ${t ? fmtTime(t) : ""}`
+  }
+
+  const hasStatusText = displayText.trim() !== ""
+  const showLEDs      = isCancelled || isDelayed || isBoarding || isProcessing ||
+                        isCheckInOpen || isArrived || isDiverted || isGoToGate ||
+                        isClose || isFinalCall || isEarly
+
+  let bg = "bg-white/10", border = "border-white/30", text = "text-white"
+  let led1: LEDColor = "blue", led2: LEDColor = "green", blinkClass = ""
+
+  if      (isCancelled)                { bg="bg-red-500/20";    border="border-red-500/50";    text="text-red-100";    led1="red";    led2="orange"; blinkClass="animate-pill-blink"      }
+  else if (isClose)                    { bg="bg-red-600/30";    border="border-red-500/70";    text="text-red-100";    led1="red";    led2="orange"; blinkClass="animate-pill-blink-fast" }
+  else if (isFinalCall)                { bg="bg-orange-600/30"; border="border-orange-500/70"; text="text-orange-100"; led1="orange"; led2="red";    blinkClass="animate-pill-blink-fast" }
+  else if (isGoToGate)                 { bg="bg-blue-500/20";   border="border-blue-500/50";   text="text-blue-100";   led1="blue";   led2="cyan";   blinkClass="animate-pill-blink"      }
+  else if (isDelayed)                  { bg="bg-yellow-500/20"; border="border-yellow-500/50"; text="text-yellow-100"; led1="yellow"; led2="orange"                                        }
+  else if (isEarly)                    { bg="bg-purple-500/20"; border="border-purple-500/50"; text="text-purple-100"; led1="purple"; led2="blue"                                         }
+  else if (isBoarding)                 { bg="bg-cyan-500/20";   border="border-cyan-500/50";   text="text-cyan-100";   led1="cyan";   led2="blue";   blinkClass="animate-pill-blink"      }
+  else if (isCheckInOpen||isProcessing){ bg="bg-green-500/20";  border="border-green-500/50";  text="text-green-100";  led1="green";  led2="lime"                                          }
+  else if (isDiverted)                 { bg="bg-orange-500/20"; border="border-orange-500/50"; text="text-orange-100"; led1="orange"; led2="red"                                          }
+  else if (isOnTime)                   { bg="bg-lime-500/20";   border="border-lime-500/50";   text="text-lime-100";   led1="lime";   led2="green"                                        }
+  else if (isArrived)                  { bg="bg-green-500/20";  border="border-green-500/50";  text="text-green-100";  led1="green";  led2="lime";   blinkClass="animate-pill-blink"      }
+
+  return { bg, border, text, led1, led2, blinkClass, showLEDs, hasStatusText, displayText }
+}
+
 // ============================================================
-// IZOLOVANI SAT
+// MICRO KOMPONENTE
 // ============================================================
+
+// Jedan ClockDisplay (bez duplog hidden/block bloka)
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
-  const [time, setTime]       = useState("")
-  const [mounted, setMounted] = useState(false)
+  const [time, setTime] = useState("")
   useEffect(() => {
-    setMounted(true)
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
     tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
   }, [])
-  if (!mounted) return <div className="text-[3rem] sm:text-[7rem] font-black text-white leading-none">--:--</div>
-  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time}</div>
+  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time || "--:--"}</div>
 })
 
-// ============================================================
-// LED
-// ============================================================
-// ============================================================
-// LED - MINIMAL CPU VERZIJA SA INVERTOVANOM ANIMACIJOM
-// ============================================================
 const LEDIndicator = memo(function LEDIndicator({
   color, phase = "a", size = "w-3 h-3",
-}: {
-  color: "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
-  phase?: "a"|"b"; size?: string
-}) {
-  const colorMap: Record<typeof color, string> = {
-    blue: "bg-blue-500",
-    green: "bg-green-500",
-    orange: "bg-orange-500",
-    red: "bg-red-500",
-    yellow: "bg-yellow-400",
-    cyan: "bg-cyan-400",
-    purple: "bg-purple-500",
-    lime: "bg-lime-500",
+}: { color: LEDColor; phase?: "a"|"b"; size?: string }) {
+  const colorMap: Record<LEDColor, string> = {
+    blue: "bg-blue-500", green: "bg-green-500", orange: "bg-orange-500",
+    red: "bg-red-500", yellow: "bg-yellow-400", cyan: "bg-cyan-400",
+    purple: "bg-purple-500", lime: "bg-lime-500",
   }
-
-  // Faza "a" koristi normalnu animaciju (pali se)
-  // Faza "b" koristi invertovanu animaciju (gasi se)
-  const animationName = phase === "a" ? "ledBlinkA" : "ledBlinkB"
-
   return (
     <div
       className={`${size} rounded-full ${colorMap[color]}`}
-      style={{
-        animation: `${animationName} 0.8s ease-in-out infinite alternate`,
-      }}
+      style={{ animation: `${phase === "a" ? "ledBlinkA" : "ledBlinkB"} 0.8s ease-in-out infinite alternate` }}
     />
   )
 })
 
-// ============================================================
-// TABLE HEADERS — sakriveni na mobilnom
-// ============================================================
 const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
-}: {
-  headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]
-  headerBg: string
-}) {
+}: { headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]; headerBg: string }) {
   return (
-    // hidden na mobilnom (ispod sm=640px), flex na desktopu
     <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
       {headers.map(h => {
         const Icon = h.icon
@@ -447,65 +372,10 @@ const TableHeaders = memo(function TableHeaders({
 })
 
 // ============================================================
-// STATUS PILL LOGIKA
-// ============================================================
-type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
-
-function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: string) => string) {
-  const autoStatus     = isArrival ? getAutoArrivalStatus(flight, fmtTime) : getAutoStatus(flight)
-  const effectiveStatus = autoStatus !== null ? autoStatus : (flight.StatusEN ?? "")
-
-  const isCancelled   = /(cancelled|canceled|otkazan)/i.test(effectiveStatus)
-  const isDelayed     = /(delay|kasni)/i.test(effectiveStatus)
-  const isBoarding    = !isArrival && /(boarding|gate open)/i.test(effectiveStatus)
-  const isProcessing  = /processing/i.test(effectiveStatus)
-  const isEarly       = /(earlier|ranije)/i.test(effectiveStatus)
-  const isOnTime      = /(on time|na vrijeme)/i.test(effectiveStatus)
-  const isDiverted    = /(diverted|preusmjeren)/i.test(effectiveStatus)
-  const isCheckInOpen = /(check.?in|check-in)/i.test(effectiveStatus)
-  const isGoToGate    = !isArrival && /(go to gate)/i.test(effectiveStatus)
-  const isClose       = !isArrival && /^close$/i.test(effectiveStatus.trim())
-  const isFinalCall   = !isArrival && /^final call$/i.test(effectiveStatus.trim())
-  const isArrived     = isArrival  && /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(effectiveStatus)
-
-  let displayText = effectiveStatus
-  if (isProcessing) displayText = "Check-In"
-  if (isArrived) {
-    const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime
-    displayText = `Arrived at ${t ? fmtTime(t) : ""}`
-  }
-
-  const hasStatusText = displayText.trim() !== ""
-
-  const shouldBlink = isArrived || isCancelled || isBoarding || isGoToGate || isClose || isFinalCall
-  const showLEDs    = isCancelled || isDelayed  || isBoarding || isProcessing ||
-                      isCheckInOpen || isArrived || isDiverted || isGoToGate || isClose || isFinalCall || isEarly
-
-  let bg = "bg-white/10", border = "border-white/30", text = "text-white"
-  let led1: LEDColor = "blue", led2: LEDColor = "green", blinkClass = ""
-
-  if      (isCancelled)              { bg="bg-red-500/20";    border="border-red-500/50";    text="text-red-100";    led1="red";    led2="orange"; blinkClass="animate-pill-blink"      }
-  else if (isClose)                  { bg="bg-red-600/30";    border="border-red-500/70";    text="text-red-100";    led1="red";    led2="orange"; blinkClass="animate-pill-blink-fast" }
-  else if (isFinalCall)              { bg="bg-orange-600/30"; border="border-orange-500/70"; text="text-orange-100"; led1="orange"; led2="red";    blinkClass="animate-pill-blink-fast" }
-  else if (isGoToGate)               { bg="bg-blue-500/20";   border="border-blue-500/50";   text="text-blue-100";   led1="blue";   led2="cyan";   blinkClass="animate-pill-blink"      }
-  else if (isDelayed)                { bg="bg-yellow-500/20"; border="border-yellow-500/50"; text="text-yellow-100"; led1="yellow"; led2="orange"                                        }
-  else if (isEarly)                  { bg="bg-purple-500/20"; border="border-purple-500/50"; text="text-purple-100"; led1="purple"; led2="blue"                                         }
-  else if (isBoarding)               { bg="bg-cyan-500/20";   border="border-cyan-500/50";   text="text-cyan-100";   led1="cyan";   led2="blue";   blinkClass="animate-pill-blink"      }
-  else if (isCheckInOpen||isProcessing){ bg="bg-green-500/20";border="border-green-500/50"; text="text-green-100";  led1="green";  led2="lime"                                          }
-  else if (isDiverted)               { bg="bg-orange-500/20"; border="border-orange-500/50"; text="text-orange-100"; led1="orange"; led2="red"                                          }
-  else if (isOnTime)                 { bg="bg-lime-500/20";   border="border-lime-500/50";   text="text-lime-100";   led1="lime";   led2="green"                                        }
-  else if (isArrived)                { bg="bg-green-500/20";  border="border-green-500/50";  text="text-green-100";  led1="green";  led2="lime";   blinkClass="animate-pill-blink"      }
-
-  return { bg, border, text, led1, led2, blinkClass, showLEDs, hasStatusText, displayText }
-}
-
-// ============================================================
-// FLIGHT ROW — desktop tablica + mobilna kartica
+// FLIGHT ROW
 // ============================================================
 const FlightRow = memo(
-  function FlightRow({
-    flight, index, showArrivals, colorTitle, autoStatusTick,
-  }: {
+  function FlightRow({ flight, index, showArrivals, colorTitle, autoStatusTick }: {
     flight: Flight; index: number; showArrivals: boolean; colorTitle: string; autoStatusTick: number
   }) {
     const formatTime = useCallback((t: string) => formatTimeString(t), [])
@@ -516,66 +386,44 @@ const FlightRow = memo(
       [flight, showArrivals, formatTime, autoStatusTick]
     )
 
-    const logoURL  = useMemo(() => getFlightawareLogoURL(flight.AirlineICAO), [flight.AirlineICAO])
-    const rowBg    = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
-    const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
+    const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ""
 
-const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-  const img = e.currentTarget;
-  
-  // Prvi fail: probali smo PNG, sad probaj JPG u public/airlines/
-  if (img.dataset.tried === 'png') {
-    img.dataset.tried = 'jpg';
-    img.src = `/airlines/${icao}.jpg`;
-    return;
-  }
-  
-  // Drugi fail: nema ni PNG ni JPG u public/airlines/, idi na Flightware
-  if (img.dataset.tried === 'jpg') {
-    img.dataset.tried = 'flightware';
-    const fwUrl = getFlightawareLogoURL(icao);
-    if (fwUrl) {
-      img.src = fwUrl;
-    } else {
-      img.src = PLACEHOLDER_IMAGE;
-      img.onerror = null;
-    }
-    return;
-  }
-  
-  // Treći fail: nema ni na Flightware, stavi placeholder
-  img.src = PLACEHOLDER_IMAGE;
-  img.onerror = null;
-}, [icao]);
+    // Logo fallback: public/airlines/{ICAO}.png → .jpg → FlightAware → placeholder
+    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = e.currentTarget
+      if (img.dataset.tried === "png") {
+        img.dataset.tried = "jpg"; img.src = `/airlines/${icao}.jpg`; return
+      }
+      if (img.dataset.tried === "jpg") {
+        img.dataset.tried = "fw"
+        const fw = getFlightawareLogoURL(icao)
+        img.src = fw || PLACEHOLDER_IMAGE
+        if (!fw) img.onerror = null
+        return
+      }
+      img.src = PLACEHOLDER_IMAGE; img.onerror = null
+    }, [icao])
 
+    const rowBg          = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
     const gateChangedAt  = (flight as any)._gateChangedAt
     const isGateChanged  = gateChangedAt && (Date.now() - gateChangedAt < 15_000)
 
-  const statusFontSize = showArrivals ? "text-[2rem]" : "text-[1.42rem]"
-const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] font-extrabold rounded-2xl border-2 px-4 py-2 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
+    const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] font-extrabold rounded-2xl border-2 px-4 py-2 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
+    const mobilePillCls = `flex items-center gap-1.5 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
+
     const estimatedDisplay = useMemo(() => {
-      const est = flight.EstimatedDepartureTime
-      const sch = flight.ScheduledDepartureTime
+      const est = flight.EstimatedDepartureTime; const sch = flight.ScheduledDepartureTime
       if (!isValidDisplayTime(est)) return null
-      const estFmt = formatTimeString(est)
-      const schFmt = formatTimeString(sch)
+      const estFmt = formatTimeString(est); const schFmt = formatTimeString(sch)
       if (estFmt === schFmt) return null
       return estFmt
     }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime])
 
-    // Mobilni pill (manji)
-    const mobilePillCls = `flex items-center gap-1.5 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`
-
     return (
       <>
-        {/* ════════════════════════════════════════
-            DESKTOP LAYOUT (sm: 640px i više)
-            Identičan originalnom kodu — ništa nije promijenjeno
-            ════════════════════════════════════════ */}
-        <div
-          className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
-          style={{ minHeight: "68px", contain: "layout style" }}
-        >
+        {/* ── DESKTOP (sm+) ────────────────────────────────── */}
+        <div className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "68px", contain: "layout style" }}>
+
           {/* Scheduled */}
           <div className="flex items-center justify-center" style={{ width: "180px" }}>
             <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
@@ -587,23 +435,22 @@ const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] fo
           <div className="flex items-center justify-center" style={{ width: "180px" }}>
             {estimatedDisplay
               ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg`}>{estimatedDisplay}</div>
-              : <div className="text-2xl text-white/30 font-bold">-</div>
-            }
+              : <div className="text-2xl text-white/30 font-bold">-</div>}
           </div>
 
-          {/* Flight Info */}
+          {/* Flight info */}
           <div className="flex items-center gap-3" style={{ width: "280px" }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-<img 
-  src={`/airlines/${icao}.png`}
-  alt={`${flight.AirlineName} logo`}
-  className="object-contain w-full h-full"
-  onError={onImgErr}
-  data-tried="png"  // označavamo da smo prvo probali PNG
-  decoding="async" 
-  loading={index < 9 ? "eager" : "lazy"} 
-  fetchPriority={index < 8 ? "high" : "auto"}
-/>
+              <img
+                src={`/airlines/${icao}.png`}
+                alt={`${flight.AirlineName} logo`}
+                className="object-contain w-full h-full"
+                onError={onImgErr}
+                data-tried="png"
+                decoding="async"
+                loading={index < 9 ? "eager" : "lazy"}
+                fetchPriority={index < 8 ? "high" : "auto"}
+              />
             </div>
             <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
@@ -652,112 +499,74 @@ const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] fo
               </div>
               <div className="flex items-center justify-center" style={{ width: "180px" }}>
                 {flight.GateNumber && flight.GateNumber !== "-"
-                  ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
-                      ${isGateChanged
-                        ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast"
-                        : "text-white bg-black/40 border-white/20"}`}>
+                  ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
                       {flight.GateNumber}
                     </div>
                   : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
               </div>
-      <div className="flex items-center justify-center" style={{ width: "500px" }}>
-  {pill.hasStatusText ? (
-    <div className={`${pillCls} overflow-hidden text-[1.8rem]`}>
-      {pill.showLEDs && (
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
-          <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
-        </div>
-      )}
-      <span className="truncate whitespace-nowrap font-extrabold tracking-wide">{pill.displayText}</span>
-    </div>
-  ) : (
-    <div className="text-[1.6rem] font-bold text-slate-300">Scheduled</div>
-  )}
-</div>
+              <div className="flex items-center justify-center" style={{ width: "500px" }}>
+                {pill.hasStatusText ? (
+                  <div className={`${pillCls} overflow-hidden text-[1.8rem]`}>
+                    {pill.showLEDs && (
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
+                        <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
+                      </div>
+                    )}
+                    <span className="truncate whitespace-nowrap font-extrabold tracking-wide">{pill.displayText}</span>
+                  </div>
+                ) : (
+                  <div className="text-[1.6rem] font-bold text-slate-300">Scheduled</div>
+                )}
+              </div>
             </>
           )}
         </div>
 
-        {/* ════════════════════════════════════════
-            MOBILNI LAYOUT (ispod sm: 640px)
-            Card layout — svaki let je kompaktna kartica
-            ════════════════════════════════════════ */}
+        {/* ── MOBILNI LAYOUT ───────────────────────────────── */}
         <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}>
-
-          {/* Red 1: Logo + broj leta | Scheduled → Estimated */}
           <div className="flex items-center gap-2.5">
-            {/* Logo */}
             <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
               <img
-                src={logoURL || PLACEHOLDER_IMAGE}
+                src={`/airlines/${icao}.png`}
                 alt={`${flight.AirlineName} logo`}
                 className="object-contain w-full h-full"
                 onError={onImgErr}
+                data-tried="png"
                 decoding="async"
               />
             </div>
-
-            {/* Broj leta */}
-            <span className="text-base font-black text-white tracking-wide">
-              {flight.FlightNumber}
-            </span>
+            <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
               <span className="text-xs text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>
             )}
-
-            {/* Scheduled i Estimated — desno poravnato */}
             <div className="ml-auto flex items-center gap-1.5">
               <span className="text-lg font-black text-white tabular-nums">
                 {formatTimeString(flight.ScheduledDepartureTime) || "--:--"}
               </span>
               {estimatedDisplay && (
-                <>
-                  <span className="text-white/30 text-xs">›</span>
-                  <span className={`text-lg font-black ${colorTitle} tabular-nums`}>
-                    {estimatedDisplay}
-                  </span>
-                </>
+                <><span className="text-white/30 text-xs">›</span>
+                  <span className={`text-lg font-black ${colorTitle} tabular-nums`}>{estimatedDisplay}</span></>
               )}
             </div>
           </div>
-
-          {/* Red 2: Destinacija (grad) */}
           <div className="text-[1.25rem] font-black text-white truncate leading-tight">
             {flight.DestinationCityName || flight.DestinationAirportName}
           </div>
-
-          {/* Red 3: Check-in badge + Gate badge + Status pill */}
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Check-In (samo za departures) */}
             {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
-                <Users className="w-3 h-3 opacity-70" />
-                {flight.CheckInDesk}
+                <Users className="w-3 h-3 opacity-70" />{flight.CheckInDesk}
               </span>
             )}
-
-            {/* Gate (samo za departures) */}
             {!showArrivals && flight.GateNumber && flight.GateNumber !== "-" && (
-              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${
-                isGateChanged
-                  ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast"
-                  : "text-white bg-black/40 border-white/20"
-              }`}>
-                <DoorOpen className="w-3 h-3 opacity-70" />
-                {flight.GateNumber}
+              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
+                <DoorOpen className="w-3 h-3 opacity-70" />{flight.GateNumber}
               </span>
             )}
-
-            {/* Status pill — isti vizualni jezik kao desktop, samo manji */}
             {pill.hasStatusText ? (
               <div className={mobilePillCls}>
-                {pill.showLEDs && (
-                  <>
-                    <LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" />
-                    <LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" />
-                  </>
-                )}
+                {pill.showLEDs && (<><LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" /><LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" /></>)}
                 <span className="truncate max-w-[200px]">{pill.displayText}</span>
               </div>
             ) : (
@@ -783,323 +592,267 @@ const pillCls = `w-[95%] flex items-center justify-center gap-3 text-[1.9rem] fo
 )
 
 // ============================================================
-// GLAVNA KOMPONENTA
-// ============================================================
-// ============================================================
-// GLAVNA KOMPONENTA (IZMIJENJENA)
+// EXPORT
 // ============================================================
 export default function CombinedPage(): JSX.Element {
   return <FlightBoardErrorBoundary><FlightBoard /></FlightBoardErrorBoundary>
 }
 
+// ============================================================
+// GLAVNA KOMPONENTA
+// ============================================================
 function FlightBoard(): JSX.Element {
   const [arrivals,   setArrivals]   = useState<Flight[]>([])
   const [departures, setDepartures] = useState<Flight[]>([])
-  const [loading,    setLoading]    = useState<boolean>(true)
-  const [showArrivals, setShowArrivals]             = useState<boolean>(true)
-  const [lastUpdate,   setLastUpdate]               = useState<string>("")
-  const [currentLanguageIndex, setCurrentLanguageIndex] = useState<number>(0)
-  const [currentMessageIndex,  setCurrentMessageIndex]  = useState<number>(0)
-  const [errorMessage, setErrorMessage]             = useState<string | null>(null)
-  const [isRecovering, setIsRecovering]             = useState<boolean>(false)
-  const [autoStatusTick, setAutoStatusTick]         = useState<number>(0)
+  const [loading,    setLoading]    = useState(true)
 
-  const isMountedRef   = useRef(true)
-  const lastHeartbeat  = useRef(Date.now())
-  const prevGatesRef   = useRef<Record<string, string>>({})
-  const isInitialLoad  = useRef(true)
+  // Jezik: indeks rotira CSS animacijom — bez state update
+  const [langIdx,      setLangIdx]      = useState(0)
+  const [showArrivals, setShowArrivals] = useState(true)
+  const [lastUpdate,   setLastUpdate]   = useState("")
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [autoStatusTick, setAutoStatusTick] = useState(0)
 
-  const currentColors = useMemo(
-    () => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures,
-    [showArrivals]
-  )
+  const isMountedRef  = useRef(true)
+  const prevGatesRef  = useRef<Record<string, string>>({})
+  const isInitialLoad = useRef(true)
+  const lastHeartbeat = useRef(Date.now())
 
+  const colors = useMemo(() => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures, [showArrivals])
+
+  // ── Hard reset u 03:00 (ne interval) ─────────────────────
+  useEffect(() => {
+    const now   = new Date()
+    const reset = new Date()
+    reset.setHours(HARD_RESET_HOUR, 0, 0, 0)
+    if (reset <= now) reset.setDate(reset.getDate() + 1)
+    const ms = reset.getTime() - now.getTime()
+    const id = setTimeout(() => window.location.reload(), ms)
+    return () => clearTimeout(id)
+  }, [])
+
+  // ── Kiosk: prevent context menu, selection ───────────────
+  useEffect(() => {
+    const p = (e: Event) => e.preventDefault()
+    document.addEventListener("contextmenu", p)
+    document.addEventListener("selectstart", p)
+    document.addEventListener("dragstart", p)
+    return () => {
+      document.removeEventListener("contextmenu", p)
+      document.removeEventListener("selectstart", p)
+      document.removeEventListener("dragstart", p)
+    }
+  }, [])
+
+  // ── autoStatusTick — svake 60s, ažurira auto-status pillove ──
   useEffect(() => {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000)
     return () => clearInterval(id)
   }, [])
 
+  // ── Language rotation — svake 4s ──────────────────────────
   useEffect(() => {
-    const id = setTimeout(() => {
-      if ((window as any).electronAPI?.restartApp) (window as any).electronAPI.restartApp()
-      else window.location.reload()
-    }, HARD_RESET_INTERVAL_MS)
-    return () => clearTimeout(id)
-  }, [])
-
-  // ============================================================
-  // POMOĆNE FUNKCIJE (USECALLBACK) - POMERENE NAZAD
-  // ============================================================
-  
-  const sortFlightsByScheduledTime = useCallback(
-    (flights: Flight[]): Flight[] =>
-      [...flights].sort((a, b) =>
-        (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")
-      ),
-    []
-  )
-
-  const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
-    const now = new Date()
-    return flights.filter(f => {
-      const flightNum = (f.FlightNumber || "").toUpperCase()
-      if (HIDDEN_FLIGHT_PATTERNS.some(p => flightNum.includes(p))) return false
-
-      const status   = (f.StatusEN ?? "").toLowerCase()
-      const arrived  = checkStatus.isArrived(f)
-      const departed = !checkStatus.isDelayed(f) &&
-        (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
-
-      if (!arrived && !departed) return true
-
-      const timeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime || f.ActualDepartureTime
-      if (!timeStr) return !arrived && !departed
-
-      const ft = parseDepartureTimeLocal(timeStr)
-      if (!ft) return false
-
-      const diff = Math.floor((now.getTime() - ft.getTime()) / 60_000)
-      if (isArrivals && arrived)   return diff <= 20
-      if (!isArrivals && departed) return diff <= 20
-      return true
-    })
-  }, [])
-
-  // ============================================================
-  // NOVI EFEKAT: UČITAVANJE IZ KEŠA
-  // (Sada je siguran jer su funkcije gore definisane)
-  // ============================================================
-  useEffect(() => {
-    const cached = loadFromCache()
-    if (cached) {
-      const filteredArrivals = filterRecentFlights(cached.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
-      const rawDepartures = getUniqueDeparturesWithDeparted(filterRecentFlights(cached.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
-
-      const departuresWithMeta = rawDepartures.map(f => {
-        const clone    = { ...f }
-        const num      = f.FlightNumber ?? ""
-        const prevGate = prevGatesRef.current[num]
-        if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
-          (clone as any)._gateChangedAt = Date.now()
-        }
-        if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
-        return clone
-      })
-
-      setArrivals(filteredArrivals)
-      setDepartures(departuresWithMeta)
-      setLastUpdate(cached.lastUpdated || new Date().toLocaleTimeString("en-GB"))
-      
-      // Ako ima keša, ukloni loader odmah
-      setLoading(false)
-    }
-  }, [filterRecentFlights])
-
-  // Heartbeat
-  useEffect(() => {
-    const upd = () => { lastHeartbeat.current = Date.now() }
-    const chk = setInterval(() => {
-      if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload()
-    }, HEARTBEAT_CHECK_INTERVAL_MS)
-    window.addEventListener("mousemove",  upd, { passive: true })
-    window.addEventListener("keypress",   upd, { passive: true })
-    window.addEventListener("touchstart", upd, { passive: true })
-    return () => { clearInterval(chk); window.removeEventListener("mousemove", upd); window.removeEventListener("keypress", upd); window.removeEventListener("touchstart", upd) }
-  }, [])
-
-  // Global errors
-  useEffect(() => {
-    const onErr = (e: ErrorEvent) => {
-      const m = e.error?.message || ""
-      if (m.includes("Out of memory") || m.includes("stack overflow") || m.includes("JavaScript heap")) {
-        setErrorMessage("Critical error. Restarting..."); setTimeout(() => window.location.reload(), 2_000)
-      }
-    }
-    const onRej = (e: PromiseRejectionEvent) => {
-      const m = e.reason?.message || ""
-      if (m.includes("network") || m.includes("fetch")) { setErrorMessage("Network error. Retrying..."); setTimeout(() => setErrorMessage(null), 5_000) }
-    }
-    window.addEventListener("error", onErr); window.addEventListener("unhandledrejection", onRej)
-    return () => { window.removeEventListener("error", onErr); window.removeEventListener("unhandledrejection", onRej) }
-  }, [])
-
-  // Memory cleanup
-  useEffect(() => {
-    const id = setInterval(() => {
-      setArrivals(  p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
-      setDepartures(p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
-      if ((window as any).gc) (window as any).gc()
-    }, MEMORY_CLEANUP_INTERVAL_MS)
+    const id = setInterval(() => setLangIdx(i => (i + 1) % LANGUAGE_KEYS.length), 4_000)
     return () => clearInterval(id)
   }, [])
 
-  // Auto-recovery
-  useEffect(() => {
-    let t: ReturnType<typeof setTimeout>
-    const id = setInterval(() => {
-      if (!loading && arrivals.length === 0 && departures.length === 0 && !isRecovering) {
-        setIsRecovering(true)
-        t = setTimeout(() => { if (arrivals.length === 0 && departures.length === 0) window.location.reload(); setIsRecovering(false) }, 30_000)
-      }
-    }, 10_000)
-    return () => { clearInterval(id); clearTimeout(t) }
-  }, [loading, arrivals.length, departures.length, isRecovering])
-
-  // Language rotation
-  useEffect(() => {
-    const id = setInterval(() => setCurrentLanguageIndex(p => (p + 1) % Object.keys(LANGUAGE_CONFIG).length), 4_000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Security message rotation
-  useEffect(() => {
-    const id = setInterval(() => setCurrentMessageIndex(p => (p + 1) % SECURITY_MESSAGES.length), 20_000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Data loading
-useEffect(() => {
-  isMountedRef.current = true
-  const controller = new AbortController()
-  let tid: ReturnType<typeof setTimeout>
-
-  const load = async () => {
-    if (!isMountedRef.current) return
-    let data: FlightDataResponse | null = null
-    let usedCache = false
-
-    try {
-      // Prikaži loading samo ako nemamo nikakve podatke
-      if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0) {
-        setLoading(true)
-      }
-      setErrorMessage(null)
-
-      try {
-        // fetch sa AbortSignal
-        const res = await fetch("/api/flights", { signal: controller.signal })
-        if (!res.ok) throw new Error("Network error")
-        data = await res.json() as FlightDataResponse
-        if (isMountedRef.current) saveToCache(data)
-      } catch (fe) {
-        setErrorMessage("Network error. Using cached data.")
-        const c = loadFromCache()
-        if (c) { data = c; usedCache = true } else throw fe
-      }
-
-      if (!isMountedRef.current || !data) return
-
-      // filtriranje i priprema podataka
-      const filteredArrivals = filterRecentFlights(data.arrivals, true)
-        .slice(0, MAX_FLIGHTS_DISPLAY)
-
-      const rawDepartures = getUniqueDeparturesWithDeparted(
-        filterRecentFlights(data.departures, false)
-      ).slice(0, MAX_FLIGHTS_DISPLAY)
-
-      const departuresWithMeta = rawDepartures.map(f => {
-        const clone = { ...f }
-        const num = f.FlightNumber ?? ""
-        const prevGate = prevGatesRef.current[num]
-        if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
-          (clone as any)._gateChangedAt = Date.now()
-        }
-        if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
-        return clone
-      })
-
-      setArrivals(filteredArrivals)
-      setDepartures(departuresWithMeta)
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-
-      if (!usedCache) setErrorMessage(null)
-      else setTimeout(() => setErrorMessage(null), 5_000)
-
-    } catch (e) {
-      console.error("Critical:", e)
-      setErrorMessage("Unable to load flight data. Check connection.")
-    } finally {
-      isInitialLoad.current = false
-      if (isMountedRef.current) {
-        setLoading(false)
-        tid = setTimeout(load, REFRESH_INTERVAL_MS)
-      }
-    }
-  }
-
-  load()
-  return () => {
-    isMountedRef.current = false
-    clearTimeout(tid)
-    controller.abort() // prekini fetch ako se komponenta unmount-a
-  }
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [filterRecentFlights]) // samo filterRecentFlights u dependency array
-
-  // Switch arrivals/departures
+  // ── Arrivals/Departures switch — svake 20s ────────────────
   useEffect(() => {
     const id = setInterval(() => setShowArrivals(p => !p), 20_000)
     return () => clearInterval(id)
   }, [])
 
+  // ── Heartbeat (kiosk — bez mouse/key listenera) ───────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload()
+      else lastHeartbeat.current = Date.now()  // Kiosk: ažurira sam sebe
+    }, HEARTBEAT_CHECK_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Memory cleanup ────────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      setArrivals(p => p.length > MAX_FLIGHTS_MEMORY ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
+      setDepartures(p => p.length > MAX_FLIGHTS_MEMORY ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
+    }, MEMORY_CLEANUP_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Global error handler ──────────────────────────────────
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) => {
+      const m = e.error?.message || ""
+      if (m.includes("Out of memory") || m.includes("stack overflow") || m.includes("heap")) {
+        setTimeout(() => window.location.reload(), 2_000)
+      }
+    }
+    window.addEventListener("error", onErr)
+    return () => window.removeEventListener("error", onErr)
+  }, [])
+
+  // ── Filter helpers ────────────────────────────────────────
+  const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
+    const now = new Date()
+    return flights.filter(f => {
+      const fn = (f.FlightNumber || "").toUpperCase()
+      if (HIDDEN_FLIGHT_PATTERNS.some(p => fn.includes(p))) return false
+      const status   = (f.StatusEN ?? "").toLowerCase()
+      const arrived  = /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(status)
+      const departed = !/(delay|kasni)/i.test(status) &&
+        (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
+      if (!arrived && !departed) return true
+      const timeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime || f.ActualDepartureTime
+      if (!timeStr) return false
+      const ft = parseFlightTimeToDate(timeStr)
+      if (!ft) return false
+      const diff = Math.floor((now.getTime() - ft.getTime()) / 60_000)
+      if (isArrivals && arrived)    return diff <= 20
+      if (!isArrivals && departed)  return diff <= 20
+      return true
+    })
+  }, [])
+
+  // ── Pripremi letove iz sirovih podataka ───────────────────
+  const prepareData = useCallback((data: FlightDataResponse) => {
+    const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
+    const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
+    const departuresWithMeta = rawDep.map(f => {
+      const clone = { ...f }
+      const num = f.FlightNumber ?? ""
+      if (prevGatesRef.current[num] && f.GateNumber && prevGatesRef.current[num] !== f.GateNumber)
+        (clone as any)._gateChangedAt = Date.now()
+      if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
+      return clone
+    })
+    return { filteredArrivals, departuresWithMeta }
+  }, [filterRecentFlights])
+
+  // ── Inicijalni keš load ───────────────────────────────────
+  useEffect(() => {
+    const cached = loadFromCache()
+    if (!cached) return
+    const { filteredArrivals, departuresWithMeta } = prepareData(cached)
+    setArrivals(filteredArrivals)
+    setDepartures(departuresWithMeta)
+    setLastUpdate(cached.lastUpdated || new Date().toLocaleTimeString("en-GB"))
+    setLoading(false)
+  }, [prepareData])
+
+  // ── Polling: jedan fetch, bez retry (Vercel optimizacija) ──
+  useEffect(() => {
+    isMountedRef.current = true
+    let tid: ReturnType<typeof setTimeout>
+    const controller = new AbortController()
+
+    const load = async () => {
+      if (!isMountedRef.current) return
+      try {
+        if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
+          setLoading(true)
+        setErrorMessage(null)
+
+        let data: FlightDataResponse | null = null
+        try {
+          const res = await fetch("/api/flights", {
+            signal: controller.signal,
+            headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+          })
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          data = await res.json()
+          if (isMountedRef.current && data) saveToCache(data)
+        } catch (fe) {
+          if ((fe as Error).name === "AbortError") return   // unmount — tiho
+          const cached = loadFromCache()
+          if (cached) {
+            data = cached
+            setErrorMessage("Using cached data")
+            setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000)
+          } else {
+            setErrorMessage("Unable to load flight data")
+          }
+        }
+
+        if (!isMountedRef.current || !data) return
+        const { filteredArrivals, departuresWithMeta } = prepareData(data)
+        setArrivals(filteredArrivals)
+        setDepartures(departuresWithMeta)
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+      } catch (e) {
+        console.error("Critical:", e)
+      } finally {
+        isInitialLoad.current = false
+        if (isMountedRef.current) {
+          setLoading(false)
+          tid = setTimeout(load, REFRESH_INTERVAL_MS)
+        }
+      }
+    }
+
+    load()
+    return () => {
+      isMountedRef.current = false
+      clearTimeout(tid)
+      controller.abort()
+    }
+  }, [prepareData]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Close handler ─────────────────────────────────────────
   const handleClose = useCallback(() => {
-    if ((window as any).electronAPI?.quitApp) { ;(window as any).electronAPI.quitApp(); return }
-    try { if ((window as any).chrome?.webview) { ;(window as any).chrome.webview.postMessage("APP_QUIT"); return } } catch {}
+    if ((window as any).electronAPI?.quitApp) { (window as any).electronAPI.quitApp(); return }
+    try { if ((window as any).chrome?.webview) { (window as any).chrome.webview.postMessage("APP_QUIT"); return } } catch {}
     window.postMessage({ type: "ELECTRON_APP_QUIT" }, "*")
     try { if (window.parent !== window) window.parent.postMessage({ type: "ELECTRON_APP_QUIT" }, "*") } catch {}
     window.location.reload()
   }, [])
 
-  const lang     = useMemo(() => { const k = Object.keys(LANGUAGE_CONFIG); return LANGUAGE_CONFIG[k[currentLanguageIndex] as keyof typeof LANGUAGE_CONFIG] }, [currentLanguageIndex])
-  const title    = useMemo(() => showArrivals ? lang.arrivals    : lang.departures,    [showArrivals, lang])
-  const subtitle = useMemo(() => showArrivals ? lang.incomingFlights : lang.outgoingFlights, [showArrivals, lang])
+  // ── Derived ───────────────────────────────────────────────
+  const lang     = LANGUAGE_CONFIG[LANGUAGE_KEYS[langIdx]]
+  const title    = showArrivals ? lang.arrivals    : lang.departures
+  const subtitle = showArrivals ? lang.incomingFlights : lang.outgoingFlights
 
-  const ArrivalIcon   = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500 rotate-90`} />, [])
-  const DepartureIcon = useCallback(({ className = "w-5 h-5" }: { className?: string }) => <Plane className={`${className} text-orange-500`} />, [])
+  const ArrivalIcon   = useCallback(({ className = "w-5 h-5" }: { className?: string }) =>
+    <Plane className={`${className} text-orange-500 rotate-90`} />, [])
+  const DepartureIcon = useCallback(({ className = "w-5 h-5" }: { className?: string }) =>
+    <Plane className={`${className} text-orange-500`} />, [])
 
-const tableHeaders = useMemo(() => {
-  const t = lang.tableHeaders
-  if (showArrivals) return [
-    { label: t.scheduled, width: "180px", icon: Clock       },
-    { label: t.estimated, width: "180px", icon: Clock       },
-    { label: t.flight,    width: "280px", icon: ArrivalIcon  },
-    { label: t.from,      width: "580px", icon: MapPin      },  // Smanjeno sa 580px na 480px
-    { label: t.status,    width: "720px", icon: Info        },  // Povećano sa 620px na 720px
-  ]
-  return [
-    { label: t.scheduled,   width: "180px", icon: Clock        },
-    { label: t.estimated,   width: "180px", icon: Clock        },
-    { label: t.flight,      width: "280px", icon: DepartureIcon },
-    { label: t.destination, width: "380px", icon: MapPin       },
-    { label: t.checkIn,     width: "340px", icon: Users        },  // Povećano sa 320px na 340px (približeno Gate koloni)
-    { label: t.gate,        width: "220px", icon: DoorOpen     },  // Povećano sa 180px na 220px
-    { label: t.status,      width: "500px", icon: Info         },  // Povećano sa 420px na 500px
-  ]
-}, [showArrivals, lang, ArrivalIcon, DepartureIcon])
+  const tableHeaders = useMemo(() => {
+    const t = lang.tableHeaders
+    if (showArrivals) return [
+      { label: t.scheduled,   width: "180px", icon: Clock        },
+      { label: t.estimated,   width: "180px", icon: Clock        },
+      { label: t.flight,      width: "280px", icon: ArrivalIcon  },
+      { label: t.from,        width: "580px", icon: MapPin       },
+      { label: t.status,      width: "720px", icon: Info         },
+    ]
+    return [
+      { label: t.scheduled,   width: "180px", icon: Clock        },
+      { label: t.estimated,   width: "180px", icon: Clock        },
+      { label: t.flight,      width: "280px", icon: DepartureIcon},
+      { label: t.destination, width: "380px", icon: MapPin       },
+      { label: t.checkIn,     width: "340px", icon: Users        },
+      { label: t.gate,        width: "220px", icon: DoorOpen     },
+      { label: t.status,      width: "500px", icon: Info         },
+    ]
+  }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
-  const departuresWithTick = useMemo(
-    () => departures.map(f => ({ ...f, _autoStatusTick: autoStatusTick } as unknown as Flight)),
-    [departures, autoStatusTick]
-  )
+  const sortedFlights = useMemo(() => {
+    const base = showArrivals ? arrivals : departures
+    return [...base]
+      .sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99"))
+      .slice(0, MAX_FLIGHTS_DISPLAY)
+  }, [showArrivals, arrivals, departures])
 
-  const currentFlights = useMemo(
-    () => showArrivals ? arrivals : departuresWithTick,
-    [showArrivals, arrivals, departuresWithTick]
-  )
-
-  const sortedFlights = useMemo(
-    () => sortFlightsByScheduledTime(currentFlights).slice(0, MAX_FLIGHTS_DISPLAY),
-    [currentFlights, sortFlightsByScheduledTime]
-  )
-
+  // ── Render ────────────────────────────────────────────────
   return (
     <div
-      className={`h-screen ${currentColors.background} text-white p-2 sm:p-4 transition-colors duration-700 flex flex-col select-none`}
+      className={`h-screen ${colors.background} text-white p-2 sm:p-4 transition-colors duration-700 flex flex-col select-none`}
       onDragOver={e => e.preventDefault()}
       onDrop={e => e.preventDefault()}
     >
       {errorMessage && (
-        <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:bottom-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
+        <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
           ⚠️ {errorMessage}
         </div>
       )}
@@ -1107,59 +860,49 @@ const tableHeaders = useMemo(() => {
       <button
         onClick={handleClose}
         className="absolute top-3 right-3 sm:top-6 sm:right-6 w-8 h-8 sm:w-10 sm:h-10 flex items-center justify-center rounded-full bg-black/40 hover:bg-black/60 active:bg-black/80 text-white shadow-2xl cursor-pointer z-50 transition-all duration-200 hover:scale-110 active:scale-95 border-2 border-white/20"
-        title="Close App"
         type="button"
+        title="Close App"
       >
-        <span className="text-xl sm:text-2xl font-bold leading-none flex items-center justify-center w-full h-full pointer-events-none">×</span>
+        <span className="text-xl sm:text-2xl font-bold leading-none pointer-events-none">×</span>
       </button>
 
-      {/* Header */}
+      {/* ── Header ─────────────────────────────────────────── */}
       <div className="w-full mx-auto mb-2 sm:mb-4 flex-shrink-0">
         <div className="flex justify-between items-center gap-2 sm:gap-4">
-
           <div className="flex items-center gap-3 sm:gap-6 min-w-0">
             <div className="p-2 sm:p-4 bg-transparent rounded-xl sm:rounded-2xl shadow-2xl border-2 border-orange-500 flex-shrink-0">
               {showArrivals
                 ? <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500 rotate-90" />
-                : <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500" />
-              }
+                : <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500" />}
             </div>
-
             <div className="min-w-0">
-              <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${currentColors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
+              <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${colors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
                 {title}
               </h1>
-              <p className={`${currentColors.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate`}>
+              <p className={`${colors.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate`}>
                 {subtitle}
               </p>
             </div>
           </div>
-
           <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
-            <div className="hidden sm:block">
-              <ClockDisplay colorClass="text-white" />
-            </div>
-            <div className="block sm:hidden">
-              <ClockDisplay colorClass="text-white" />
-            </div>
-            <div className={`w-3 h-3 sm:w-6 sm:h-6 rounded-full ${currentColors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
+            <ClockDisplay colorClass="text-white" />
+            <div className={`w-3 h-3 sm:w-6 sm:h-6 rounded-full ${colors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
           </div>
         </div>
       </div>
 
-      {/* Tabla */}
+      {/* ── Tablica ─────────────────────────────────────────── */}
       <div className="w-full mx-auto flex-1 min-h-0">
-  {arrivals.length === 0 && departures.length === 0 ? (
+        {loading && arrivals.length === 0 && departures.length === 0 ? (
           <div className="text-center p-8 h-full flex items-center justify-center">
             <div className="inline-flex items-center gap-4">
-              <div className={`w-8 h-8 border-4 ${currentColors.border} border-t-transparent rounded-full animate-spin`} />
+              <div className={`w-8 h-8 border-4 ${colors.border} border-t-transparent rounded-full animate-spin`} />
               <span className="text-xl sm:text-2xl text-white font-semibold">Awaiting flight data...</span>
             </div>
           </div>
         ) : (
-          <div className={`${currentColors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
-            <TableHeaders headers={tableHeaders} headerBg={currentColors.header} />
-
+          <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
+            <TableHeaders headers={tableHeaders} headerBg={colors.header} />
             <div className="flex-1 overflow-y-auto">
               {sortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
@@ -1173,7 +916,7 @@ const tableHeaders = useMemo(() => {
                     flight={flight}
                     index={index}
                     showArrivals={showArrivals}
-                    colorTitle={currentColors.title}
+                    colorTitle={colors.title}
                     autoStatusTick={autoStatusTick}
                   />
                 ))
@@ -1183,40 +926,20 @@ const tableHeaders = useMemo(() => {
         )}
       </div>
 
-      {/* Ticker */}
+      {/* ── Ticker ──────────────────────────────────────────── */}
       <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
         <div className="ticker-wrap">
-          <div className={`ticker-move ${currentColors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
-            {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
-            {SECURITY_MESSAGES.map((msg, i) => <span key={`dup-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
+          <div className={`ticker-move ${colors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
+            {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
+            {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
           </div>
         </div>
       </div>
 
       <style jsx global>{`
         #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
-        .led-base{will-change:opacity,box-shadow;animation:1s ease-in-out infinite alternate led-pulse}
-        .led-phase-b{animation-delay:.5s}
-        .led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}
-        .led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}
-        .led-purple{background:#4a1d96}.led-lime{background:#365314}
-        @keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}
-        @keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}
-        @keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}
-        @keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}
-        @keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}
-        @keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}
-        @keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}
-        @keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}
-        @keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}
-        .led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}
-        .led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}
-        .led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}
-        .led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}
-        .led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}
-        .led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}
-        .led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}
-        .led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}
+        @keyframes ledBlinkA{0%{opacity:.2}100%{opacity:1}}
+        @keyframes ledBlinkB{0%{opacity:1}100%{opacity:.2}}
         @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
         @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
         .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink;will-change:opacity}
@@ -1225,20 +948,10 @@ const tableHeaders = useMemo(() => {
         .ticker-move{display:inline-block;white-space:nowrap;will-change:transform;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
         @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
         @media(max-width:639px){.ticker-move{animation-duration:35s}}
-        @media(prefers-reduced-motion:reduce){.animate-blink,.animate-pill-blink,.animate-pill-blink-fast,.animate-pulse,.animate-spin,.led-base,.ticker-move{animation:none!important;opacity:1!important}}
+        @media(prefers-reduced-motion:reduce){.animate-pill-blink,.animate-pill-blink-fast,.animate-pulse,.animate-spin,.ticker-move{animation:none!important;opacity:1!important}}
         ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
-        body,html{overflow:hidden;margin:0;padding:0}.flight-row-contain{contain:layout style}
-        @keyframes ledBlinkA {
-  0% { opacity: 0.2; }
-  100% { opacity: 1; }
-}
-
-/* Druga LED - invertovana animacija (0% svijetla, 100% tamna) */
-@keyframes ledBlinkB {
-  0% { opacity: 1; }
-  100% { opacity: 0.2; }
-}
+        body,html{overflow:hidden;margin:0;padding:0}
       `}</style>
     </div>
   )
