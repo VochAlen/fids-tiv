@@ -511,6 +511,22 @@ export default function CheckInPage() {
   );
 }
 
+function getAdImagesForFlight(
+  flight: EnhancedFlight | null,
+  classType: string | null,
+  defaultAdImages: string[]
+): string[] {
+  if (!flight) return defaultAdImages;
+  
+  // British Airways — posebne slike prema klasi
+  if (flight.FlightNumber?.toUpperCase().startsWith('BA')) {
+    const isBusiness = classType?.toUpperCase().includes('BUSINESS');
+    return isBusiness ? ['/british/ba1.jpg'] : ['/british/ba2.jpg'];
+  }
+  
+  return defaultAdImages;
+}
+
 // ============================================================
 // INNER DISPLAY KOMPONENTA
 // ============================================================
@@ -559,13 +575,13 @@ function CheckInDisplay() {
   }, []);
 
   // ── Helper: ručni status šaltera
-  const fetchDeskStatusOverride = useCallback(async (desk: string): Promise<string | null> => {
-    try {
-      const res = await fetch(`/api/desk-status/${desk}`);
-      const data = await res.json();
-      return data.status;
-    } catch { return null; }
-  }, []);
+  // const fetchDeskStatusOverride = useCallback(async (desk: string): Promise<string | null> => {
+  //   try {
+  //     const res = await fetch(`/api/desk-status/${desk}`);
+  //     const data = await res.json();
+  //     return data.status;
+  //   } catch { return null; }
+  // }, []);
 
   // ── Sync currentFlightRef
   useEffect(() => { currentFlightRef.current = flightDisplay.flight; }, [flightDisplay.flight]);
@@ -818,7 +834,9 @@ function CheckInDisplay() {
         }
       }, 500);
     }
-  }, [deskNumberParam, preloadFlightImages, updateCountdowns, fetchDeskClassOverride, fetchDeskStatusOverride]);
+  // }, [deskNumberParam, preloadFlightImages, updateCountdowns, fetchDeskClassOverride, fetchDeskStatusOverride]);
+  }, [deskNumberParam, preloadFlightImages, updateCountdowns, fetchDeskClassOverride]);
+
 
   // ── Queue novog flighta
   // P3 FIX: umjesto push, uvijek zamijeni pending let s najnovijim.
@@ -947,46 +965,50 @@ function CheckInDisplay() {
           const deskPosition = deskIndex + 1;
           return { ...flight, departureTime, isActive: !isDeparted && !isCancelled, deskPosition };
         })
-        .filter((f): f is typeof f & { departureTime: Date } =>
-          f.departureTime !== null &&
-          f.isActive &&
-          !isCheckInClosed(f as typeof f & { departureTime: Date }, allOverrides)
-        ) as (EnhancedFlight & { departureTime: Date; isActive: boolean; deskPosition: number })[];
+   .filter((f): f is typeof f & { departureTime: Date } =>
+  f.departureTime !== null &&
+  f.isActive
+) as (EnhancedFlight & { departureTime: Date; isActive: boolean; deskPosition: number })[];
 
       const sorted = withTime.sort((a, b) => a.departureTime.getTime() - b.departureTime.getTime());
 
       // ── Future letovi (dinamički lookahead + ETD za velika kašnjenja)
-      const future = sorted.filter((f) => {
-        const s = (f.StatusEN || '').toLowerCase();
-        if (s.includes('cancelled') || s.includes('departed') || s.includes('poletio')) return false;
+const future = sorted.filter((f) => {
+  const s = (f.StatusEN || '').toLowerCase();
+  if (s.includes('cancelled') || s.includes('departed') || s.includes('poletio')) return false;
 
-        const etd = f.EstimatedDepartureTime;
-        const std = f.ScheduledDepartureTime;
-        let effectiveDepartureMs = f.departureTime.getTime();
+  // isCheckInClosed pokriva: checkInDone marker, close time (STD/ETD-30min)
+  // i open time (STD/ETD-lookahead) — sve u jednoj funkciji
+  if (isCheckInClosed(f, allOverrides)) return false;
 
-        if (etd && std && etd !== std) {
-          const [eh, em] = etd.split(':').map(Number);
-          const [sh, sm] = std.split(':').map(Number);
-          if (!isNaN(eh) && !isNaN(sh)) {
-            let delay = (eh * 60 + em) - (sh * 60 + sm);
-            if (delay > LARGE_DELAY_THRESHOLD_MIN) {
-              const etdDate = new Date();
-              etdDate.setHours(eh, em, 0, 0);
-              effectiveDepartureMs = etdDate.getTime();
-            }
-          }
-        }
+  const etd = f.EstimatedDepartureTime;
+  const std = f.ScheduledDepartureTime;
+  let effectiveDepartureMs = f.departureTime.getTime();
 
-        if (effectiveDepartureMs <= now.getTime()) return false;
+  if (etd && std && etd !== std) {
+    const [eh, em] = etd.split(':').map(Number);
+    const [sh, sm] = std.split(':').map(Number);
+    if (!isNaN(eh) && !isNaN(sh)) {
+      let delay = (eh * 60 + em) - (sh * 60 + sm);
+      if (delay < 0) delay += 1440;
+      if (delay > LARGE_DELAY_THRESHOLD_MIN) {
+        const etdDate = new Date();
+        etdDate.setHours(eh, em, 0, 0);
+        effectiveDepartureMs = etdDate.getTime();
+      }
+    }
+  }
 
-        const lookaheadMs = getCheckInLookaheadMs(f.FlightNumber);
-        const checkInWindowStart = effectiveDepartureMs - lookaheadMs;
-        if (DEVELOPMENT) {
-          const minutesBefore = Math.floor((effectiveDepartureMs - now.getTime()) / 60000);
-          console.log(`[CheckIn] ${f.FlightNumber}: ${minutesBefore}min prije ETD, lookahead ${lookaheadMs / 60000}min, ulazi: ${Date.now() >= checkInWindowStart}`);
-        }
-        return Date.now() >= checkInWindowStart;
-      });
+  if (effectiveDepartureMs <= now.getTime()) return false;
+
+  const lookaheadMs = getCheckInLookaheadMs(f.FlightNumber);
+  const checkInWindowStart = effectiveDepartureMs - lookaheadMs;
+  if (DEVELOPMENT) {
+    const minutesBefore = Math.floor((effectiveDepartureMs - now.getTime()) / 60000);
+    console.log(`[CheckIn] ${f.FlightNumber}: ${minutesBefore}min prije ETD, lookahead ${lookaheadMs / 60000}min, ulazi: ${Date.now() >= checkInWindowStart}`);
+  }
+  return Date.now() >= checkInWindowStart;
+});
 
       // ── Precision timer za sledeći check-in opening
       if (precisionTimerRef.current) {
@@ -1073,19 +1095,19 @@ function CheckInDisplay() {
         return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
       };
 
-      if (currentManualStatus === 'open') {
-        for (const f of sorted) {
-          const s = (f.StatusEN || '').toLowerCase();
-          if (s.includes('cancelled') || s.includes('otkazan') ||
-              s.includes('diverted')  || s.includes('preusmjeren') ||
-              s.includes('departed')  || s.includes('poletio')) continue;
-          if (isBlockedByEmpty(f)) continue;
-          if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
-          if (isCheckInClosed(f, allOverrides)) continue;
-          currentFlight = f;
-          break;
-        }
-      }
+if (currentManualStatus === 'open') {
+  for (const f of sorted) {
+    const s = (f.StatusEN || '').toLowerCase();
+    if (s.includes('cancelled') || s.includes('otkazan') ||
+        s.includes('diverted')  || s.includes('preusmjeren') ||
+        s.includes('departed')  || s.includes('poletio')) continue;
+    if (isBlockedByEmpty(f)) continue;
+    if (isCheckInClosed(f, allOverrides)) continue; // ← jedna linija umjesto duplirane logike
+    if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
+    currentFlight = f;
+    break;
+  }
+}
 
       if (!currentFlight && currentManualStatus !== 'closed') {
         for (const f of future) {
@@ -1602,8 +1624,12 @@ function CheckInDisplay() {
             </div>
           </div>
 
-          <AdBanner adImages={adImages} currentIndex={currentAdIndex} nextIndex={nextAdIndex} isTransitioning={isAdTransitioning} />
-
+<AdBanner 
+  adImages={getAdImagesForFlight(flightDisplay.flight, flightDisplay.classType, adImages)} 
+  currentIndex={currentAdIndex} 
+  nextIndex={nextAdIndex} 
+  isTransitioning={isAdTransitioning} 
+/>
           <div className="mt-2 mb-1 bg-slate-800/80 rounded-xl border border-white/10 p-3 gpu-accelerated">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
