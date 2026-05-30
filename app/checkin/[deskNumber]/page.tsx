@@ -422,19 +422,21 @@ const AirlineLogo = memo(function AirlineLogo({
   if (!logoUrl) return null;
   if (portrait) {
     return (
-      <div className="relative w-full max-w-[90vw] h-[220px] bg-white rounded-xl shadow-lg mb-3">
-        <Image src={logoUrl} alt={airlineName} fill sizes="(max-width: 768px) 90vw, 800px"
-          className="object-contain p-4" priority fetchPriority="high" loading="eager"
+      <div className="w-full max-w-[90vw] bg-white rounded-xl shadow-lg mb-3 flex items-center justify-center overflow-hidden">
+        <Image src={logoUrl} alt={airlineName} width={800} height={220}
+          className="w-full h-auto object-contain"
+          priority fetchPriority="high" loading="eager"
           decoding="async" onError={handleError} />
       </div>
     );
   }
-  return (
-    <div className="w-72 h-36 bg-white rounded-2xl p-3 shadow-lg flex items-center justify-center flex-shrink-0">
-      <Image src={logoUrl} alt={airlineName} width={360} height={120}
-        className="object-contain" priority decoding="async" onError={handleError} />
-    </div>
-  );
+ return (
+      <div className="bg-white rounded-2xl shadow-lg flex-shrink-0 overflow-hidden">
+        <Image src={logoUrl} alt={airlineName} width={360} height={120}
+          className="w-auto h-auto max-w-[18rem] max-h-36 object-contain block"
+          priority decoding="async" onError={handleError} />
+      </div>
+    );
 });
 
 // ============================================================
