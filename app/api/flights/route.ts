@@ -48,6 +48,47 @@ const FETCH_HEADERS = {
   'Pragma': 'no-cache',
 } as const;
 
+
+// Polja koja check-in stranica STVARNO koristi
+// Sve ostalo se bacuje — smanjuje payload ~60-70%
+const SLIM_FIELDS = [
+  'FlightNumber',
+  'FlightType',
+  'AirlineName',
+  'AirlineICAO',
+  'AirlineLogoURL',
+  'DestinationCityName',
+  'DestinationAirportCode',
+  'ScheduledDepartureTime',
+  'EstimatedDepartureTime',
+  'StatusEN',
+  'GateNumber',
+  'CheckInDesk',
+  'BaggageReclaim',
+  'Terminal',
+  'CodeShareFlights',
+  '_sortTime',
+] as const;
+
+type SlimFlight = Pick<Flight, typeof SLIM_FIELDS[number]>;
+
+function slimFlight(f: Flight): SlimFlight {
+  const out = {} as SlimFlight;
+  for (const key of SLIM_FIELDS) {
+    if (key in f) (out as any)[key] = (f as any)[key];
+  }
+  return out;
+}
+
+function slimFlightData(data: FlightData): FlightData {
+  return {
+    ...data,
+    departures: data.departures.map(slimFlight) as Flight[],
+    arrivals:   data.arrivals.map(slimFlight)   as Flight[],
+  };
+}
+
+
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 1000;
@@ -412,7 +453,8 @@ export async function GET(): Promise<NextResponse> {
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
-    return NextResponse.json(flightData, {
+     return NextResponse.json(slimFlightData(flightData), {
+
       headers: {
         'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120',
         'X-Data-Source': 'live',
@@ -456,9 +498,9 @@ export async function GET(): Promise<NextResponse> {
 
       await saveFlightDataToCache(flightData);
 
-      return NextResponse.json(flightData, {
-        headers: {
-          'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60',
+      return NextResponse.json(slimFlightData(flightData), {
+          headers: {
+            'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=30',
           'X-Data-Source': source,
           'X-Offline-Mode': 'true',
           'X-Total-Flights': flightData.totalFlights.toString(),
@@ -487,7 +529,7 @@ export async function GET(): Promise<NextResponse> {
     // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
     await saveFlightMetadata(flightData.departures, flightData.arrivals, 'emergency');
 
-    return NextResponse.json(flightData, {
+   return NextResponse.json(slimFlightData(flightData), {
       headers: {
         'Cache-Control': 'public, s-maxage=15, stale-while-revalidate=30',
         'X-Data-Source': 'emergency',

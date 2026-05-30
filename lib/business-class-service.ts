@@ -112,6 +112,25 @@ export interface CreateDestinationData {
 
 export interface UpdateDestinationData extends Partial<CreateDestinationData> {}
 
+
+// ============================================================
+// IN-MEMORY CACHE (isti pattern kao u page.tsx)
+// ============================================================
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minuta
+
+let _specificFlightsCache: { data: SpecificFlight[]; expiry: number } | null = null;
+let _destinationsCache:    { data: Destination[];    expiry: number } | null = null;
+let _airlinesCache:        { data: Airline[];         expiry: number } | null = null;
+
+export function invalidateBusinessClassCache() {
+  _specificFlightsCache = null;
+  _destinationsCache    = null;
+  _airlinesCache        = null;
+}
+
+
+
+
 // Helper funkcija za hendlovanje fetch grešaka
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -133,18 +152,17 @@ async function handleResponse<T>(response: Response): Promise<T> {
 }
 
 // AVIO KOMPANIJE
-export async function getAllAirlines(): Promise<Airline[]> {
+export async function getAllAirlines(forceRefresh = false): Promise<Airline[]> {
+  if (!forceRefresh && _airlinesCache && Date.now() < _airlinesCache.expiry) {
+    return _airlinesCache.data;
+  }
   try {
-    const timestamp = Date.now();
-    const response = await fetch(`/api/admin/airlines?t=${timestamp}`, {
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
-      }
-    });
-    return await handleResponse<Airline[]>(response);
+    const response = await fetch('/api/admin/airlines', { next: { revalidate: 300 } });
+    const data = await handleResponse<Airline[]>(response);
+    _airlinesCache = { data, expiry: Date.now() + CACHE_TTL_MS };
+    return data;
   } catch (error) {
+    if (_airlinesCache) return _airlinesCache.data;
     console.error('Error fetching airlines:', error);
     throw error;
   }
@@ -222,18 +240,17 @@ export async function deleteAirline(iataCode: string): Promise<{ success: boolea
 }
 
 // SPECIFIČNI LETOVI
-export async function getAllSpecificFlights(): Promise<SpecificFlight[]> {
+export async function getAllSpecificFlights(forceRefresh = false): Promise<SpecificFlight[]> {
+  if (!forceRefresh && _specificFlightsCache && Date.now() < _specificFlightsCache.expiry) {
+    return _specificFlightsCache.data;
+  }
   try {
-    const timestamp = Date.now();
-    const response = await fetch(`/api/admin/specific-flights?t=${timestamp}`, {
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
-      }
-    });
-    return await handleResponse<SpecificFlight[]>(response);
+    const response = await fetch('/api/admin/specific-flights', { next: { revalidate: 300 } });
+    const data = await handleResponse<SpecificFlight[]>(response);
+    _specificFlightsCache = { data, expiry: Date.now() + CACHE_TTL_MS };
+    return data;
   } catch (error) {
+    if (_specificFlightsCache) return _specificFlightsCache.data; // stale fallback
     console.error('Error fetching specific flights:', error);
     throw error;
   }
@@ -357,18 +374,17 @@ export async function deleteSpecificFlight(flightNumber: string): Promise<{ succ
 
 
 // DESTINACIJE
-export async function getAllDestinations(): Promise<Destination[]> {
+export async function getAllDestinations(forceRefresh = false): Promise<Destination[]> {
+  if (!forceRefresh && _destinationsCache && Date.now() < _destinationsCache.expiry) {
+    return _destinationsCache.data;
+  }
   try {
-    const timestamp = Date.now();
-    const response = await fetch(`/api/admin/destinations?t=${timestamp}`, {
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
-      }
-    });
-    return await handleResponse<Destination[]>(response);
+    const response = await fetch('/api/admin/destinations', { next: { revalidate: 300 } });
+    const data = await handleResponse<Destination[]>(response);
+    _destinationsCache = { data, expiry: Date.now() + CACHE_TTL_MS };
+    return data;
   } catch (error) {
+    if (_destinationsCache) return _destinationsCache.data;
     console.error('Error fetching destinations:', error);
     throw error;
   }

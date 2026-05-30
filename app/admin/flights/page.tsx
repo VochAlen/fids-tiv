@@ -9,6 +9,9 @@ import {
   ChevronDown, LogOut, Home, Save, Trash2, AlertTriangle, Shield, Lock
 } from 'lucide-react';
 import type { Flight } from '@/types/flight';
+import { invalidateBusinessClassCache } from '@/lib/business-class-service';
+
+
 
 // ============================================================
 // KONSTANTE
@@ -395,6 +398,7 @@ export default function AdminFlightsPage() {
           body: JSON.stringify({ flightNumber, field, action, value })
         });
         if (!res.ok) throw new Error((await res.json()).message);
+        invalidateBusinessClassCache();
         await loadFlights(true);
         showToast(`Uspješno: ${field} → ${value || 'uklonjeno'}`, 'success');
       } catch (err) {
