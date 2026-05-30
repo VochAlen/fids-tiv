@@ -54,6 +54,9 @@ const DEVELOPMENT                  = process.env.NODE_ENV === 'development';
 const LARGE_DELAY_THRESHOLD_MIN    = 240;
 const DEFAULT_CHECKIN_OPEN_MINUTES = 120;
 
+const isBAFlight = (flight: EnhancedFlight | null): boolean =>
+  !!flight?.FlightNumber?.toUpperCase().startsWith('BA');
+
 const DESK_POSITION_CLASS: Record<number, string> = {
   1: 'BUSINESS',
   2: 'BUSINESS',
@@ -1339,8 +1342,9 @@ if (currentManualStatus === 'open') {
   }, [flightDisplay.flight?.FlightNumber, loadFlights]);
 
   // ── Ad crossfade
-  useEffect(() => {
+ useEffect(() => {
     if (adImages.length < 2) return;
+    if (isBAFlight(flightDisplay.flight)) return; // BA koristi fiksnu sliku
     const id = setInterval(() => {
       setIsAdTransitioning(true);
       const next = (currentAdIndex + 2) % adImages.length;
@@ -1354,7 +1358,7 @@ if (currentManualStatus === 'open') {
       }, 100);
     }, AD_SWITCH_INTERVAL);
     return () => clearInterval(id);
-  }, [adImages, currentAdIndex]);
+   }, [adImages, currentAdIndex, flightDisplay.flight]);
 
   // ── Debug info
   useEffect(() => {
