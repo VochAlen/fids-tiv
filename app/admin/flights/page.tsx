@@ -158,61 +158,147 @@ const StatusControl = ({ currentStatus, flightNumber, onOverride }: any) => {
 };
 
 // ============================================================
-// DESK MANUAL CONTROL (pojednostavljen)
+// DESK MANUAL CONTROL
+// FORCE OPEN (XY234) → early-open: prikaži OVAJ let odmah
+// FORCE CLOSE        → zatvori šalter
+// Reset to Auto      → vrati na automatiku
 // ============================================================
 const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string; flightNumber?: string }) => {
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
-  const desks = deskNumbers?.split(',').map(d => d.trim()) || [];
+  const [deskStates, setDeskStates] = useState<Record<string, { status: string; flightNumber: string | null }>>({});
+  const [loadingDesk, setLoadingDesk] = useState<Record<string, boolean>>({});
+  const desks = deskNumbers?.split(',').map(d => d.trim()).filter(Boolean) || [];
 
+  // Učitaj trenutni status pri mountu
   useEffect(() => {
-    desks.forEach(async desk => {
+    if (!desks.length) return;
+    desks.forEach(async (desk) => {
       try {
-        const res = await fetch(`/api/admin/desk-status-override/${desk}`);
+        const res = await fetch(`/api/desk-status/${desk}`);
+        if (!res.ok) return;
         const data = await res.json();
-        if (data.status) setOverrides(prev => ({ ...prev, [desk]: data.status }));
+        if (data.status) {
+          setDeskStates(prev => ({
+            ...prev,
+            [desk]: { status: data.status, flightNumber: data.flightNumber ?? null },
+          }));
+        }
       } catch {}
     });
-  }, [desks]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deskNumbers]);
 
-  const handleAction = async (desk: string, action: string) => {
+  const handleSetStatus = async (
+    desk: string,
+    status: 'open' | 'closed' | null,
+    targetFlight: string | null = null
+  ) => {
+    setLoadingDesk(prev => ({ ...prev, [desk]: true }));
     try {
-      const res = await fetch('/api/admin/desk-status-override', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: desk, action, flightNumber })
+      const res = await fetch(`/api/desk-status/${desk}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, flightNumber: targetFlight }),
       });
-      const result = await res.json();
-      if (result.cleared || result.ttl === 0) {
-        alert('Check-in prozor je već zatvoren (STD - 30min).');
-        return;
+      if (!res.ok) { alert('Greška pri postavljanju statusa'); return; }
+
+      if (status === null) {
+        setDeskStates(prev => { const n = { ...prev }; delete n[desk]; return n; });
+      } else {
+        setDeskStates(prev => ({ ...prev, [desk]: { status, flightNumber: targetFlight } }));
       }
-      if (action === 'clear') setOverrides(prev => { const next = { ...prev }; delete next[desk]; return next; });
-      else setOverrides(prev => ({ ...prev, [desk]: action }));
-    } catch (error) {
+    } catch {
       alert('Greška pri postavljanju statusa');
+    } finally {
+      setLoadingDesk(prev => ({ ...prev, [desk]: false }));
     }
   };
 
-  if (!deskNumbers) return null;
+  if (!desks.length) return null;
 
   return (
     <div className="mt-2 space-y-2">
-      <div className="text-xs text-white/50">🚷 Manual Open/Close</div>
-      {desks.map(desk => (
-        <div key={desk} className="flex items-center gap-2 p-2 rounded-lg bg-white/5 border border-white/10">
-          <span className="text-xs font-bold w-8">Š{desk}</span>
-          {!overrides[desk] ? (
-            <div className="flex gap-1">
-              <button onClick={() => handleAction(desk, 'open')} className="px-2 py-1 text-[10px] font-bold rounded bg-green-600 hover:bg-green-700 text-white">FORCE OPEN</button>
-              <button onClick={() => handleAction(desk, 'closed')} className="px-2 py-1 text-[10px] font-bold rounded bg-red-600 hover:bg-red-700 text-white">FORCE CLOSE</button>
+      <div className="text-xs text-white/50 mb-1">🖥️ Manual Desk Control</div>
+      {desks.map((desk) => {
+        const state     = deskStates[desk];
+        const isOpen    = state?.status === 'open';
+        const isClosed  = state?.status === 'closed';
+        const isEarly   = isOpen && !!state?.flightNumber;
+        const isBusy    = !!loadingDesk[desk];
+
+        return (
+          <div key={desk} className="rounded-lg bg-white/5 border border-white/10 overflow-hidden">
+
+            {/* Status red */}
+            <div className="flex items-center gap-2 px-3 py-2">
+              <span className="text-xs font-bold text-white/70 w-8 flex-shrink-0">Š{desk}</span>
+
+              {!state ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/40">AUTO</span>
+              ) : isEarly ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/30 text-purple-200 border border-purple-500/40 font-bold">
+                  ⚡ OPEN · {state.flightNumber}
+                </span>
+              ) : isOpen ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-500/30 font-bold">
+                  ✓ OPEN
+                </span>
+              ) : (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 font-bold">
+                  ✕ CLOSED
+                </span>
+              )}
+
+              {state && (
+                <button
+                  onClick={() => handleSetStatus(desk, null)}
+                  disabled={isBusy}
+                  className="ml-auto text-[10px] text-white/40 hover:text-white px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 transition disabled:opacity-40"
+                >
+                  Reset Auto
+                </button>
+              )}
             </div>
-          ) : (
-            <div className="flex items-center justify-between flex-1">
-              <span className={`text-xs font-bold px-2 py-0.5 rounded ${overrides[desk] === 'open' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'}`}>{overrides[desk].toUpperCase()}</span>
-              <button onClick={() => handleAction(desk, 'clear')} className="text-[10px] text-white/70 hover:text-white px-2 py-1 rounded bg-white/10">Reset to Auto</button>
+
+            {/* Dugmad */}
+            <div className="flex flex-wrap gap-1.5 px-3 pb-3">
+
+              {/* FORCE OPEN — uvijek šalje flightNumber ovog leta (early-open) */}
+              <button
+                onClick={() => handleSetStatus(desk, 'open', flightNumber ?? null)}
+                disabled={isBusy || (isEarly && state?.flightNumber === flightNumber)}
+                title={flightNumber
+                  ? `Otvori šalter za let ${flightNumber} odmah (early-open)`
+                  : 'Otvori šalter'}
+                className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40
+                  bg-green-600/20 hover:bg-green-600/40 text-green-300 border border-green-600/30"
+              >
+                ✓ FORCE OPEN{flightNumber ? ` (${flightNumber})` : ''}
+              </button>
+
+              {/* FORCE CLOSE */}
+              <button
+                onClick={() => handleSetStatus(desk, 'closed', null)}
+                disabled={isBusy || isClosed}
+                title="Zatvori šalter"
+                className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40
+                  bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-600/30"
+              >
+                ✕ FORCE CLOSE
+              </button>
+
             </div>
-          )}
-        </div>
-      ))}
+
+            {/* Info kad je early-open aktivan */}
+            {isEarly && (
+              <div className="mx-3 mb-3 px-2 py-1.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-[10px] text-purple-200">
+                ⚡ Let <strong>{state.flightNumber}</strong> prikazan odmah na ovom šalteru.
+                Klikni <strong>Reset Auto</strong> za povratak na automatiku.
+              </div>
+            )}
+
+          </div>
+        );
+      })}
     </div>
   );
 };

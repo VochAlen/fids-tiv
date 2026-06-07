@@ -144,19 +144,33 @@ async function fetchAllOverridesCached(): Promise<Record<string, Record<string, 
 // bez višestrukih API poziva u istom poll ciklusu.
 // ============================================================
 const DESK_STATUS_CACHE_MS = 30_000;
-let _deskStatusCache: Map<string, { status: string | null; expiry: number }> = new Map();
 
-async function fetchDeskStatusCached(desk: string): Promise<string | null> {
+interface DeskStatusResult {
+  status: string | null;
+  flightNumber: string | null; // ← early-open: konkretni let za prikaz
+}
+
+let _deskStatusCache: Map<string, DeskStatusResult & { expiry: number }> = new Map();
+
+async function fetchDeskStatusCached(desk: string): Promise<DeskStatusResult> {
   const cached = _deskStatusCache.get(desk);
-  if (cached && Date.now() < cached.expiry) return cached.status;
+  if (cached && Date.now() < cached.expiry) {
+    return { status: cached.status, flightNumber: cached.flightNumber };
+  }
   try {
     const res = await fetch(`/api/desk-status/${desk}`);
-    if (!res.ok) return cached?.status ?? null;
+    if (!res.ok) {
+      return { status: cached?.status ?? null, flightNumber: cached?.flightNumber ?? null };
+    }
     const data = await res.json();
-    _deskStatusCache.set(desk, { status: data.status ?? null, expiry: Date.now() + DESK_STATUS_CACHE_MS });
-    return data.status ?? null;
+    const result: DeskStatusResult = {
+      status: data.status ?? null,
+      flightNumber: data.flightNumber ?? null,
+    };
+    _deskStatusCache.set(desk, { ...result, expiry: Date.now() + DESK_STATUS_CACHE_MS });
+    return result;
   } catch {
-    return cached?.status ?? null;
+    return { status: cached?.status ?? null, flightNumber: cached?.flightNumber ?? null };
   }
 }
 
@@ -553,7 +567,8 @@ function CheckInDisplay() {
   const [isTransitioning,     setIsTransitioning]     = useState(false);
   const [shouldShowCheckIn,   setShouldShowCheckIn]   = useState(false);
 
-  const isMountedRef          = useRef(true);
+const isMountedRef            = useRef(true);
+  const shouldShowCheckInRef    = useRef(shouldShowCheckIn);
   const currentFlightRef      = useRef<EnhancedFlight | null>(null);
   const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logoCacheRef          = useRef<Map<string, string>>(new Map());
@@ -571,11 +586,12 @@ function CheckInDisplay() {
   const currentTheme  = useSeasonalTheme();
 
   // ── Helper: ručna klasa šaltera
-  const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
+const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string | null> => {
     try {
       const res = await fetch(`/api/desk-class/${desk}`);
+      if (!res.ok) return null;
       const data = await res.json();
-      return data.classType;
+      return data.classType ?? null;
     } catch { return null; }
   }, []);
 
@@ -773,7 +789,7 @@ function CheckInDisplay() {
         return;
       }
 
-      const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, overrideStatus, checkInStatus] =
+     const [{ logoUrl, cityUrl }, fallbackClass, overrideClass, deskStatusResult, checkInStatus] =
         await Promise.all([
           preloadFlightImages(nextFlight),
           getCheckInClassType(nextFlight, deskNumberParam).catch(() => null),
@@ -788,7 +804,8 @@ function CheckInDisplay() {
           ),
         ]);
 
-      const finalClassType = overrideClass || fallbackClass;
+      const overrideStatus = deskStatusResult.status;
+const finalClassType = overrideClass || fallbackClass;
       const positionClassType = (() => {
         const isBA = nextFlight.FlightNumber?.toUpperCase().startsWith('BA');
         if (isBA) {
@@ -1077,12 +1094,71 @@ const future = sorted.filter((f) => {
 
       // ── Manual status za ovaj desk
       // P2+P9 FIX: koristi cached verziju umjesto direktnog fetcha
+ // ── Manual status za ovaj desk (uključuje early-open flightNumber)
       let currentManualStatus: string | null = null;
+      let earlyOpenFlightNumber: string | null = null;
       try {
-        currentManualStatus = await fetchDeskStatusCached(deskNumberParam);
-        if (DEVELOPMENT) console.log(`[CheckIn] Manual status desk ${deskNumberParam}: ${currentManualStatus}`);
+        const deskStatusResult = await fetchDeskStatusCached(deskNumberParam);
+        currentManualStatus = deskStatusResult.status;
+        earlyOpenFlightNumber = deskStatusResult.flightNumber;
+        if (DEVELOPMENT) {
+          console.log(`[CheckIn] Manual status desk ${deskNumberParam}: ${currentManualStatus}` +
+            (earlyOpenFlightNumber ? ` (early-open: ${earlyOpenFlightNumber})` : ''));
+        }
       } catch {
         if (DEVELOPMENT) console.warn('[CheckIn] Failed to fetch manual status');
+      }
+
+      // ── Early-open: pronađi let po broju, bypass check-in prozora
+      // Uslov: agent je manuelno otvorio let koji još nije u future[] prozoru.
+      // Kad let prirodno uđe u prozor → earlyOpenFlightNumber se ignoruje
+      // (future[] ga uzima normalno). Kad let poleti → key se briše (vidi niže).
+      let earlyOpenFlight: (EnhancedFlight & { departureTime: Date }) | null = null;
+      if (earlyOpenFlightNumber && currentManualStatus === 'open') {
+        const normalize = (fn: string) => fn.replace(/\s+/g, '').toUpperCase();
+        const candidate = sorted.find(
+          (f) => normalize(f.FlightNumber || '') === normalize(earlyOpenFlightNumber!)
+        ) ?? null;
+
+        if (candidate) {
+          const s = (candidate.StatusEN || '').toLowerCase();
+          const isTerminal =
+            s.includes('cancelled') || s.includes('otkazan') ||
+            s.includes('departed')  || s.includes('poletio');
+
+          if (isTerminal) {
+            // Let završio — očisti flightNumber iz desk-status keya
+            // (ostavi status 'open' nedirnut — agent ga sam gasi)
+            void fetch(`/api/desk-status/${deskNumberParam}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: 'open', flightNumber: null }),
+            }).then(() => invalidateDeskStatusCache(deskNumberParam)).catch(() => {});
+            if (DEVELOPMENT) console.log(`[EarlyOpen] ${candidate.FlightNumber} završio, čistim flightNumber iz keya`);
+          } else {
+            const alreadyInWindow = future.some(
+              (f) => normalize(f.FlightNumber || '') === normalize(earlyOpenFlightNumber!)
+            );
+            if (!alreadyInWindow) {
+              earlyOpenFlight = candidate;
+              if (DEVELOPMENT) {
+                const minsLeft = Math.round((candidate.departureTime.getTime() - Date.now()) / 60_000);
+                console.log(`[EarlyOpen] Desk ${deskNumberParam}: prikazujem ${candidate.FlightNumber} ` +
+                  `(${minsLeft}min do STD, izvan normalnog prozora)`);
+              }
+            } else {
+              // Ušao u normalni prozor — flightNumber više nije potreban u keyu
+              void fetch(`/api/desk-status/${deskNumberParam}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'open', flightNumber: null }),
+              }).then(() => invalidateDeskStatusCache(deskNumberParam)).catch(() => {});
+              if (DEVELOPMENT) console.log(`[EarlyOpen] ${candidate.FlightNumber} ušao u normalni prozor, čistim early-open signal`);
+            }
+          }
+        } else {
+          if (DEVELOPMENT) console.warn(`[EarlyOpen] Desk ${deskNumberParam}: ${earlyOpenFlightNumber} nije u feed-u (još nije stigao)`);
+        }
       }
 
       // ── Odaberi trenutni let
@@ -1100,20 +1176,26 @@ const future = sorted.filter((f) => {
         return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
       };
 
-if (currentManualStatus === 'open') {
-  for (const f of sorted) {
-    const s = (f.StatusEN || '').toLowerCase();
-    if (s.includes('cancelled') || s.includes('otkazan') ||
-        s.includes('diverted')  || s.includes('preusmjeren') ||
-        s.includes('departed')  || s.includes('poletio')) continue;
-    if (isBlockedByEmpty(f)) continue;
-    if (isCheckInClosed(f, allOverrides)) continue; // ← jedna linija umjesto duplirane logike
-    if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
-    currentFlight = f;
-    break;
-  }
-}
+   if (earlyOpenFlight && currentManualStatus !== 'closed') {
+        currentFlight = earlyOpenFlight;
+      }
 
+      // Prioritet 2: manual 'open' bez early-open, ili early-open nije pronađen u feed-u
+      if (!currentFlight && currentManualStatus === 'open') {
+        for (const f of sorted) {
+          const s = (f.StatusEN || '').toLowerCase();
+          if (s.includes('cancelled') || s.includes('otkazan') ||
+              s.includes('diverted')  || s.includes('preusmjeren') ||
+              s.includes('departed')  || s.includes('poletio')) continue;
+          if (isBlockedByEmpty(f)) continue;
+          if (isCheckInClosed(f, allOverrides)) continue;
+          if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
+          currentFlight = f;
+          break;
+        }
+      }
+
+      // Prioritet 3: normalni automatski check-in prozor
       if (!currentFlight && currentManualStatus !== 'closed') {
         for (const f of future) {
           if (isBlockedByEmpty(f)) continue;
@@ -1137,8 +1219,14 @@ if (currentManualStatus === 'open') {
 
       if (changed) await queueFlightTransition(currentFlight);
 
-      const idx  = future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
-      const next = idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null;
+   // Ako je currentFlight early-open (nije u future[]), next je prvi iz future[].
+      // Ako je u future[], next je sljedeći iza njega.
+      const currentIsEarlyOpen = currentFlight != null &&
+        !future.some((f) => f.FlightNumber === currentFlight.FlightNumber);
+      const idx  = currentIsEarlyOpen ? -1 : future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
+      const next = currentIsEarlyOpen
+        ? (future[0] ?? null)
+        : (idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null);
       if (isMountedRef.current) setNextScheduledFlight(next);
 
     } catch (err) {
@@ -1179,18 +1267,23 @@ if (currentManualStatus === 'open') {
   }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus,
       flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
+// ── Sync shouldShowCheckIn u ref da interval ne restartuje useEffect
+  useEffect(() => { shouldShowCheckInRef.current = shouldShowCheckIn; }, [shouldShowCheckIn]);
+
   // ── Main data load interval
   useEffect(() => {
     isMountedRef.current = true;
     void loadFlights();
-    const intervalMs = shouldShowCheckIn ? INTERVAL_ACTIVE : INTERVAL_INACTIVE;
-    const id = setInterval(() => { void loadFlights(); }, intervalMs);
+    const id = setInterval(() => {
+      if (!isMountedRef.current) return;
+      void loadFlights();
+    }, shouldShowCheckInRef.current ? INTERVAL_ACTIVE : INTERVAL_INACTIVE);
     return () => {
       isMountedRef.current = false;
       clearInterval(id);
       if (precisionTimerRef.current) clearTimeout(precisionTimerRef.current);
     };
-  }, [loadFlights, shouldShowCheckIn]);
+  }, [loadFlights]);
 
   // ── FIX 2 — visibilitychange: reload podataka kad se tab reaktivira
   useEffect(() => {
@@ -1209,10 +1302,10 @@ if (currentManualStatus === 'open') {
   useEffect(() => {
     if (!flightDisplay.flight) return;
     const refreshStatus = async () => {
-      try {
+   try {
         // Invalidiraj cache da forsiramo svježi fetch u ovom intervalu
         invalidateDeskStatusCache(deskNumberParam);
-        const newStatus = await fetchDeskStatusCached(deskNumberParam);
+        const { status: newStatus } = await fetchDeskStatusCached(deskNumberParam);
         setFlightDisplay((prev) => {
           if (prev.manualDeskStatus === newStatus) return prev;
           return { ...prev, manualDeskStatus: newStatus };
@@ -1322,9 +1415,9 @@ if (currentManualStatus === 'open') {
     if (!checkInCloseTime) return;
     const closeTimeMs  = checkInCloseTime.getTime();
     const msUntilClose = closeTimeMs - Date.now();
-    const doClose = () => {
+ const doClose = () => {
       invalidateDeskStatusCache(deskNumberParam);
-      void fetchDeskStatusCached(deskNumberParam).then((newStatus) => {
+      void fetchDeskStatusCached(deskNumberParam).then(({ status: newStatus }) => {
         setFlightDisplay((prev) => ({ ...prev, manualDeskStatus: newStatus }));
       });
     };
