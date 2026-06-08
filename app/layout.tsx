@@ -13,12 +13,7 @@ export const metadata: Metadata = {
 // ═══════════════════════════════════════════════════════════════
 // INICIJALIZACIJA AUTO-RESET SISTEMA (pokreće se jednom pri startu)
 // ═══════════════════════════════════════════════════════════════
-// Ovo se izvršava na serveru pri startu aplikacije
-// Timer će raditi non-stop, nezavisno od admin login-a
-
-// Provjeri da smo na serveru (ne u browseru)
 if (typeof window === 'undefined') {
-  // Mali delay da se osigura da je sve učitano
   setTimeout(() => {
     initAutoReset();
   }, 2000);
@@ -30,7 +25,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" data-theme="light">  {/* ← DODATO data-theme */}
       <body className={inter.className}>{children}</body>
     </html>
   );

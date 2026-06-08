@@ -365,11 +365,23 @@ export default function MobileFIDS() {
 
   // ─── Theme state ────────────────────────────────────────────────────────────
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  
+  // ─── FIX: sprječava flicker ikone aviona na prvom load-u ───────────────────
+  const [isInitialLoad, setIsInitialLoad] = useState(true)
 
   const mountedRef = useRef(true)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Inject CSS
+  // Force CSS injection BEFORE first render (sprječava FOUC - Flash of Unstyled Content)
+  if (typeof window !== 'undefined' && !document.getElementById('mf-styles')) {
+    const style = document.createElement('style')
+    style.id = 'mf-styles'
+    style.textContent = CSS
+    document.head.appendChild(style)
+    document.documentElement.setAttribute('data-theme', theme)
+  }
+
+  // Inject CSS (fallback)
   useEffect(() => {
     if (document.getElementById('mf-styles')) return
     const el = document.createElement('style')
@@ -449,7 +461,12 @@ export default function MobileFIDS() {
     setDepartures(deps)
     setArrivals(arrs)
     setLastUpdate(data.lastUpdated || new Date().toLocaleTimeString('en-GB'))
-  }, [])
+    
+    // FIX: nakon prvog uspješnog prepare, gasimo initial load state
+    if (isInitialLoad) {
+      setIsInitialLoad(false)
+    }
+  }, [isInitialLoad])
 
   // Load
   useEffect(() => {
@@ -509,6 +526,18 @@ export default function MobileFIDS() {
     [...filtered].sort((a, b) =>
       (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
     ), [filtered])
+
+  // ─── FIX: Sprječava flicker - potpuno prazan ekran tokom prvog load-a
+  if (isInitialLoad) {
+    return (
+      <div style={{ 
+        position: 'fixed', 
+        inset: 0, 
+        background: theme === 'dark' ? '#050A15' : '#F8FAFF',
+        visibility: 'hidden' 
+      }} />
+    )
+  }
 
   return (
     <div className="mf-root">
