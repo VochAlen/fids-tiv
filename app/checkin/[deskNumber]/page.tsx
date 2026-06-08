@@ -1221,9 +1221,12 @@ const future = sorted.filter((f) => {
 
    // Ako je currentFlight early-open (nije u future[]), next je prvi iz future[].
       // Ako je u future[], next je sljedeći iza njega.
-      const currentIsEarlyOpen = currentFlight != null &&
-        !future.some((f) => f.FlightNumber === currentFlight.FlightNumber);
-      const idx  = currentIsEarlyOpen ? -1 : future.findIndex((f) => f.FlightNumber === currentFlight?.FlightNumber);
+const safeFlight = currentFlight; // ← lokalna referenca
+const currentIsEarlyOpen = safeFlight != null &&
+  !future.some((f) => f.FlightNumber === safeFlight.FlightNumber);
+const idx = currentIsEarlyOpen
+  ? -1
+  : future.findIndex((f) => f.FlightNumber === safeFlight?.FlightNumber);
       const next = currentIsEarlyOpen
         ? (future[0] ?? null)
         : (idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null);
