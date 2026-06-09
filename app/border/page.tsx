@@ -346,9 +346,9 @@ const FooterMessage = memo(function FooterMessage() {
         <span className="fids-footer-separator">•</span>
         <span>Keep your personal belongings with you at all times.</span>
                 <span className="fids-footer-separator">•</span>
-        <span>Passengers must declare goods exceeding duty-free allowances at Customs Control.</span>
+        {/* <span>Passengers must declare goods exceeding duty-free allowances at Customs Control.</span>
                   <span className="fids-footer-separator">•</span>
-        <span>Free Wi-Fi available throughout the terminal.</span>
+        <span>Free Wi-Fi available throughout the terminal.</span> */}
       </div>
     </div>
   );
