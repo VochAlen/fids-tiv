@@ -25,7 +25,7 @@ const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
 const MAX_FLIGHTS_DISPLAY      = 12;
-const ARRIVED_SHOW_MINUTES     = 45;        // ← prikaži 45 min nakon dolaska
+const ARRIVED_SHOW_MINUTES     = 60;        // ← prikaži 45 min nakon dolaska
 const CANCELLED_SHOW_MINUTES   = 15;        // ← prikaži cancelled letove 15 minuta
 const HIDDEN_PATTERNS          = ["ZZZ", "G00", "PVT", "TST"];
 

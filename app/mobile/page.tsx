@@ -24,16 +24,273 @@ interface ParsedStatus {
   icon: string
 }
 
+// ─── TTS Types ────────────────────────────────────────────────────────────────
+type AnnouncementPhase =
+  | 'checkin_120' | 'checkin_90' | 'checkin_60' | 'checkin_45'
+  | 'boarding_30' | 'boarding_20'
+  | 'final_10'
+  | 'delay'
+  | 'arrived'
+
+interface AnnouncementKey {
+  flightNumber: string
+  phase: AnnouncementPhase
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 const REFRESH_MS = 60_000
 const CACHE_KEY = 'mfids_cache_v1'
 const CACHE_TTL = 5 * 60_000
-const PLACEHOLDER = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCA0MCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjQiIHJ4PSI0IiBmaWxsPSIjMUUyQTNBIi8+PHRleHQgeD0iMjAiIHk9IjE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNDc2MDdBIiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+'
+const PLACEHOLDER = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCA0MCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjQiIHJ4PSI0IiBmaWxsPSIjRjFGNUY5Ii8+PHRleHQgeD0iMjAiIHk9IjE1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOUM5Q0E2IiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+'
 
 const HIDDEN_PATTERNS = ['ZZZ', 'G00', 'PVT', 'TST']
 
 const CHECKIN_OFFSETS: Record<string, number> = {
   '6H': 180, 'FZ': 180, 'LS': 150, 'LY': 180, 'IZ': 180, 'BA': 150,
+}
+
+// ─── TTS Number Reader ────────────────────────────────────────────────────────
+const ONES = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+
+function numberToWords(n: number): string {
+  if (n < 20) return ONES[n] || String(n)
+  const t = Math.floor(n / 10)
+  const o = n % 10
+  return o === 0 ? TENS[t] : `${TENS[t]} ${ONES[o]}`
+}
+
+/**
+ * Reads a counter/gate string like "04", "05", "4-6", "4,5,6" as words.
+ * "04" → "four", "04,05,06" → "four, five and six"
+ */
+function readCounterString(raw: string): string {
+  if (!raw || raw === '-') return ''
+  // Normalize separators
+  const parts = raw.split(/[\s,\/\-–]+/).map(p => p.trim()).filter(Boolean)
+  const words = parts.map(p => {
+    const n = parseInt(p, 10)
+    return isNaN(n) ? p : numberToWords(n)
+  })
+  if (words.length === 0) return ''
+  if (words.length === 1) return words[0]
+  if (words.length === 2) return `${words[0]} and ${words[1]}`
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+}
+
+/**
+ * Spell out a flight number character by character with spaces so TTS reads each digit/letter.
+ * "W64521" → "W 6 4 5 2 1"
+ */
+function spellFlightNumber(fn: string): string {
+  return fn.trim().split('').join(' ')
+}
+
+// ─── TTS Engine ───────────────────────────────────────────────────────────────
+class TTSQueue {
+  private queue: string[] = []
+  private speaking = false
+  private enabled = true
+  private voice: SpeechSynthesisVoice | null = null
+
+  constructor() {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      // Pick the best English voice available
+      const pickVoice = () => {
+        const voices = window.speechSynthesis.getVoices()
+        const preferred = voices.find(v =>
+          v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex'))
+        ) || voices.find(v => v.lang.startsWith('en')) || null
+        this.voice = preferred
+      }
+      pickVoice()
+      window.speechSynthesis.onvoiceschanged = pickVoice
+    }
+  }
+
+  setEnabled(val: boolean) {
+    this.enabled = val
+    if (!val) {
+      this.queue = []
+      if (typeof window !== 'undefined') window.speechSynthesis?.cancel()
+      this.speaking = false
+    }
+  }
+
+  enqueue(text: string) {
+    if (!this.enabled) return
+    this.queue.push(text)
+    if (!this.speaking) this.processNext()
+  }
+
+  private processNext() {
+    if (!this.enabled || this.queue.length === 0) {
+      this.speaking = false
+      return
+    }
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+    this.speaking = true
+    const text = this.queue.shift()!
+    const utt = new SpeechSynthesisUtterance(text)
+    utt.lang = 'en-GB'
+    utt.rate = 0.88
+    utt.pitch = 1.0
+    utt.volume = 1.0
+    if (this.voice) utt.voice = this.voice
+    utt.onend = () => this.processNext()
+    utt.onerror = () => this.processNext()
+    window.speechSynthesis.cancel() // prevent any stale utterance
+    window.speechSynthesis.speak(utt)
+  }
+}
+
+// Singleton instance (created lazily on client)
+let ttsInstance: TTSQueue | null = null
+function getTTS(): TTSQueue {
+  if (!ttsInstance) ttsInstance = new TTSQueue()
+  return ttsInstance
+}
+
+// ─── Announcement Builder ─────────────────────────────────────────────────────
+function buildAnnouncementText(
+  phase: AnnouncementPhase,
+  flight: Flight,
+  isArrival: boolean,
+): string {
+  const airline = (flight.AirlineName || '').trim() || 'the airline'
+  const fn = spellFlightNumber(flight.FlightNumber || '')
+  const dest =
+    flight.DestinationCityName ||
+    flight.DestinationAirportName ||
+    flight.DestinationAirportCode ||
+    (isArrival ? (flight.OriginCityName || flight.OriginAirportName || flight.OriginAirportCode || 'origin') : 'destination')
+  const checkin = readCounterString(flight.CheckInDesk || '')
+  const gate = readCounterString(flight.GateNumber || '')
+
+  const intro = `${airline}, flight number ${fn}`
+
+  switch (phase) {
+    case 'checkin_120':
+    case 'checkin_90':
+    case 'checkin_60':
+    case 'checkin_45': {
+      const counterPart = checkin ? `, at check-in counter ${checkin}` : ''
+      return `Attention passengers. ${intro}, to ${dest}, check-in is now open${counterPart}. Please proceed to the check-in area.`
+    }
+    case 'boarding_30':
+    case 'boarding_20': {
+      const gatePart = gate ? `, at gate ${gate}` : ''
+      return `Attention passengers. ${intro}, to ${dest}, boarding is now in progress${gatePart}. Please have your boarding pass and documents ready.`
+    }
+    case 'final_10': {
+      const gatePart = gate ? `, gate ${gate}` : ''
+      return `This is the final call for all passengers travelling on ${intro}, to ${dest}${gatePart}. Please proceed to the gate immediately. The gate is about to close.`
+    }
+    case 'delay': {
+      return `Attention passengers. ${intro}, to ${dest}, has been delayed. We apologize for any inconvenience. Please listen for further announcements.`
+    }
+    case 'arrived': {
+      return `${airline}, flight number ${fn}, from ${dest}, has landed. Welcome.`
+    }
+  }
+}
+
+// ─── Announcement Scheduler ───────────────────────────────────────────────────
+/**
+ * Given the current list of departure and arrival flights,
+ * decide which announcements to fire (once per key per session).
+ */
+function scheduleAnnouncements(
+  departures: Flight[],
+  arrivals: Flight[],
+  announced: Set<string>,
+  enqueue: (text: string) => void,
+) {
+  const now = Date.now()
+
+  // ── Departures ──
+  for (const f of departures) {
+    const fn = f.FlightNumber || ''
+    if (!fn) continue
+    const statusRaw = (f.StatusEN ?? '').toLowerCase()
+
+    const sch = parseTime(f.ScheduledDepartureTime)
+    const est = parseTime(f.EstimatedDepartureTime) ?? sch
+    if (!sch || !est) continue
+
+    const minsToSch = (sch.getTime() - now) / 60_000
+    const minsToEst = (est.getTime() - now) / 60_000
+    const isDelayed = isLate(f)
+
+    // Helper: fire once
+    const fire = (phase: AnnouncementPhase) => {
+      const key = `${fn}::${phase}`
+      if (announced.has(key)) return
+      announced.add(key)
+      enqueue(buildAnnouncementText(phase, f, false))
+    }
+
+    // Check-in phases (based on STD)
+    // Trigger window: fires when minsToSch is within [threshold, threshold+2]
+    const checkinPhases: Array<[AnnouncementPhase, number]> = [
+      ['checkin_120', 120],
+      ['checkin_90',  90],
+      ['checkin_60',  60],
+      ['checkin_45',  45],
+    ]
+    for (const [phase, threshold] of checkinPhases) {
+      // Fire when we are within 2 minutes past the threshold
+      if (minsToSch <= threshold + 1 && minsToSch > threshold - 2) {
+        fire(phase)
+      }
+    }
+
+    // Boarding phases (based on EST)
+    if (minsToEst <= 30 && minsToEst > 27) fire('boarding_30')
+    if (minsToEst <= 20 && minsToEst > 17) fire('boarding_20')
+
+    // Final call (based on EST)
+    if (minsToEst <= 10 && minsToEst > 7) fire('final_10')
+
+    // Delay announcement — only if newly delayed and still > 5 mins out
+    if (isDelayed && minsToEst > 5) {
+      const delayKey = `${fn}::delay`
+      // Re-announce delay if ETD changed significantly (track last announced ETD)
+      const etdKey = `${fn}::delay_etd`
+      const lastEtd = announced.has(etdKey) ? (announced as any).__etd?.[fn] : undefined
+      const currentEtd = fmt(f.EstimatedDepartureTime)
+      if (!announced.has(delayKey) || lastEtd !== currentEtd) {
+        announced.add(delayKey)
+        // Store last ETD (minor hack but stays in-module)
+        if (!(announced as any).__etd) (announced as any).__etd = {}
+          ;(announced as any).__etd[fn] = currentEtd
+        enqueue(buildAnnouncementText('delay', f, false))
+      }
+    }
+  }
+
+  // ── Arrivals ──
+  for (const f of arrivals) {
+    const fn = f.FlightNumber || ''
+    if (!fn) continue
+    const statusRaw = (f.StatusEN ?? '').toLowerCase()
+    const isArrived = /(arrived|landed|sletio|stigao)/.test(statusRaw)
+    if (!isArrived) continue
+
+    // Don't announce if arrived more than 15 minutes ago
+    const tStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime || f.ActualDepartureTime
+    const t = parseTime(tStr)
+    if (t) {
+      const minsAgo = (now - t.getTime()) / 60_000
+      if (minsAgo > 15) continue
+    }
+
+    const key = `${fn}::arrived`
+    if (announced.has(key)) continue
+    announced.add(key)
+    enqueue(buildAnnouncementText('arrived', f, true))
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -231,14 +488,12 @@ const FlightCard = memo(function FlightCard({
         </div>
 
         <div className="mf-route-block">
-          {/* 1st Row: Logo + City + IATA */}
           <div className="mf-dest-line">
             <AirlineLogo icao={icao} name={flight.AirlineName || icao} />
             <span className="mf-city">{city}</span>
             {iata && <span className="mf-iata">{iata}</span>}
           </div>
           
-          {/* 2nd Row: Flight Number + Codeshare */}
           <div className="mf-meta-line">
             <span className="mf-fnum">{flight.FlightNumber}</span>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
@@ -321,6 +576,57 @@ const SearchBar = memo(function SearchBar({
   )
 })
 
+// ─── TTS Toggle ───────────────────────────────────────────────────────────────
+const TTSToggle = memo(function TTSToggle({
+  enabled, onToggle, lastAnnouncement,
+}: {
+  enabled: boolean
+  onToggle: () => void
+  lastAnnouncement: string
+}) {
+  return (
+    <div className="mf-tts-wrap">
+      {/* Speaker icon */}
+      <svg
+        className={`mf-tts-icon ${enabled ? 'mf-tts-icon-on' : 'mf-tts-icon-off'}`}
+        viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"
+      >
+        {enabled
+          ? <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0016 7.97v8.05A4.5 4.5 0 0016.5 12zm2.5 0a7 7 0 00-6-6.93v2.04A5 5 0 0119 12a5 5 0 01-3 4.89v2.04A7 7 0 0019 12z"/>
+          : <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45A4.4 4.4 0 0016.5 12zm2.5 0a7 7 0 00-.46-2.52l1.5-1.5A9 9 0 0121 12a9 9 0 01-4.6 7.87l-1.42-1.42A7 7 0 0019 12zM4.27 3L3 4.27l4.18 4.17H3v6h4l5 5v-6.73l4.25 4.25A7 7 0 0112 19a7 7 0 01-1.85-.25L8.7 20.2A9 9 0 0012 21a9 9 0 005.27-1.68L19 21l1.27-1.27L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+        }
+      </svg>
+
+      {/* Label + toggle track */}
+      <button
+        onClick={onToggle}
+        className="mf-tts-row"
+        aria-label={enabled ? 'Disable PA announcements' : 'Enable PA announcements'}
+        aria-pressed={enabled}
+        type="button"
+      >
+        <span className={`mf-tts-label ${enabled ? 'mf-tts-label-on' : 'mf-tts-label-off'}`}>
+          PA System
+        </span>
+        {/* Toggle track */}
+        <span className={`mf-toggle-track ${enabled ? 'mf-toggle-on' : 'mf-toggle-off'}`}>
+          <span className="mf-toggle-thumb" />
+        </span>
+      </button>
+
+      {/* Last announcement ticker */}
+      {enabled && lastAnnouncement && (
+        <div className="mf-tts-last" title={lastAnnouncement}>
+          <svg viewBox="0 0 16 16" fill="currentColor" width="9" height="9" aria-hidden="true" style={{ flexShrink: 0, opacity: 0.5 }}>
+            <path d="M2 4h12v2l-4 4v4l-4-2V10L2 6V4z"/>
+          </svg>
+          <span>{lastAnnouncement}</span>
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ─── Empty state ──────────────────────────────────────────────────────────────
 function EmptyState({ query }: { query: string }) {
   return (
@@ -363,16 +669,18 @@ export default function MobileFIDS() {
   const [tick, setTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
-  // ─── Theme state ────────────────────────────────────────────────────────────
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
-  
-  // ─── FIX: sprječava flicker ikone aviona na prvom load-u ───────────────────
   const [isInitialLoad, setIsInitialLoad] = useState(true)
+
+  // ── TTS state ──
+  const [ttsEnabled, setTtsEnabled] = useState(true)
+  const [lastAnnouncement, setLastAnnouncement] = useState('')
+  const announcedRef = useRef<Set<string>>(new Set())
+  const ttsInitialized = useRef(false)
 
   const mountedRef = useRef(true)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Force CSS injection BEFORE first render (sprječava FOUC - Flash of Unstyled Content)
   if (typeof window !== 'undefined' && !document.getElementById('mf-styles')) {
     const style = document.createElement('style')
     style.id = 'mf-styles'
@@ -381,7 +689,6 @@ export default function MobileFIDS() {
     document.documentElement.setAttribute('data-theme', theme)
   }
 
-  // Inject CSS (fallback)
   useEffect(() => {
     if (document.getElementById('mf-styles')) return
     const el = document.createElement('style')
@@ -401,13 +708,21 @@ export default function MobileFIDS() {
     }
   }, [])
 
-  // Theme initialization
   useEffect(() => {
     const saved = localStorage.getItem('mf_theme') as 'light' | 'dark' | null
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    const initial = saved || (prefersDark ? 'dark' : 'light')
+    const initial = saved || 'light'
     setTheme(initial)
     document.documentElement.setAttribute('data-theme', initial)
+  }, [])
+
+  // Restore TTS preference — default ON unless user explicitly turned off
+  useEffect(() => {
+    const savedTts = localStorage.getItem('mf_tts')
+    if (savedTts === 'off') {
+      setTtsEnabled(false)
+      getTTS().setEnabled(false)
+    }
+    // default is already true, no action needed for 'on' or null
   }, [])
 
   const toggleTheme = useCallback(() => {
@@ -417,20 +732,37 @@ export default function MobileFIDS() {
     document.documentElement.setAttribute('data-theme', next)
   }, [theme])
 
-  // Clock
+  // ── TTS Toggle ──
+  const toggleTTS = useCallback(() => {
+    setTtsEnabled(prev => {
+      const next = !prev
+      localStorage.setItem('mf_tts', next ? 'on' : 'off')
+      getTTS().setEnabled(next)
+      if (next && !ttsInitialized.current) {
+        // First enable: speak a short silent utterance to unlock audio context on mobile
+        ttsInitialized.current = true
+        const u = new SpeechSynthesisUtterance(' ')
+        u.volume = 0
+        window.speechSynthesis?.speak(u)
+      }
+      if (!next) {
+        setLastAnnouncement('')
+      }
+      return next
+    })
+  }, [])
+
   const [clock, setClock] = useState('')
   useEffect(() => {
     const t = () => setClock(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
     t(); const id = setInterval(t, 1000); return () => clearInterval(id)
   }, [])
 
-  // Status tick
   useEffect(() => {
     const id = setInterval(() => setTick(t => t + 1), 60_000)
     return () => clearInterval(id)
   }, [])
 
-  // Hard reset 03:00
   useEffect(() => {
     const now = new Date(); const reset = new Date()
     reset.setHours(3, 0, 0, 0)
@@ -439,7 +771,20 @@ export default function MobileFIDS() {
     return () => clearTimeout(id)
   }, [])
 
-  // Prepare data
+  // ── TTS scheduler: runs every minute (on tick) ──
+  useEffect(() => {
+    if (!ttsEnabled || isInitialLoad) return
+    if (departures.length === 0 && arrivals.length === 0) return
+
+    const tts = getTTS()
+    const enqueue = (text: string) => {
+      setLastAnnouncement(text.length > 80 ? text.slice(0, 77) + '…' : text)
+      tts.enqueue(text)
+    }
+
+    scheduleAnnouncements(departures, arrivals, announcedRef.current, enqueue)
+  }, [tick, ttsEnabled, departures, arrivals, isInitialLoad])
+
   const prepare = useCallback((data: FlightDataResponse) => {
     const filterFn = (flights: Flight[], isArr: boolean): Flight[] => {
       const now = new Date()
@@ -462,13 +807,11 @@ export default function MobileFIDS() {
     setArrivals(arrs)
     setLastUpdate(data.lastUpdated || new Date().toLocaleTimeString('en-GB'))
     
-    // FIX: nakon prvog uspješnog prepare, gasimo initial load state
     if (isInitialLoad) {
       setIsInitialLoad(false)
     }
   }, [isInitialLoad])
 
-  // Load
   useEffect(() => {
     mountedRef.current = true
     const cached = loadCache()
@@ -505,7 +848,6 @@ export default function MobileFIDS() {
     }
   }, [prepare])
 
-  // Filter
   const flights = tab === 'departures' ? departures : arrivals
   const filtered = useMemo(() => {
     if (!query.trim()) return flights
@@ -527,13 +869,12 @@ export default function MobileFIDS() {
       (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
     ), [filtered])
 
-  // ─── FIX: Sprječava flicker - potpuno prazan ekran tokom prvog load-a
   if (isInitialLoad) {
     return (
       <div style={{ 
         position: 'fixed', 
         inset: 0, 
-        background: theme === 'dark' ? '#050A15' : '#F8FAFF',
+        background: theme === 'dark' ? '#050A15' : '#F7F8FA',
         visibility: 'hidden' 
       }} />
     )
@@ -587,6 +928,15 @@ export default function MobileFIDS() {
         </div>
       </header>
 
+      {/* TTS Control Bar */}
+      <div className="mf-tts-bar">
+        <TTSToggle
+          enabled={ttsEnabled}
+          onToggle={toggleTTS}
+          lastAnnouncement={lastAnnouncement}
+        />
+      </div>
+
       <div className="mf-search-section">
         <SearchBar value={query} onChange={setQuery} count={sorted.length} />
       </div>
@@ -633,35 +983,35 @@ export default function MobileFIDS() {
 const CSS = `
   html, body { overflow: auto !important; height: auto !important; min-height: 100%; }
 
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700;9..40,800&family=DM+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 
-  /* ===== LIGHT THEME (default) ===== */
+  /* ===== LIGHT THEME (Default 2026 Authority) ===== */
   :root {
-    --bg:        #F8FAFF;
-    --bg-2:      #FFFFFF;
-    --bg-3:      #F0F4FA;
+    --bg:        #F7F8FA;
+    --bg-2:      #0A2342;
+    --bg-3:      #EEF1F5;
     --bg-card:   #FFFFFF;
-    --bg-card-2: #F8F9FC;
-    --border:    rgba(0,0,0,0.06);
-    --border-2:  rgba(0,0,0,0.10);
-    --text-1:    #1A2C3E;
-    --text-2:    #4A627A;
-    --text-3:    #7A8EA6;
-    --accent:    #0078D7;
-    --accent-dim:rgba(0,120,215,0.08);
-    --gate:      #0078D7;
-    --gate-bg:   rgba(0,120,215,0.06);
-    --gate-bdr:  rgba(0,120,215,0.20);
-    --checkin:   #E68A00;
-    --checkin-bg:rgba(230,138,0,0.06);
-    --checkin-bdr:rgba(230,138,0,0.20);
-    --critical:  #E53E3E;
-    --warning:   #E68A00;
-    --active:    #00875A;
-    --info:      #3A7BCB;
+    --bg-card-2: #FFFFFF;
+    --border:    #E2E6ED;
+    --border-2:  #D1D5DB;
+    --text-1:    #0A2342;
+    --text-2:    #4A5568;
+    --text-3:    #718096;
+    --accent:    #E8A020;
+    --accent-dim:rgba(232, 160, 32, 0.1);
+    --gate:      #E8A020;
+    --gate-bg:   rgba(232, 160, 32, 0.06);
+    --gate-bdr:  rgba(232, 160, 32, 0.25);
+    --checkin:   #0A2342;
+    --checkin-bg:rgba(10, 35, 66, 0.04);
+    --checkin-bdr:rgba(10, 35, 66, 0.15);
+    --critical:  #D5392E;
+    --warning:   #E8A020;
+    --active:    #1A7A4A;
+    --info:      #0A2342;
     --radius:    14px;
     --radius-sm: 8px;
-    --font:      'DM Sans', system-ui, -apple-system, sans-serif;
+    --font:      'Inter', system-ui, -apple-system, sans-serif;
     --mono:      'DM Mono', 'SF Mono', 'Menlo', monospace;
     --safe-top:  env(safe-area-inset-top, 0px);
     --safe-bot:  env(safe-area-inset-bottom, 16px);
@@ -674,19 +1024,19 @@ const CSS = `
     --bg-3:      #0E1628;
     --bg-card:   #0B1222;
     --bg-card-2: #0D1629;
-    --border:    rgba(255,255,255,0.05);
-    --border-2:  rgba(255,255,255,0.09);
+    --border:    rgba(255,255,255,0.08);
+    --border-2:  rgba(255,255,255,0.12);
     --text-1:    #F0F5FF;
     --text-2:    #8CA3BE;
     --text-3:    #4A5E75;
-    --accent:    #00D4FF;
-    --accent-dim:rgba(0,212,255,0.12);
-    --gate:      #00E5FF;
-    --gate-bg:   rgba(0,229,255,0.07);
-    --gate-bdr:  rgba(0,229,255,0.25);
-    --checkin:   #FFB800;
-    --checkin-bg:rgba(255,184,0,0.07);
-    --checkin-bdr:rgba(255,184,0,0.22);
+    --accent:    #E8A020;
+    --accent-dim:rgba(232, 160, 32, 0.12);
+    --gate:      #FFB800;
+    --gate-bg:   rgba(255,184,0,0.07);
+    --gate-bdr:  rgba(255,184,0,0.25);
+    --checkin:   #5BA8FF;
+    --checkin-bg:rgba(91,168,255,0.07);
+    --checkin-bdr:rgba(91,168,255,0.22);
     --critical:  #FF3B3B;
     --warning:   #FFB800;
     --active:    #00D68F;
@@ -707,20 +1057,18 @@ const CSS = `
 
   .mf-header {
     background: var(--bg-2);
-    border-bottom: 1px solid var(--border);
     padding-top: calc(var(--safe-top) + 10px);
     position: sticky;
     top: 0;
     z-index: 100;
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 4px 12px rgba(10, 35, 66, 0.1);
   }
 
   .mf-header-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 16px 12px;
+    padding: 0 16px 14px;
     gap: 12px;
   }
 
@@ -732,18 +1080,13 @@ const CSS = `
   }
 
   .mf-airport-icon {
-    width: 34px; height: 34px;
-    background: linear-gradient(135deg, rgba(0,120,215,0.15), rgba(0,120,215,0.05));
-    border: 1px solid rgba(0,120,215,0.2);
+    width: 36px; height: 36px;
+    background: rgba(232, 160, 32, 0.15);
+    border: 1px solid rgba(232, 160, 32, 0.3);
     border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    color: var(--accent);
-  }
-
-  [data-theme="dark"] .mf-airport-icon {
-    background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(0,212,255,0.05));
-    border-color: rgba(0,212,255,0.2);
+    color: #E8A020;
   }
 
   .mf-airport-icon svg { width: 18px; height: 18px; }
@@ -755,16 +1098,16 @@ const CSS = `
   }
 
   .mf-airport-name {
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 700;
-    color: var(--text-1);
+    color: #FFFFFF;
     letter-spacing: -0.3px;
     line-height: 1.2;
   }
 
   .mf-airport-code {
     font-size: 11px;
-    color: var(--text-3);
+    color: rgba(255,255,255,0.5);
     font-family: var(--mono);
     letter-spacing: 0.8px;
   }
@@ -781,23 +1124,22 @@ const CSS = `
     font-family: var(--mono);
     font-size: 26px;
     font-weight: 500;
-    color: var(--text-1);
+    color: #FFFFFF;
     letter-spacing: 1.5px;
     line-height: 1;
   }
 
   .mf-clock-label {
     font-size: 8px;
-    color: var(--text-3);
+    color: rgba(255,255,255,0.4);
     letter-spacing: 1.5px;
     font-weight: 600;
     margin-top: 2px;
   }
 
-  /* Theme toggle button */
   .mf-theme-toggle {
-    background: var(--bg-3);
-    border: 1px solid var(--border-2);
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
     border-radius: 30px;
     width: 38px;
     height: 38px;
@@ -806,14 +1148,14 @@ const CSS = `
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-2);
+    color: #FFFFFF;
     transition: all 0.2s ease;
     flex-shrink: 0;
     -webkit-tap-highlight-color: transparent;
   }
 
   .mf-theme-toggle:hover {
-    background: var(--border-2);
+    background: rgba(255,255,255,0.15);
     transform: scale(0.96);
   }
 
@@ -821,7 +1163,7 @@ const CSS = `
     display: flex;
     padding: 0 12px;
     gap: 0;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid rgba(255,255,255,0.1);
   }
 
   .mf-tab {
@@ -834,7 +1176,7 @@ const CSS = `
     font-family: var(--font);
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-3);
+    color: rgba(255,255,255,0.45);
     background: none;
     border: none;
     border-bottom: 2.5px solid transparent;
@@ -846,8 +1188,8 @@ const CSS = `
   }
 
   .mf-tab-active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
+    color: #FFFFFF;
+    border-bottom-color: #E8A020;
   }
 
   .mf-tab-icon {
@@ -859,8 +1201,8 @@ const CSS = `
   .mf-tab-icon-arr { transform: rotate(180deg); }
 
   .mf-tab-cnt {
-    background: rgba(0,0,0,0.06);
-    color: var(--text-3);
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.6);
     font-family: var(--mono);
     font-size: 10px;
     font-weight: 500;
@@ -871,17 +1213,134 @@ const CSS = `
     transition: all 0.25s;
   }
 
-  [data-theme="dark"] .mf-tab-cnt {
-    background: rgba(255,255,255,0.06);
+  .mf-tab-active .mf-tab-cnt {
+    background: rgba(232, 160, 32, 0.2);
+    color: #E8A020;
   }
 
-  .mf-tab-active .mf-tab-cnt {
-    background: var(--accent-dim);
-    color: var(--accent);
+  /* ── TTS Bar ── */
+  .mf-tts-bar {
+    background: var(--bg-2);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 10px 16px;
+  }
+
+  .mf-tts-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mf-tts-icon {
+    flex-shrink: 0;
+    transition: color 0.25s ease;
+  }
+
+  .mf-tts-icon-on  { color: #1A7A4A; }
+  [data-theme="dark"] .mf-tts-icon-on { color: #00D68F; }
+  .mf-tts-icon-off { color: rgba(255,255,255,0.3); }
+
+  .mf-tts-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mf-tts-label {
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    transition: color 0.25s ease;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .mf-tts-label-on  { color: rgba(255,255,255,0.9); }
+  .mf-tts-label-off { color: rgba(255,255,255,0.35); }
+
+  /* Toggle track */
+  .mf-toggle-track {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    flex-shrink: 0;
+    transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.3s ease;
+    display: block;
+  }
+
+  .mf-toggle-on {
+    background: #1A7A4A;
+    box-shadow: 0 0 0 1px rgba(26,122,74,0.6), inset 0 1px 3px rgba(0,0,0,0.2);
+  }
+
+  [data-theme="dark"] .mf-toggle-on {
+    background: #00D68F;
+    box-shadow: 0 0 0 1px rgba(0,214,143,0.5), inset 0 1px 3px rgba(0,0,0,0.15);
+  }
+
+  .mf-toggle-off {
+    background: rgba(255,255,255,0.12);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.1), inset 0 1px 3px rgba(0,0,0,0.3);
+  }
+
+  /* Toggle thumb */
+  .mf-toggle-thumb {
+    position: absolute;
+    top: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                background 0.3s ease;
+  }
+
+  .mf-toggle-on  .mf-toggle-thumb { transform: translateX(23px); }
+  .mf-toggle-off .mf-toggle-thumb { transform: translateX(3px); background: rgba(255,255,255,0.7); }
+
+  .mf-tts-row:active .mf-toggle-track { opacity: 0.85; }
+
+  /* Animated sound wave rings when ON */
+  .mf-tts-icon-on {
+    animation: mf-tts-ping 2s ease-in-out infinite;
+  }
+
+  @keyframes mf-tts-ping {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .mf-tts-last {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.4);
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .mf-tts-last span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-style: italic;
   }
 
   .mf-search-section {
-    padding: 10px 12px 0;
+    padding: 12px 12px 0;
   }
 
   .mf-search-wrap { display: flex; flex-direction: column; gap: 5px; }
@@ -903,7 +1362,7 @@ const CSS = `
 
   .mf-search-input {
     width: 100%;
-    background: var(--bg-3);
+    background: var(--bg-card);
     border: 1px solid var(--border-2);
     border-radius: 12px;
     padding: 11px 40px 11px 38px;
@@ -913,6 +1372,7 @@ const CSS = `
     outline: none;
     transition: border-color 0.2s, box-shadow 0.2s;
     -webkit-appearance: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.02);
   }
 
   .mf-search-input::placeholder { color: var(--text-3); }
@@ -926,7 +1386,7 @@ const CSS = `
   .mf-search-clear {
     position: absolute;
     right: 10px;
-    background: rgba(0,0,0,0.08);
+    background: var(--bg-3);
     border: none;
     color: var(--text-2);
     width: 24px; height: 24px;
@@ -935,10 +1395,6 @@ const CSS = `
     font-size: 11px;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-  }
-
-  [data-theme="dark"] .mf-search-clear {
-    background: rgba(255,255,255,0.08);
   }
 
   .mf-search-count {
@@ -966,9 +1422,9 @@ const CSS = `
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .mf-dot-ok   { background: var(--active); box-shadow: 0 0 8px rgba(0,214,143,0.5); animation: mf-pulse 2.5s infinite; }
+  .mf-dot-ok   { background: var(--active); box-shadow: 0 0 8px rgba(26,122,74,0.4); animation: mf-pulse 2.5s infinite; }
   .mf-dot-load { background: var(--warning); animation: mf-pulse 1s infinite; }
-  .mf-dot-err  { background: var(--critical); box-shadow: 0 0 8px rgba(255,59,59,0.4); }
+  .mf-dot-err  { background: var(--critical); box-shadow: 0 0 8px rgba(213,57,46,0.4); }
 
   @keyframes mf-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
 
@@ -984,46 +1440,42 @@ const CSS = `
   }
 
   .mf-list {
-    padding: 8px 10px calc(var(--safe-bot) + 24px);
+    padding: 10px 12px calc(var(--safe-bot) + 24px);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
   }
 
   .mf-card {
     background: var(--bg-card);
-    border: 1px solid var(--border-2);
-    border-radius: var(--radius);
+    border: none;
+    border-left: 4px dashed var(--border-2);
+    border-radius: 0 var(--radius) var(--radius) 0;
     overflow: hidden;
-    transition: border-color 0.25s, box-shadow 0.25s;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
     -webkit-tap-highlight-color: transparent;
     position: relative;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.04), 0 2px 4px -1px rgba(0,0,0,0.02);
   }
 
-  .mf-card::before {
-    content: '';
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 4px;
-    background: var(--border-2);
-    transition: background 0.3s;
-    z-index: 2;
-  }
+  .mf-card.mf-tier-critical { border-left-color: var(--critical); }
+  .mf-card.mf-tier-warning  { border-left-color: var(--warning); }
+  .mf-card.mf-tier-active   { border-left-color: var(--active); }
+  .mf-card.mf-tier-info     { border-left-color: var(--info); }
 
-  .mf-card.mf-tier-critical::before { background: var(--critical); box-shadow: 0 0 12px rgba(255,59,59,0.3); }
-  .mf-card.mf-tier-warning::before  { background: var(--warning); }
-  .mf-card.mf-tier-active::before   { background: var(--active); }
-  .mf-card.mf-tier-info::before     { background: var(--info); }
+  .mf-card:active {
+    transform: scale(0.98);
+  }
 
   .mf-card-hl {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent-dim), 0 4px 20px var(--accent-dim);
+    box-shadow: 0 0 0 2px var(--accent), 0 8px 24px var(--accent-dim);
+    border-left-style: solid;
   }
 
   .mf-card-flight {
     display: flex;
     gap: 14px;
-    padding: 14px 14px 12px 18px;
+    padding: 16px 16px 14px 18px;
     align-items: flex-start;
   }
 
@@ -1031,18 +1483,18 @@ const CSS = `
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
+    gap: 4px;
     min-width: 52px;
     flex-shrink: 0;
-    padding-top: 1px;
+    padding-top: 2px;
   }
 
   .mf-time-sched {
     font-family: var(--mono);
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 500;
     color: var(--text-1);
-    letter-spacing: 0.8px;
+    letter-spacing: -0.5px;
     line-height: 1;
   }
 
@@ -1050,21 +1502,26 @@ const CSS = `
     font-family: var(--mono);
     font-size: 12px;
     font-weight: 500;
-    color: var(--warning);
+    color: #D5392E;
     letter-spacing: 0.5px;
     line-height: 1;
     display: flex;
     align-items: center;
     gap: 3px;
-    background: var(--checkin-bg);
+    background: rgba(213, 57, 46, 0.08);
     padding: 2px 6px;
     border-radius: 4px;
+  }
+
+  [data-theme="dark"] .mf-time-est {
+    color: #FF8A8A;
+    background: rgba(255, 59, 59, 0.1);
   }
 
   .mf-route-block {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     min-width: 0;
     flex: 1;
   }
@@ -1089,29 +1546,31 @@ const CSS = `
 
   .mf-iata {
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
     color: var(--text-3);
     letter-spacing: 0.8px;
     flex-shrink: 0;
-    background: rgba(0,0,0,0.04);
-    padding: 1px 6px;
+    background: var(--bg-3);
+    padding: 2px 6px;
     border-radius: 4px;
-  }
-
-  [data-theme="dark"] .mf-iata {
-    background: rgba(255,255,255,0.04);
   }
 
   .mf-logo-wrap {
     width: 60px; 
     height: 34px;
-    background: white;
+    background: #FFFFFF;
+    border: 1px solid #E2E6ED;
     border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
     overflow: hidden;
     flex-shrink: 0;
     padding: 2px;
+  }
+
+  [data-theme="dark"] .mf-logo-wrap {
+    background: #0E1628;
+    border-color: rgba(255,255,255,0.1);
   }
 
   .mf-logo-img {
@@ -1131,7 +1590,7 @@ const CSS = `
     font-family: var(--mono);
     font-size: 16px;
     font-weight: 700;
-    color: #FFD700;
+    color: var(--accent);
     letter-spacing: 0.5px;
     white-space: nowrap;
   }
@@ -1139,14 +1598,11 @@ const CSS = `
   .mf-codeshare {
     font-size: 10px;
     color: var(--text-3);
-    background: rgba(0,0,0,0.04);
+    background: var(--bg-3);
     padding: 1px 5px;
     border-radius: 4px;
     white-space: nowrap;
-  }
-
-  [data-theme="dark"] .mf-codeshare {
-    background: rgba(255,255,255,0.04);
+    font-weight: 500;
   }
 
   .mf-card-ops {
@@ -1154,16 +1610,30 @@ const CSS = `
     align-items: stretch;
     gap: 0;
     background: var(--bg-card-2);
-    border-top: 1px solid var(--border);
+    border-top: 2px dashed var(--border-2);
+    position: relative;
   }
+
+  .mf-card-ops::before, .mf-card-ops::after {
+    content: '';
+    position: absolute;
+    top: -7px;
+    width: 14px;
+    height: 14px;
+    background: var(--bg);
+    border-radius: 50%;
+    z-index: 2;
+  }
+  .mf-card-ops::before { left: -9px; }
+  .mf-card-ops::after { right: -9px; }
 
   .mf-op-box {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 10px 14px;
-    gap: 3px;
+    padding: 12px 14px;
+    gap: 4px;
     min-width: 80px;
     position: relative;
   }
@@ -1171,9 +1641,9 @@ const CSS = `
   .mf-op-box + .mf-op-box::before {
     content: '';
     position: absolute;
-    left: 0; top: 8px; bottom: 8px;
+    left: 0; top: 10px; bottom: 10px;
     width: 1px;
-    background: var(--border-2);
+    background: var(--border);
   }
 
   .mf-op-lbl {
@@ -1203,17 +1673,12 @@ const CSS = `
 
   .mf-checkin-box .mf-op-lbl {
     color: var(--checkin);
-    opacity: 0.7;
+    opacity: 0.8;
   }
 
   .mf-checkin-box .mf-op-val {
     font-size: 16px;
     color: var(--checkin);
-    text-shadow: 0 0 20px rgba(230,138,0,0.15);
-  }
-
-  [data-theme="dark"] .mf-checkin-box .mf-op-val {
-    text-shadow: 0 0 20px rgba(255,184,0,0.15);
   }
 
   .mf-gate-box {
@@ -1222,19 +1687,14 @@ const CSS = `
 
   .mf-gate-box .mf-op-lbl {
     color: var(--gate);
-    opacity: 0.65;
+    opacity: 0.8;
   }
 
   .mf-gate-box .mf-op-val {
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 700;
     color: var(--gate);
-    text-shadow: 0 0 24px rgba(0,120,215,0.2);
     letter-spacing: 1px;
-  }
-
-  [data-theme="dark"] .mf-gate-box .mf-op-val {
-    text-shadow: 0 0 24px rgba(0,229,255,0.2);
   }
 
   .mf-gate-urgent {
@@ -1269,12 +1729,14 @@ const CSS = `
     align-items: center;
     gap: 6px;
     padding: 5px 10px;
-    border-radius: var(--radius-sm);
+    border-radius: 6px;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.3px;
     white-space: nowrap;
     border: 1px solid transparent;
+    background: var(--bg-3);
+    color: var(--text-2);
   }
 
   .mf-badge-dot {
@@ -1284,45 +1746,45 @@ const CSS = `
   }
 
   .mf-badge-critical {
-    background: rgba(229,62,62,0.12);
-    color: #C53030;
-    border-color: rgba(229,62,62,0.25);
+    background: rgba(213, 57, 46, 0.08);
+    color: #D5392E;
+    border-color: rgba(213, 57, 46, 0.2);
   }
   [data-theme="dark"] .mf-badge-critical {
-    background: rgba(255,59,59,0.12);
-    color: #FFA0A0;
-    border-color: rgba(255,59,59,0.25);
+    background: rgba(255, 59, 59, 0.12);
+    color: #FF8A8A;
+    border-color: rgba(255, 59, 59, 0.25);
   }
   .mf-badge-critical .mf-badge-dot { background: var(--critical); box-shadow: 0 0 6px var(--critical); animation: mf-pulse 1.2s infinite; }
 
   .mf-badge-warning {
-    background: rgba(230,138,0,0.12);
-    color: #B45A00;
-    border-color: rgba(230,138,0,0.25);
+    background: rgba(232, 160, 32, 0.08);
+    color: #B45309;
+    border-color: rgba(232, 160, 32, 0.2);
   }
   [data-theme="dark"] .mf-badge-warning {
-    background: rgba(255,184,0,0.12);
+    background: rgba(255, 184, 0, 0.12);
     color: #FFD666;
-    border-color: rgba(255,184,0,0.25);
+    border-color: rgba(255, 184, 0, 0.25);
   }
   .mf-badge-warning .mf-badge-dot { background: var(--warning); }
 
   .mf-badge-active {
-    background: rgba(0,135,90,0.12);
-    color: #006644;
-    border-color: rgba(0,135,90,0.25);
+    background: rgba(26, 122, 74, 0.08);
+    color: #1A7A4A;
+    border-color: rgba(26, 122, 74, 0.2);
   }
   [data-theme="dark"] .mf-badge-active {
-    background: rgba(0,214,143,0.12);
+    background: rgba(0, 214, 143, 0.12);
     color: #6EE7B7;
-    border-color: rgba(0,214,143,0.25);
+    border-color: rgba(0, 214, 143, 0.25);
   }
   .mf-badge-active .mf-badge-dot { background: var(--active); animation: mf-pulse 2s infinite; }
 
   .mf-badge-info {
-    background: rgba(58,123,203,0.10);
-    color: #2A5A8E;
-    border-color: rgba(58,123,203,0.20);
+    background: rgba(10, 35, 66, 0.06);
+    color: #0A2342;
+    border-color: rgba(10, 35, 66, 0.15);
   }
   [data-theme="dark"] .mf-badge-info {
     background: rgba(91,168,255,0.10);
@@ -1332,12 +1794,9 @@ const CSS = `
   .mf-badge-info .mf-badge-dot { background: var(--info); }
 
   .mf-badge-neutral {
-    background: rgba(0,0,0,0.04);
+    background: var(--bg-3);
     color: var(--text-3);
     border-color: var(--border);
-  }
-  [data-theme="dark"] .mf-badge-neutral {
-    background: rgba(255,255,255,0.04);
   }
   .mf-badge-neutral .mf-badge-dot { background: var(--text-3); }
 

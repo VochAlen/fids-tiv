@@ -1,9 +1,17 @@
-// Dedicated layout for the mobile FIDS page.
-// Overrides any parent layout that sets h-screen / overflow-hidden.
-export default function FlightsLayout({ children }: { children: React.ReactNode }) {
+
+// Mobile FIDS layout — unlocks scroll from any parent that sets h-screen/overflow-hidden
+export default function MobileFIDSLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ height: 'auto', minHeight: '100dvh', overflow: 'visible' }}>
+    <div
+      style={{
+        height: 'auto',
+        minHeight: '100dvh',
+        overflow: 'visible',
+        background: '#F7F8FA',
+      }}
+    >
       {children}
     </div>
   )
 }
+ 
