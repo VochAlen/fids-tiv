@@ -164,7 +164,7 @@ function buildAnnouncementText(
     flight.DestinationCityName ||
     flight.DestinationAirportName ||
     flight.DestinationAirportCode ||
-    (isArrival ? (flight.OriginCityName || flight.OriginAirportName || flight.OriginAirportCode || 'origin') : 'destination')
+    (isArrival ? ((flight as any).OriginCityName || (flight as any).OriginAirportName || (flight as any).OriginAirportCode || 'origin') : 'destination')
   const checkin = readCounterString(flight.CheckInDesk || '')
   const gate = readCounterString(flight.GateNumber || '')
 
