@@ -14,7 +14,8 @@ import {
 import { useWeather } from '@/hooks/use-weather';
 
 const REFRESH_INTERVAL_MS    = 20_000;
-const GRACE_AFTER_DEPARTURE_MS = 1 * 60 * 1000; // 1 minuta nakon polaska
+// const GRACE_AFTER_DEPARTURE_MS = 1 * 60 * 1000; // 1 minuta nakon polaska
+const CLOSE_BEFORE_DEPARTURE_MS = 10 * 60 * 1000; // 10 minuta PRIJE polaska
 
 // ─────────────────────────────────────────────────────────────
 // Error Boundary
@@ -254,27 +255,24 @@ function GateDisplay() {
 
   // ── shouldDisplayFlight ─────────────────────────────────────
   // FIX: grace period je sada NAKON polaska, ne prije
-  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-    const s = (f.StatusEN || '').toLowerCase().trim();
+const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+  const s = (f.StatusEN || '').toLowerCase().trim();
 
-    // Cancelled i diverted nikad ne prikazujemo
-    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+  if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
 
-    // Manual 'open': prikazuj sve dok nije departed/cancelled/diverted
-    if (manualGateStatusRef.current === 'open') return true;
+  if (manualGateStatusRef.current === 'open') return true;
 
-    // Departed: API kaže da je poletio — sakrij
-    if (s.includes('departed') || s.includes('poletio')) return false;
+  if (s.includes('departed') || s.includes('poletio')) return false;
 
-    // Vremenski backup: sakrij ako je ETD/STD prošao + 1 minuta
-    // Koristimo ETD ako postoji (kasneći let), inače STD
-    const refTime = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
-    const dep = parseDepartureTime(refTime);
-    if (dep && Date.now() > dep.getTime() + GRACE_AFTER_DEPARTURE_MS) return false;
+  // Sakrij let 10 minuta PRIJE ETD/STD
+  // (umjesto 1 minutu NAKON — daje vremena za sljedeći let)
+  const refTime = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
+  const dep = parseDepartureTime(refTime);
+  if (dep && Date.now() > dep.getTime() - CLOSE_BEFORE_DEPARTURE_MS) return false;
 
-    return true;
-  }, []);
+  return true;
+}, []);
 
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
@@ -523,17 +521,16 @@ function GateDisplay() {
     if (!dep) return;
 
     // Okidamo refresh tačno kad shouldDisplayFlight vraća false
-    const triggerAt = dep.getTime() + GRACE_AFTER_DEPARTURE_MS;
-    const ms = triggerAt - Date.now();
+ const triggerAt = dep.getTime() - CLOSE_BEFORE_DEPARTURE_MS;
+  const ms = triggerAt - Date.now();
 
-    if (ms > 0 && ms < 4 * 60 * 60 * 1000) {
-      stdSwitchTimerRef.current = setTimeout(() => {
-        if (isMountedRef.current) loadFlights();
-      }, ms);
-    } else if (ms <= 0 && ms > -30_000) {
-      // Već smo unutar grace perioda → odmah osvježi
-      loadFlights();
-    }
+  if (ms > 0 && ms < 4 * 60 * 60 * 1000) {
+    stdSwitchTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) loadFlights();
+    }, ms);
+  } else if (ms <= 0 && ms > -30_000) {
+    loadFlights();
+  }
 
     return () => {
       if (stdSwitchTimerRef.current) {
