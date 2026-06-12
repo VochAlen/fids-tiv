@@ -206,14 +206,6 @@ const handleSetStatus = async (
     } else {
       setDeskStates(prev => ({ ...prev, [desk]: { status, flightNumber: targetFlight } }));
     }
-
-    // ⭐ NOVO: Pošalji signal svim FIDS tabovima
-    try {
-      const bc = new BroadcastChannel('desk-status-updates');
-      bc.postMessage({ desk, status, flightNumber: targetFlight, ts: Date.now() });
-      bc.close();
-    } catch {} // BroadcastChannel nije dostupan u svim browserima
-
   } catch {
     alert('Greška pri postavljanju statusa');
   } finally {
