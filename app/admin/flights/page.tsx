@@ -187,31 +187,39 @@ const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deskNumbers]);
 
-  const handleSetStatus = async (
-    desk: string,
-    status: 'open' | 'closed' | null,
-    targetFlight: string | null = null
-  ) => {
-    setLoadingDesk(prev => ({ ...prev, [desk]: true }));
-    try {
-      const res = await fetch(`/api/desk-status/${desk}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, flightNumber: targetFlight }),
-      });
-      if (!res.ok) { alert('Greška pri postavljanju statusa'); return; }
+const handleSetStatus = async (
+  desk: string,
+  status: 'open' | 'closed' | null,
+  targetFlight: string | null = null
+) => {
+  setLoadingDesk(prev => ({ ...prev, [desk]: true }));
+  try {
+    const res = await fetch(`/api/desk-status/${desk}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, flightNumber: targetFlight }),
+    });
+    if (!res.ok) { alert('Greška pri postavljanju statusa'); return; }
 
-      if (status === null) {
-        setDeskStates(prev => { const n = { ...prev }; delete n[desk]; return n; });
-      } else {
-        setDeskStates(prev => ({ ...prev, [desk]: { status, flightNumber: targetFlight } }));
-      }
-    } catch {
-      alert('Greška pri postavljanju statusa');
-    } finally {
-      setLoadingDesk(prev => ({ ...prev, [desk]: false }));
+    if (status === null) {
+      setDeskStates(prev => { const n = { ...prev }; delete n[desk]; return n; });
+    } else {
+      setDeskStates(prev => ({ ...prev, [desk]: { status, flightNumber: targetFlight } }));
     }
-  };
+
+    // ⭐ NOVO: Pošalji signal svim FIDS tabovima
+    try {
+      const bc = new BroadcastChannel('desk-status-updates');
+      bc.postMessage({ desk, status, flightNumber: targetFlight, ts: Date.now() });
+      bc.close();
+    } catch {} // BroadcastChannel nije dostupan u svim browserima
+
+  } catch {
+    alert('Greška pri postavljanju statusa');
+  } finally {
+    setLoadingDesk(prev => ({ ...prev, [desk]: false }));
+  }
+};
 
   if (!desks.length) return null;
 

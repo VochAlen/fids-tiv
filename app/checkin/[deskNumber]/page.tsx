@@ -91,14 +91,16 @@ function isCheckInClosed(
   const etd = f.EstimatedDepartureTime;
   const std = f.ScheduledDepartureTime;
 
+  // ── Za velika kašnjenja (>240min): i open i close prema ETD
+  // ── Za normalna kašnjenja: i open i close prema STD
   let referenceMs = f.departureTime.getTime();
-  const lookaheadMs = getCheckInLookaheadMs(f.FlightNumber);
 
   if (etd && std && etd !== std) {
     const [eh, em] = etd.split(':').map(Number);
     const [sh, sm] = std.split(':').map(Number);
     if (!isNaN(eh) && !isNaN(sh)) {
       let delay = (eh * 60 + em) - (sh * 60 + sm);
+      if (delay < 0) delay += 1440;
       if (delay > LARGE_DELAY_THRESHOLD_MIN) {
         const etdDate = new Date();
         etdDate.setHours(eh, em, 0, 0);
@@ -107,12 +109,11 @@ function isCheckInClosed(
     }
   }
 
-  const openTime  = referenceMs - lookaheadMs;
+  const openTime  = referenceMs - getCheckInLookaheadMs(f.FlightNumber);
   const closeTime = referenceMs - 30 * 60 * 1000;
 
   return Date.now() < openTime || Date.now() >= closeTime;
 }
-
 // ============================================================
 // IN-PROCESS OVERRIDE CACHE
 // ============================================================
@@ -766,18 +767,17 @@ const fetchDeskClassOverride = useCallback(async (desk: string): Promise<string 
     transitionGuardRef.current   = true;
     setIsTransitioning(true);
 
-    const releaseLocks = () => {
-      isProcessingQueueRef.current = false;
-      transitionGuardRef.current   = false;
-      setIsTransitioning(false);
-      queueLenRef.current = transitionQueueRef.current.length;
-      // P1 FIX: ako je loadFlights čekao dok je guard bio aktivan, pokreni ga sad
-      if (pendingLoadRef.current && isMountedRef.current) {
-        pendingLoadRef.current = false;
-        setTimeout(() => { if (isMountedRef.current) void loadFlights(); }, 50);
-      }
-    };
-
+const releaseLocks = () => {
+  isProcessingQueueRef.current = false;
+  transitionGuardRef.current   = false;
+  setIsTransitioning(false);
+  queueLenRef.current = transitionQueueRef.current.length;
+  // P1 FIX: koristi ref umjesto direktne reference
+  if (pendingLoadRef.current && isMountedRef.current) {
+    pendingLoadRef.current = false;
+    setTimeout(() => { if (isMountedRef.current) void loadFlightsRef.current(); }, 50);
+  }
+};
     try {
       const nextFlight = transitionQueueRef.current.shift();
       queueLenRef.current = transitionQueueRef.current.length;
@@ -1135,11 +1135,52 @@ const future = sorted.filter((f) => {
               body: JSON.stringify({ status: 'open', flightNumber: null }),
             }).then(() => invalidateDeskStatusCache(deskNumberParam)).catch(() => {});
             if (DEVELOPMENT) console.log(`[EarlyOpen] ${candidate.FlightNumber} završio, čistim flightNumber iz keya`);
-          } else {
+} else {
             const alreadyInWindow = future.some(
               (f) => normalize(f.FlightNumber || '') === normalize(earlyOpenFlightNumber!)
             );
-            if (!alreadyInWindow) {
+
+            // ── STD-30min auto-close: uvijek baziran na STD, ETD se ignoriše
+const closeTimeMs = (() => {
+  const std = candidate.ScheduledDepartureTime;
+  const etd = candidate.EstimatedDepartureTime;
+  if (!std) return null;
+
+  const [sh, sm] = std.split(':').map(Number);
+  if (isNaN(sh) || isNaN(sm)) return null;
+
+  // Default: STD
+  let referenceMs = candidate.departureTime.getTime();
+
+  // Za velika kašnjenja (>240min): koristi ETD kao referencu
+  if (etd && etd !== std) {
+    const [eh, em] = etd.split(':').map(Number);
+    if (!isNaN(eh)) {
+      let delay = (eh * 60 + em) - (sh * 60 + sm);
+      if (delay < 0) delay += 1440;
+      if (delay > LARGE_DELAY_THRESHOLD_MIN) {
+        const etdDate = new Date();
+        etdDate.setHours(eh, em, 0, 0);
+        referenceMs = etdDate.getTime();
+      }
+    }
+  }
+
+  return referenceMs - 30 * 60 * 1000;
+})();
+
+            const isPastCloseTime = closeTimeMs !== null && Date.now() >= closeTimeMs;
+
+            if (isPastCloseTime) {
+              // STD-30min je prošlo — briši override, zatvori šalter
+              void fetch(`/api/desk-status/${deskNumberParam}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: null }),
+              }).then(() => invalidateDeskStatusCache(deskNumberParam)).catch(() => {});
+         if (DEVELOPMENT) console.log(`[EarlyOpen] ${candidate.FlightNumber} prošao close time, zatvarujem šalter`);
+              // earlyOpenFlight ostaje null → šalter ide u inactive
+            } else if (!alreadyInWindow) {
               earlyOpenFlight = candidate;
               if (DEVELOPMENT) {
                 const minsLeft = Math.round((candidate.departureTime.getTime() - Date.now()) / 60_000);
@@ -1270,8 +1311,50 @@ const idx = currentIsEarlyOpen
   }, [flightDisplay.manualDeskStatus, flightDisplay.checkInStatus,
       flightDisplay.isCancelled, flightDisplay.isDiverted]);
 
-// ── Sync shouldShowCheckIn u ref da interval ne restartuje useEffect
+
+// ── loadFlightsRef — stabilan ref da fast poll ne restartuje interval
+  const loadFlightsRef = useRef(loadFlights);
+  useEffect(() => { loadFlightsRef.current = loadFlights; }, [loadFlights]);
+
+  // ── Fast desk-status polling (3s) — cross-device, zamjena za BroadcastChannel
+  useEffect(() => {
+    let lastStatus: string | null = '__INIT__';
+    let lastFlight: string | null = '__INIT__';
+
+    const poll = async () => {
+      if (!isMountedRef.current) return;
+      try {
+        const res = await fetch(`/api/desk-status/${deskNumberParam}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const newStatus = data.status ?? null;
+        const newFlight = data.flightNumber ?? null;
+
+        if (newStatus !== lastStatus || newFlight !== lastFlight) {
+          lastStatus = newStatus;
+          lastFlight = newFlight;
+          if (DEVELOPMENT) {
+            console.log(`[FastPoll] Desk ${deskNumberParam}: ${newStatus} (${newFlight})`);
+          }
+          invalidateDeskStatusCache(deskNumberParam);
+          _overrideCache = null;
+          if (isMountedRef.current) void loadFlightsRef.current();
+        }
+      } catch {}
+    };
+
+    void poll();
+    const id = setInterval(poll, 3_000);
+    return () => clearInterval(id);
+  }, [deskNumberParam]);
+
+  // ── Sync shouldShowCheckIn u ref da interval ne restartuje useEffect
   useEffect(() => { shouldShowCheckInRef.current = shouldShowCheckIn; }, [shouldShowCheckIn]);
+
+
 
   // ── Main data load interval
   useEffect(() => {

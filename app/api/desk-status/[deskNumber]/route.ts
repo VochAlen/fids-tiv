@@ -1,13 +1,9 @@
 // app/api/desk-status/[deskNumber]/route.ts
-//
-// IZMJENA: Dodat POST handler koji upisuje { status, flightNumber, setAt } u Redis.
-// GET ostaje nepromijenjen — već parsira JSON i vraća flightNumber.
 
 import { NextResponse } from 'next/server';
 import { getRedisClient, safeRedisSet, safeRedisDel } from '@/lib/redis';
-// getRedisClient ostaje jer ga GET koristi direktno
 
-const TTL_SECONDS = 8 * 60 * 60; // 8h — auto-expire, safety net
+const TTL_SECONDS = 8 * 60 * 60; // 8h
 
 export async function GET(
   request: Request,
@@ -21,24 +17,35 @@ export async function GET(
     const value = await client.get(redisKey);
 
     if (!value) {
-      return NextResponse.json({ status: null });
+      return NextResponse.json(
+        { status: null },
+        { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } }
+      );
     }
 
-    // Pokušaj parsirati JSON (novi format)
     try {
       const data = JSON.parse(value);
-      return NextResponse.json({
-        status: data.status,
-        flightNumber: data.flightNumber ?? null,
-        setAt: data.setAt,
-      });
+      return NextResponse.json(
+        {
+          status: data.status,
+          flightNumber: data.flightNumber ?? null,
+          setAt: data.setAt,
+        },
+        { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } }
+      );
     } catch {
       // Stari format (samo string "open" / "closed")
-      return NextResponse.json({ status: value, flightNumber: null });
+      return NextResponse.json(
+        { status: value, flightNumber: null },
+        { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } }
+      );
     }
   } catch (error) {
     console.error('[desk-status GET] Redis error:', error);
-    return NextResponse.json({ status: null, flightNumber: null });
+    return NextResponse.json(
+      { status: null, flightNumber: null },
+      { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } }
+    );
   }
 }
 
@@ -66,22 +73,25 @@ export async function POST(
     };
 
     // null status = clear override
-// null status = clear override
     if (status === null) {
       await safeRedisDel(redisKey);
       return NextResponse.json({ ok: true, action: 'cleared' });
     }
+
     if (status !== 'open' && status !== 'closed') {
-      return NextResponse.json({ error: 'status must be open, closed, or null' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'status must be open, closed, or null' },
+        { status: 400 }
+      );
     }
 
-const payload = JSON.stringify({
-  status,
-  flightNumber: flightNumber ?? null,
-  setAt: new Date().toISOString(),
-});
+    const payload = JSON.stringify({
+      status,
+      flightNumber: flightNumber ?? null,
+      setAt: new Date().toISOString(),
+    });
 
-await safeRedisSet(redisKey, payload, TTL_SECONDS);
+    await safeRedisSet(redisKey, payload, TTL_SECONDS);
 
     return NextResponse.json({
       ok: true,

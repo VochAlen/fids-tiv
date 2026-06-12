@@ -130,6 +130,10 @@ class TTSQueue {
       return
     }
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+
+    // Chrome pauses speechSynthesis when tab is backgrounded — resume if needed
+    if (window.speechSynthesis.paused) window.speechSynthesis.resume()
+
     this.speaking = true
     const text = this.queue.shift()!
     const utt = new SpeechSynthesisUtterance(text)
@@ -138,9 +142,27 @@ class TTSQueue {
     utt.pitch = 1.0
     utt.volume = 1.0
     if (this.voice) utt.voice = this.voice
-    utt.onend = () => this.processNext()
-    utt.onerror = () => this.processNext()
-    window.speechSynthesis.cancel() // prevent any stale utterance
+
+    // Chrome background-tab watchdog: nudge synthesis if it stalls
+    const watchdog = setTimeout(() => {
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume()
+    }, 15_000)
+
+    utt.onend = () => {
+      clearTimeout(watchdog)
+      this.speaking = false
+      this.processNext()
+    }
+    utt.onerror = (e) => {
+      clearTimeout(watchdog)
+      // 'interrupted' fires on deliberate cancel() — not a real error
+      if ((e as SpeechSynthesisErrorEvent).error !== 'interrupted') {
+        console.warn('[TTS] error:', (e as SpeechSynthesisErrorEvent).error)
+      }
+      this.speaking = false
+      this.processNext()
+    }
+
     window.speechSynthesis.speak(utt)
   }
 }
