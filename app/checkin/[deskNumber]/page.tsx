@@ -1202,9 +1202,7 @@ const closeTimeMs = (() => {
         }
       }
 
-      // ── Odaberi trenutni let
-      let currentFlight: EnhancedFlight | null = null;
-
+ // ── Odaberi trenutni let
       const isBlockedByEmpty = (f: EnhancedFlight & { departureTime: Date }): boolean => {
         const override = allOverrides[f.FlightNumber];
         if (override?.CheckInDesk !== '__EMPTY__') return false;
@@ -1217,22 +1215,42 @@ const closeTimeMs = (() => {
         return !(stdMs && Date.now() - stdMs > 4 * 60 * 60 * 1000);
       };
 
-   if (earlyOpenFlight && currentManualStatus !== 'closed') {
+      let currentFlight: EnhancedFlight | null = null;
+
+      // Prioritet 1: early-open — FORCE OPEN sa konkretnim letom
+      // Apsolutni prioritet, ignoriše sve ostale letove na šalteru
+      if (earlyOpenFlight && currentManualStatus !== 'closed') {
         currentFlight = earlyOpenFlight;
       }
 
-      // Prioritet 2: manual 'open' bez early-open, ili early-open nije pronađen u feed-u
+      // Prioritet 2: manual 'open' BEZ early-open flightNumber
+      // Agent je kliknuo generalni FORCE OPEN bez specificiranja leta
       if (!currentFlight && currentManualStatus === 'open') {
+        const nowMs = Date.now();
         for (const f of sorted) {
           const s = (f.StatusEN || '').toLowerCase();
           if (s.includes('cancelled') || s.includes('otkazan') ||
               s.includes('diverted')  || s.includes('preusmjeren') ||
               s.includes('departed')  || s.includes('poletio')) continue;
           if (isBlockedByEmpty(f)) continue;
+          // Preskoči letove čiji je check-in prozor zatvoren
           if (isCheckInClosed(f, allOverrides)) continue;
-          if (f.departureTime < new Date(Date.now() - 60 * 60 * 1000)) continue;
+          // Preskoči letove kojima je STD-30min prošlo (zombie letovi)
+          const stdMs = f.departureTime.getTime();
+          if (stdMs - 30 * 60 * 1000 < nowMs && !f.EstimatedDepartureTime) continue;
           currentFlight = f;
           break;
+        }
+
+        // Ako manual 'open' nije pronašao validan let → resetuj override
+        // da ne blokira auto-logiku za naredne letove
+        if (!currentFlight) {
+          if (DEVELOPMENT) console.log(`[CheckIn] Manual 'open' bez validnog leta — resetujem override na desk ${deskNumberParam}`);
+          void fetch(`/api/desk-status/${deskNumberParam}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: null }),
+          }).then(() => invalidateDeskStatusCache(deskNumberParam)).catch(() => {});
         }
       }
 
@@ -1262,16 +1280,58 @@ const closeTimeMs = (() => {
 
    // Ako je currentFlight early-open (nije u future[]), next je prvi iz future[].
       // Ako je u future[], next je sljedeći iza njega.
-const safeFlight = currentFlight; // ← lokalna referenca
-const currentIsEarlyOpen = safeFlight != null &&
-  !future.some((f) => f.FlightNumber === safeFlight.FlightNumber);
-const idx = currentIsEarlyOpen
-  ? -1
-  : future.findIndex((f) => f.FlightNumber === safeFlight?.FlightNumber);
+// ── Next scheduled flight za inactive screen
+      // Gleda u sorted[] — sve buduće letove, ne samo one u check-in prozoru
+      const safeFlight = currentFlight;
+      const currentIsEarlyOpen = safeFlight != null &&
+        !future.some((f) => f.FlightNumber === safeFlight.FlightNumber);
+      const idx = currentIsEarlyOpen
+        ? -1
+        : future.findIndex((f) => f.FlightNumber === safeFlight?.FlightNumber);
       const next = currentIsEarlyOpen
         ? (future[0] ?? null)
         : (idx >= 0 && idx < future.length - 1 ? future[idx + 1] : null);
-      if (isMountedRef.current) setNextScheduledFlight(next);
+
+      // ── Ako nema currentFlighta (inactive), prikaži prvi budući let iz sorted[]
+      // (čak i ako još nije u check-in prozoru)
+      let nextToDisplay: Flight | null = next;
+if (!currentFlight && !next) {
+        nextToDisplay = sorted.find((f) => {
+          const s = (f.StatusEN || '').toLowerCase();
+          if (s.includes('cancelled') || s.includes('otkazan') ||
+              s.includes('departed')  || s.includes('poletio')) return false;
+
+          // ── Preskoči letove kojima je check-in prozor već zatvoren
+          // (STD-30min je prošlo — let je završen sa check-inom)
+          const stdMs = f.departureTime.getTime();
+          const closeTime = stdMs - 30 * 60 * 1000;
+          if (Date.now() >= closeTime) return false;
+
+          // Uzmi prvi budući let čiji STD još nije prošao
+          return f.departureTime.getTime() > Date.now();
+        }) ?? null;
+      }
+
+      if (isMountedRef.current) setNextScheduledFlight(nextToDisplay);
+     
+
+      // ── Countdown do otvaranja check-ina za sljedeći let (inactive screen)
+      if (!currentFlight && nextToDisplay) {
+        const stdMs = (() => {
+          const std = nextToDisplay.ScheduledDepartureTime;
+          if (!std) return null;
+          const [h, m] = std.split(':').map(Number);
+          if (isNaN(h)) return null;
+          const d = new Date(); d.setHours(h, m, 0, 0);
+          return d.getTime();
+        })();
+        if (stdMs) {
+          const lookaheadMs = getCheckInLookaheadMs(nextToDisplay.FlightNumber);
+          const opensAt = stdMs - lookaheadMs;
+          const minsUntilOpen = Math.max(0, Math.floor((opensAt - Date.now()) / 60_000));
+          setTimeUntilCheckIn(minsUntilOpen > 0 ? minsUntilOpen : null);
+        }
+      }
 
     } catch (err) {
       if (DEVELOPMENT) console.error('❌ loadFlights error:', err);
@@ -1313,13 +1373,15 @@ const idx = currentIsEarlyOpen
 
 
 // ── loadFlightsRef — stabilan ref da fast poll ne restartuje interval
+  // ── loadFlightsRef — stabilan ref da fast poll ne restartuje interval
   const loadFlightsRef = useRef(loadFlights);
   useEffect(() => { loadFlightsRef.current = loadFlights; }, [loadFlights]);
 
-  // ── Fast desk-status polling (3s) — cross-device, zamjena za BroadcastChannel
+  // ── Fast desk-status polling (3s) — cross-device, sa race condition guardom
   useEffect(() => {
     let lastStatus: string | null = '__INIT__';
     let lastFlight: string | null = '__INIT__';
+    let isLoadingRef = false;
 
     const poll = async () => {
       if (!isMountedRef.current) return;
@@ -1341,7 +1403,10 @@ const idx = currentIsEarlyOpen
           }
           invalidateDeskStatusCache(deskNumberParam);
           _overrideCache = null;
-          if (isMountedRef.current) void loadFlightsRef.current();
+          if (isMountedRef.current && !isLoadingRef) {
+            isLoadingRef = true;
+            void loadFlightsRef.current().finally(() => { isLoadingRef = false; });
+          }
         }
       } catch {}
     };
@@ -1350,6 +1415,8 @@ const idx = currentIsEarlyOpen
     const id = setInterval(poll, 3_000);
     return () => clearInterval(id);
   }, [deskNumberParam]);
+
+
 
   // ── Sync shouldShowCheckIn u ref da interval ne restartuje useEffect
   useEffect(() => { shouldShowCheckInRef.current = shouldShowCheckIn; }, [shouldShowCheckIn]);
