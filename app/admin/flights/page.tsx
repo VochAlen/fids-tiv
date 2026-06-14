@@ -596,7 +596,7 @@ const CounterRow = ({ label, count, total, color }: { label: string; count: numb
   const pct = total > 0 ? Math.round((count / total) * 100) : 0;
   return (
     <div className="flex items-center gap-2 py-0.5">
-      <span className="text-xs text-white/70 font-mono w-16 flex-shrink-0 truncate">{label}</span>
+      <span className="text-xs text-white/70 font-mono w-24 flex-shrink-0">{label}</span>
       <MiniBar value={count} max={total} color={color} />
       <span className="text-xs font-bold text-white w-8 text-right flex-shrink-0">{pct}%</span>
       <span className="text-[10px] text-white/40 w-5 text-right flex-shrink-0">({count})</span>
@@ -1105,9 +1105,9 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
               <span className="text-xs font-semibold text-white/80">Najopterećeniji šalteri</span>
             </div>
             <div className="space-y-1">
-              {stats.topDesks.map(({ desk, count }) => (
-                <CounterRow key={desk} label={`Šalter ${desk}`} count={count} total={stats.topDesks[0].count} color="bg-purple-500" />
-              ))}
+ {stats.topDesks.map(({ desk, count }) => (
+  <CounterRow key={desk} label={`Šalter ${String(desk)}`} count={count} total={stats.topDesks[0].count} color="bg-purple-500" />
+))}
             </div>
           </div>
         </>
