@@ -21,7 +21,7 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS         = 60_000   // ↑ 60s→90s: -33% Vercel poziva
-const CACHE_DURATION              = 10 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
+const CACHE_DURATION              = 3 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
 const MAX_FLIGHTS_DISPLAY         = 9
@@ -912,7 +912,9 @@ function FlightBoard(): JSX.Element {
               ) : (
                 sortedFlights.map((flight, index) => (
                   <FlightRow
-                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`}
+                    // key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`}
+                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
+                    
                     flight={flight}
                     index={index}
                     showArrivals={showArrivals}

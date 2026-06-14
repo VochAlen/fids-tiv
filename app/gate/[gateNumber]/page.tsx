@@ -345,12 +345,16 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
       );
 
       // 2. Check-in status za svaki let
-      const withStatus = await Promise.all(
-        allForGate.map(async (f: Flight) => ({
-          ...f,
-          checkInStatus: await getFlightCheckInStatus(f),
-        }))
-      );
+      // const withStatus = await Promise.all(
+      //   allForGate.map(async (f: Flight) => ({
+      //     ...f,
+      //     checkInStatus: await getFlightCheckInStatus(f),
+      //   }))
+      // );
+      const withStatus = allForGate.map((f: Flight) => ({
+  ...f,
+  checkInStatus: null,
+}));
 
       // 3. Sortiraj po STD — gate slot se bazira na rasporedu, ne ETD
       const withTime = withStatus

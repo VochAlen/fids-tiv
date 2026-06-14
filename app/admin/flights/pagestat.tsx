@@ -172,27 +172,12 @@ const StatusControl = ({ currentStatus, flightNumber, onOverride }: any) => {
 };
 
 // ============================================================
-// DESK MANUAL CONTROL (sa logDeskEvent)
+// DESK MANUAL CONTROL
 // ============================================================
 const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string; flightNumber?: string }) => {
   const [deskStates, setDeskStates] = useState<Record<string, { status: string; flightNumber: string | null }>>({});
   const [loadingDesk, setLoadingDesk] = useState<Record<string, boolean>>({});
   const desks = deskNumbers?.split(',').map(d => d.trim()).filter(Boolean) || [];
-
-  // Helper za logovanje historije šaltera
-  const logDeskEvent = async (desk: string, fn: string | null, event: 'force-open' | 'force-close+done' | 'done-next' | 'reset-auto') => {
-    try {
-      await fetch(`/api/desk-history/${desk}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ts: new Date().toISOString(),
-          event,
-          flightNumber: fn,
-        }),
-      });
-    } catch {} // non-critical
-  };
 
   useEffect(() => {
     if (!deskNumbers) return;
@@ -256,110 +241,17 @@ const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 font-bold">✕ CLOSED</span>
               )}
               {state && (
-                <button
-                  onClick={async () => {
-                    setLoadingDesk(prev => ({ ...prev, [desk]: true }));
-                    try {
-                      await handleSetStatus(desk, null, null);
-                      await logDeskEvent(desk, null, 'reset-auto');
-                    } finally {
-                      setLoadingDesk(prev => ({ ...prev, [desk]: false }));
-                    }
-                  }}
-                  disabled={isBusy}
-                  className="ml-auto text-[10px] text-white/40 hover:text-white px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 transition disabled:opacity-40"
-                >
-                  Reset Auto
-                </button>
+                <button onClick={() => handleSetStatus(desk, null)} disabled={isBusy} className="ml-auto text-[10px] text-white/40 hover:text-white px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 transition disabled:opacity-40">Reset Auto</button>
               )}
             </div>
-
             <div className="flex flex-wrap gap-1.5 px-3 pb-3">
-              {/* FORCE OPEN */}
-              <button
-                onClick={async () => {
-                  setLoadingDesk(prev => ({ ...prev, [desk]: true }));
-                  try {
-                    await handleSetStatus(desk, 'open', flightNumber ?? null);
-                    await logDeskEvent(desk, flightNumber ?? null, 'force-open');
-                  } finally {
-                    setLoadingDesk(prev => ({ ...prev, [desk]: false }));
-                  }
-                }}
-                disabled={isBusy || (isEarly && state?.flightNumber === flightNumber)}
-                title={flightNumber ? `Otvori šalter za let ${flightNumber} odmah (early-open)` : 'Otvori šalter'}
-                className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40 bg-green-600/20 hover:bg-green-600/40 text-green-300 border border-green-600/30"
-              >
+              <button onClick={() => handleSetStatus(desk, 'open', flightNumber ?? null)} disabled={isBusy || (isEarly && state?.flightNumber === flightNumber)} title={flightNumber ? `Otvori šalter za let ${flightNumber} odmah (early-open)` : 'Otvori šalter'} className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40 bg-green-600/20 hover:bg-green-600/40 text-green-300 border border-green-600/30">
                 ✓ FORCE OPEN{flightNumber ? ` (${flightNumber})` : ''}
               </button>
-                         {/* FORCE CLOSE */}
-              <button
-                onClick={async () => {
-                  if (isBusy || isClosed) return;
-                  setLoadingDesk(prev => ({ ...prev, [desk]: true }));
-                  try {
-                    if (flightNumber) {
-                      await fetch('/api/admin/flight-override', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ flightNumber, field: 'checkInDone', action: 'assign', value: 'true' }),
-                      });
-                    }
-                    const res = await fetch(`/api/desk-status/${desk}`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ status: 'closed', flightNumber: null }),
-                    });
-                    if (!res.ok) { alert('Greška pri postavljanju statusa'); return; }
-                    setDeskStates(prev => ({ ...prev, [desk]: { status: 'closed', flightNumber: null } }));
-                    await logDeskEvent(desk, flightNumber ?? null, 'force-close+done');
-                  } catch {
-                    alert('Greška');
-                  } finally {
-                    setLoadingDesk(prev => ({ ...prev, [desk]: false }));
-                  }
-                }}
-                disabled={isBusy || isClosed}
-                title="Zatvori šalter i označi check-in kao završen"
-                className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-600/30"
-              >
+              <button onClick={() => handleSetStatus(desk, 'closed', null)} disabled={isBusy || isClosed} title="Zatvori šalter" className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-600/30">
                 ✕ FORCE CLOSE
               </button>
-
-              {/* DONE · NEXT */}
-              <button
-                onClick={async () => {
-                  if (!flightNumber) return;
-                  setLoadingDesk(prev => ({ ...prev, [desk]: true }));
-                  try {
-                    await fetch('/api/admin/flight-override', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ flightNumber, field: 'checkInDone', action: 'assign', value: 'true' }),
-                    });
-                    await fetch(`/api/desk-status/${desk}`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ status: null }),
-                    });
-                    setDeskStates(prev => { const n = { ...prev }; delete n[desk]; return n; });
-                    await logDeskEvent(desk, flightNumber, 'done-next');
-                  } catch {
-                    alert('Greška');
-                  } finally {
-                    setLoadingDesk(prev => ({ ...prev, [desk]: false }));
-                  }
-                }}
-                disabled={isBusy || !flightNumber}
-                title={`Završi check-in za ${flightNumber ?? ''} i vrati šalter na auto`}
-                className="px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition disabled:opacity-40 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30"
-              >
-                ✅ DONE · NEXT
-              </button>
-
-   
             </div>
-
             {isEarly && (
               <div className="mx-3 mb-3 px-2 py-1.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-[10px] text-purple-200">
                 ⚡ Let <strong>{state.flightNumber}</strong> prikazan odmah na ovom šalteru. Klikni <strong>Reset Auto</strong> za povratak na automatiku.
@@ -368,82 +260,6 @@ const DeskManualControl = ({ deskNumbers, flightNumber }: { deskNumbers?: string
           </div>
         );
       })}
-    </div>
-  );
-};
-
-// ============================================================
-// DESK HISTORY CARD (nova komponenta)
-// ============================================================
-const DeskHistoryCard = ({ deskNumbers }: { deskNumbers?: string }) => {
-  const [history, setHistory] = useState<Record<string, any[]>>({});
-  const [open, setOpen] = useState(false);
-  const desks = deskNumbers?.split(',').map(d => d.trim()).filter(Boolean) || [];
-
-  useEffect(() => {
-    if (!open || !desks.length) return;
-    desks.forEach(async (desk) => {
-      try {
-        const res = await fetch(`/api/desk-history/${desk}`);
-        const data = await res.json();
-        setHistory(prev => ({ ...prev, [desk]: data }));
-      } catch {}
-    });
-  }, [open, deskNumbers]);
-
-  if (!desks.length) return null;
-
-  const EVENT_CONFIG = {
-    'force-open':      { label: 'FORCE OPEN',  color: 'text-green-400',  bg: 'bg-green-500/10',  border: 'border-green-500/20', icon: '✓' },
-    'force-close+done':{ label: 'CLOSE + DONE', color: 'text-red-400',    bg: 'bg-red-500/10',    border: 'border-red-500/20',   icon: '✕' },
-    'done-next':       { label: 'DONE · NEXT',  color: 'text-blue-400',   bg: 'bg-blue-500/10',   border: 'border-blue-500/20',  icon: '✅' },
-    'reset-auto':      { label: 'RESET AUTO',   color: 'text-white/50',   bg: 'bg-white/5',       border: 'border-white/10',     icon: '↺' },
-  } as const;
-
-  return (
-    <div className="mt-2">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:bg-white/8 transition text-[10px] text-white/50"
-      >
-        <span>📋 History šaltera</span>
-        <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-
-      {open && (
-        <div className="mt-1 space-y-2">
-          {desks.map(desk => {
-            const entries = history[desk] || [];
-            return (
-              <div key={desk} className="rounded-lg bg-white/3 border border-white/8 overflow-hidden">
-                <div className="px-3 py-1.5 bg-white/5 border-b border-white/8">
-                  <span className="text-[10px] font-bold text-white/60">Šalter {desk}</span>
-                </div>
-                {entries.length === 0 ? (
-                  <div className="px-3 py-2 text-[10px] text-white/30 italic">Nema historije</div>
-                ) : (
-                  <div className="max-h-48 overflow-y-auto">
-                    {entries.map((entry, i) => {
-                      const cfg = EVENT_CONFIG[entry.event as keyof typeof EVENT_CONFIG] ?? EVENT_CONFIG['reset-auto'];
-                      const time = new Date(entry.ts).toLocaleTimeString('bs-BA', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                      return (
-                        <div key={i} className={`flex items-center gap-2 px-3 py-1.5 border-b border-white/5 last:border-0 ${cfg.bg}`}>
-                          <span className={`text-[11px] ${cfg.color} font-mono flex-shrink-0`}>{cfg.icon}</span>
-                          <span className={`text-[10px] font-bold ${cfg.color} w-24 flex-shrink-0`}>{cfg.label}</span>
-                          {entry.flightNumber && (
-                            <span className="text-[10px] text-white/70 font-mono flex-shrink-0">{entry.flightNumber}</span>
-                          )}
-                          <span className="text-[10px] text-white/30 font-mono ml-auto flex-shrink-0">{time}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 };
@@ -469,7 +285,7 @@ const OverrideBadge = ({ fieldName }: { fieldName: string }) => {
 };
 
 // ============================================================
-// FLIGHT CARD (sa DeskHistoryCard)
+// FLIGHT CARD
 // ============================================================
 const FlightCard = ({ flight, onOverride, onClearAll }: any) => {
   const [expanded, setExpanded] = useState(false);
@@ -523,7 +339,6 @@ const FlightCard = ({ flight, onOverride, onClearAll }: any) => {
                 <OverrideControl label="Check-In Desk" currentValue={flight.CheckInDesk} fieldName="CheckInDesk" flightNumber={flight.FlightNumber} onOverride={onOverride} />
                 <OverrideControl label="Gate" currentValue={flight.GateNumber} fieldName="GateNumber" flightNumber={flight.FlightNumber} onOverride={onOverride} />
                 <DeskManualControl deskNumbers={flight.CheckInDesk} flightNumber={flight.FlightNumber} />
-                <DeskHistoryCard deskNumbers={flight.CheckInDesk} />
                 {hasOverride && (
                   <button onClick={() => onClearAll(flight.FlightNumber)} className="w-full mt-2 px-3 py-2 text-sm bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-lg transition">
                     <Trash2 className="w-4 h-4 inline mr-2" />Ukloni sve override-ove
@@ -716,9 +531,13 @@ const useFlightStats = (departures: any[], arrivals: any[]) => {
 };
 
 // ============================================================
-// PDF EXPORT FUNCTION (istovjetna prethodnoj verziji – sa svijetlim stilom)
+// PDF EXPORT FUNCTION (pure client-side, no SSR issues)
+// ============================================================
+// ============================================================
+// PDF EXPORT FUNCTION (pure client-side, no SSR issues)
 // ============================================================
 const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: string) => {
+  // Ova sintaksa radi sa jspdf 4.2.1
   const jspdfModule = await import('jspdf');
   const { jsPDF } = jspdfModule;
   
@@ -729,6 +548,7 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   const COL = W - MARGIN * 2;
   let y = 0;
 
+  // Helpers
   const hex = (h: string) => {
     const r = parseInt(h.slice(1, 3), 16);
     const g = parseInt(h.slice(3, 5), 16);
@@ -737,84 +557,113 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   };
   const setColor = (h: string) => doc.setTextColor(...hex(h));
   const setFill = (h: string) => doc.setFillColor(...hex(h));
+  const setDraw = (h: string) => doc.setDrawColor(...hex(h));
+  
+  // Helper za crni tekst (koristićemo ga za sav tekst osim headera)
   const setBlackText = () => doc.setTextColor(0, 0, 0);
-  const setDarkGrayText = () => doc.setTextColor(30, 41, 59);
 
-  setFill('#e0f2fe');
+  // ── HEADER BLOCK ── (ostaje originalno - svetle boje na tamnoj pozadini)
+  setFill('#0f172a');
   doc.rect(0, 0, W, 38, 'F');
-  setDarkGrayText();
+
+  // Airport name top-left
+  setColor('#94a3b8');
   doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
   doc.text('TIVAT AIRPORT — TIV', MARGIN, 10);
-  setColor('#0284c7');
+
+  // Main title
+  setColor('#ffffff');
   doc.setFontSize(17);
   doc.setFont('helvetica', 'bold');
   doc.text('Terminal Building Statistics', MARGIN, 20);
-  setDarkGrayText();
+
+  // Subtitle / date
+  setColor('#cbd5e1');
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   doc.text(`Date: ${date}`, MARGIN, 27.5);
   doc.text(`Generated: ${new Date().toLocaleTimeString('bs-BA', { hour: '2-digit', minute: '2-digit' })}`, MARGIN, 33);
-  setColor('#0369a1');
+
+  // Plane icon area (right side of header)
+  setColor('#3b82f6');
   doc.setFontSize(22);
   doc.text('✈', W - MARGIN - 8, 22);
+
   y = 45;
 
+  // ── SUMMARY KPI ROW ──
   const kpis = [
-    { label: 'Departures', value: String(stats.totalDep), bg: '#e0f2fe', textColor: '#0284c7' },
-    { label: 'Arrivals', value: String(stats.totalArr), bg: '#dcfce7', textColor: '#16a34a' },
-    { label: 'Cancelled', value: String(stats.cancelledDep + stats.cancelledArr), bg: '#fee2e2', textColor: '#dc2626' },
-    { label: 'Diverted', value: String(stats.divertedArr), bg: '#ffedd5', textColor: '#ea580c' },
+    { label: 'Departures', value: String(stats.totalDep), color: '#3b82f6' },
+    { label: 'Arrivals', value: String(stats.totalArr), color: '#22c55e' },
+    { label: 'Cancelled', value: String(stats.cancelledDep + stats.cancelledArr), color: '#ef4444' },
+    { label: 'Diverted', value: String(stats.divertedArr), color: '#f97316' },
   ];
   const kpiW = COL / 4;
   kpis.forEach((k, i) => {
     const x = MARGIN + i * kpiW;
-    setFill(k.bg);
+    setFill('#1e293b');
     doc.roundedRect(x, y, kpiW - 2, 18, 2, 2, 'F');
-    setBlackText();
+    setColor(k.color);
     doc.setFontSize(14);
     doc.setFont('helvetica', 'bold');
     doc.text(k.value, x + kpiW / 2 - 1, y + 9, { align: 'center' });
-    setBlackText();
+    // Label ispod broja - OSTAVLJAMO svetlo sivu (dobro je)
+    setColor('#94a3b8');
     doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
     doc.text(k.label, x + kpiW / 2 - 1, y + 14.5, { align: 'center' });
   });
   y += 24;
 
+  // ── SECTION helper ──
   const sectionTitle = (title: string) => {
-    setFill('#e2e8f0');
+    setFill('#1e293b');
     doc.rect(MARGIN, y, COL, 7, 'F');
-    setColor('#1e293b');
+    // Tekst sekcije - PLAVA (ostaje)
+    setColor('#60a5fa');
     doc.setFontSize(8);
     doc.setFont('helvetica', 'bold');
     doc.text(title.toUpperCase(), MARGIN + 3, y + 4.8);
     y += 10;
   };
 
+  // Bar row helper (label | bar | pct | count) - SVE BOJE TEKSTA SU CRNE
   const barRow = (label: string, value: number, maxVal: number, total: number, barColor: string) => {
     const pct = total > 0 ? Math.round((value / total) * 100) : 0;
     const barMaxW = 65;
     const barW = maxVal > 0 ? (value / maxVal) * barMaxW : 0;
-    setBlackText();
+
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(7.5);
     doc.setFont('helvetica', 'normal');
     doc.text(label, MARGIN + 2, y + 3.2);
-    setFill('#f8fafc');
+
+    // Bar background
+    setFill('#334155');
     doc.roundedRect(MARGIN + 46, y, barMaxW, 4, 1, 1, 'F');
+
+    // Bar fill
     if (barW > 0.5) {
       setFill(barColor);
       doc.roundedRect(MARGIN + 46, y, barW, 4, 1, 1, 'F');
     }
+
+    // pct - CRNI TEKST
     setBlackText();
     doc.setFontSize(7.5);
     doc.setFont('helvetica', 'bold');
     doc.text(`${pct}%`, MARGIN + 115, y + 3.2);
+
+    // count - CRNI TEKST
     setBlackText();
     doc.setFont('helvetica', 'normal');
     doc.text(`(${value})`, MARGIN + 126, y + 3.2);
+
     y += 6.5;
   };
 
+  // ── ON-TIME PERFORMANCE (Departures) ──
   sectionTitle('On-Time Performance — Departures');
   const d = stats.depOnTime;
   barRow('On time (±15 min)', d.onTime, d.total, d.total, '#22c55e');
@@ -823,13 +672,14 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   barRow('Delayed 30–60 min', d.d30, d.total, d.total, '#f97316');
   barRow('Delayed >60 min', d.d60p, d.total, d.total, '#ef4444');
   if (d.avgDelay > 0) {
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(7);
     doc.text(`Average delay (delayed flights only): ${d.avgDelay} min`, MARGIN + 2, y);
     y += 5;
   }
   y += 2;
 
+  // ── ON-TIME PERFORMANCE (Arrivals) ──
   sectionTitle('On-Time Performance — Arrivals');
   const a = stats.arrOnTime;
   barRow('On time (±15 min)', a.onTime, a.total, a.total, '#22c55e');
@@ -838,34 +688,43 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   barRow('Delayed 30–60 min', a.d30, a.total, a.total, '#f97316');
   barRow('Delayed >60 min', a.d60p, a.total, a.total, '#ef4444');
   if (a.avgDelay > 0) {
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(7);
     doc.text(`Average delay (delayed flights only): ${a.avgDelay} min`, MARGIN + 2, y);
     y += 5;
   }
   y += 2;
 
+  // ── CHECK PAGE BREAK ──
   const checkPage = () => { if (y > 250) { doc.addPage(); y = 14; } };
+
   checkPage();
 
+  // ── CHECK-IN COUNTERS ──
   if (stats.topDesks.length > 0) {
     sectionTitle('Check-In Counter Load');
     const maxDeskCount = stats.topDesks[0]?.count || 1;
     stats.topDesks.forEach(({ desk, count }) => barRow(`Counter ${desk}`, count, maxDeskCount, maxDeskCount, '#a855f7'));
     y += 2;
   }
+
   checkPage();
 
+  // ── GATE UTILIZATION ──
   if (stats.topGates.length > 0) {
     sectionTitle('Gate Utilization');
     const maxGateCount = stats.topGates[0]?.count || 1;
     stats.topGates.forEach(({ gate, count }) => barRow(`Gate ${gate}`, count, maxGateCount, maxGateCount, '#3b82f6'));
     y += 2;
   }
+
   checkPage();
 
+  // ── PEAK HOURS (side by side) ──
   sectionTitle('Peak Traffic Hours');
-  setBlackText();
+
+  // Heatmap grid for departures
+  setBlackText(); // CRNI TEKST
   doc.setFontSize(7);
   doc.setFont('helvetica', 'bold');
   doc.text('DEPARTURES', MARGIN, y + 3);
@@ -875,10 +734,11 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   stats.hours.forEach(({ h, count }) => {
     const x = MARGIN + (h - 6) * cellW;
     const pct = stats.maxHourCount > 0 ? count / stats.maxHourCount : 0;
-    const fillHex = pct === 0 ? '#f1f5f9' : pct < 0.35 ? '#bfdbfe' : pct < 0.65 ? '#60a5fa' : pct < 0.85 ? '#f97316' : '#ef4444';
+    const fillHex = pct === 0 ? '#1e293b' : pct < 0.35 ? '#1d4ed8' : pct < 0.65 ? '#2563eb' : pct < 0.85 ? '#f97316' : '#dc2626';
     setFill(fillHex);
     doc.roundedRect(x, y, cellW - 0.5, 7, 0.8, 0.8, 'F');
-    setColor(pct === 0 ? '#64748b' : '#1e293b');
+    // Tekst u heatmap - ostaje kako jeste (beli na tamnoj pozadini)
+    setColor(pct === 0 ? '#475569' : '#ffffff');
     doc.setFontSize(5.5);
     doc.setFont('helvetica', count > 0 ? 'bold' : 'normal');
     doc.text(`${h}`, x + cellW / 2 - 0.25, y + 3, { align: 'center' });
@@ -886,7 +746,7 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   });
   y += 10;
 
-  setBlackText();
+  setBlackText(); // CRNI TEKST
   doc.setFontSize(7);
   doc.setFont('helvetica', 'bold');
   doc.text('ARRIVALS', MARGIN, y + 3);
@@ -895,25 +755,28 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
   stats.hoursArr.forEach(({ h, count }) => {
     const x = MARGIN + (h - 6) * cellW;
     const pct = stats.maxHourCountArr > 0 ? count / stats.maxHourCountArr : 0;
-    const fillHex = pct === 0 ? '#f1f5f9' : pct < 0.35 ? '#bbf7d0' : pct < 0.65 ? '#4ade80' : pct < 0.85 ? '#f97316' : '#ef4444';
+    const fillHex = pct === 0 ? '#1e293b' : pct < 0.35 ? '#14532d' : pct < 0.65 ? '#16a34a' : pct < 0.85 ? '#f97316' : '#dc2626';
     setFill(fillHex);
     doc.roundedRect(x, y, cellW - 0.5, 7, 0.8, 0.8, 'F');
-    setColor(pct === 0 ? '#64748b' : '#1e293b');
+    setColor(pct === 0 ? '#475569' : '#ffffff');
     doc.setFontSize(5.5);
     doc.setFont('helvetica', count > 0 ? 'bold' : 'normal');
     doc.text(`${h}`, x + cellW / 2 - 0.25, y + 3, { align: 'center' });
     if (count > 0) doc.text(`${count}`, x + cellW / 2 - 0.25, y + 6, { align: 'center' });
   });
   y += 12;
+
   checkPage();
 
+  // ── TWO-COLUMN: AIRLINES + DESTINATIONS ──
   const colLeft = MARGIN;
   const colRight = MARGIN + COL / 2 + 2;
   const yBeforeCols = y;
 
-  setFill('#e2e8f0');
+  // Airlines departures
+  setFill('#1e293b');
   doc.rect(colLeft, y, COL / 2 - 2, 7, 'F');
-  setColor('#1e293b');
+  setColor('#60a5fa');
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
   doc.text('AIRLINES (DEP)', colLeft + 3, y + 4.8);
@@ -924,24 +787,25 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
     const shortName = name.length > 18 ? name.slice(0, 16) + '..' : name;
     const pct = Math.round((count / stats.totalDep) * 100);
     const bw = (count / maxAirline) * 42;
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
     doc.text(shortName, colLeft + 2, y + 3);
-    setFill('#f8fafc');
+    setFill('#334155');
     doc.roundedRect(colLeft + 38, y, 42, 3.5, 0.7, 0.7, 'F');
     if (bw > 0.3) { setFill('#3b82f6'); doc.roundedRect(colLeft + 38, y, bw, 3.5, 0.7, 0.7, 'F'); }
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(6.5);
     doc.setFont('helvetica', 'bold');
     doc.text(`${pct}%`, colLeft + 82, y + 2.8);
     y += 5.5;
   });
 
+  // Destinations (right column)
   let yR = yBeforeCols;
-  setFill('#e2e8f0');
+  setFill('#1e293b');
   doc.rect(colRight, yR, COL / 2 - 2, 7, 'F');
-  setColor('#1e293b');
+  setColor('#34d399');
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
   doc.text('TOP DESTINATIONS', colRight + 3, yR + 4.8);
@@ -952,14 +816,14 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
     const shortCity = city.length > 17 ? city.slice(0, 15) + '..' : city;
     const pct = Math.round((count / stats.totalDep) * 100);
     const bw = (count / maxDest) * 42;
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
     doc.text(shortCity, colRight + 2, yR + 3);
-    setFill('#f8fafc');
+    setFill('#334155');
     doc.roundedRect(colRight + 38, yR, 42, 3.5, 0.7, 0.7, 'F');
     if (bw > 0.3) { setFill('#22c55e'); doc.roundedRect(colRight + 38, yR, bw, 3.5, 0.7, 0.7, 'F'); }
-    setBlackText();
+    setBlackText(); // CRNI TEKST
     doc.setFontSize(6.5);
     doc.setFont('helvetica', 'bold');
     doc.text(`${pct}%`, colRight + 82, yR + 2.8);
@@ -968,18 +832,30 @@ const exportStatsPDF = async (stats: ReturnType<typeof useFlightStats>, date: st
 
   y = Math.max(y, yR) + 4;
 
+  // ── FOOTER ── (ostaje originalno)
+   // ── FOOTER ──
   const pageCount = doc.getNumberOfPages();
   for (let p = 1; p <= pageCount; p++) {
     doc.setPage(p);
-    setFill('#f1f5f9');
+    setFill('#0f172a');
     doc.rect(0, 287, W, 10, 'F');
-    setDarkGrayText();
+    
+    // Leva strana: povjerljivo
+    setColor('#475569');
     doc.setFontSize(6.5);
+    doc.setFont('helvetica', 'normal');
     doc.text('Tivat Airport (TIV) — Terminal Building Statistics', MARGIN, 292.5);
+    
+    // Centralni dio: "Developed with ❤️ for Tivat Airport by Alen, 2026 :: alen.vocanec@apm.co.me"
+    // Koristimo srcu emoji ❤️
     const footerCenterText = 'Developed by Alen, 2026 :: alen.vocanec@apm.co.me';
     doc.text(footerCenterText, W / 2, 292.5, { align: 'center' });
+    
+    // Desna strana: broj stranice u formatu "Page 1 of 3"
     doc.text(`Page ${p} of ${pageCount}`, W - MARGIN, 292.5, { align: 'right' });
   }
+
+  doc.save(`TIV-Statistics-${date.replace(/\./g, '-')}.pdf`);
 
   doc.save(`TIV-Statistics-${date.replace(/\./g, '-')}.pdf`);
 };
@@ -1010,6 +886,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
 
   return (
     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-5">
+      {/* Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
           <BarChart2 className="w-4 h-4 text-blue-400" />
@@ -1020,13 +897,22 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
             <button onClick={() => setStatsTab('dep')} className={`px-2.5 py-1 rounded-md transition font-medium ${statsTab === 'dep' ? 'bg-blue-600 text-white' : 'text-white/50 hover:text-white'}`}>Polaski</button>
             <button onClick={() => setStatsTab('arr')} className={`px-2.5 py-1 rounded-md transition font-medium ${statsTab === 'arr' ? 'bg-green-600 text-white' : 'text-white/50 hover:text-white'}`}>Dolasci</button>
           </div>
-          <button onClick={handleExport} disabled={exporting} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed">
-            {exporting ? <RefreshCw className="w-3 h-3 animate-spin" /> : <FileDown className="w-3 h-3" />}
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            title="Izvezi statistiku kao PDF"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {exporting
+              ? <RefreshCw className="w-3 h-3 animate-spin" />
+              : <FileDown className="w-3 h-3" />
+            }
             {exporting ? 'Generišem...' : 'PDF'}
           </button>
         </div>
       </div>
 
+      {/* KPI mini cards */}
       <div className="grid grid-cols-2 gap-2">
         {[
           { label: 'Polaski', val: stats.totalDep, color: 'text-blue-400', bg: 'bg-blue-500/10' },
@@ -1041,6 +927,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         ))}
       </div>
 
+      {/* On-Time Performance */}
       <div>
         <div className="flex items-center gap-2 mb-2">
           <TrendingUp className="w-3.5 h-3.5 text-green-400" />
@@ -1065,6 +952,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
 
       <div className="border-t border-white/10" />
 
+      {/* Peak Hours heatmap */}
       <div>
         <div className="flex items-center gap-2 mb-3">
           <Clock className="w-3.5 h-3.5 text-blue-400" />
@@ -1096,6 +984,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         </div>
       </div>
 
+      {/* Check-in counters (dep tab only) */}
       {statsTab === 'dep' && stats.topDesks.length > 0 && (
         <>
           <div className="border-t border-white/10" />
@@ -1119,6 +1008,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         </>
       )}
 
+      {/* Gates */}
       {stats.topGates.length > 0 && (
         <>
           <div className="border-t border-white/10" />
@@ -1136,6 +1026,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         </>
       )}
 
+      {/* Airlines breakdown */}
       <div className="border-t border-white/10" />
       <div>
         <div className="flex items-center gap-2 mb-2">
@@ -1153,6 +1044,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         )}
       </div>
 
+      {/* Top Destinations (dep only) */}
       {statsTab === 'dep' && stats.topDestinations.length > 0 && (
         <>
           <div className="border-t border-white/10" />
@@ -1179,6 +1071,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
 export default function AdminFlightsPage() {
   const router = useRouter();
 
+  // State
   const [flights, setFlights] = useState<{ departures: Flight[]; arrivals: Flight[] }>({ departures: [], arrivals: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1188,12 +1081,14 @@ export default function AdminFlightsPage() {
   const [airlineFilter, setAirlineFilter] = useState('all');
   const [error, setError] = useState<string | null>(null);
 
+  // Sigurnost
   const [safetyMode, setSafetyMode] = useState(true);
   const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; title: string; message: string; action: () => void }>({ open: false, title: '', message: '', action: () => {} });
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
   const [countdown, setCountdown] = useState(AUTO_REFRESH_INTERVAL / 1000);
   const lastClickRef = useRef(0);
 
+  // Utility
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type });
   }, []);
@@ -1212,6 +1107,7 @@ export default function AdminFlightsPage() {
     }
   }, [showToast]);
 
+  // Load overrides
   const loadOverrides = useCallback(async () => {
     try {
       const res = await fetch('/api/admin/flight-override?action=getAllOverrides');
@@ -1219,6 +1115,7 @@ export default function AdminFlightsPage() {
     } catch { return {}; }
   }, []);
 
+  // Load flights
   const loadFlights = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     setRefreshing(true);
@@ -1246,6 +1143,7 @@ export default function AdminFlightsPage() {
     }
   }, [loadOverrides]);
 
+  // Override handler
   const handleOverride = useCallback(async (flightNumber: string, field: string, action: string, value?: string) => {
     withDebounce(async () => {
       try {
@@ -1263,6 +1161,7 @@ export default function AdminFlightsPage() {
     });
   }, [loadFlights]);
 
+  // Clear all overrides for a flight
   const handleClearAllOverrides = useCallback(async (flightNumber: string) => {
     confirmAction('Uklanjanje override-a', `Ukloniti sve override-ove za let ${flightNumber}?`, async () => {
       try {
@@ -1278,6 +1177,7 @@ export default function AdminFlightsPage() {
     });
   }, [loadFlights, safetyMode]);
 
+  // Clear all flights overrides
   const handleClearAllFlightsOverrides = useCallback(async () => {
     confirmAction('Brisanje SVIH override-a', 'Ovo će ukloniti sve override-ove za sve letove! Ova akcija se ne može poništiti.', async () => {
       try {
@@ -1295,6 +1195,7 @@ export default function AdminFlightsPage() {
     });
   }, [loadFlights, safetyMode]);
 
+  // Auto-refresh timers
   useEffect(() => {
     const interval = setInterval(() => { if (!refreshing) loadFlights(true); }, AUTO_REFRESH_INTERVAL);
     return () => clearInterval(interval);
@@ -1307,6 +1208,7 @@ export default function AdminFlightsPage() {
 
   useEffect(() => { loadFlights(); }, [loadFlights]);
 
+  // Display helpers
   const allFlights = useMemo(() =>
     activeTab === 'all' ? [...flights.departures, ...flights.arrivals]
     : activeTab === 'departures' ? flights.departures
@@ -1357,6 +1259,7 @@ export default function AdminFlightsPage() {
         <ConfirmDialog open={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} onConfirm={() => { confirmDialog.action(); setConfirmDialog({ ...confirmDialog, open: false }); }} onCancel={() => setConfirmDialog({ ...confirmDialog, open: false })} />
 
         <div className="max-w-[1600px] mx-auto">
+          {/* Header */}
           <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
             <div>
               <div className="flex items-center gap-3 mb-2 flex-wrap">
@@ -1388,6 +1291,7 @@ export default function AdminFlightsPage() {
 
           {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 text-sm">⚠️ {error}</div>}
 
+          {/* Filteri */}
           <div className="bg-white/5 rounded-xl p-4 mb-4">
             <div className="flex flex-wrap gap-4">
               <div className="flex gap-1">
@@ -1410,9 +1314,13 @@ export default function AdminFlightsPage() {
             </div>
           </div>
 
+          {/* Odletjeli letovi — collapsible na vrhu */}
           <DepartedSection flights={departedFlights} onOverride={handleOverride} onClearAll={handleClearAllOverrides} />
 
+          {/* Glavni layout: lista + stats */}
           <div className="flex flex-col xl:flex-row gap-4 items-start">
+
+            {/* Lista letova */}
             <div className="flex-1 min-w-0 space-y-3">
               {loading && !flights.departures.length ? (
                 <div className="text-center py-12"><div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><div className="text-white/50">Učitavanje...</div></div>
@@ -1424,11 +1332,15 @@ export default function AdminFlightsPage() {
                 ))
               )}
             </div>
+
+            {/* Stats panel — desno na xl, ispod na mobile */}
             <div className="w-full xl:w-80 xl:flex-shrink-0 xl:sticky xl:top-4">
               <FlightStatsPanel departures={flights.departures} arrivals={flights.arrivals} />
             </div>
+
           </div>
 
+          {/* Footer */}
           <div className="mt-6 pt-4 border-t border-white/10 text-center text-xs text-white/30 pb-8">
             Prikazano {filteredFlights.length} aktivnih od {allFlights.length} letova • Sinhronizovano: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : 'N/A'}
           </div>

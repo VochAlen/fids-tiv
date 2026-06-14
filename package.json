@@ -131,6 +131,7 @@
     "eslint-config-next": "13.5.1",
     "ini": "^6.0.0",
     "ioredis": "^5.10.1",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.446.0",
     "next": "14.2.0",
     "react": "^18.2.0",

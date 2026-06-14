@@ -43,7 +43,7 @@ import ChristmasInactiveScreen from '@/components/ChristmasInactiveScreen';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const INTERVAL_ACTIVE              = 45_000;
+const INTERVAL_ACTIVE              = 55_000;
 const INTERVAL_INACTIVE            = 60_000;
 const AD_SWITCH_INTERVAL           = 15_000;
 const CACHE_CLEANUP_INTERVAL       = 4 * 60 * 60 * 1_000;
@@ -1412,7 +1412,7 @@ if (!currentFlight && !next) {
     };
 
     void poll();
-    const id = setInterval(poll, 3_000);
+    const id = setInterval(poll, 5_000);
     return () => clearInterval(id);
   }, [deskNumberParam]);
 
