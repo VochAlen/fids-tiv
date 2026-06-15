@@ -1006,7 +1006,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
   };
 
   const ot = statsTab === 'dep' ? stats.depOnTime : stats.arrOnTime;
-  const label = statsTab === 'dep' ? 'Polaski' : 'Dolasci';
+  const label = statsTab === 'dep' ? 'Polasci' : 'Dolasci';
 
   return (
     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-5">
@@ -1017,7 +1017,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
         </div>
         <div className="flex items-center gap-2">
           <div className="flex gap-1 text-xs bg-white/5 rounded-lg p-0.5">
-            <button onClick={() => setStatsTab('dep')} className={`px-2.5 py-1 rounded-md transition font-medium ${statsTab === 'dep' ? 'bg-blue-600 text-white' : 'text-white/50 hover:text-white'}`}>Polaski</button>
+            <button onClick={() => setStatsTab('dep')} className={`px-2.5 py-1 rounded-md transition font-medium ${statsTab === 'dep' ? 'bg-blue-600 text-white' : 'text-white/50 hover:text-white'}`}>Polasci</button>
             <button onClick={() => setStatsTab('arr')} className={`px-2.5 py-1 rounded-md transition font-medium ${statsTab === 'arr' ? 'bg-green-600 text-white' : 'text-white/50 hover:text-white'}`}>Dolasci</button>
           </div>
           <button onClick={handleExport} disabled={exporting} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 transition disabled:opacity-50 disabled:cursor-not-allowed">
@@ -1029,7 +1029,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
 
       <div className="grid grid-cols-2 gap-2">
         {[
-          { label: 'Polaski', val: stats.totalDep, color: 'text-blue-400', bg: 'bg-blue-500/10' },
+          { label: 'Polasci', val: stats.totalDep, color: 'text-blue-400', bg: 'bg-blue-500/10' },
           { label: 'Dolasci', val: stats.totalArr, color: 'text-green-400', bg: 'bg-green-500/10' },
           { label: 'Otkazani', val: stats.cancelledDep + stats.cancelledArr, color: 'text-red-400', bg: 'bg-red-500/10' },
           { label: 'Preusmjereni', val: stats.divertedArr, color: 'text-orange-400', bg: 'bg-orange-500/10' },
@@ -1125,7 +1125,7 @@ const FlightStatsPanel = ({ departures, arrivals }: { departures: any[]; arrival
           <div>
             <div className="flex items-center gap-2 mb-2">
               <MapPin className="w-3.5 h-3.5 text-blue-400" />
-              <span className="text-xs font-semibold text-white/80">Najopterećeniji gejteri</span>
+              <span className="text-xs font-semibold text-white/80">Najopterećeniji gejtovi</span>
             </div>
             <div className="space-y-1">
               {stats.topGates.map(({ gate, count }) => (

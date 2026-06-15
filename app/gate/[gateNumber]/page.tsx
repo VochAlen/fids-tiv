@@ -13,9 +13,10 @@ import {
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
 
-const REFRESH_INTERVAL_MS    = 20_000;
-// const GRACE_AFTER_DEPARTURE_MS = 1 * 60 * 1000; // 1 minuta nakon polaska
-const CLOSE_BEFORE_DEPARTURE_MS = 10 * 60 * 1000; // 10 minuta PRIJE polaska
+const REFRESH_INTERVAL_MS          = 20_000;
+const DISPLAY_START_BEFORE_ETD_MS  = 30 * 60 * 1000; // 30 min PRIJE ETD — delayed let se prikazuje
+const HIDE_BEFORE_ETD_MS           =  5 * 60 * 1000; //  5 min PRIJE ETD — delayed let se gasi
+const CLOSE_BEFORE_DEPARTURE_MS    = 10 * 60 * 1000; // 10 min PRIJE STD — non-delayed let se gasi
 
 // ─────────────────────────────────────────────────────────────
 // Error Boundary
@@ -91,16 +92,6 @@ const AirlineLogo = memo(function AirlineLogo(
 
 // ─────────────────────────────────────────────────────────────
 // parseDepartureTime
-//
-// KLJUČNA LOGIKA — rješavamo problem jutarnjih letova (00:00–06:00):
-//
-// Koristimo "aviation day" koji počinje u 03:00.
-// Ako je trenutno vrijeme između 00:00 i 03:00 (deep night),
-// letovi "danas" su zapravo letovi koji su krenuli "jučer poslije 03:00".
-//
-// NAPOMENA: parseDepartureTime je SAMO za parsiranje stringa u Date.
-// Odluka o prikazu (shouldDisplayFlight) se bazira na STATUS-u iz API-ja,
-// a BACKUP logika na ETD/STD + GRACE_AFTER_DEPARTURE_MS.
 // ─────────────────────────────────────────────────────────────
 const parseDepartureTime = (t: string): Date | null => {
   if (!t) return null;
@@ -124,7 +115,6 @@ const formatTimeRemaining = (min: number): string => {
   return `${min}m`;
 };
 
-// FIX: dodana provjera EstimatedDepartureTime
 const flightChanged = (a: Flight | null, b: Flight | null): boolean =>
   a?.FlightNumber !== b?.FlightNumber ||
   a?.ScheduledDepartureTime !== b?.ScheduledDepartureTime ||
@@ -202,28 +192,6 @@ export default function GatePage() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// shouldDisplayFlight — CENTRALNA LOGIKA PRIKAZA
-//
-// DIZAJN:
-//
-// Primarna logika (STATUS iz API-ja):
-//   cancelled / diverted   → NIKAD ne prikazuj
-//   departed               → sakrij (let je otišao)
-//
-// Sekundarna logika (VREMENSKI BACKUP za slučaj da API kasni):
-//   ETD/STD + GRACE_AFTER_DEPARTURE_MS → ako je prošlo, sakrij
-//   GRACE = 1 minuta → kratko, ali dovoljno za API sinhronizaciju
-//
-// FIX: Grace period se mjeri NAKON polaska (ne prije).
-// Prethodna verzija koristila je dep - 5min što je gasilo
-// let dok je boarding još bio u toku.
-//
-// Manual override:
-//   'open'   → prikazuj dok nije departed/cancelled/diverted
-//   'closed' → ne prikazuj ništa
-// ─────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────
 // Glavna komponenta
 // ─────────────────────────────────────────────────────────────
 
@@ -254,25 +222,47 @@ function GateDisplay() {
   }, []);
 
   // ── shouldDisplayFlight ─────────────────────────────────────
-  // FIX: grace period je sada NAKON polaska, ne prije
-const shouldDisplayFlight = useCallback((f: Flight): boolean => {
-  const s = (f.StatusEN || '').toLowerCase().trim();
+  //
+  // OPTIMALNA VERZIJA — koristi msToDep pristup:
+  //
+  // Delayed let (ETD !== STD):
+  //   msToDep > 5min  AND  msToDep <= 30min  → prikazuj
+  //   msToDep <= 5min OR  msToDep > 30min    → ne prikazuj
+  //
+  // Non-delayed let:
+  //   msToDep > 10min  → prikazuj
+  //   msToDep <= 10min → ne prikazuj
+  //
+  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+    const s = (f.StatusEN || '').toLowerCase().trim();
 
-  if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-  if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+    if (manualGateStatusRef.current === 'open') return true;
+    if (s.includes('departed') || s.includes('poletio')) return false;
 
-  if (manualGateStatusRef.current === 'open') return true;
+    const isDelayed = !!(
+      f.EstimatedDepartureTime &&
+      f.EstimatedDepartureTime !== f.ScheduledDepartureTime
+    );
 
-  if (s.includes('departed') || s.includes('poletio')) return false;
+    const refTime = isDelayed
+      ? f.EstimatedDepartureTime
+      : f.ScheduledDepartureTime || '';
 
-  // Sakrij let 10 minuta PRIJE ETD/STD
-  // (umjesto 1 minutu NAKON — daje vremena za sljedeći let)
-  const refTime = f.EstimatedDepartureTime || f.ScheduledDepartureTime || '';
-  const dep = parseDepartureTime(refTime);
-  if (dep && Date.now() > dep.getTime() - CLOSE_BEFORE_DEPARTURE_MS) return false;
+    const dep = parseDepartureTime(refTime);
+    if (!dep) return true;
 
-  return true;
-}, []);
+    const msToDep = dep.getTime() - Date.now();
+
+    if (isDelayed) {
+      // Delayed: prikazuj SAMO između ETD-30min i ETD-5min
+      return msToDep > HIDE_BEFORE_ETD_MS && msToDep <= DISPLAY_START_BEFORE_ETD_MS;
+    } else {
+      // Non-delayed: sakrij 10 minuta prije STD
+      return msToDep > CLOSE_BEFORE_DEPARTURE_MS;
+    }
+  }, []);
 
   // ── Weather ─────────────────────────────────────────────────
   const weather = useWeather({
@@ -344,19 +334,13 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
         (f: Flight) => flightMatchesGate(f, gateNumber)
       );
 
-      // 2. Check-in status za svaki let
-      // const withStatus = await Promise.all(
-      //   allForGate.map(async (f: Flight) => ({
-      //     ...f,
-      //     checkInStatus: await getFlightCheckInStatus(f),
-      //   }))
-      // );
+      // 2. Check-in status (trenutno isključen)
       const withStatus = allForGate.map((f: Flight) => ({
-  ...f,
-  checkInStatus: null,
-}));
+        ...f,
+        checkInStatus: null,
+      }));
 
-      // 3. Sortiraj po STD — gate slot se bazira na rasporedu, ne ETD
+      // 3. Sortiraj po STD
       const withTime = withStatus
         .map(f => ({
           ...f,
@@ -385,15 +369,6 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
       }
 
       // 5. Odaberi TRENUTNI let
-      //
-      // LOGIKA ODABIRA:
-      // - Prođi kroz sortirane letove (po STD asc)
-      // - Uzmi PRVI koji prolazi shouldDisplayFlight
-      //
-      // FIX: Prolaz 1 sada dozvoljava letove koji kasne do 30 minuta
-      // (prethodna verzija odbacivala je sve čiji je ETD/STD prošao čak 1 minutu)
-      //
-      // Manual 'open': uzmi prvi koji nije cancelled/diverted
       let current: (typeof sorted)[number] | null = null;
 
       if (manualGateStatusRef.current === 'open') {
@@ -403,31 +378,14 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
                  !s.includes('diverted')  && !s.includes('preusmjeren');
         }) ?? null;
       } else {
-        // Prolaz 1: traži prvi let čiji ETD/STD još nije prošao
+        // Sva vremenska logika je u shouldDisplayFlight — samo nađi prvi koji prolazi
         for (const f of sorted) {
-          if (!shouldDisplayFlight(f)) continue;
-
-          const refTimeStr = (f.EstimatedDepartureTime && f.EstimatedDepartureTime !== f.ScheduledDepartureTime)
-            ? f.EstimatedDepartureTime
-            : f.ScheduledDepartureTime || '';
-
-          const dep = parseDepartureTime(refTimeStr);
-          if (!dep) continue;
-
-          const minutesSinceDep = Math.floor((Date.now() - dep.getTime()) / 60_000);
-          // FIX: dozvoli kasneće letove do 30 minuta od ETD
-          // (prethodna verzija: minutesSinceDep >= 0 → odmah preskakalo)
-          if (minutesSinceDep > 0) continue;
-
-          current = f;
-          break;
+          if (shouldDisplayFlight(f)) {
+            current = f;
+            break;
+          }
         }
-
-        // Fallback: nema budućeg leta → uzmi prvi koji je aktivan
-        // (API možda još nije ažurirao status na "departed")
-        if (!current) {
-          current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
-        }
+        // NEMA redundantnog fallback — ako loop ne nađe, current ostaje null
       }
 
       // 6. Sljedeći let IZA currenta
@@ -501,16 +459,11 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
 
-  // ── Switch timer — refresh NAKON polaska ────────────────────
+  // ── Switch timer ─────────────────────────────────────────────
   //
-  // FIX: timer se sada okida NAKON ETD + GRACE_AFTER_DEPARTURE_MS
-  // (prethodna verzija: okidao se 5 minuta PRIJE ETD/STD,
-  //  što je pozivalo loadFlights() u trenutku kada shouldDisplayFlight
-  //  još nije vraćao false → ekran se praznio prerano)
+  // Delayed let:  okida se pri ETD - 5 min  (HIDE_BEFORE_ETD_MS)
+  // Non-delayed:  okida se pri STD - 10 min (CLOSE_BEFORE_DEPARTURE_MS)
   //
-  // Nova logika:
-  //   triggerAt = ETD/STD + 1 minuta = tačno kada shouldDisplay → false
-  //   Max 4h u budućnost (zaštita od pogrešnih podataka)
   useEffect(() => {
     if (stdSwitchTimerRef.current) {
       clearTimeout(stdSwitchTimerRef.current);
@@ -519,22 +472,29 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     if (!display.flight) return;
     if (manualGateStatusRef.current === 'open') return;
 
-    const departureTimeStr =
-      display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
+    const f = display.flight;
+    const isDelayed = !!(
+      f.EstimatedDepartureTime &&
+      f.EstimatedDepartureTime !== f.ScheduledDepartureTime
+    );
+
+const departureTimeStr = isDelayed 
+  ? (f.EstimatedDepartureTime || '') 
+  : (f.ScheduledDepartureTime || '');
     const dep = parseDepartureTime(departureTimeStr);
     if (!dep) return;
 
-    // Okidamo refresh tačno kad shouldDisplayFlight vraća false
- const triggerAt = dep.getTime() - CLOSE_BEFORE_DEPARTURE_MS;
-  const ms = triggerAt - Date.now();
+    const hideBeforeMs = isDelayed ? HIDE_BEFORE_ETD_MS : CLOSE_BEFORE_DEPARTURE_MS;
+    const triggerAt = dep.getTime() - hideBeforeMs;
+    const ms = triggerAt - Date.now();
 
-  if (ms > 0 && ms < 4 * 60 * 60 * 1000) {
-    stdSwitchTimerRef.current = setTimeout(() => {
-      if (isMountedRef.current) loadFlights();
-    }, ms);
-  } else if (ms <= 0 && ms > -30_000) {
-    loadFlights();
-  }
+    if (ms > 0 && ms < 4 * 60 * 60 * 1000) {
+      stdSwitchTimerRef.current = setTimeout(() => {
+        if (isMountedRef.current) loadFlights();
+      }, ms);
+    } else if (ms <= 0 && ms > -30_000) {
+      loadFlights();
+    }
 
     return () => {
       if (stdSwitchTimerRef.current) {
@@ -578,9 +538,6 @@ const shouldDisplayFlight = useCallback((f: Flight): boolean => {
   const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
-  // effectiveStatus — BEZ auto-boarding
-  // FIX: uklonjena lažna "Boarding" logika koja je mogla prikazivati
-  // pogrešan status za kasneće letove kada API još nije ažuriran
   const effectiveStatus = useMemo(() => {
     return display.flight?.StatusEN || '';
   }, [display.flight]);
@@ -1039,81 +996,81 @@ const C = {
 };
 
 const styles: Record<string, React.CSSProperties> = {
-  root: { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, padding: '0', overflow: 'hidden' },
-  topBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.9rem 2.5rem', background: C.panel, borderBottom: `1px solid ${C.border}`, flexShrink: 0 },
-  topBarLeft: { display: 'flex', alignItems: 'baseline', gap: '0.7rem' },
-  topBarLabel: { fontSize: '0.95rem', fontWeight: 600, letterSpacing: '.18em', color: C.textMuted, fontFamily: FONT_MONO },
-  topBarGate: { fontSize: '3.2rem', fontWeight: 700, lineHeight: 1, color: C.gold, letterSpacing: '.04em' },
-  topBarTerminal: { fontSize: '2rem', fontWeight: 600, color: C.text, letterSpacing: '.06em' },
-  topBarSep: { color: C.border, fontSize: '1.8rem', margin: '0 0.4rem' },
-  clock: { fontFamily: FONT_MONO, fontSize: '2.2rem', fontWeight: 400, color: C.accent, letterSpacing: '.08em' },
-  divider: { height: '1px', background: `linear-gradient(90deg, transparent 0%, ${C.border} 20%, ${C.border} 80%, transparent 100%)`, flexShrink: 0 },
-  main: { display: 'flex', flex: 1, overflow: 'visible', padding: '1.5rem 2.5rem', gap: '0', minHeight: 0 },
-  leftCol: { display: 'flex', flexDirection: 'column', justifyContent: 'space-evenly', flex: '0 0 52%', gap: '.8rem', paddingRight: '2.5rem', overflow: 'visible' },
-  logoCard: { width: '100%', height: 'clamp(120px, 14vh, 200px)', background: '#ffffff', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxShadow: `0 0 0 1px ${C.border}, 0 4px 40px rgba(30,144,255,0.12)`, flexShrink: 0 },
-  logoImg: { width: '100%', height: '100%', objectFit: 'contain', padding: '10px 20px' },
-  logoFallback: { color: '#6b7280', fontSize: '14px', fontFamily: FONT_MONO, fontWeight: 600, letterSpacing: '.12em' },
-  flightNumber: { fontSize: 'clamp(4.5rem, 9vw, 8rem)', fontWeight: 700, letterSpacing: '.05em', color: C.white, lineHeight: 1 },
-  codeshare: { fontSize: '1rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_MONO },
-  codeshareList: { color: C.text, fontWeight: 600 },
-  destCode: { fontSize: 'clamp(2.8rem, 5.5vw, 5rem)', fontWeight: 700, letterSpacing: '.12em', color: C.accent, lineHeight: 1 },
-  destCity: { fontSize: 'clamp(4.5rem, 9vw, 9rem)', fontWeight: 700, color: C.white, letterSpacing: '.03em', lineHeight: 1, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const },
-  chargerWarning: { display: 'flex', alignItems: 'flex-start', gap: '.7rem', background: 'rgba(234,179,8,0.12)', border: '1px solid rgba(234,179,8,0.35)', borderRadius: '10px', padding: '.7rem 1rem' },
-  chargerIcon: { fontSize: '1.3rem', color: '#eab308', flexShrink: 0, lineHeight: '1.3' as unknown as number },
-  chargerText: { fontSize: 'clamp(0.85rem, 1.4vw, 1.25rem)', fontWeight: 600, color: '#fde047', letterSpacing: '.04em', lineHeight: '1.4' as unknown as number, fontFamily: FONT_DISPLAY },
-  boardingNotice: { display: 'flex', alignItems: 'flex-start', gap: '.7rem', background: 'rgba(30,144,255,0.1)', border: '1px solid rgba(30,144,255,0.3)', borderRadius: '10px', padding: '.7rem 1rem' },
-  boardingIcon: { fontSize: '1.3rem', flexShrink: 0, lineHeight: '1.3' as unknown as number },
-  boardingText: { fontSize: 'clamp(0.85rem, 1.4vw, 1.25rem)', fontWeight: 600, color: C.text, letterSpacing: '.04em', lineHeight: '1.4' as unknown as number, fontFamily: FONT_DISPLAY },
-  vDivider: { width: '1px', alignSelf: 'stretch', flexShrink: 0, background: `linear-gradient(180deg, transparent 0%, ${C.border} 15%, ${C.border} 85%, transparent 100%)`, margin: '0 2.5rem' },
-  rightCol: { flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '1rem' },
-  timeBlock: { display: 'flex', flexDirection: 'column', gap: '.3rem' },
-  timeLabel: { fontSize: '0.85rem', fontWeight: 600, letterSpacing: '.18em', color: C.textMuted, fontFamily: FONT_MONO },
-  timeValue: { fontFamily: FONT_MONO, fontSize: 'clamp(3.5rem, 7vw, 6.5rem)', fontWeight: 400, letterSpacing: '.1em', color: C.white, lineHeight: 1 },
-  countdown: { display: 'flex', alignItems: 'baseline', gap: '.7rem' },
-  countdownVal: { fontFamily: FONT_MONO, fontSize: 'clamp(1.6rem, 3vw, 2.8rem)', color: C.gold, fontWeight: 400 },
-  countdownLabel: { fontSize: '0.85rem', color: C.textMuted, letterSpacing: '.12em', fontFamily: FONT_MONO },
-  statusBlock: { display: 'flex', alignItems: 'flex-start' },
-  statusBadge: { display: 'inline-block', fontSize: 'clamp(1.6rem, 3vw, 2.8rem)', fontWeight: 700, letterSpacing: '.12em', padding: '.45em 1.2em', borderRadius: '8px', fontFamily: FONT_DISPLAY },
-  gateChangedBanner: { background: '#431407', border: '1px solid #ea580c', borderRadius: '8px', padding: '.6rem 1.2rem', color: '#fed7aa', fontSize: '1.1rem', fontWeight: 700, letterSpacing: '.12em', fontFamily: FONT_MONO },
-  checkInBanner: { background: '#3b0764', border: '1px solid #a855f7', borderRadius: '8px', padding: '.5rem 1.2rem', color: '#e9d5ff', fontSize: '1rem', fontWeight: 600, letterSpacing: '.1em', fontFamily: FONT_MONO },
-  dangerousGoodsWrapper: { flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end', paddingTop: '0.5rem', minHeight: 0 },
-  dangerousGoodsImg: { maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: '8px' },
-  footer: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 2.5rem', background: C.panel, borderTop: `1px solid ${C.border}`, flexShrink: 0, gap: '2rem' },
-  footerMeta: { display: 'flex', gap: '1.2rem', alignItems: 'center', color: C.textMuted, fontSize: '.8rem', letterSpacing: '.12em', fontFamily: FONT_MONO, flexShrink: 0 },
-  nextFlight: { display: 'flex', alignItems: 'center', gap: '1.8rem', overflow: 'hidden' },
-  nextLabel: { fontSize: '1rem', fontWeight: 600, color: C.textMuted, letterSpacing: '.16em', fontFamily: FONT_MONO, flexShrink: 0 },
-  nextFN: { fontSize: '2.5rem', fontWeight: 700, color: C.text, letterSpacing: '.08em', flexShrink: 0 },
-  nextDest: { fontSize: '2.3rem', fontWeight: 600, color: C.textMuted, letterSpacing: '.04em', overflow: 'hidden', whiteSpace: 'nowrap' as const, textOverflow: 'ellipsis' },
-  nextTime: { fontFamily: FONT_MONO, fontSize: '2.3rem', color: C.gold, letterSpacing: '.08em', flexShrink: 0 },
-  emptyRoot: { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, overflow: 'hidden' },
-  emptyMain: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '0.8rem', padding: '1rem', overflow: 'hidden' },
-  emptyGateNumber: { fontSize: 'clamp(10rem, 20vw, 18rem)', fontWeight: 800, color: C.gold, letterSpacing: '.06em', fontFamily: FONT_DISPLAY, textShadow: `0 0 30px rgba(230,168,23,0.3)`, lineHeight: 1, marginBottom: '0.25rem' },
-  emptyStatusWrapper: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.6rem', maxWidth: '90vw' },
-  emptyStatusIcon: { fontSize: '3rem', opacity: 0.9, filter: 'drop-shadow(0 0 10px rgba(230,168,23,0.4))', marginBottom: '0' },
-  emptyLanguageStack: { display: 'flex', flexDirection: 'column' as const, gap: '0.25rem', alignItems: 'center' },
-  emptyLanguageRow: { display: 'flex', alignItems: 'baseline', gap: '0.6rem', flexWrap: 'wrap' as const, justifyContent: 'center' },
-  emptyLanguageCode: { fontSize: '0.7rem', fontWeight: 700, color: C.accent, letterSpacing: '.1em', fontFamily: FONT_MONO, background: 'rgba(30,144,255,0.15)', padding: '0.15rem 0.4rem', borderRadius: '4px' },
-  emptyLanguageText: { fontSize: 'clamp(1.1rem, 2.2vw, 1.6rem)', fontWeight: 600, color: '#cfe4ff', letterSpacing: '.05em' },
-  emptySubtextStack: { display: 'flex', flexDirection: 'column' as const, gap: '0.2rem', alignItems: 'center', marginTop: '0' },
-  emptySubtextRow: { display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' as const, justifyContent: 'center' },
-  emptySubtextCode: { fontSize: '0.55rem', fontWeight: 600, color: C.textMuted, fontFamily: FONT_MONO, opacity: 0.7 },
-  emptySubtextText: { fontSize: 'clamp(0.7rem, 1.2vw, 0.85rem)', color: C.textMuted, letterSpacing: '.03em' },
-  emptyMeta: { display: 'flex', gap: '1.5rem', alignItems: 'center', marginTop: '0.8rem', padding: '0.5rem 1.2rem', background: 'rgba(13,22,41,0.8)', borderRadius: '10px', backdropFilter: 'blur(8px)', border: `1px solid ${C.border}` },
-  emptyMetaItem: { display: 'flex', flexDirection: 'column' as const, alignItems: 'center', gap: '0.2rem' },
-  emptyMetaLabel: { fontSize: '0.6rem', fontWeight: 600, letterSpacing: '.12em', color: C.textMuted, fontFamily: FONT_MONO },
-  emptyMetaValue: { fontSize: '0.9rem', fontWeight: 500, fontFamily: FONT_MONO, color: C.accent },
-  emptyMetaDivider: { width: '1px', height: '1.5rem', background: C.border },
-  emptyFooter: { padding: '0.4rem 2rem', textAlign: 'center' as const, background: C.panel, borderTop: `1px solid ${C.border}` },
-  emptyFooterStack: { display: 'flex', flexWrap: 'wrap' as const, justifyContent: 'center', gap: '0.1rem' },
-  emptyFooterText: { fontSize: '0.65rem', color: C.textMuted, letterSpacing: '.04em', fontFamily: FONT_MONO },
-  emptyFooterSeparator: { color: C.border, margin: '0 0.2rem' },
-  splash: { width: '100vw', height: '100vh', background: C.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_DISPLAY, gap: '1rem' },
-  splashIcon: { fontSize: '4rem', color: C.gold, opacity: .6 },
-  splashTitle: { fontSize: '2.2rem', color: C.text, fontWeight: 600, letterSpacing: '.1em' },
-  splashSub: { fontSize: '1rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_MONO },
-  gateLabel: { fontWeight: 800, color: C.gold, letterSpacing: '.06em', fontFamily: FONT_DISPLAY },
-  spinner: { width: 56, height: 56, border: `3px solid ${C.border}`, borderTop: `3px solid ${C.accent}`, borderRadius: '50%', animation: 'spin 1s linear infinite' },
-  metaRow: { display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '1.2rem', color: C.textMuted, fontSize: '.9rem', letterSpacing: '.1em', fontFamily: FONT_MONO },
-  weatherWidget: { display: 'flex', alignItems: 'center', gap: '.5rem', background: 'rgba(30,144,255,0.08)', border: '1px solid rgba(30,144,255,0.2)', borderRadius: '8px', padding: '.4rem .9rem', alignSelf: 'center', flexShrink: 0 },
-  weatherTemp: { fontFamily: FONT_MONO, fontSize: 'clamp(1.2rem, 2.2vw, 1.8rem)', color: C.accent, fontWeight: 400, letterSpacing: '.08em' },
+  root:                 { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, padding: '0', overflow: 'hidden' },
+  splash:               { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, gap: '1.5rem' },
+  splashIcon:           { fontSize: '4rem' },
+  splashTitle:          { fontSize: '2rem', fontWeight: 700, letterSpacing: '.12em', color: C.white },
+  splashSub:            { fontSize: '1rem', color: C.textMuted, fontFamily: FONT_MONO },
+  spinner:              { width: '48px', height: '48px', border: `3px solid ${C.border}`, borderTopColor: C.accent, borderRadius: '50%', animation: 'spin .8s linear infinite' },
+  topBar:               { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.9rem 2.5rem', background: C.panel, borderBottom: `1px solid ${C.border}`, flexShrink: 0 },
+  topBarLeft:           { display: 'flex', alignItems: 'baseline', gap: '0.7rem' },
+  topBarLabel:          { fontSize: '0.95rem', fontWeight: 600, letterSpacing: '.18em', color: C.textMuted, fontFamily: FONT_MONO },
+  topBarGate:           { fontSize: '3.2rem', fontWeight: 700, lineHeight: 1, color: C.gold, letterSpacing: '.04em' },
+  topBarTerminal:       { fontSize: '2rem', fontWeight: 600, color: C.text, letterSpacing: '.06em' },
+  topBarSep:            { color: C.border, fontSize: '1.8rem', margin: '0 0.4rem' },
+  clock:                { fontFamily: FONT_MONO, fontSize: '2.2rem', fontWeight: 400, color: C.accent, letterSpacing: '.08em' },
+  divider:              { height: '1px', background: `linear-gradient(90deg, transparent 0%, ${C.border} 20%, ${C.border} 80%, transparent 100%)`, flexShrink: 0 },
+  main:                 { display: 'flex', flex: 1, overflow: 'visible', padding: '1.5rem 2.5rem', gap: '0', minHeight: 0 },
+  leftCol:              { display: 'flex', flexDirection: 'column', justifyContent: 'space-evenly', flex: '0 0 52%', gap: '.8rem', paddingRight: '2.5rem', overflow: 'visible' },
+  logoCard:             { width: '100%', height: 'clamp(120px, 14vh, 200px)', background: '#ffffff', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxShadow: `0 0 0 1px ${C.border}, 0 4px 40px rgba(30,144,255,0.12)`, flexShrink: 0 },
+  logoImg:              { width: '100%', height: '100%', objectFit: 'contain', padding: '10px 20px' },
+  logoFallback:         { color: '#6b7280', fontSize: '14px', fontFamily: FONT_MONO, fontWeight: 600, letterSpacing: '.12em' },
+  flightNumber:         { fontSize: 'clamp(4.5rem, 9vw, 8rem)', fontWeight: 700, letterSpacing: '.05em', color: C.white, lineHeight: 1 },
+  codeshare:            { fontSize: '1rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_MONO },
+  codeshareList:        { color: C.text, fontWeight: 600 },
+  destCode:             { fontSize: 'clamp(2.8rem, 5.5vw, 5rem)', fontWeight: 700, letterSpacing: '.12em', color: C.accent, lineHeight: 1 },
+  destCity:             { fontSize: 'clamp(4.5rem, 9vw, 9rem)', fontWeight: 700, color: C.white, letterSpacing: '.03em', lineHeight: 1, wordBreak: 'break-word' as const, overflowWrap: 'break-word' as const },
+  weatherWidget:        { display: 'flex', alignItems: 'center', gap: '.5rem', background: 'rgba(30,58,95,0.3)', borderRadius: '8px', padding: '.4rem .8rem' },
+  weatherTemp:          { fontSize: '1.4rem', fontWeight: 600, color: C.text, fontFamily: FONT_MONO, letterSpacing: '.06em' },
+  chargerWarning:       { display: 'flex', alignItems: 'flex-start', gap: '.7rem', background: 'rgba(234,179,8,0.12)', border: '1px solid rgba(234,179,8,0.35)', borderRadius: '10px', padding: '.7rem 1rem' },
+  chargerIcon:          { fontSize: '1.3rem', color: '#eab308', flexShrink: 0, lineHeight: '1.3' as unknown as number },
+  chargerText:          { fontSize: 'clamp(0.85rem, 1.4vw, 1.25rem)', fontWeight: 600, color: '#fde047', letterSpacing: '.04em', lineHeight: '1.4' as unknown as number, fontFamily: FONT_DISPLAY },
+  boardingNotice:       { display: 'flex', alignItems: 'flex-start', gap: '.7rem', background: 'rgba(30,144,255,0.1)', border: '1px solid rgba(30,144,255,0.3)', borderRadius: '10px', padding: '.7rem 1rem' },
+  boardingIcon:         { fontSize: '1.3rem', flexShrink: 0, lineHeight: '1.3' as unknown as number },
+  boardingText:         { fontSize: 'clamp(0.85rem, 1.4vw, 1.25rem)', fontWeight: 600, color: C.text, letterSpacing: '.04em', lineHeight: '1.4' as unknown as number, fontFamily: FONT_DISPLAY },
+  vDivider:             { width: '1px', alignSelf: 'stretch', flexShrink: 0, background: `linear-gradient(180deg, transparent 0%, ${C.border} 15%, ${C.border} 85%, transparent 100%)`, margin: '0 2.5rem' },
+  rightCol:             { flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '1rem' },
+  timeBlock:            { display: 'flex', flexDirection: 'column', gap: '.3rem' },
+  timeLabel:            { fontSize: '0.85rem', fontWeight: 600, letterSpacing: '.18em', color: C.textMuted, fontFamily: FONT_MONO },
+  timeValue:            { fontFamily: FONT_MONO, fontSize: 'clamp(3.5rem, 7vw, 6.5rem)', fontWeight: 400, letterSpacing: '.1em', color: C.white, lineHeight: 1 },
+  countdown:            { display: 'flex', alignItems: 'baseline', gap: '.7rem' },
+  countdownVal:         { fontFamily: FONT_MONO, fontSize: 'clamp(1.6rem, 3vw, 2.8rem)', color: C.gold, fontWeight: 400 },
+  countdownLabel:       { fontSize: '0.85rem', color: C.textMuted, letterSpacing: '.12em', fontFamily: FONT_MONO },
+  statusBlock:          { display: 'flex', alignItems: 'flex-start' },
+  statusBadge:          { display: 'inline-block', fontSize: 'clamp(1.6rem, 3vw, 2.8rem)', fontWeight: 700, letterSpacing: '.12em', padding: '.45em 1.2em', borderRadius: '8px', fontFamily: FONT_DISPLAY },
+  gateChangedBanner:    { background: '#431407', border: '1px solid #ea580c', borderRadius: '8px', padding: '.6rem 1.2rem', color: '#fed7aa', fontSize: '1.1rem', fontWeight: 700, letterSpacing: '.12em', fontFamily: FONT_MONO },
+  checkInBanner:        { background: '#3b0764', border: '1px solid #a855f7', borderRadius: '8px', padding: '.5rem 1.2rem', color: '#e9d5ff', fontSize: '1rem', fontWeight: 600, letterSpacing: '.1em', fontFamily: FONT_MONO },
+  dangerousGoodsWrapper:{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end', paddingTop: '0.5rem', minHeight: 0 },
+  dangerousGoodsImg:    { maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: '8px' },
+  footer:               { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 2.5rem', background: C.panel, borderTop: `1px solid ${C.border}`, flexShrink: 0, gap: '2rem' },
+  footerMeta:           { display: 'flex', gap: '1.2rem', alignItems: 'center', color: C.textMuted, fontSize: '.85rem', fontFamily: FONT_MONO, letterSpacing: '.08em' },
+  nextFlight:           { display: 'flex', alignItems: 'baseline', gap: '.8rem' },
+  nextLabel:            { fontSize: '.75rem', fontWeight: 600, letterSpacing: '.15em', color: C.textMuted, fontFamily: FONT_MONO },
+  nextFN:               { fontSize: '1.8rem', fontWeight: 700, color: C.accent, letterSpacing: '.06em' },
+  nextDest:             { fontSize: '1.6rem', fontWeight: 600, color: C.text, letterSpacing: '.06em', maxWidth: '280px', whiteSpace: 'nowrap' as const, overflow: 'hidden' as const, textOverflow: 'ellipsis' as const },
+  nextTime:             { fontSize: '1.8rem', fontWeight: 400, color: C.gold, fontFamily: FONT_MONO, letterSpacing: '.08em' },
+
+  // ── Empty / no-flight stilovi ──────────────────────────────
+  emptyRoot:            { width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: C.bg, fontFamily: FONT_DISPLAY, color: C.white, overflow: 'hidden' },
+  emptyMain:            { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '2rem', padding: '2rem' },
+  emptyGateNumber:      { fontSize: 'clamp(8rem, 18vw, 16rem)', fontWeight: 700, color: C.gold, letterSpacing: '.08em', lineHeight: 1, fontFamily: FONT_DISPLAY },
+  emptyStatusWrapper:   { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem' },
+  emptyStatusIcon:      { fontSize: '2.5rem' },
+  emptyLanguageStack:   { display: 'flex', flexDirection: 'column', gap: '.35rem', alignItems: 'center' },
+  emptyLanguageRow:     { display: 'flex', gap: '.6rem', alignItems: 'baseline' },
+  emptyLanguageCode:    { fontSize: '.65rem', fontWeight: 700, color: C.textMuted, letterSpacing: '.15em', fontFamily: FONT_MONO, minWidth: '2rem' },
+  emptyLanguageText:    { fontSize: 'clamp(1rem, 2vw, 1.4rem)', fontWeight: 700, letterSpacing: '.15em', color: C.white },
+  emptySubtextStack:    { display: 'flex', flexDirection: 'column', gap: '.2rem', alignItems: 'center' },
+  emptySubtextRow:      { display: 'flex', gap: '.5rem', alignItems: 'baseline' },
+  emptySubtextCode:     { fontSize: '.55rem', fontWeight: 600, color: C.textMuted, letterSpacing: '.12em', fontFamily: FONT_MONO, minWidth: '2rem' },
+  emptySubtextText:     { fontSize: 'clamp(0.65rem, 1vw, 0.8rem)', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_DISPLAY },
+  emptyMeta:            { display: 'flex', gap: '1.5rem', alignItems: 'center', background: 'rgba(30,58,95,0.2)', borderRadius: '8px', padding: '.6rem 1.5rem', marginTop: '1rem' },
+  emptyMetaItem:        { display: 'flex', flexDirection: 'column', gap: '.15rem', alignItems: 'center' },
+  emptyMetaLabel:       { fontSize: '.6rem', fontWeight: 600, letterSpacing: '.15em', color: C.textMuted, fontFamily: FONT_MONO },
+  emptyMetaValue:       { fontSize: '.9rem', fontWeight: 600, color: C.accent, fontFamily: FONT_MONO, letterSpacing: '.06em' },
+  emptyMetaDivider:     { width: '1px', height: '2rem', background: C.border },
+  emptyFooter:          { padding: '1rem 2.5rem', background: C.panel, borderTop: `1px solid ${C.border}` },
+  emptyFooterStack:     { display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: '0' },
+  emptyFooterText:      { fontSize: '.75rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_DISPLAY },
+  emptyFooterSeparator: { opacity: .3 },
 };
