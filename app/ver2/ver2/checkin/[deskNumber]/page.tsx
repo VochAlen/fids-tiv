@@ -5,7 +5,7 @@ import {
   useState,
   useRef,
   useCallback,
-  memo,
+  memo, useMemo,
   Component,
   type ErrorInfo,
   type ReactNode,
@@ -32,6 +32,13 @@ const AD_SWITCH_INTERVAL = 15_000;
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
 
+  const isBAFlight = (flightNumber: string): boolean =>
+  flightNumber.toUpperCase().startsWith('BA');
+
+const BA_IMAGES: Record<string, string> = {
+  BUSINESS: '/british/ba1.jpg',
+  ECONOMY:  '/british/ba2.jpg',
+};
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
 `;
@@ -109,6 +116,9 @@ class CheckInErrorBoundary extends Component<
 // ============================================================
 // AIRLINE LOGO
 // ============================================================
+// ============================================================
+// AIRLINE LOGO
+// ============================================================
 const AirlineLogo = memo(function AirlineLogo({
   logoUrl,
   airlineName,
@@ -126,19 +136,21 @@ const AirlineLogo = memo(function AirlineLogo({
 
   if (portrait) {
     return (
-      <div className="relative w-full max-w-[90vw] h-[220px] bg-white rounded-xl shadow-lg mb-3">
-        <Image
-          src={logoUrl}
-          alt={airlineName}
-          fill
-          sizes="(max-width: 768px) 90vw, 800px"
-          className="object-contain p-4"
-          priority
-          fetchPriority="high"
-          loading="eager"
-          decoding="async"
-          onError={handleError}
-        />
+      <div className="relative w-full max-w-[90vw] bg-white rounded-xl shadow-lg mb-3 flex items-center justify-center" style={{ height: 'clamp(120px, 18vh, 280px)' }}>
+        <div className="relative w-full h-full">
+          <Image
+            src={logoUrl}
+            alt={airlineName}
+            fill
+            sizes="(max-width: 768px) 90vw, 800px"
+            className="object-contain p-4"
+            priority
+            fetchPriority="high"
+            loading="eager"
+            decoding="async"
+            onError={handleError}
+          />
+        </div>
       </div>
     );
   }
@@ -150,7 +162,7 @@ const AirlineLogo = memo(function AirlineLogo({
         alt={airlineName}
         width={360}
         height={120}
-        className="object-contain"
+        className="object-contain w-full h-full"
         priority
         decoding="async"
         onError={handleError}
@@ -202,12 +214,36 @@ const AdBanner = memo(function AdBanner({
   currentIndex,
   nextIndex,
   isTransitioning,
+  baImageSrc,
 }: {
   adImages: string[];
   currentIndex: number;
   nextIndex: number;
   isTransitioning: boolean;
+  baImageSrc: string | null;
 }) {
+  // BA let — prikaži statičnu sliku umjesto ads
+  if (baImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={baImageSrc}
+            alt="British Airways"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+          />
+        </div>
+      </div>
+    );
+  }
+
   if (!adImages.length) return null;
   return (
     <div className="flex-1 min-h-[400px] bg-slate-800 rounded-xl overflow-hidden flex items-stretch ad-image-container">
@@ -242,7 +278,6 @@ const AdBanner = memo(function AdBanner({
     </div>
   );
 });
-
 // ============================================================
 // EXPORT WRAPPER
 // ============================================================
@@ -275,6 +310,13 @@ function CheckInDisplay() {
   const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { adImages } = useAdImages();
+  // BA override za ad banner
+const baAdImage = useMemo((): string | null => {
+  if (!isBAFlight(assignment.flightNumber)) return null;
+  if (assignment.classType === 'BUSINESS') return BA_IMAGES.BUSINESS;
+  if (assignment.classType === 'ECONOMY')  return BA_IMAGES.ECONOMY;
+  return null;
+}, [assignment.flightNumber, assignment.classType]);
 
   // ── CSS injection ──────────────────────────────────────────
   useEffect(() => {
@@ -765,12 +807,13 @@ try {
           </div>
 
           {/* Reklame */}
-          <AdBanner
-            adImages={adImages}
-            currentIndex={currentAdIndex}
-            nextIndex={nextAdIndex}
-            isTransitioning={isAdTransitioning}
-          />
+<AdBanner
+  adImages={adImages}
+  currentIndex={currentAdIndex}
+  nextIndex={nextAdIndex}
+  isTransitioning={isAdTransitioning}
+  baImageSrc={baAdImage}
+/>
 
           {/* Footer */}
           <div className="flex-shrink-0 flex justify-center items-center space-x-2 text-xs font-inter py-1">
