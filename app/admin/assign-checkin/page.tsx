@@ -92,13 +92,28 @@ const processFlights = (departures: Flight[]): Flight[] =>
 // ─────────────────────────────────────────────
 // Komponenta: TouchFeedback (haptic like)
 // ─────────────────────────────────────────────
+const TAP_MOVE_THRESHOLD = 10; // px
+
 const TouchFeedback = ({ children, onTap, disabled }: { children: React.ReactNode; onTap: () => void; disabled?: boolean }) => {
   const [ripple, setRipple] = useState(false);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
 
-  const handleTouch = (e: React.TouchEvent) => {
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touchStart.current = { x: t.clientX, y: t.clientY };
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (disabled || !touchStart.current) return;
+    const t = e.changedTouches[0];
+    const dx = Math.abs(t.clientX - touchStart.current.x);
+    const dy = Math.abs(t.clientY - touchStart.current.y);
+    touchStart.current = null;
+
+    // Ako je prst pomjeren više od praga, to je scroll/drag, ne tap — ignoriši
+    if (dx > TAP_MOVE_THRESHOLD || dy > TAP_MOVE_THRESHOLD) return;
+
     e.preventDefault();
-    e.stopPropagation();
-    if (disabled) return;
     setRipple(true);
     onTap();
     setTimeout(() => setRipple(false), 150);
@@ -106,10 +121,11 @@ const TouchFeedback = ({ children, onTap, disabled }: { children: React.ReactNod
 
   return (
     <div
-      onTouchEnd={handleTouch}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
       onClick={!disabled ? onTap : undefined}
       className={`relative transition-all duration-150 ${ripple ? 'scale-95' : 'scale-100'}`}
-      style={{ touchAction: 'manipulation' }}
+      style={{ touchAction: 'pan-y' }}
     >
       {ripple && (
         <div className="absolute inset-0 bg-white/20 rounded-xl animate-ping" style={{ animationDuration: '300ms' }} />
@@ -807,8 +823,8 @@ const handleClassToggle = useCallback(async (
     </div>
   );
 
-  const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignment[]) => (
-    <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2">
+const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignment[]) => (
+  <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-3">
       {items.map(id => (
         <ResourceCell
           key={id}
