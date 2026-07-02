@@ -539,38 +539,74 @@ function GateDisplay() {
   // ------------------------------------------------------------
   // Polling gate status override-a (svakih 30s)
   // ------------------------------------------------------------
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const override = await fetchGateStatusOverride(gateNumber);
-        const newStatus = override?.status ?? null;
-        const newFlightNumber = override?.flightNumber ?? null;
-        if (manualGateStatusRef.current !== newStatus ||
-            display.overrideFlightNumber !== newFlightNumber) {
-          loadFlights();
-        }
-      } catch (e) {
-        console.error('Gate status poll error:', e);
-      }
-    };
-    poll();
-    const id = setInterval(poll, 30_000);
-    return () => clearInterval(id);
-  }, [gateNumber, fetchGateStatusOverride, loadFlights, display.overrideFlightNumber]);
+  // useEffect(() => {
+  //   const poll = async () => {
+  //     try {
+  //       const override = await fetchGateStatusOverride(gateNumber);
+  //       const newStatus = override?.status ?? null;
+  //       const newFlightNumber = override?.flightNumber ?? null;
+  //       if (manualGateStatusRef.current !== newStatus ||
+  //           display.overrideFlightNumber !== newFlightNumber) {
+  //         loadFlights();
+  //       }
+  //     } catch (e) {
+  //       console.error('Gate status poll error:', e);
+  //     }
+  //   };
+  //   poll();
+  //   const id = setInterval(poll, 30_000);
+  //   return () => clearInterval(id);
+  // }, [gateNumber, fetchGateStatusOverride, loadFlights, display.overrideFlightNumber]);
 
   // ------------------------------------------------------------
   // Polling klase gate-a (svakih 15s — brže od glavnog refresh-a)  ← NOVO
   // ------------------------------------------------------------
+  // useEffect(() => {
+  //   const poll = async () => {
+  //     try {
+  //       const classType = await fetchGateClass(gateNumber);
+  //       setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+  //     } catch { /* ignoriši */ }
+  //   };
+  //   const id = setInterval(poll, 15_000);
+  //   return () => clearInterval(id);
+  // }, [gateNumber, fetchGateClass]);
+
+  // ------------------------------------------------------------
+  // Kombinovani lagan poll: override status + klasa (svakih 8s)
+  // Zamjenjuje ranije DVA zasebna polla (30s override + 15s klasa)
+  // koja su duplirala posao koji loadFlights već radi na 20s.
+  // ------------------------------------------------------------
   useEffect(() => {
     const poll = async () => {
       try {
-        const classType = await fetchGateClass(gateNumber);
-        setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
-      } catch { /* ignoriši */ }
+        const [override, classType] = await Promise.all([
+          fetchGateStatusOverride(gateNumber),
+          fetchGateClass(gateNumber),
+        ]);
+
+        const newStatus = override?.status ?? null;
+        const newFlightNumber = override?.flightNumber ?? null;
+
+        // Override se promijenio (status ili let) → treba pun reload
+        if (
+          manualGateStatusRef.current !== newStatus ||
+          currentFlightRef.current?.FlightNumber !== newFlightNumber && newStatus === 'open'
+        ) {
+          loadFlights();
+          return;
+        }
+
+        // Samo klasa se promijenila → laka izmjena state-a, bez punog reloada
+        setDisplay(prev => (prev.classType !== classType ? { ...prev, classType } : prev));
+      } catch (e) {
+        console.error('Gate light poll error:', e);
+      }
     };
+    poll();
     const id = setInterval(poll, 15_000);
     return () => clearInterval(id);
-  }, [gateNumber, fetchGateClass]);
+  }, [gateNumber, fetchGateStatusOverride, fetchGateClass, loadFlights]);
 
   // ------------------------------------------------------------
   // Countdown ticker

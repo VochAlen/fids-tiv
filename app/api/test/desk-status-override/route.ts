@@ -13,8 +13,11 @@ export async function GET(request: Request) {
   if (deskNumber) {
     const redisKey = `test:desk-status:${deskNumber}`;
     const value = await client.get(redisKey);
-    if (!value) {
-      return NextResponse.json({ status: null, flightNumber: null });
+if (!value) {
+      return NextResponse.json(
+        { status: null, flightNumber: null },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
     }
     
     // ⭐ PROVJERI DA LI JE KLJUČ STAR
@@ -25,11 +28,14 @@ export async function GET(request: Request) {
       return NextResponse.json({ status: null, flightNumber: null });
     }
     
-    return NextResponse.json({
-      status: data.status,
-      flightNumber: data.flightNumber,
-      setAt: data.setAt,
-    });
+return NextResponse.json(
+      {
+        status: data.status,
+        flightNumber: data.flightNumber,
+        setAt: data.setAt,
+      },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   // Inače – vrati SVE testne dodjele (uz čišćenje starih)

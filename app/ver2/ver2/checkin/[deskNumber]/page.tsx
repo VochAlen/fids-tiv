@@ -306,8 +306,10 @@ function CheckInDisplay() {
   const [nextAdIndex, setNextAdIndex] = useState(1);
   const [isAdTransitioning, setIsAdTransitioning] = useState(false);
 
-  const isMountedRef = useRef(true);
+const isMountedRef = useRef(true);
   const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFlightNumberRef = useRef<string>('');
+  const logoCacheRef = useRef<Map<string, string>>(new Map());
 
   const { adImages } = useAdImages();
   // BA override za ad banner
@@ -347,6 +349,11 @@ const baAdImage = useMemo((): string | null => {
     return () => clearTimeout(id);
   }, []);
 
+  // ── Reset praćenja leta pri promjeni šaltera ────────────────
+  useEffect(() => {
+    lastFlightNumberRef.current = '';
+  }, [deskNumberParam]);
+
   // ── Debounced orientation ──────────────────────────────────
   useEffect(() => {
     const check = () => setIsPortrait(window.innerHeight > window.innerWidth);
@@ -379,11 +386,11 @@ const baAdImage = useMemo((): string | null => {
   }, [adImages, currentAdIndex]);
 
   // ── Glavni fetch iz desk-status-override ──────────────────
-  const fetchDeskData = useCallback(async () => {
+const fetchDeskData = useCallback(async () => {
     if (!isMountedRef.current) return;
 
     try {
-      // Dohvati status/let za ovaj šalter
+      // Lagan poziv — radi se svaki POLL_INTERVAL (4s)
       const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`);
       if (!res.ok) throw new Error('Failed to fetch desk status');
       const data = await res.json();
@@ -393,16 +400,46 @@ const baAdImage = useMemo((): string | null => {
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setLoading(false);
 
-      // Nema dodjele
+      // Nema dodjele → instant reset, bez ikakvog dodatnog fetch-a
       if (!data || !data.flightNumber || data.status === null) {
+        lastFlightNumberRef.current = '';
         setAssignment(EMPTY_ASSIGNMENT);
         return;
       }
 
-      // Dohvati detalje leta iz /api/flights
+      // Klasa šaltera — lagan poziv, provjerava se svaki put jer se može
+      // mijenjati nezavisno od leta
+      let classType: string | null = null;
+      try {
+        const classRes = await fetch(`/api/test/desk-class/${deskNumberParam}`);
+        if (classRes.ok) {
+          const classData = await classRes.json();
+          classType = classData.classType || null;
+        }
+      } catch {
+        // Ignorišemo
+      }
+
+      // Isti let kao prošli put → samo status (open/closed) i/ili klasa su se
+      // promijenili. Ne radimo ponovo fetch cijelog /api/flights, ne
+      // provjeravamo logo sliku — instant update, minimalan trošak.
+      if (data.flightNumber === lastFlightNumberRef.current) {
+        setAssignment((prev) => ({
+          ...prev,
+          status: data.status as 'open' | 'closed',
+          classType,
+          setAt: data.setAt || null,
+        }));
+        return;
+      }
+
+      lastFlightNumberRef.current = data.flightNumber;
+
+      // Novi let dodijeljen ovom šalteru → tek sada dohvati pune podatke.
+      // Bez cache-busting parametra — koristi Redis/CDN keš sa servera.
       let flightDetails: Record<string, string | string[] | boolean | null> = {};
       try {
-        const flightsRes = await fetch('/api/flights?nocache=' + Date.now());
+        const flightsRes = await fetch('/api/flights');
         const flightsData = await flightsRes.json();
         const allFlights = [
           ...(flightsData.departures || []),
@@ -416,47 +453,41 @@ const baAdImage = useMemo((): string | null => {
         // Nastavljamo s minimalnim podacima
       }
 
-      // Logo URL
+      // Logo URL — keširaj rezultat provjere po ICAO kodu, ne probaj mrežu
+      // ponovo za isti avio-prevoznik
       const icao =
         (flightDetails.AirlineICAO as string) ||
         data.flightNumber.substring(0, 2).toUpperCase();
       let logoUrl = '/airlines/placeholder.jpg';
       if (icao) {
-        // Provjeri lokalne slike
-        const checkImg = (src: string): Promise<boolean> =>
-          new Promise((resolve) => {
-            if (typeof window === 'undefined') return resolve(false);
-            const img = new window.Image();
-            img.onload = () => resolve(true);
-            img.onerror = () => resolve(false);
-            setTimeout(() => resolve(false), 1000);
-            img.src = src;
-          });
-        const [hasJpg, hasPng] = await Promise.all([
-          checkImg(`/airlines/${icao}.jpg`),
-          checkImg(`/airlines/${icao}.png`),
-        ]);
-        if (hasJpg) logoUrl = `/airlines/${icao}.jpg`;
-        else if (hasPng) logoUrl = `/airlines/${icao}.png`;
-        else if (flightDetails.AirlineLogoURL)
-          logoUrl = flightDetails.AirlineLogoURL as string;
+        const cachedLogo = logoCacheRef.current.get(icao);
+        if (cachedLogo) {
+          logoUrl = cachedLogo;
+        } else {
+          const checkImg = (src: string): Promise<boolean> =>
+            new Promise((resolve) => {
+              if (typeof window === 'undefined') return resolve(false);
+              const img = new window.Image();
+              img.onload = () => resolve(true);
+              img.onerror = () => resolve(false);
+              setTimeout(() => resolve(false), 1000);
+              img.src = src;
+            });
+          const [hasJpg, hasPng] = await Promise.all([
+            checkImg(`/airlines/${icao}.jpg`),
+            checkImg(`/airlines/${icao}.png`),
+          ]);
+          if (hasJpg) logoUrl = `/airlines/${icao}.jpg`;
+          else if (hasPng) logoUrl = `/airlines/${icao}.png`;
+          else if (flightDetails.AirlineLogoURL)
+            logoUrl = flightDetails.AirlineLogoURL as string;
+
+          logoCacheRef.current.set(icao, logoUrl);
+        }
       }
 
       const destCode = (flightDetails.DestinationAirportCode as string) || '';
       const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';
-
-      // Klasa šaltera
-// Klasa šaltera
-let classType: string | null = null;
-try {
-  const classRes = await fetch(`/api/test/desk-class/${deskNumberParam}`);
-  if (classRes.ok) {
-    const classData = await classRes.json();
-    classType = classData.classType || null;
-  }
-} catch {
-  // Ignorišemo
-}
 
       const statusStr = (flightDetails.StatusEN as string) || '';
       const sl = statusStr.toLowerCase().trim();

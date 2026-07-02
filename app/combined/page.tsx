@@ -20,8 +20,8 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 60_000   // ↑ 60s→90s: -33% Vercel poziva
-const CACHE_DURATION              = 3 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
+const REFRESH_INTERVAL_MS         = 80_000   // ↑ 60s→90s: -33% Vercel poziva
+const CACHE_DURATION              = 4 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
 const MAX_FLIGHTS_DISPLAY         = 9
@@ -228,6 +228,18 @@ const loadFromCache = (): FlightDataResponse | null => {
     const { data, timestamp } = JSON.parse(raw)
     return Date.now() - timestamp > CACHE_DURATION ? null : data
   } catch { return null }
+}
+const fetchAssignments = async (): Promise<{
+  desks: Record<string, string>
+  gates: Record<string, string>
+}> => {
+  try {
+    const res = await fetch('/api/test/stats?type=assignments')
+    if (!res.ok) return { desks: {}, gates: {} }
+    return await res.json()
+  } catch {
+    return { desks: {}, gates: {} }
+  }
 }
 
 // ── Auto-status logika ────────────────────────────────────────
@@ -715,19 +727,37 @@ function FlightBoard(): JSX.Element {
   }, [])
 
   // ── Pripremi letove iz sirovih podataka ───────────────────
-  const prepareData = useCallback((data: FlightDataResponse) => {
-    const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
-    const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
-    const departuresWithMeta = rawDep.map(f => {
-      const clone = { ...f }
-      const num = f.FlightNumber ?? ""
-      if (prevGatesRef.current[num] && f.GateNumber && prevGatesRef.current[num] !== f.GateNumber)
+const prepareData = useCallback((
+  data: FlightDataResponse,
+  assignments?: { desks: Record<string, string>; gates: Record<string, string> }
+) => {
+  const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
+  const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
+
+  const departuresWithMeta = rawDep.map(f => {
+    const clone = { ...f }
+    const num = f.FlightNumber ?? ""
+
+    const adminDesk = assignments?.desks?.[num]
+    if (adminDesk) {
+      (clone as any).CheckInDesk = adminDesk
+    }
+
+    const adminGate = assignments?.gates?.[num]
+    const effectiveGate = adminGate || f.GateNumber || ""
+    if (effectiveGate && effectiveGate !== "-") {
+      if (prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate) {
         (clone as any)._gateChangedAt = Date.now()
-      if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber
-      return clone
-    })
-    return { filteredArrivals, departuresWithMeta }
-  }, [filterRecentFlights])
+      }
+      clone.GateNumber = effectiveGate
+      prevGatesRef.current[num] = effectiveGate
+    }
+
+    return clone
+  })
+
+  return { filteredArrivals, departuresWithMeta }
+}, [filterRecentFlights])
 
   // ── Inicijalni keš load ───────────────────────────────────
   useEffect(() => {
@@ -754,10 +784,9 @@ function FlightBoard(): JSX.Element {
         setErrorMessage(null)
 
         let data: FlightDataResponse | null = null
-        try {
+try {
           const res = await fetch("/api/flights", {
             signal: controller.signal,
-            headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
           })
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
           data = await res.json()
@@ -774,11 +803,13 @@ function FlightBoard(): JSX.Element {
           }
         }
 
-        if (!isMountedRef.current || !data) return
-        const { filteredArrivals, departuresWithMeta } = prepareData(data)
-        setArrivals(filteredArrivals)
-        setDepartures(departuresWithMeta)
-        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+if (!isMountedRef.current || !data) return
+
+const assignments = await fetchAssignments()
+const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+setArrivals(filteredArrivals)
+setDepartures(departuresWithMeta)
+setLastUpdate(new Date().toLocaleTimeString("en-GB"))
       } catch (e) {
         console.error("Critical:", e)
       } finally {

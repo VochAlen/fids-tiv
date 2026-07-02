@@ -716,7 +716,8 @@ function ArrivalsBoard(): JSX.Element {
     const load = async () => {
       if (!mounted.current) return;
       try {
-        const res = await fetch("/api/flights", { headers: { "Cache-Control": "no-cache" } });
+        // const res = await fetch("/api/flights", { headers: { "Cache-Control": "no-cache" } });
+         const res = await fetch("/api/flights");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (!mounted.current) return;

@@ -8,9 +8,9 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 60_000;
-const FETCH_TIMEOUT_MS            = 15_000;
-const MAX_RETRIES                 = 3;
+const REFRESH_INTERVAL_MS         = 80_000;
+const FETCH_TIMEOUT_MS            = 20_000;
+const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
 const CACHE_KEY                   = 'dep_board_cache';
 const CACHE_DURATION              = 5 * 60 * 1_000;
@@ -169,10 +169,7 @@ const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   try {
-    const r = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', Pragma: 'no-cache', Expires: '0' },
-    });
+    const r = await fetch(url, { signal: ctrl.signal });
     clearTimeout(id); return r;
   } catch (e) { clearTimeout(id); throw e; }
 };
@@ -190,6 +187,19 @@ const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_
     }
   }
   throw last || new Error('All retries failed');
+};
+
+const fetchAssignments = async (): Promise<{
+  desks: Record<string, string>;
+  gates: Record<string, string>;
+}> => {
+  try {
+    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
+    if (!res.ok) return { desks: {}, gates: {} };
+    return await res.json();
+  } catch {
+    return { desks: {}, gates: {} };
+  }
 };
 
 const checkStatus = {
@@ -431,11 +441,16 @@ const FlightRow = memo(
           </div>
 
           {/* Check-In */}
-          <div className="flex items-center justify-center" style={{ width: '320px' }}>
-            {flight.CheckInDesk && flight.CheckInDesk !== '-'
-              ? <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">{flight.CheckInDesk}</div>
-              : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
-          </div>
+{/* Check-In */}
+<div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: '320px' }}>
+  {flight.CheckInDesk && flight.CheckInDesk !== '-'
+    ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
+        <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
+          {d}
+        </div>
+      ))
+    : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+</div>
 
           {/* Gate */}
           <div className="flex items-center justify-center" style={{ width: '180px' }}>
@@ -677,18 +692,33 @@ function DeparturesBoard(): JSX.Element {
         const rawDepartures = getUniqueDeparturesWithDeparted(
           filterRecentDepartures(data.departures)
         ).slice(0, MAX_FLIGHTS_DISPLAY);
+const assignments = await fetchAssignments().catch(() => ({
+  desks: {} as Record<string, string>,
+  gates: {} as Record<string, string>,
+}));
 
-        const departuresWithMeta = rawDepartures.map(f => {
-          const clone = { ...f };
-          const num = f.FlightNumber ?? '';
-          const prevGate = prevGatesRef.current[num];
-          if (prevGate && f.GateNumber && prevGate !== f.GateNumber) {
-            (clone as any)._gateChangedAt = Date.now();
-          }
-          if (f.GateNumber && f.GateNumber !== '-') prevGatesRef.current[num] = f.GateNumber;
-          return clone;
-        });
+const departuresWithMeta = rawDepartures.map(f => {
+  const clone = { ...f };
+  const num   = f.FlightNumber ?? '';
 
+  const adminDesk = assignments.desks[num];
+  if (adminDesk) {
+    (clone as any).CheckInDesk = adminDesk;
+  }
+
+  const adminGate     = assignments.gates[num];
+  const effectiveGate = adminGate || f.GateNumber || '';
+  if (effectiveGate && effectiveGate !== '-') {
+    const prevGate = prevGatesRef.current[num];
+    if (prevGate && prevGate !== effectiveGate) {
+      (clone as any)._gateChangedAt = Date.now();
+    }
+    (clone as any).GateNumber = effectiveGate;
+    prevGatesRef.current[num] = effectiveGate;
+  }
+
+  return clone;
+});
         setFlights(departuresWithMeta);
         setLastUpdate(new Date().toLocaleTimeString('en-GB'));
         if (!usedCache) setErrorMessage(null);

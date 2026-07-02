@@ -10,7 +10,7 @@ import {
   sortFlightsByTime,
   filterTodayFlights
 } from '@/lib/flight-api-helpers';
-import Redis from 'ioredis';
+// import Redis from 'ioredis';
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
@@ -173,24 +173,25 @@ async function saveFlightDataToCache(data: FlightData): Promise<void> {
 }
 
 // ── METADATA FUNCTIONS ────────────────────────────────────────
-async function saveFlightMetadata(departures: Flight[], arrivals: Flight[], source: string): Promise<void> {
+async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): Promise<void> {
   try {
     const client = getRedisClient();
     const hash = Buffer.from(JSON.stringify({
-      dCount: departures.length,
-      aCount: arrivals.length,
-      source: source,
+      dCount: slimmed.departures.length,
+      aCount: slimmed.arrivals.length,
+      source,
       timestamp: new Date().toISOString(),
     })).toString('base64').substring(0, 32);
-    
-    await Promise.all([
-      client.setex(FLIGHT_HASH_KEY, 60, hash),
-      client.setex(FLIGHT_COUNT_KEY, 60, String(departures.length + arrivals.length)),
-      client.setex(FLIGHT_MODIFIED_KEY, 60, new Date().toISOString()),
-      client.setex(FLIGHT_SOURCE_KEY, 60, source),
-    ]);
+
+    const pipeline = client.pipeline();
+    pipeline.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(slimmed));
+    pipeline.setex(FLIGHT_HASH_KEY, 60, hash);
+    pipeline.setex(FLIGHT_COUNT_KEY, 60, String(slimmed.departures.length + slimmed.arrivals.length));
+    pipeline.setex(FLIGHT_MODIFIED_KEY, 60, new Date().toISOString());
+    pipeline.setex(FLIGHT_SOURCE_KEY, 60, source);
+    await pipeline.exec();
   } catch (e) {
-    console.warn('⚠️ Failed to save flight metadata:', e);
+    console.warn('⚠️ Failed to save flight data/metadata:', e);
   }
 }
 
@@ -260,6 +261,7 @@ async function loadOverridesMap(): Promise<Record<string, Record<string, string>
 
   return overrideCacheData;
 }
+
 
 async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
   try {
@@ -395,7 +397,7 @@ export async function GET(): Promise<NextResponse> {
   if (cached) {
     return NextResponse.json(cached, {
       headers: {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120',
+        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
         'X-Data-Source': cached.source + '-cached',
         'X-Total-Flights': cached.totalFlights.toString(),
       }
@@ -443,20 +445,17 @@ export async function GET(): Promise<NextResponse> {
       console.error('⚠️ Backup save failed:', e);
     }
 
-    const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
+ const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
+    const slimmed = slimFlightData(flightData);
 
-    // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
-    await saveFlightMetadata(flightData.departures, flightData.arrivals, 'live');
-
-    // Sačuvaj u Redis cache za narednih 60 sekundi
-    await saveFlightDataToCache(flightData);
+    // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
+    await saveFlightDataAndMetadata(slimmed, 'live');
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
-     return NextResponse.json(slimFlightData(flightData), {
-
+    return NextResponse.json(slimmed, {
       headers: {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120',
+        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
         'X-Data-Source': 'live',
         'X-Total-Flights': flightData.totalFlights.toString(),
         'X-Departures': flightData.departures.length.toString(),
@@ -494,13 +493,14 @@ export async function GET(): Promise<NextResponse> {
       );
 
       // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
-      await saveFlightMetadata(flightData.departures, flightData.arrivals, source);
+const slimmed = slimFlightData(flightData);
 
-      await saveFlightDataToCache(flightData);
+      // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
+      await saveFlightDataAndMetadata(slimmed, source);
 
-      return NextResponse.json(slimFlightData(flightData), {
-          headers: {
-            'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=30',
+      return NextResponse.json(slimmed, {
+        headers: {
+          'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=30',
           'X-Data-Source': source,
           'X-Offline-Mode': 'true',
           'X-Total-Flights': flightData.totalFlights.toString(),
@@ -527,9 +527,12 @@ export async function GET(): Promise<NextResponse> {
     );
 
     // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
-    await saveFlightMetadata(flightData.departures, flightData.arrivals, 'emergency');
+const slimmed = slimFlightData(flightData);
 
-   return NextResponse.json(slimFlightData(flightData), {
+    // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
+    await saveFlightDataAndMetadata(slimmed, 'emergency');
+
+    return NextResponse.json(slimmed, {
       headers: {
         'Cache-Control': 'public, s-maxage=15, stale-while-revalidate=30',
         'X-Data-Source': 'emergency',
@@ -561,5 +564,6 @@ export async function GET(): Promise<NextResponse> {
   });
 }
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+// export const dynamic = 'force-dynamic';
+// export const revalidate = 0;
+export const revalidate = 60;
