@@ -10,8 +10,11 @@ export async function GET(
   const { gateNumber } = params;
   try {
     const client = getRedisClient();
-    const classType = await client.get(REDIS_KEY(gateNumber));
-    return NextResponse.json({ classType: classType ?? null });
+  const classType = await client.get(REDIS_KEY(gateNumber)); // ili deskNumber
+    return NextResponse.json(
+      { classType: classType ?? null },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   } catch (err) {
     console.error('[gate-class] GET error:', err);
     return NextResponse.json({ classType: null });

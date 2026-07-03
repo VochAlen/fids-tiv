@@ -10,8 +10,11 @@ export async function GET(
   const { deskNumber } = params;
   try {
     const client = getRedisClient();
-    const classType = await client.get(REDIS_KEY(deskNumber));
-    return NextResponse.json({ classType: classType ?? null });
+const classType = await client.get(REDIS_KEY(deskNumber)); // ili deskNumber
+    return NextResponse.json(
+      { classType: classType ?? null },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   } catch (err) {
     console.error('[desk-class] GET error:', err);
     return NextResponse.json({ classType: null });

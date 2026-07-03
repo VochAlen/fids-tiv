@@ -78,13 +78,14 @@ return NextResponse.json(
     }
   } while (cursor !== '0');
 
-  if (cleanedCount > 0) {
+if (cleanedCount > 0) {
     console.log(`[cleanup] Total cleaned: ${cleanedCount} old desk-status keys`);
   }
 
-  return NextResponse.json(all);
+  return NextResponse.json(all, {
+    headers: { 'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=15' },
+  });
 }
-
 export async function POST(request: Request) {
   const { deskNumber, action, flightNumber } = await request.json();
   const client = getRedisClient();

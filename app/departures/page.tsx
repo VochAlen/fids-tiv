@@ -194,9 +194,37 @@ const fetchAssignments = async (): Promise<{
   gates: Record<string, string>;
 }> => {
   try {
-    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
-    if (!res.ok) return { desks: {}, gates: {} };
-    return await res.json();
+    // Čitamo direktno iz istog izvora koji koriste fizički check-in i gate
+    // ekrani (desk-status-override / gate-status-override) — garantuje da
+    // se departures/combined board NIKAD ne razmimoiđe sa stvarnim stanjem
+    // koje osoblje postavlja u admin panelu.
+    const [deskRes, gateRes] = await Promise.all([
+      fetchWithTimeout('/api/test/desk-status-override', 5_000),
+      fetchWithTimeout('/api/test/gate-status-override', 5_000),
+    ]);
+
+    const deskData: Record<string, any> = deskRes.ok ? await deskRes.json() : {};
+    const gateData: Record<string, any> = gateRes.ok ? await gateRes.json() : {};
+
+    const desks: Record<string, string> = {};
+    const gates: Record<string, string> = {};
+
+    // flightNumber → "1, 2, 3" (podržava više šaltera po letu)
+    for (const [deskNumber, val] of Object.entries(deskData)) {
+      if (val?.status === 'open' && val.flightNumber) {
+        const fn = val.flightNumber as string;
+        desks[fn] = desks[fn] ? `${desks[fn]}, ${deskNumber}` : deskNumber;
+      }
+    }
+
+    // flightNumber → gate broj
+    for (const [gateNumber, val] of Object.entries(gateData)) {
+      if (val?.status === 'open' && val.flightNumber) {
+        gates[val.flightNumber as string] = gateNumber;
+      }
+    }
+
+    return { desks, gates };
   } catch {
     return { desks: {}, gates: {} };
   }
