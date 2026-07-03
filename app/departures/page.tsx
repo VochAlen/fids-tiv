@@ -34,6 +34,16 @@ const COLOR_CONFIG = {
 };
 
 const SECURITY_MESSAGES = [
+  // ⬇️ NOVE PORUKE (dodate na početak)
+  { 
+    text: 'ℹ️ PLEASE NOTE: Check-in counters and gates are subject to change based on operational requirements. Please contact airport staff for the latest information. •', 
+    language: 'en' 
+  },
+  { 
+    text: 'ℹ️ NAPOMENA: Check-in šalteri i izlazi se mogu mijenjati u zavisnosti od operativnih potreba. Za najnovije informacije kontaktirajte osoblje aerodroma. •', 
+    language: 'cnr' 
+  },
+  // postojeće poruke (nepromijenjene)
   { text: '⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •', language: 'en' },
   { text: '⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •', language: 'cnr' },
   { text: '📶 FREE AIRPORT WIFI: Network: "One Crna Gora" | No password required | Connect to One Crna Gora for access •', language: 'en' },

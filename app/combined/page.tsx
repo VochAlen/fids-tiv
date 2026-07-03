@@ -110,11 +110,19 @@ const LANGUAGE_CONFIG: Record<LangKey, {
 }
 
 const SECURITY_MESSAGES = [
+  // Nova poruka – engleski
+  "ℹ️ PLEASE NOTE: Check-in counters and gates are subject to change based on operational requirements. Please contact airport staff for the latest information. •",
+
+  // Nova poruka – crnogorski
+  "ℹ️ NAPOMENA: Check-in šalteri i izlazi se mogu mijenjati u zavisnosti od operativnih potreba. Za najnovije informacije kontaktirajte osoblje aerodroma. •",
   "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •",
   "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •",
   "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •",
   "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •",
-]
+
+  
+];
+
 
 // ============================================================
 // PLACEHOLDER (inline base64 — bez network poziva)
