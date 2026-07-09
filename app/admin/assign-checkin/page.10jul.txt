@@ -18,9 +18,7 @@ let cachedFlights: Flight[] | null = null;
 let cachedFlightsExpiry = 0;
 const FLIGHTS_CACHE_MS = 30_000;
 
-let isDirty = false;
-let lastHash = '';
-let isCheckingChanges = false;
+
 
 const DESKS = [
   ...Array.from({ length: 12 }, (_, i) => String(i + 1)),
@@ -59,7 +57,7 @@ interface Assignment {
   destinationCity: string;
   scheduledTime: string;
   assignedAt: string;
-  classType: ClassType;
+  classType: ClassType;   // ← NOVO
 }
 
 interface StatSession {
@@ -442,6 +440,7 @@ const StatsModal: React.FC<{
   const currentActive = tab === 'desks' ? currentCheckin : currentGates;
   const data          = tab === 'desks' ? stats.desks    : stats.gates;
 
+  // Spoji završene sesije + trenutno aktivne (koje još nisu u stats)
   const activeOnlyIds = currentActive
     .filter(a => !data[a.resourceId])
     .map(a => a.resourceId);
@@ -471,6 +470,7 @@ const StatsModal: React.FC<{
         }`}
         onClick={e => e.stopPropagation()}
       >
+        {/* Header */}
         <div className={`flex items-center justify-between p-5 border-b ${isDark ? 'border-white/10' : 'border-gray-100'}`}>
           <div>
             <div className={`font-bold text-lg flex items-center gap-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -493,6 +493,7 @@ const StatsModal: React.FC<{
           </div>
         ) : (
           <>
+            {/* Summary */}
             <div className="grid grid-cols-3 gap-3 p-5 pb-3">
               {[
                 { label: 'završenih letova', value: String(grandSessions) },
@@ -506,6 +507,7 @@ const StatsModal: React.FC<{
               ))}
             </div>
 
+            {/* Tabovi */}
             <div className="flex gap-2 px-5 pb-3">
               {(['desks', 'gates'] as const).map(t => (
                 <button key={t} onClick={() => setTab(t)}
@@ -517,6 +519,7 @@ const StatsModal: React.FC<{
                                : 'text-gray-500 hover:text-gray-700 border border-transparent'
                   }`}>
                   {t === 'desks' ? '🏷️ Šalteri' : '🚪 Gate-ovi'}
+                  {/* Badge za aktivne */}
                   {(t === 'desks' ? currentCheckin : currentGates).length > 0 && (
                     <span className="ml-2 inline-flex items-center gap-1 text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded-full">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
@@ -527,6 +530,7 @@ const StatsModal: React.FC<{
               ))}
             </div>
 
+            {/* Lista */}
             <div className="px-5 pb-5 space-y-2 max-h-[55vh] overflow-y-auto">
               {entries.length === 0 ? (
                 <div className={`text-center py-12 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
@@ -543,6 +547,7 @@ const StatsModal: React.FC<{
                   <div key={id} className={`rounded-xl border p-3 ${
                     isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'
                   }`}>
+                    {/* Naslov */}
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <span className={`font-bold text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -569,6 +574,7 @@ const StatsModal: React.FC<{
                       )}
                     </div>
 
+                    {/* Trenutno aktivan let */}
                     {active && (
                       <div className={`flex items-center gap-2 text-[11px] rounded-lg px-2 py-1.5 mb-2 ${
                         isDark ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-emerald-50 border border-emerald-200'
@@ -585,8 +591,10 @@ const StatsModal: React.FC<{
                       </div>
                     )}
 
+                    {/* Završene sesije */}
                     {sessions.length > 0 && (
                       <>
+                        {/* Progress bar */}
                         <div className={`h-1 rounded-full mb-2 overflow-hidden ${isDark ? 'bg-white/10' : 'bg-gray-200'}`}>
                           <div
                             className={`h-full rounded-full ${tab === 'desks' ? 'bg-sky-500' : 'bg-emerald-500'}`}
@@ -617,7 +625,6 @@ const StatsModal: React.FC<{
     </div>
   );
 };
-
 // ─────────────────────────────────────────────
 // GLAVNA KOMPONENTA
 // ─────────────────────────────────────────────
@@ -636,6 +643,8 @@ export default function AssignPanel() {
   const [tickSec,                setTickSec]                = useState(REFRESH_INTERVAL_MS / 1000);
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(true);
+  // const [checkinClasses,         setCheckinClasses]         = useState<Record<string, ClassType>>({});
+  // const [gateClasses,            setGateClasses]            = useState<Record<string, ClassType>>({});
   const [showStats,              setShowStats]              = useState(false);
   const [dailyStats,             setDailyStats]             = useState<DailyStats>({ desks: {}, gates: {} });
   const [loadingStats,           setLoadingStats]           = useState(false);
@@ -646,9 +655,9 @@ export default function AssignPanel() {
   const gateAssignmentsRef    = useRef<Assignment[]>([]);
   const touchTimeoutRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => { flightsRef.current = flights; }, [flights]);
-  useEffect(() => { checkinAssignmentsRef.current = checkinAssignments; }, [checkinAssignments]);
-  useEffect(() => { gateAssignmentsRef.current = gateAssignments; }, [gateAssignments]);
+  useEffect(() => { flightsRef.current            = flights;            }, [flights]);
+  useEffect(() => { checkinAssignmentsRef.current  = checkinAssignments; }, [checkinAssignments]);
+  useEffect(() => { gateAssignmentsRef.current     = gateAssignments;    }, [gateAssignments]);
 
   const setSelectedFlight = useCallback((flight: Flight | null) => {
     selectedFlightRef.current = flight;
@@ -681,10 +690,10 @@ export default function AssignPanel() {
   }, []);
 
   // API
-// Dodaj opcioni parametar za prisilno osvježavanje
-const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> => {
+// Izmenite fetchFlightsData
+const fetchFlightsData = useCallback(async (): Promise<Flight[]> => {
   const now = Date.now();
-  if (!force && cachedFlights && now < cachedFlightsExpiry) {
+  if (cachedFlights && now < cachedFlightsExpiry) {
     return cachedFlights;
   }
   
@@ -706,128 +715,140 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     finally { setLoadingFlights(false); }
   }, [fetchFlightsData]);
 
-  const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res = await fetch(`${API_PREFIX}/desk-status-override`);
-      if (!res.ok) return {};
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [deskNumber, value] of Object.entries(data)) {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId:      deskNumber,
-            flightNumber:    parsed.flightNumber as string,
-            airlineName:     flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime:   flight?.ScheduledDepartureTime || '',
-            assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-            classType:       (parsed.classType as ClassType) ?? null,
-          });
-        }
-      }
-      setCheckinAssignments(list);
-      return data;
-    } catch (err) { console.error(err); return {}; }
-  }, []);
-
-  const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res = await fetch(`${API_PREFIX}/gate-status-override`);
-      if (!res.ok) return {};
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [gateNumber, value] of Object.entries(data)) {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId:      gateNumber,
-            flightNumber:    parsed.flightNumber as string,
-            airlineName:     flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime:   flight?.ScheduledDepartureTime || '',
-            assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-            classType:       (parsed.classType as ClassType) ?? null,
-          });
-        }
-      }
-      setGateAssignments(list);
-      return data;
-    } catch (err) { console.error(err); return {}; }
-  }, []);
-
-  const refreshAll = useCallback(async (currentFlights: Flight[]) => {
-    const [deskData, gateData] = await Promise.all([
-      fetchCheckinAssignments(currentFlights),
-      fetchGateAssignments(currentFlights),
-    ]);
-    return { deskData, gateData };
-  }, [fetchCheckinAssignments, fetchGateAssignments]);
-
-  // checkForChanges funkcija - proverava da li ima promena pre refresha
-  const checkForChanges = useCallback(async () => {
-  if (isCheckingChanges) return;
-  isCheckingChanges = true;
-  
+const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
   try {
-    const res = await fetch('/api/flights/status');
-    const meta = await res.json();
-    
-    if (meta.hash !== lastHash) {
-      lastHash = meta.hash;
-      isDirty = true;
-    }
-    
-    if (isDirty) {
-      const sorted = await fetchFlightsData(true); // ← force=true, zaobiđi lokalni keš
-      setFlights(sorted);
-      await refreshAll(sorted);
-      setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
-      isDirty = false;
-    }
-  } catch (err) {
-    console.error('Check for changes error:', err);
-  } finally {
-    isCheckingChanges = false;
-  }
-}, [fetchFlightsData, refreshAll]);
-  // Inicijalno učitavanje - JEDAN poziv
-  useEffect(() => {
-    const loadAllData = async () => {
-      try {
-        const sorted = await fetchFlightsData();
-        setFlights(sorted);
-        await refreshAll(sorted);
-        setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
-        setLoadingFlights(false);
-      } catch (err) {
-        console.error('Error loading data:', err);
-        setLoadingFlights(false);
+    const res = await fetch(`${API_PREFIX}/desk-status-override`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const list: Assignment[] = [];
+    for (const [deskNumber, value] of Object.entries(data)) {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
+      if (parsed.flightNumber && parsed.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
+        list.push({
+          resourceId:      deskNumber,
+          flightNumber:    parsed.flightNumber as string,
+          airlineName:     flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime:   flight?.ScheduledDepartureTime || '',
+          assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+          classType:       (parsed.classType as ClassType) ?? null,
+        });
       }
-    };
-    
-    loadAllData();
-  }, [fetchFlightsData, refreshAll]);
+    }
+    setCheckinAssignments(list);
+    return data; // ← NOVO: vrati sirove podatke za ponovnu upotrebu
+  } catch (err) { console.error(err); return {}; }
+}, []);
 
-  // Auto-refresh timer sa dirty flag-om
+const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
+  try {
+    const res = await fetch(`${API_PREFIX}/gate-status-override`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const list: Assignment[] = [];
+    for (const [gateNumber, value] of Object.entries(data)) {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
+      if (parsed.flightNumber && parsed.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
+        list.push({
+          resourceId:      gateNumber,
+          flightNumber:    parsed.flightNumber as string,
+          airlineName:     flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime:   flight?.ScheduledDepartureTime || '',
+          assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+          classType:       (parsed.classType as ClassType) ?? null,
+        });
+      }
+    }
+    setGateAssignments(list);
+    return data; // ← NOVO
+  } catch (err) { console.error(err); return {}; }
+}, []);
+
+const refreshAll = useCallback(async (currentFlights: Flight[]) => {
+  const [deskData, gateData] = await Promise.all([
+    fetchCheckinAssignments(currentFlights),
+    fetchGateAssignments(currentFlights),
+  ]);
+  return { deskData, gateData }; // ← NOVO: proslijedi dalje
+}, [fetchCheckinAssignments, fetchGateAssignments]);
+
+// ✅ OPTIMIZOVANO
+// ✅ OPTIMIZOVANO: JEDAN poziv umesto dva
+useEffect(() => {
+  const loadAllData = async () => {
+    try {
+      // 1. Dohvati letove
+      const sorted = await fetchFlightsData();
+      setFlights(sorted);
+      
+      // 2. Dohvati override-ove (koristi sveže letove)
+      await refreshAll(sorted);
+      
+      setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
+      setLoadingFlights(false);
+    } catch (err) {
+      console.error('Error loading data:', err);
+      setLoadingFlights(false);
+    }
+  };
+  
+  loadAllData();
+}, [fetchFlightsData, refreshAll]); // ← SAMO ovi dependency-ji
+
+  // Auto-refresh timer
   useEffect(() => {
     const ticker = setInterval(
       () => setTickSec(prev => (prev <= 1 ? REFRESH_INTERVAL_MS / 1000 : prev - 1)),
       1000,
     );
 
-    const interval = setInterval(async () => {
-      setTickSec(REFRESH_INTERVAL_MS / 1000);
-      await checkForChanges();
-    }, REFRESH_INTERVAL_MS);
+const interval = setInterval(async () => {
+  setTickSec(REFRESH_INTERVAL_MS / 1000);
+  try {
+    const sorted = await fetchFlightsData();
+    setFlights(sorted);
+    setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
 
-    return () => { 
-      clearInterval(ticker); 
-      clearInterval(interval); 
-    };
-  }, [checkForChanges]);
+    // ← Iskoristi podatke koje refreshAll već dovuče, bez ponovnog fetch-a
+    const { deskData: allDeskStatus, gateData: allGateStatus } = await refreshAll(sorted);
+
+    for (const a of checkinAssignmentsRef.current) {
+      if (!sorted.find(f => f.FlightNumber === a.flightNumber)) {
+        const current = allDeskStatus[a.resourceId];
+        if (current?.flightNumber === a.flightNumber && current?.status === 'open') {
+          try {
+            await trackEnd('desk', a.resourceId);
+            await fetch(`${API_PREFIX}/desk-status-override`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deskNumber: a.resourceId, action: 'clear' }),
+            });
+          } catch (err) { console.error('Auto-clear desk error:', err); }
+        }
+      }
+    }
+
+    for (const a of gateAssignmentsRef.current) {
+      if (!sorted.find(f => f.FlightNumber === a.flightNumber)) {
+        const current = allGateStatus[a.resourceId];
+        if (current?.flightNumber === a.flightNumber && current?.status === 'open') {
+          try {
+            await trackEnd('gate', a.resourceId);
+            await fetch(`${API_PREFIX}/gate-status-override`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ gateNumber: a.resourceId, action: 'clear' }),
+            });
+          } catch (err) { console.error('Auto-clear gate error:', err); }
+        }
+      }
+    }
+  } catch (err) { console.error('Silent refresh error:', err); }
+}, REFRESH_INTERVAL_MS);
+
+    return () => { clearInterval(ticker); clearInterval(interval); };
+  }, [fetchFlightsData, refreshAll]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -837,12 +858,6 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
       setFlights(sorted);
       setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
       await refreshAll(sorted);
-      
-      // Resetuj dirty flag i hash
-      isDirty = false;
-      const statusRes = await fetch('/api/flights/status');
-      const meta = await statusRes.json();
-      lastHash = meta.hash || '';
     } catch (err) { console.error(err); }
     finally { setRefreshing(false); }
   }, [fetchFlightsData, refreshAll]);
@@ -862,8 +877,11 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
 
+      // Zapiši početak sesije u stats
       await trackStart(resourceType, resourceId, flight);
 
+      // BA automatska klasa
+// BA automatska klasa
       if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
         const existingBADesks = checkinAssignmentsRef.current.filter(
           a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
@@ -877,7 +895,6 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
         } catch (err) { console.error('Auto BA class error:', err); }
       }
 
-      isDirty = true;
       await refreshAll(flightsRef.current);
       return true;
     } catch (err) {
@@ -906,7 +923,7 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     const p = pendingOverride;
     setPendingOverride(null);
     if (!p) return;
-    await trackEnd(p.resourceType, p.resourceId);
+    await trackEnd(p.resourceType, p.resourceId); // zatvori staru sesiju
     await assignFlightToResource(p.flight, p.resourceId, p.resourceType);
     setSelectedFlight(null);
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
@@ -920,35 +937,69 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
 
   const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     try {
-      await trackEnd('desk', deskNumber);
+      await trackEnd('desk', deskNumber); // zapiši stats
       await fetch(`${API_PREFIX}/desk-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deskNumber, action: 'clear' }),
       });
-      isDirty = true;
       await fetchCheckinAssignments(flightsRef.current);
     } catch { console.error('Greška pri brisanju šaltera', deskNumber); }
   }, [fetchCheckinAssignments]);
 
   const handleRemoveGate = useCallback(async (gateNumber: string) => {
     try {
-      await trackEnd('gate', gateNumber);
+      await trackEnd('gate', gateNumber); // zapiši stats
       await fetch(`${API_PREFIX}/gate-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gateNumber, action: 'clear' }),
       });
-      isDirty = true;
       await fetchGateAssignments(flightsRef.current);
     } catch { console.error('Greška pri brisanju gate-a', gateNumber); }
   }, [fetchGateAssignments]);
 
-  const handleClassToggle = useCallback(async (
+  // const fetchAllClasses = useCallback(async (
+  //   assignments: Assignment[], type: 'desk' | 'gate',
+  // ): Promise<Record<string, ClassType>> => {
+  //   const entries = await Promise.all(
+  //     assignments.map(async a => {
+  //       try {
+  //         const endpoint = type === 'desk'
+  //           ? `/api/test/desk-class/${a.resourceId}`
+  //           : `/api/test/gate-class/${a.resourceId}`;
+  //         const res  = await fetch(endpoint);
+  //         if (!res.ok) return [a.resourceId, null] as const;
+  //         const data = await res.json();
+  //         return [a.resourceId, (data.classType ?? null)] as const;
+  //       } catch { return [a.resourceId, null] as const; }
+  //     }),
+  //   );
+  //   return Object.fromEntries(entries) as Record<string, ClassType>;
+  // }, []);
+
+  // useEffect(() => {
+  //   if (checkinAssignments.length === 0) { setCheckinClasses({}); return; }
+  //   const id = setTimeout(() => {
+  //     fetchAllClasses(checkinAssignments, 'desk').then(setCheckinClasses);
+  //   }, 800);
+  //   return () => clearTimeout(id);
+  // }, [checkinAssignments, fetchAllClasses]);
+
+  // useEffect(() => {
+  //   if (gateAssignments.length === 0) { setGateClasses({}); return; }
+  //   const id = setTimeout(() => {
+  //     fetchAllClasses(gateAssignments, 'gate').then(setGateClasses);
+  //   }, 800);
+  //   return () => clearTimeout(id);
+  // }, [gateAssignments, fetchAllClasses]);
+
+const handleClassToggle = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate', next: ClassType,
   ) => {
-    const setAssignments = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
+    const setAssignments  = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
     const prevAssignments = resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
     const prev = prevAssignments.find(a => a.resourceId === resourceId)?.classType ?? null;
 
+    // Optimistic update
     setAssignments(list => list.map(a =>
       a.resourceId === resourceId ? { ...a, classType: next } : a
     ));
@@ -965,8 +1016,6 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error('setClass failed');
-      
-      isDirty = true;
     } catch (err) {
       console.error('Class toggle error:', err);
       setAssignments(list => list.map(a =>
@@ -1033,22 +1082,25 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
 
   return (
     <div className={`min-h-screen p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-gray-900'}`}>
+
       {pendingOverride && (
         <ConfirmOverlay pending={pendingOverride} onConfirm={handleConfirmOverride}
           onCancel={() => setPendingOverride(null)} isDark={isDark} />
       )}
-      {showStats && (
-        <StatsModal
-          stats={dailyStats}
-          loading={loadingStats}
-          onClose={() => setShowStats(false)}
-          isDark={isDark}
-          currentCheckin={checkinAssignments}
-          currentGates={gateAssignments}
-        />
-      )}
+{showStats && (
+  <StatsModal
+    stats={dailyStats}
+    loading={loadingStats}
+    onClose={() => setShowStats(false)}
+    isDark={isDark}
+    currentCheckin={checkinAssignments}   // ← dodano
+    currentGates={gateAssignments}        // ← dodano
+  />
+)}
+
 
       <div className="max-w-7xl mx-auto">
+
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
           <div>
@@ -1071,6 +1123,7 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
               <RefreshCw size={16} className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`} />
             </button>
 
+            {/* Dugme za statistiku */}
             <button onClick={openStats} title="Dnevna statistika"
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               <BarChart2 size={16} className={isDark ? 'text-sky-400' : 'text-sky-600'} />
@@ -1171,7 +1224,7 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {checkinAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="desk"
+        <AssignmentCard key={a.resourceId} a={a} type="desk"
                           classType={a.classType}
                           onRemove={() => handleRemoveCheckin(a.resourceId)}
                           onClassToggle={next => handleClassToggle(a.resourceId, 'desk', next)}
@@ -1213,7 +1266,7 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {gateAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="gate"
+    <AssignmentCard key={a.resourceId} a={a} type="gate"
                           classType={a.classType}
                           onRemove={() => handleRemoveGate(a.resourceId)}
                           onClassToggle={next => handleClassToggle(a.resourceId, 'gate', next)}

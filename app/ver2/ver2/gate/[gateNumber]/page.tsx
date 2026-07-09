@@ -16,7 +16,7 @@ import { useWeather } from '@/hooks/use-weather';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 20_000;
+const REFRESH_INTERVAL_MS    = 35_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // Klasa → boja (isti sistem kao u check-in display-u)
@@ -276,10 +276,19 @@ function GateDisplay() {
   // ------------------------------------------------------------
 const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
     try {
+      // Dodajemo query parametar da dobijemo samo podatke za ovaj gate
       const res = await fetch(`/api/test/gate-status-override?gateNumber=${gate}`);
       if (!res.ok) return null;
+      // Ruta sada vraća direktno entry za taj gate
       const data = await res.json();
-      return { status: data.status, flightNumber: data.flightNumber || null, classType: data.classType ?? null };
+      if (!data || data.status === undefined) {
+        return { status: null, flightNumber: null, classType: null };
+      }
+      return { 
+        status: data.status, 
+        flightNumber: data.flightNumber || null, 
+        classType: data.classType ?? null 
+      };
     } catch (err) {
       console.error('fetchGateStatusOverride error:', err);
       return null;
@@ -489,8 +498,8 @@ const loadFlights = useCallback(async () => {
       if (isMountedRef.current) setLoading(false);
     }
 }, [gateNumber, fetchGateStatusOverride, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
-  // ------------------------------------------------------------
-  // Polling interval
+ // ------------------------------------------------------------
+  // Polling interval (glavni)
   // ------------------------------------------------------------
   useEffect(() => {
     isMountedRef.current = true;
@@ -503,6 +512,39 @@ const loadFlights = useCallback(async () => {
     loadFlights().then(schedule);
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [loadFlights]);
+
+  // ------------------------------------------------------------
+  // 🔥 KOMBINOVANI POLLING: override status + klasa (svakih 8s)  ← DODATI OVDE
+  // ------------------------------------------------------------
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const override = await fetchGateStatusOverride(gateNumber);
+        
+        const newStatus = override?.status ?? null;
+        const newFlightNumber = override?.flightNumber ?? null;
+        const newClassType = override?.classType ?? null;
+
+        // Override se promijenio (status ili let) → treba pun reload
+        if (
+          manualGateStatusRef.current !== newStatus ||
+          (currentFlightRef.current?.FlightNumber !== newFlightNumber && newStatus === 'open')
+        ) {
+          loadFlights();
+          return;
+        }
+
+        // Samo klasa se promijenila → laka izmjena state-a, bez punog reloada
+        setDisplay(prev => (prev.classType !== newClassType ? { ...prev, classType: newClassType } : prev));
+      } catch (e) {
+        console.error('Gate light poll error:', e);
+      }
+    };
+    
+    poll();
+    const id = setInterval(poll, 8_000); // 8 sekundi - brže od glavnog polling-a
+    return () => clearInterval(id);
+  }, [gateNumber, fetchGateStatusOverride, loadFlights]);
 
   // ------------------------------------------------------------
   // Timer za automatsko prebacivanje na STD-1min

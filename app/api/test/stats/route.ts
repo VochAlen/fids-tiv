@@ -1,67 +1,54 @@
-import Redis from 'ioredis';
 import { NextRequest, NextResponse } from 'next/server';
+import { getRedisClient } from '@/lib/redis';
 
-const getClient = () => new Redis(process.env.FIDS_REDIS_URL!);
+// ── IN-PROCESS CACHE (izbjegava Redis GET na svaki request) ──
+type CacheEntry<T> = { data: T; expiry: number };
+const CACHE_TTL_MS = 15_000; // 15s je dovoljno za admin panel
 
-export async function GET(req: NextRequest) {
-  const date = req.nextUrl.searchParams.get('date')
-             || new Date().toISOString().split('T')[0];
-  const type = req.nextUrl.searchParams.get('type');
-  const client = getClient();
+const assignmentsCache = new Map<string, CacheEntry<{ desks: Record<string, string>; gates: Record<string, string> }>>();
+const dailyStatsCache  = new Map<string, CacheEntry<{ desks: Record<string, unknown>; gates: Record<string, unknown> }>>();
 
-  try {
-    // ── Dodjele za departures board ──────────────────────
-if (type === 'assignments') {
-  const scanKeys = async (pattern: string): Promise<string[]> => {
-    const keys: string[] = [];
-    let cursor = '0';
-    do {
-      const [nextCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== '0');
-    return keys;
-  };
+type DeskOrGateEntry = {
+  status: 'open' | 'closed' | null;
+  flightNumber: string;
+  classType: string | null;
+  setAt: number | null;
+};
 
-  const [deskKeys, gateKeys] = await Promise.all([
-    scanKeys('test:desk-status:*'),
-    scanKeys('test:gate-status:*'),
+const sortIds = (ids: string[]) =>
+  [...ids].sort((a, b) => {
+    const na = parseInt(a, 10), nb = parseInt(b, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+
+// ── Čita direktno iz jedan-ključ šeme (test:desk-status:all / test:gate-status:all) ──
+// Zamjenjuje stari SCAN pristup koji više ne odgovara stvarnoj strukturi podataka.
+async function readAssignments(): Promise<{ desks: Record<string, string>; gates: Record<string, string> }> {
+  const cached = assignmentsCache.get('current');
+  if (cached && Date.now() < cached.expiry) return cached.data;
+
+  const client = getRedisClient();
+  const [deskRaw, gateRaw] = await Promise.all([
+    client.get('test:desk-status:all'),
+    client.get('test:gate-status:all'),
   ]);
 
-  const sortIds = (ids: string[]) =>
-    [...ids].sort((a, b) => {
-      const na = parseInt(a, 10), nb = parseInt(b, 10);
-      if (!isNaN(na) && !isNaN(nb)) return na - nb;
-      return a.localeCompare(b);
-    });
+  const deskAll: Record<string, DeskOrGateEntry> = deskRaw ? JSON.parse(deskRaw) : {};
+  const gateAll: Record<string, DeskOrGateEntry> = gateRaw ? JSON.parse(gateRaw) : {};
 
   const deskMap: Record<string, string[]> = {};
   const gateMap: Record<string, string[]> = {};
 
-  if (deskKeys.length > 0) {
-    const vals = await Promise.all(deskKeys.map(k => client.get(k)));
-    deskKeys.forEach((key, i) => {
-      try {
-        const v = JSON.parse(vals[i] || '{}');
-        if (v.flightNumber && v.status === 'open') {
-          const deskId = key.replace('test:desk-status:', '');
-          (deskMap[v.flightNumber] ??= []).push(deskId);
-        }
-      } catch {}
-    });
+  for (const [deskId, entry] of Object.entries(deskAll)) {
+    if (entry.flightNumber && entry.status === 'open') {
+      (deskMap[entry.flightNumber] ??= []).push(deskId);
+    }
   }
-
-  if (gateKeys.length > 0) {
-    const vals = await Promise.all(gateKeys.map(k => client.get(k)));
-    gateKeys.forEach((key, i) => {
-      try {
-        const v = JSON.parse(vals[i] || '{}');
-        if (v.flightNumber && v.status === 'open') {
-          const gateId = key.replace('test:gate-status:', '');
-          (gateMap[v.flightNumber] ??= []).push(gateId);
-        }
-      } catch {}
-    });
+  for (const [gateId, entry] of Object.entries(gateAll)) {
+    if (entry.flightNumber && entry.status === 'open') {
+      (gateMap[entry.flightNumber] ??= []).push(gateId);
+    }
   }
 
   const desks: Record<string, string> = {};
@@ -69,71 +56,90 @@ if (type === 'assignments') {
   Object.entries(deskMap).forEach(([fn, ids]) => { desks[fn] = sortIds(ids).join(', '); });
   Object.entries(gateMap).forEach(([fn, ids]) => { gates[fn] = sortIds(ids).join(', '); });
 
-  return NextResponse.json({ desks, gates }, {
-    headers: {
-      'Cache-Control': 'public, s-maxage=20, stale-while-revalidate=20',
-    },
-  });
+  const result = { desks, gates };
+  assignmentsCache.set('current', { data: result, expiry: Date.now() + CACHE_TTL_MS });
+  return result;
 }
 
-    // ── Dnevna statistika (nepromijenjeno) ───────────────
-    const raw = await client.get(`tiv-daily-stats:${date}`);
-    return NextResponse.json(raw ? JSON.parse(raw) : { desks: {}, gates: {} });
+async function readDailyStats(date: string): Promise<{ desks: Record<string, unknown>; gates: Record<string, unknown> }> {
+  const cached = dailyStatsCache.get(date);
+  if (cached && Date.now() < cached.expiry) return cached.data;
 
-  } finally {
-    client.disconnect();
+  const client = getRedisClient();
+  const raw = await client.get(`tiv-daily-stats:${date}`);
+  const data = raw ? JSON.parse(raw) : { desks: {}, gates: {} };
+
+  dailyStatsCache.set(date, { data, expiry: Date.now() + CACHE_TTL_MS });
+  return data;
+}
+
+export async function GET(req: NextRequest) {
+  const date = req.nextUrl.searchParams.get('date')
+             || new Date().toISOString().split('T')[0];
+  const type = req.nextUrl.searchParams.get('type');
+
+  if (type === 'assignments') {
+    const result = await readAssignments();
+    return NextResponse.json(result, {
+      headers: { 'Cache-Control': 'public, s-maxage=15, stale-while-revalidate=20' },
+    });
   }
+
+  const data = await readDailyStats(date);
+  return NextResponse.json(data, {
+    headers: { 'Cache-Control': 'public, s-maxage=15, stale-while-revalidate=20' },
+  });
 }
 
 export async function POST(req: NextRequest) {
   const { action, type, resourceId, flight } = await req.json();
-  const client = getClient();
-  try {
-    if (action === 'start') {
-      await client.set(
-        `tiv-stat-active:${type}:${resourceId}`,
-        JSON.stringify({
-          flight:      flight.FlightNumber,
-          destination: flight.DestinationCityName || flight.DestinationAirportCode || '',
-          assignedAt:  new Date().toISOString(),
-        }),
-      );
-    }
+  const client = getRedisClient();
 
-    if (action === 'end') {
-      const raw = await client.get(`tiv-stat-active:${type}:${resourceId}`);
-      if (raw) {
-        const active  = JSON.parse(raw);
-        const now     = new Date();
-        const from    = new Date(active.assignedAt);
-        const minutes = Math.max(1, Math.round((now.getTime() - from.getTime()) / 60_000));
-        const fmt     = (d: Date) =>
-          d.toLocaleTimeString('sr-Latn-RS', { hour: '2-digit', minute: '2-digit' });
-
-        const today    = now.toISOString().split('T')[0];
-        const statsKey = `tiv-daily-stats:${today}`;
-        const existing = await client.get(statsKey);
-        const data     = existing ? JSON.parse(existing) : { desks: {}, gates: {} };
-        const group    = type === 'desk' ? data.desks : data.gates;
-
-        if (!group[resourceId]) group[resourceId] = [];
-        group[resourceId].push({
-          flight:      active.flight,
-          destination: active.destination,
-          from:        fmt(from),
-          to:          fmt(now),
-          minutes,
-        });
-
-        await client.set(statsKey, JSON.stringify(data));
-        await client.del(`tiv-stat-active:${type}:${resourceId}`);
-      }
-    }
-
-    return NextResponse.json({ ok: true });
-  } finally {
-    client.disconnect();
+  if (action === 'start') {
+    await client.set(
+      `tiv-stat-active:${type}:${resourceId}`,
+      JSON.stringify({
+        flight:      flight.FlightNumber,
+        destination: flight.DestinationCityName || flight.DestinationAirportCode || '',
+        assignedAt:  new Date().toISOString(),
+      }),
+    );
   }
+
+  if (action === 'end') {
+    const raw = await client.get(`tiv-stat-active:${type}:${resourceId}`);
+    if (raw) {
+      const active  = JSON.parse(raw);
+      const now     = new Date();
+      const from    = new Date(active.assignedAt);
+      const minutes = Math.max(1, Math.round((now.getTime() - from.getTime()) / 60_000));
+      const fmt     = (d: Date) =>
+        d.toLocaleTimeString('sr-Latn-RS', { hour: '2-digit', minute: '2-digit' });
+
+      const today    = now.toISOString().split('T')[0];
+      const statsKey = `tiv-daily-stats:${today}`;
+      const existing = await client.get(statsKey);
+      const data     = existing ? JSON.parse(existing) : { desks: {}, gates: {} };
+      const group    = type === 'desk' ? data.desks : data.gates;
+
+      if (!group[resourceId]) group[resourceId] = [];
+      group[resourceId].push({
+        flight:      active.flight,
+        destination: active.destination,
+        from:        fmt(from),
+        to:          fmt(now),
+        minutes,
+      });
+
+      await client.set(statsKey, JSON.stringify(data));
+      await client.del(`tiv-stat-active:${type}:${resourceId}`);
+
+      // Invalidiraj keš za današnji datum odmah, da admin panel vidi promjenu bez čekanja TTL-a
+      dailyStatsCache.delete(today);
+    }
+  }
+
+  return NextResponse.json({ ok: true });
 }
-// na kraju app/api/test/stats/route.ts
-export const revalidate = 20; // dodjele se rijetko mijenjaju u odnosu na 20s prozor
+
+export const revalidate = 20;

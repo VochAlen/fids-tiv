@@ -13,7 +13,7 @@ import {
 let lastKnownHash: string | null = null;
 let lastKnownData: FlightData | null = null;
 let lastHashCheckTime = 0;
-const HASH_CHECK_INTERVAL = 30_000; // 10 sekundi minimalno između provjera
+const HASH_CHECK_INTERVAL = 35_000; // 10 sekundi minimalno između provjera
 
 
 

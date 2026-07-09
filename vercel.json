@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/admin/auto-reset",
-      "schedule": "* * * * *"
+      "path": "/api/admin/cleanup-overrides",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

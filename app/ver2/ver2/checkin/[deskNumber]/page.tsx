@@ -27,7 +27,7 @@ import { useAdImages } from '@/hooks/useAdImages';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 20_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 35_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
@@ -387,133 +387,130 @@ const baAdImage = useMemo((): string | null => {
 
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
+  if (!isMountedRef.current) return;
+
+  try {
+    // NOVO: Dodajemo query parametar da dobijemo samo podatke za ovaj šalter
+    const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`);
+    if (!res.ok) throw new Error('Failed to fetch desk status');
+    
+    // NOVO: Ruta sada vraća direktno entry za taj desk, ne ceo objekat
+    const myData = await res.json();
+
     if (!isMountedRef.current) return;
 
-    try {
-      // Lagan poziv — radi se svaki POLL_INTERVAL (4s)
-      const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`);
-      if (!res.ok) throw new Error('Failed to fetch desk status');
-      const data = await res.json();
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setLoading(false);
 
-      if (!isMountedRef.current) return;
+    // Nema dodjele → instant reset, bez ikakvog dodatnog fetch-a
+    if (!myData || !myData.flightNumber || myData.status === null) {
+      lastFlightNumberRef.current = '';
+      setAssignment(EMPTY_ASSIGNMENT);
+      return;
+    }
 
-      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-      setLoading(false);
+    const classType: string | null = myData.classType ?? null;
 
-      // Nema dodjele → instant reset, bez ikakvog dodatnog fetch-a
-      if (!data || !data.flightNumber || data.status === null) {
-        lastFlightNumberRef.current = '';
-        setAssignment(EMPTY_ASSIGNMENT);
-        return;
-      }
-
-      // Klasa šaltera — lagan poziv, provjerava se svaki put jer se može
-      // mijenjati nezavisno od leta
-// Klasa šaltera — sada dolazi zajedno sa statusom, bez posebnog fetch-a
-      const classType: string | null = data.classType ?? null;
-
-      // Isti let kao prošli put → samo status (open/closed) i/ili klasa su se
-      // promijenili. Ne radimo ponovo fetch cijelog /api/flights, ne
-      // provjeravamo logo sliku — instant update, minimalan trošak.
-      if (data.flightNumber === lastFlightNumberRef.current) {
-        setAssignment((prev) => ({
-          ...prev,
-          status: data.status as 'open' | 'closed',
-          classType,
-          setAt: data.setAt || null,
-        }));
-        return;
-      }
-
-      lastFlightNumberRef.current = data.flightNumber;
-
-      // Novi let dodijeljen ovom šalteru → tek sada dohvati pune podatke.
-      // Bez cache-busting parametra — koristi Redis/CDN keš sa servera.
-      let flightDetails: Record<string, string | string[] | boolean | null> = {};
-      try {
-        const flightsRes = await fetch('/api/flights');
-        const flightsData = await flightsRes.json();
-        const allFlights = [
-          ...(flightsData.departures || []),
-          ...(flightsData.arrivals || []),
-        ];
-        const match = allFlights.find(
-          (f: Record<string, string>) => f.FlightNumber === data.flightNumber
-        );
-        if (match) flightDetails = match;
-      } catch {
-        // Nastavljamo s minimalnim podacima
-      }
-
-      // Logo URL — keširaj rezultat provjere po ICAO kodu, ne probaj mrežu
-      // ponovo za isti avio-prevoznik
-      const icao =
-        (flightDetails.AirlineICAO as string) ||
-        data.flightNumber.substring(0, 2).toUpperCase();
-      let logoUrl = '/airlines/placeholder.jpg';
-      if (icao) {
-        const cachedLogo = logoCacheRef.current.get(icao);
-        if (cachedLogo) {
-          logoUrl = cachedLogo;
-        } else {
-          const checkImg = (src: string): Promise<boolean> =>
-            new Promise((resolve) => {
-              if (typeof window === 'undefined') return resolve(false);
-              const img = new window.Image();
-              img.onload = () => resolve(true);
-              img.onerror = () => resolve(false);
-              setTimeout(() => resolve(false), 1000);
-              img.src = src;
-            });
-          const [hasJpg, hasPng] = await Promise.all([
-            checkImg(`/airlines/${icao}.jpg`),
-            checkImg(`/airlines/${icao}.png`),
-          ]);
-          if (hasJpg) logoUrl = `/airlines/${icao}.jpg`;
-          else if (hasPng) logoUrl = `/airlines/${icao}.png`;
-          else if (flightDetails.AirlineLogoURL)
-            logoUrl = flightDetails.AirlineLogoURL as string;
-
-          logoCacheRef.current.set(icao, logoUrl);
-        }
-      }
-
-      const destCode = (flightDetails.DestinationAirportCode as string) || '';
-      const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';
-
-      const statusStr = (flightDetails.StatusEN as string) || '';
-      const sl = statusStr.toLowerCase().trim();
-      const isCancelled =
-        sl.includes('cancelled') || sl.includes('canceled') ||
-        sl.includes('annulé') || sl.includes('otkazan');
-      const isDiverted =
-        sl.includes('diverted') || sl.includes('preusmjeren') || sl.includes('dévié');
-
-      setAssignment({
-        status: data.status as 'open' | 'closed',
-        flightNumber: data.flightNumber,
-        airlineName: (flightDetails.AirlineName as string) || '',
-        destinationCity: (flightDetails.DestinationCityName as string) || '',
-        destinationCode: destCode,
-        scheduledTime: (flightDetails.ScheduledDepartureTime as string) || '',
-        estimatedTime: (flightDetails.EstimatedDepartureTime as string) || '',
-        gateNumber: (flightDetails.GateNumber as string) || '',
-        logoUrl,
-        cityUrl,
+    // Isti let kao prošli put → samo status (open/closed) i/ili klasa su se
+    // promijenili. Ne radimo ponovo fetch cijelog /api/flights, ne
+    // provjeravamo logo sliku — instant update, minimalan trošak.
+    if (myData.flightNumber === lastFlightNumberRef.current) {
+      setAssignment((prev) => ({
+        ...prev,
+        status: myData.status as 'open' | 'closed',
         classType,
-        isCancelled,
-        isDiverted,
-        codeshareFlights: (flightDetails.CodeShareFlights as string[]) || [],
-        setAt: data.setAt || null,
-      });
-    } catch (err) {
-      console.error('fetchDeskData error:', err);
-      if (isMountedRef.current) {
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        setLoading(false);
+        setAt: myData.setAt || null,
+      }));
+      return;
+    }
+
+    lastFlightNumberRef.current = myData.flightNumber;
+
+    // Novi let dodijeljen ovom šalteru → tek sada dohvati pune podatke.
+    let flightDetails: Record<string, string | string[] | boolean | null> = {};
+    try {
+      const flightsRes = await fetch('/api/flights');
+      const flightsData = await flightsRes.json();
+      const allFlights = [
+        ...(flightsData.departures || []),
+        ...(flightsData.arrivals || []),
+      ];
+      const match = allFlights.find(
+        (f: Record<string, string>) => f.FlightNumber === myData.flightNumber
+      );
+      if (match) flightDetails = match;
+    } catch {
+      // Nastavljamo s minimalnim podacima
+    }
+
+    // Logo URL — keširaj rezultat provjere po ICAO kodu
+    const icao =
+      (flightDetails.AirlineICAO as string) ||
+      myData.flightNumber.substring(0, 2).toUpperCase();
+    let logoUrl = '/airlines/placeholder.jpg';
+    if (icao) {
+      const cachedLogo = logoCacheRef.current.get(icao);
+      if (cachedLogo) {
+        logoUrl = cachedLogo;
+      } else {
+        const checkImg = (src: string): Promise<boolean> =>
+          new Promise((resolve) => {
+            if (typeof window === 'undefined') return resolve(false);
+            const img = new window.Image();
+            img.onload = () => resolve(true);
+            img.onerror = () => resolve(false);
+            setTimeout(() => resolve(false), 1000);
+            img.src = src;
+          });
+        const [hasJpg, hasPng] = await Promise.all([
+          checkImg(`/airlines/${icao}.jpg`),
+          checkImg(`/airlines/${icao}.png`),
+        ]);
+        if (hasJpg) logoUrl = `/airlines/${icao}.jpg`;
+        else if (hasPng) logoUrl = `/airlines/${icao}.png`;
+        else if (flightDetails.AirlineLogoURL)
+          logoUrl = flightDetails.AirlineLogoURL as string;
+
+        logoCacheRef.current.set(icao, logoUrl);
       }
     }
-  }, [deskNumberParam]);
+
+    const destCode = (flightDetails.DestinationAirportCode as string) || '';
+    const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';
+
+    const statusStr = (flightDetails.StatusEN as string) || '';
+    const sl = statusStr.toLowerCase().trim();
+    const isCancelled =
+      sl.includes('cancelled') || sl.includes('canceled') ||
+      sl.includes('annulé') || sl.includes('otkazan');
+    const isDiverted =
+      sl.includes('diverted') || sl.includes('preusmjeren') || sl.includes('dévié');
+
+    setAssignment({
+      status: myData.status as 'open' | 'closed',
+      flightNumber: myData.flightNumber,
+      airlineName: (flightDetails.AirlineName as string) || '',
+      destinationCity: (flightDetails.DestinationCityName as string) || '',
+      destinationCode: destCode,
+      scheduledTime: (flightDetails.ScheduledDepartureTime as string) || '',
+      estimatedTime: (flightDetails.EstimatedDepartureTime as string) || '',
+      gateNumber: (flightDetails.GateNumber as string) || '',
+      logoUrl,
+      cityUrl,
+      classType,
+      isCancelled,
+      isDiverted,
+      codeshareFlights: (flightDetails.CodeShareFlights as string[]) || [],
+      setAt: myData.setAt || null,
+    });
+  } catch (err) {
+    console.error('fetchDeskData error:', err);
+    if (isMountedRef.current) {
+      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      setLoading(false);
+    }
+  }
+}, [deskNumberParam]);
 
   // ── Polling ────────────────────────────────────────────────
   useEffect(() => {
