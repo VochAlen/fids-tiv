@@ -12,9 +12,20 @@ export async function GET(req: NextRequest) {
   try {
     // ── Dodjele za departures board ──────────────────────
 if (type === 'assignments') {
+  const scanKeys = async (pattern: string): Promise<string[]> => {
+    const keys: string[] = [];
+    let cursor = '0';
+    do {
+      const [nextCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== '0');
+    return keys;
+  };
+
   const [deskKeys, gateKeys] = await Promise.all([
-    client.keys('test:desk-status:*'),
-    client.keys('test:gate-status:*'),
+    scanKeys('test:desk-status:*'),
+    scanKeys('test:gate-status:*'),
   ]);
 
   const sortIds = (ids: string[]) =>

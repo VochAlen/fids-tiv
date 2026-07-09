@@ -8,7 +8,7 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 80_000;
+const REFRESH_INTERVAL_MS         = 90_000;
 const FETCH_TIMEOUT_MS            = 20_000;
 const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
@@ -196,37 +196,15 @@ const fetchAssignments = async (): Promise<{
   gates: Record<string, string>;
 }> => {
   try {
-    // Čitamo direktno iz istog izvora koji koriste fizički check-in i gate
-    // ekrani (desk-status-override / gate-status-override) — garantuje da
-    // se departures/combined board NIKAD ne razmimoiđe sa stvarnim stanjem
-    // koje osoblje postavlja u admin panelu.
-    const [deskRes, gateRes] = await Promise.all([
-      fetchWithTimeout('/api/test/desk-status-override', 5_000),
-      fetchWithTimeout('/api/test/gate-status-override', 5_000),
-    ]);
-
-    const deskData: Record<string, any> = deskRes.ok ? await deskRes.json() : {};
-    const gateData: Record<string, any> = gateRes.ok ? await gateRes.json() : {};
-
-    const desks: Record<string, string> = {};
-    const gates: Record<string, string> = {};
-
-    // flightNumber → "1, 2, 3" (podržava više šaltera po letu)
-    for (const [deskNumber, val] of Object.entries(deskData)) {
-      if (val?.status === 'open' && val.flightNumber) {
-        const fn = val.flightNumber as string;
-        desks[fn] = desks[fn] ? `${desks[fn]}, ${deskNumber}` : deskNumber;
-      }
-    }
-
-    // flightNumber → gate broj
-    for (const [gateNumber, val] of Object.entries(gateData)) {
-      if (val?.status === 'open' && val.flightNumber) {
-        gates[val.flightNumber as string] = gateNumber;
-      }
-    }
-
-    return { desks, gates };
+    // Jedan poziv umjesto dva, 20s keš umjesto 5s — endpoint već postoji
+    // i radi tačno ovaj posao (vidi stats/route.ts, type=assignments)
+    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
+    if (!res.ok) return { desks: {}, gates: {} };
+    const data = await res.json();
+    return {
+      desks: data.desks ?? {},
+      gates: data.gates ?? {},
+    };
   } catch {
     return { desks: {}, gates: {} };
   }

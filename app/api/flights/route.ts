@@ -14,7 +14,7 @@ import {
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
-const FLIGHT_CACHE_TTL_SECONDS = 60; // 1 minuta — smanjuje broj invokacija za ~60x
+const FLIGHT_CACHE_TTL_SECONDS = 90; // 1 minuta — smanjuje broj invokacija za ~60x
 
 // ── METADATA CACHE ─────────────────────────────────────────────
 const FLIGHT_HASH_KEY = 'cache:flights:hash';
@@ -25,7 +25,7 @@ const FLIGHT_SOURCE_KEY = 'cache:flights:source';
 // ── IN-PROCESS OVERRIDE CACHE (izbjegava Redis round-trip na svakom requestu) ──
 let overrideCacheData: Record<string, Record<string, string>> = {};
 let overrideCacheExpiry = 0;
-const OVERRIDE_CACHE_MS = 30_000; // 30 sekundi
+const OVERRIDE_CACHE_MS = 40_000; // 30 sekundi
 
 // ── REDIS CLEANUP ─────────────────────────────────────────────
 let lastRedisCleanup = 0;
@@ -163,14 +163,14 @@ async function getFlightDataFromCache(): Promise<FlightData | null> {
   return null;
 }
 
-async function saveFlightDataToCache(data: FlightData): Promise<void> {
-  try {
-    const client = getRedisClient();
-    await client.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(data));
-  } catch {
-    // Non-critical, nastavi
-  }
-}
+// async function saveFlightDataToCache(data: FlightData): Promise<void> {
+//   try {
+//     const client = getRedisClient();
+//     await client.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(data));
+//   } catch {
+//     // Non-critical, nastavi
+//   }
+// }
 
 // ── METADATA FUNCTIONS ────────────────────────────────────────
 async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): Promise<void> {
@@ -397,7 +397,7 @@ export async function GET(): Promise<NextResponse> {
   if (cached) {
     return NextResponse.json(cached, {
       headers: {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+        'Cache-Control': 'public, s-maxage=90, stale-while-revalidate=30',
         'X-Data-Source': cached.source + '-cached',
         'X-Total-Flights': cached.totalFlights.toString(),
       }
@@ -455,7 +455,7 @@ export async function GET(): Promise<NextResponse> {
 
     return NextResponse.json(slimmed, {
       headers: {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+        'Cache-Control': 'public, s-maxage=90, stale-while-revalidate=30',
         'X-Data-Source': 'live',
         'X-Total-Flights': flightData.totalFlights.toString(),
         'X-Departures': flightData.departures.length.toString(),
@@ -566,4 +566,4 @@ const slimmed = slimFlightData(flightData);
 
 // export const dynamic = 'force-dynamic';
 // export const revalidate = 0;
-export const revalidate = 60;
+export const revalidate = 90;
