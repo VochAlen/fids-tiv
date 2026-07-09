@@ -18,7 +18,9 @@ const HEARTBEAT_TIMEOUT_MS        = 120_000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY         = 9;
-const MAX_FLIGHTS_MEMORY          = 15;
+const MAX_FLIGHTS_MEMORY          = 60;
+const PAGE_SIZE           = 8;       // koliko letova po stranici
+const PAGE_ROTATE_MS      = 20_000;  // rotacija svakih 20s
 const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
 
 const HIDDEN_FLIGHT_PATTERNS = ['ZZZ', 'G00', 'PVT', 'TST'];
@@ -600,6 +602,7 @@ function DeparturesBoard(): JSX.Element {
   const [errorMessage,   setErrorMessage]   = useState<string | null>(null);
   const [isRecovering,   setIsRecovering]   = useState<boolean>(false);
   const [autoStatusTick, setAutoStatusTick] = useState<number>(0);
+  const [pageIndex, setPageIndex] = useState(0);
 
   const isMountedRef  = useRef(true);
   const prevGatesRef  = useRef<Record<string, string>>({});
@@ -611,6 +614,13 @@ function DeparturesBoard(): JSX.Element {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000);
     return () => clearInterval(id);
   }, []);
+  // ── Rotacija stranica (prikaz sledeće grupe letova svakih 20s) ──
+useEffect(() => {
+  const id = setInterval(() => {
+    setPageIndex(p => p + 1);
+  }, PAGE_ROTATE_MS);
+  return () => clearInterval(id);
+}, []);
 
   // Hard reset
   useEffect(() => {
@@ -716,10 +726,9 @@ function DeparturesBoard(): JSX.Element {
           if (c) { data = c; usedCache = true; } else throw fe;
         }
         if (!isMountedRef.current || !data) return;
-
-        const rawDepartures = getUniqueDeparturesWithDeparted(
-          filterRecentDepartures(data.departures)
-        ).slice(0, MAX_FLIGHTS_DISPLAY);
+const rawDepartures = getUniqueDeparturesWithDeparted(
+  filterRecentDepartures(data.departures)
+);   // ⭐ zadrži sve današnje letove, sijecenje ide kasnije za prikaz
 const assignments = await fetchAssignments().catch(() => ({
   desks: {} as Record<string, string>,
   gates: {} as Record<string, string>,
@@ -763,12 +772,21 @@ const departuresWithMeta = rawDepartures.map(f => {
     return () => { isMountedRef.current = false; clearTimeout(tid); };
   }, [filterRecentDepartures]);
 
-  const sortedFlights = useMemo(
-    () => [...flights].sort((a, b) =>
-      (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
-    ).slice(0, MAX_FLIGHTS_DISPLAY),
-    [flights]
-  );
+const allSortedFlights = useMemo(
+  () => [...flights].sort((a, b) =>
+    (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
+  ),
+  [flights]
+);
+
+const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE));
+
+const sortedFlights = useMemo(() => {
+  if (allSortedFlights.length === 0) return [];
+  const currentPage = pageIndex % totalPages;
+  const start = currentPage * PAGE_SIZE;
+  return allSortedFlights.slice(start, start + PAGE_SIZE);
+}, [allSortedFlights, pageIndex, totalPages]);
 
   const DepartureIcon = useCallback(({ className = 'w-5 h-5' }: { className?: string }) =>
     <Plane className={`${className} text-orange-500`} />, []);
@@ -860,8 +878,7 @@ const departuresWithMeta = rawDepartures.map(f => {
           </div>
         </div>
       </div>
-
-      {/* ── Footer ── */}
+{/* ── Footer ── */}
       <div className="w-full mx-auto mt-1 text-center flex-shrink-0">
         <div className={`${COLOR_CONFIG.subtitle} text-xs py-1`}>
           <div className="flex items-center justify-center gap-2 mb-0">
@@ -872,6 +889,20 @@ const departuresWithMeta = rawDepartures.map(f => {
             <span>Auto Refresh every 60s</span>
           </div>
         </div>
+
+        {/* ⭐ Indikator stranice — dodano ovdje */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-1.5 mt-1">
+            {Array.from({ length: totalPages }).map((_, i) => (
+              <div
+                key={i}
+                className={`w-1.5 h-1.5 rounded-full transition-all ${
+                  i === (pageIndex % totalPages) ? 'bg-yellow-400 w-4' : 'bg-white/20'
+                }`}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       <style jsx global>{`

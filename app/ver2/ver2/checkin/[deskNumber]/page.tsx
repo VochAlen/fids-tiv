@@ -27,7 +27,7 @@ import { useAdImages } from '@/hooks/useAdImages';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 15_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 20_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
@@ -409,16 +409,8 @@ const fetchDeskData = useCallback(async () => {
 
       // Klasa šaltera — lagan poziv, provjerava se svaki put jer se može
       // mijenjati nezavisno od leta
-      let classType: string | null = null;
-      try {
-        const classRes = await fetch(`/api/test/desk-class/${deskNumberParam}`);
-        if (classRes.ok) {
-          const classData = await classRes.json();
-          classType = classData.classType || null;
-        }
-      } catch {
-        // Ignorišemo
-      }
+// Klasa šaltera — sada dolazi zajedno sa statusom, bez posebnog fetch-a
+      const classType: string | null = data.classType ?? null;
 
       // Isti let kao prošli put → samo status (open/closed) i/ili klasa su se
       // promijenili. Ne radimo ponovo fetch cijelog /api/flights, ne

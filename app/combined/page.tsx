@@ -25,10 +25,12 @@ const CACHE_DURATION              = 4 * 60_000  // ↑ 5min→10min: manje fetch
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
 const MAX_FLIGHTS_DISPLAY         = 9
-const MAX_FLIGHTS_MEMORY          = 15
+const MAX_FLIGHTS_MEMORY          = 60
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60_000
 const HEARTBEAT_TIMEOUT_MS        = 120_000
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000
+const PAGE_SIZE           = 8
+const PAGE_ROTATE_MS      = 6_000   // svakih 6s nova stranica — podesi po želji (5-8s je dobar opseg)
 
 // UKLONJEN fetchWithRetry i fetchWithTimeout — nisu se koristili,
 // a generirale su retry pozive koji troše Vercel invocations.
@@ -668,6 +670,12 @@ function FlightBoard(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [autoStatusTick, setAutoStatusTick] = useState(0)
 
+  const [arrivalsPage,   setArrivalsPage]   = useState(0)
+const [departuresPage, setDeparturesPage] = useState(0)
+const [toggleCount, setToggleCount] = useState(0)
+
+const [pageIndex, setPageIndex] = useState(0)
+
   const isMountedRef  = useRef(true)
   const prevGatesRef  = useRef<Record<string, string>>({})
   const isInitialLoad = useRef(true)
@@ -712,8 +720,23 @@ function FlightBoard(): JSX.Element {
   }, [])
 
   // ── Arrivals/Departures switch — svake 20s ────────────────
+// ── Arrivals/Departures switch + rotacija stranica — svake 20s ──
+// ── Arrivals/Departures switch — svake 20s ────────────────
+// ── Arrivals/Departures switch — svake 20s ────────────────
+useEffect(() => {
+  const id = setInterval(() => {
+    setShowArrivals(p => !p)
+    setPageIndex(0)   // ⭐ reset — nova lista uvijek počinje od prve stranice
+  }, 20_000)
+  return () => clearInterval(id)
+}, [])
+
+
+  // ── Rotacija stranica unutar trenutno prikazane liste (brže od 20s switcha) ──
   useEffect(() => {
-    const id = setInterval(() => setShowArrivals(p => !p), 20_000)
+    const id = setInterval(() => {
+      setPageIndex(p => p + 1)
+    }, PAGE_ROTATE_MS)
     return () => clearInterval(id)
   }, [])
 
@@ -774,8 +797,8 @@ const prepareData = useCallback((
   data: FlightDataResponse,
   assignments?: { desks: Record<string, string>; gates: Record<string, string> }
 ) => {
-  const filteredArrivals = filterRecentFlights(data.arrivals, true).slice(0, MAX_FLIGHTS_DISPLAY)
-  const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false)).slice(0, MAX_FLIGHTS_DISPLAY)
+const filteredArrivals = filterRecentFlights(data.arrivals, true)
+const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false))
 
   const departuresWithMeta = rawDep.map(f => {
     const clone = { ...f }
@@ -911,12 +934,21 @@ setLastUpdate(new Date().toLocaleTimeString("en-GB"))
     ]
   }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
-  const sortedFlights = useMemo(() => {
-    const base = showArrivals ? arrivals : departures
-    return [...base]
-      .sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99"))
-      .slice(0, MAX_FLIGHTS_DISPLAY)
-  }, [showArrivals, arrivals, departures])
+const allSortedFlights = useMemo(() => {
+  const base = showArrivals ? arrivals : departures
+  return [...base].sort((a, b) =>
+    (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")
+  )
+}, [showArrivals, arrivals, departures])
+
+const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
+
+const sortedFlights = useMemo(() => {
+  if (allSortedFlights.length === 0) return []
+  const currentPage = pageIndex % totalPages
+  const start = currentPage * PAGE_SIZE
+  return allSortedFlights.slice(start, start + PAGE_SIZE)
+}, [allSortedFlights, pageIndex, totalPages])
 
   // ── Render ────────────────────────────────────────────────
   return (
@@ -1011,6 +1043,20 @@ setLastUpdate(new Date().toLocaleTimeString("en-GB"))
           </div>
         </div>
       </div>
+      {totalPages > 1 && (
+  <div className="flex items-center justify-center gap-1.5 mt-2">
+    {Array.from({ length: totalPages }).map((_, i) => (
+      <div
+        key={i}
+        className={`w-1.5 h-1.5 rounded-full transition-all ${
+          i === ((showArrivals ? arrivalsPage : departuresPage) % totalPages)
+            ? `${colors.accent} w-4`
+            : 'bg-white/20'
+        }`}
+      />
+    ))}
+  </div>
+)}
 
       <style jsx global>{`
         #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}

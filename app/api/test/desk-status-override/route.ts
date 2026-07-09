@@ -87,7 +87,8 @@ if (cleanedCount > 0) {
   });
 }
 export async function POST(request: Request) {
-  const { deskNumber, action, flightNumber } = await request.json();
+  const { deskNumber, action, flightNumber, classType } = await request.json();
+  //                                          ^^^^^^^^^ dodano ovdje
   const client = getRedisClient();
   const redisKey = `test:desk-status:${deskNumber}`;
 
@@ -96,7 +97,9 @@ export async function POST(request: Request) {
   }
 
   if (action === 'open' && flightNumber) {
-    const value = JSON.stringify({ status: 'open', flightNumber, setAt: Date.now() });
+    const existing = await client.get(redisKey);
+    const prevClass = existing ? JSON.parse(existing).classType : null;
+    const value = JSON.stringify({ status: 'open', flightNumber, classType: prevClass, setAt: Date.now() });
     await client.set(redisKey, value, 'EX', 3600);
     return NextResponse.json({ success: true, ttl: 3600 });
   }
@@ -109,6 +112,16 @@ export async function POST(request: Request) {
 
   if (action === 'clear') {
     await client.del(redisKey);
+    return NextResponse.json({ success: true });
+  }
+
+  // ── NOVO: setClass akcija ──────────────────────────
+  if (action === 'setClass') {
+    const existing = await client.get(redisKey);
+    if (!existing) return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
+    const data = JSON.parse(existing);
+    data.classType = classType ?? null;
+    await client.set(redisKey, JSON.stringify(data), 'EX', 3600);
     return NextResponse.json({ success: true });
   }
 

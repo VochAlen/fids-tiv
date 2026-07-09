@@ -274,12 +274,12 @@ function GateDisplay() {
   // ------------------------------------------------------------
   // Dohvatanje gate status override-a
   // ------------------------------------------------------------
-  const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null } | null> => {
+const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
     try {
       const res = await fetch(`/api/test/gate-status-override?gateNumber=${gate}`);
       if (!res.ok) return null;
       const data = await res.json();
-      return { status: data.status, flightNumber: data.flightNumber || null };
+      return { status: data.status, flightNumber: data.flightNumber || null, classType: data.classType ?? null };
     } catch (err) {
       console.error('fetchGateStatusOverride error:', err);
       return null;
@@ -289,16 +289,16 @@ function GateDisplay() {
   // ------------------------------------------------------------
   // Dohvatanje klase za gate  ← NOVO
   // ------------------------------------------------------------
-  const fetchGateClass = useCallback(async (gate: string): Promise<string | null> => {
-    try {
-      const res = await fetch(`/api/test/gate-class/${gate}`);
-      if (!res.ok) return null;
-      const data = await res.json();
-      return data.classType ?? null;
-    } catch {
-      return null;
-    }
-  }, []);
+  // const fetchGateClass = useCallback(async (gate: string): Promise<string | null> => {
+  //   try {
+  //     const res = await fetch(`/api/test/gate-class/${gate}`);
+  //     if (!res.ok) return null;
+  //     const data = await res.json();
+  //     return data.classType ?? null;
+  //   } catch {
+  //     return null;
+  //   }
+  // }, []);
 
   // ------------------------------------------------------------
   // Provjera da li let odgovara gate-u
@@ -360,23 +360,21 @@ function GateDisplay() {
   // ------------------------------------------------------------
   // Glavna funkcija za učitavanje podataka
   // ------------------------------------------------------------
-  const loadFlights = useCallback(async () => {
+const loadFlights = useCallback(async () => {
     if (!isMountedRef.current) return;
     try {
-      // Paralelno dohvati letove i klasu gate-a  ← NOVO
-      const [data, classType] = await Promise.all([
-        fetchFlightData(),
-        fetchGateClass(gateNumber),
-      ]);
+      const data = await fetchFlightData();
 
-      // 1. Override za ovaj gate
+      // 1. Override za ovaj gate (uključuje i klasu)
       let overrideStatus: string | null = null;
       let overrideFlightNumber: string | null = null;
+      let classType: string | null = null;
       try {
         const override = await fetchGateStatusOverride(gateNumber);
         if (override) {
           overrideStatus = override.status;
           overrideFlightNumber = override.flightNumber;
+          classType = override.classType;
         }
       } catch (err) {
         console.error('Override fetch error:', err);
@@ -490,8 +488,7 @@ function GateDisplay() {
       console.error('Gate load error:', err);
       if (isMountedRef.current) setLoading(false);
     }
-  }, [gateNumber, fetchGateStatusOverride, fetchGateClass, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
-
+}, [gateNumber, fetchGateStatusOverride, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
   // ------------------------------------------------------------
   // Polling interval
   // ------------------------------------------------------------
@@ -577,36 +574,36 @@ function GateDisplay() {
   // Zamjenjuje ranije DVA zasebna polla (30s override + 15s klasa)
   // koja su duplirala posao koji loadFlights već radi na 20s.
   // ------------------------------------------------------------
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const [override, classType] = await Promise.all([
-          fetchGateStatusOverride(gateNumber),
-          fetchGateClass(gateNumber),
-        ]);
+  // useEffect(() => {
+  //   const poll = async () => {
+  //     try {
+  //       const [override, classType] = await Promise.all([
+  //         fetchGateStatusOverride(gateNumber),
+  //         fetchGateClass(gateNumber),
+  //       ]);
 
-        const newStatus = override?.status ?? null;
-        const newFlightNumber = override?.flightNumber ?? null;
+  //       const newStatus = override?.status ?? null;
+  //       const newFlightNumber = override?.flightNumber ?? null;
 
-        // Override se promijenio (status ili let) → treba pun reload
-        if (
-          manualGateStatusRef.current !== newStatus ||
-          currentFlightRef.current?.FlightNumber !== newFlightNumber && newStatus === 'open'
-        ) {
-          loadFlights();
-          return;
-        }
+  //       // Override se promijenio (status ili let) → treba pun reload
+  //       if (
+  //         manualGateStatusRef.current !== newStatus ||
+  //         currentFlightRef.current?.FlightNumber !== newFlightNumber && newStatus === 'open'
+  //       ) {
+  //         loadFlights();
+  //         return;
+  //       }
 
-        // Samo klasa se promijenila → laka izmjena state-a, bez punog reloada
-        setDisplay(prev => (prev.classType !== classType ? { ...prev, classType } : prev));
-      } catch (e) {
-        console.error('Gate light poll error:', e);
-      }
-    };
-    poll();
-    const id = setInterval(poll, 15_000);
-    return () => clearInterval(id);
-  }, [gateNumber, fetchGateStatusOverride, fetchGateClass, loadFlights]);
+  //       // Samo klasa se promijenila → laka izmjena state-a, bez punog reloada
+  //       setDisplay(prev => (prev.classType !== classType ? { ...prev, classType } : prev));
+  //     } catch (e) {
+  //       console.error('Gate light poll error:', e);
+  //     }
+  //   };
+  //   poll();
+  //   const id = setInterval(poll, 15_000);
+  //   return () => clearInterval(id);
+  // }, [gateNumber, fetchGateStatusOverride, fetchGateClass, loadFlights]);
 
   // ------------------------------------------------------------
   // Countdown ticker

@@ -51,6 +51,7 @@ interface Assignment {
   destinationCity: string;
   scheduledTime: string;
   assignedAt: string;
+  classType: ClassType;   // ← NOVO
 }
 
 interface StatSession {
@@ -636,8 +637,8 @@ export default function AssignPanel() {
   const [tickSec,                setTickSec]                = useState(REFRESH_INTERVAL_MS / 1000);
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(true);
-  const [checkinClasses,         setCheckinClasses]         = useState<Record<string, ClassType>>({});
-  const [gateClasses,            setGateClasses]            = useState<Record<string, ClassType>>({});
+  // const [checkinClasses,         setCheckinClasses]         = useState<Record<string, ClassType>>({});
+  // const [gateClasses,            setGateClasses]            = useState<Record<string, ClassType>>({});
   const [showStats,              setShowStats]              = useState(false);
   const [dailyStats,             setDailyStats]             = useState<DailyStats>({ desks: {}, gates: {} });
   const [loadingStats,           setLoadingStats]           = useState(false);
@@ -698,29 +699,30 @@ export default function AssignPanel() {
     finally { setLoadingFlights(false); }
   }, [fetchFlightsData]);
 
-  const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res  = await fetch(`${API_PREFIX}/desk-status-override`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [deskNumber, value] of Object.entries(data)) {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId:      deskNumber,
-            flightNumber:    parsed.flightNumber as string,
-            airlineName:     flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime:   flight?.ScheduledDepartureTime || '',
-            assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-          });
-        }
+const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
+  try {
+    const res  = await fetch(`${API_PREFIX}/desk-status-override`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const list: Assignment[] = [];
+    for (const [deskNumber, value] of Object.entries(data)) {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
+      if (parsed.flightNumber && parsed.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
+        list.push({
+          resourceId:      deskNumber,
+          flightNumber:    parsed.flightNumber as string,
+          airlineName:     flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime:   flight?.ScheduledDepartureTime || '',
+          assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+          classType:       (parsed.classType as ClassType) ?? null,   // ← NOVO
+        });
       }
-      setCheckinAssignments(list);
-    } catch (err) { console.error(err); }
-  }, []);
+    }
+    setCheckinAssignments(list);
+  } catch (err) { console.error(err); }
+}, []);
 
   const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
     try {
@@ -739,6 +741,7 @@ export default function AssignPanel() {
             destinationCity: flight?.DestinationCityName || '',
             scheduledTime:   flight?.ScheduledDepartureTime || '',
             assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
+             classType:       (parsed.classType as ClassType) ?? null,   // ← NOVO,
           });
         }
       }
@@ -846,17 +849,17 @@ export default function AssignPanel() {
       await trackStart(resourceType, resourceId, flight);
 
       // BA automatska klasa
+// BA automatska klasa
       if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
         const existingBADesks = checkinAssignmentsRef.current.filter(
           a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
         );
         const autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
         try {
-          await fetch(`/api/test/desk-class/${resourceId}`, {
+          await fetch(`${API_PREFIX}/desk-status-override`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ classType: autoClass }),
+            body: JSON.stringify({ deskNumber: resourceId, action: 'setClass', classType: autoClass }),
           });
-          setCheckinClasses(prev => ({ ...prev, [resourceId]: autoClass }));
         } catch (err) { console.error('Auto BA class error:', err); }
       }
 
@@ -922,60 +925,72 @@ export default function AssignPanel() {
     } catch { console.error('Greška pri brisanju gate-a', gateNumber); }
   }, [fetchGateAssignments]);
 
-  const fetchAllClasses = useCallback(async (
-    assignments: Assignment[], type: 'desk' | 'gate',
-  ): Promise<Record<string, ClassType>> => {
-    const entries = await Promise.all(
-      assignments.map(async a => {
-        try {
-          const endpoint = type === 'desk'
-            ? `/api/test/desk-class/${a.resourceId}`
-            : `/api/test/gate-class/${a.resourceId}`;
-          const res  = await fetch(endpoint);
-          if (!res.ok) return [a.resourceId, null] as const;
-          const data = await res.json();
-          return [a.resourceId, (data.classType ?? null)] as const;
-        } catch { return [a.resourceId, null] as const; }
-      }),
-    );
-    return Object.fromEntries(entries) as Record<string, ClassType>;
-  }, []);
+  // const fetchAllClasses = useCallback(async (
+  //   assignments: Assignment[], type: 'desk' | 'gate',
+  // ): Promise<Record<string, ClassType>> => {
+  //   const entries = await Promise.all(
+  //     assignments.map(async a => {
+  //       try {
+  //         const endpoint = type === 'desk'
+  //           ? `/api/test/desk-class/${a.resourceId}`
+  //           : `/api/test/gate-class/${a.resourceId}`;
+  //         const res  = await fetch(endpoint);
+  //         if (!res.ok) return [a.resourceId, null] as const;
+  //         const data = await res.json();
+  //         return [a.resourceId, (data.classType ?? null)] as const;
+  //       } catch { return [a.resourceId, null] as const; }
+  //     }),
+  //   );
+  //   return Object.fromEntries(entries) as Record<string, ClassType>;
+  // }, []);
 
-  useEffect(() => {
-    if (checkinAssignments.length === 0) { setCheckinClasses({}); return; }
-    const id = setTimeout(() => {
-      fetchAllClasses(checkinAssignments, 'desk').then(setCheckinClasses);
-    }, 800);
-    return () => clearTimeout(id);
-  }, [checkinAssignments, fetchAllClasses]);
+  // useEffect(() => {
+  //   if (checkinAssignments.length === 0) { setCheckinClasses({}); return; }
+  //   const id = setTimeout(() => {
+  //     fetchAllClasses(checkinAssignments, 'desk').then(setCheckinClasses);
+  //   }, 800);
+  //   return () => clearTimeout(id);
+  // }, [checkinAssignments, fetchAllClasses]);
 
-  useEffect(() => {
-    if (gateAssignments.length === 0) { setGateClasses({}); return; }
-    const id = setTimeout(() => {
-      fetchAllClasses(gateAssignments, 'gate').then(setGateClasses);
-    }, 800);
-    return () => clearTimeout(id);
-  }, [gateAssignments, fetchAllClasses]);
+  // useEffect(() => {
+  //   if (gateAssignments.length === 0) { setGateClasses({}); return; }
+  //   const id = setTimeout(() => {
+  //     fetchAllClasses(gateAssignments, 'gate').then(setGateClasses);
+  //   }, 800);
+  //   return () => clearTimeout(id);
+  // }, [gateAssignments, fetchAllClasses]);
 
-  const handleClassToggle = useCallback(async (
+const handleClassToggle = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate', next: ClassType,
   ) => {
-    const currentClasses = resourceType === 'desk' ? checkinClasses : gateClasses;
-    const setClasses     = resourceType === 'desk' ? setCheckinClasses : setGateClasses;
-    const current        = currentClasses[resourceId] ?? null;
-    setClasses(prev => ({ ...prev, [resourceId]: next }));
+    const setAssignments  = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
+    const prevAssignments = resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
+    const prev = prevAssignments.find(a => a.resourceId === resourceId)?.classType ?? null;
+
+    // Optimistic update
+    setAssignments(list => list.map(a =>
+      a.resourceId === resourceId ? { ...a, classType: next } : a
+    ));
+
     try {
       const endpoint = resourceType === 'desk'
-        ? `/api/test/desk-class/${resourceId}` : `/api/test/gate-class/${resourceId}`;
-      await fetch(endpoint, {
+        ? `${API_PREFIX}/desk-status-override` : `${API_PREFIX}/gate-status-override`;
+      const body = resourceType === 'desk'
+        ? { deskNumber: resourceId, action: 'setClass', classType: next }
+        : { gateNumber: resourceId, action: 'setClass', classType: next };
+
+      const res = await fetch(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ classType: next }),
+        body: JSON.stringify(body),
       });
+      if (!res.ok) throw new Error('setClass failed');
     } catch (err) {
       console.error('Class toggle error:', err);
-      setClasses(prev => ({ ...prev, [resourceId]: current }));
+      setAssignments(list => list.map(a =>
+        a.resourceId === resourceId ? { ...a, classType: prev } : a
+      ));
     }
-  }, [checkinClasses, gateClasses]);
+  }, []);
 
   const handleLogout = async () => {
     await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
@@ -1177,8 +1192,8 @@ export default function AssignPanel() {
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {checkinAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="desk"
-                          classType={checkinClasses[a.resourceId] ?? null}
+        <AssignmentCard key={a.resourceId} a={a} type="desk"
+                          classType={a.classType}
                           onRemove={() => handleRemoveCheckin(a.resourceId)}
                           onClassToggle={next => handleClassToggle(a.resourceId, 'desk', next)}
                           isDark={isDark} />
@@ -1219,8 +1234,8 @@ export default function AssignPanel() {
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {gateAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="gate"
-                          classType={gateClasses[a.resourceId] ?? null}
+    <AssignmentCard key={a.resourceId} a={a} type="gate"
+                          classType={a.classType}
                           onRemove={() => handleRemoveGate(a.resourceId)}
                           onClassToggle={next => handleClassToggle(a.resourceId, 'gate', next)}
                           isDark={isDark} />
