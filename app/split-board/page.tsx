@@ -34,6 +34,7 @@ const MAX_FLIGHTS_DISPLAY          = 9;
 const MAX_FLIGHTS_MEMORY           = 15;
 const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
+let lastKnownHash: string | null = null;
 
 // ============================================================
 // ERROR BOUNDARY
@@ -187,6 +188,25 @@ const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] =
     if (!isArrivals && departed) return diff <= 20;
     return true;
   });
+};
+
+const fetchAssignments = async (): Promise<{
+  desks: Record<string, string>;
+  gates: Record<string, string>;
+}> => {
+  try {
+    // Koristi već keširanu rutu (in-process keš na serveru) —
+    // isti izvor koji koristi combined/departures board
+    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
+    if (!res.ok) return { desks: {}, gates: {} };
+    const data = await res.json();
+    return {
+      desks: data.desks ?? {},
+      gates: data.gates ?? {},
+    };
+  } catch {
+    return { desks: {}, gates: {} };
+  }
 };
 
 // ============================================================
@@ -553,55 +573,99 @@ function SplitBoard(): JSX.Element {
   }, []);
 
   // Učitavanje podataka
-  const loadData = useCallback(async () => {
-    if (!isMountedRef.current) return;
+const loadData = useCallback(async () => {
+  if (!isMountedRef.current) return;
+  try {
+    if (isInitialLoad.current) setLoading(true);
+    setErrorMessage(null);
+
+    // ── HASH CHECK ──
+    let hashChanged = true;
     try {
-      if (isInitialLoad.current) setLoading(true);
-      setErrorMessage(null);
-      let data: any = null;
-      let usedCache = false;
-      try {
-        const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS);
-        if (!res.ok) throw new Error("Network error");
-        data = await res.json();
-        if (isMountedRef.current) {
-          saveToCache({ arrivals: data.arrivals || [], departures: data.departures || [], lastUpdated: new Date().toLocaleTimeString("en-GB") });
+      const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+          hashChanged = false;
+        } else {
+          lastKnownHash = statusData.hash;
         }
-      } catch (err) {
-        setErrorMessage("Network error. Using cached data.");
-        const cached = loadFromCache();
-        if (cached) { data = { arrivals: cached.arrivals, departures: cached.departures }; usedCache = true; }
-        else throw err;
       }
-      if (!isMountedRef.current || !data) return;
-
-      let rawArrivals = filterRecentFlights(data.arrivals || [], true);
-      rawArrivals = rawArrivals.slice(0, MAX_FLIGHTS_DISPLAY);
-      let rawDepartures = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures || [], false));
-      rawDepartures = rawDepartures.slice(0, MAX_FLIGHTS_DISPLAY);
-
-      const departuresWithMeta = rawDepartures.map(f => {
-        const clone = { ...f };
-        const num = f.FlightNumber ?? "";
-        const prevGate = prevGatesRef.current[num];
-        if (prevGate && f.GateNumber && prevGate !== f.GateNumber) (clone as any)._gateChangedAt = Date.now();
-        if (f.GateNumber && f.GateNumber !== "-") prevGatesRef.current[num] = f.GateNumber;
-        return clone;
-      });
-
-      setArrivals(rawArrivals);
-      setDepartures(departuresWithMeta);
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"));
-      if (!usedCache) setErrorMessage(null);
-      else setTimeout(() => setErrorMessage(null), 5_000);
-    } catch (err) {
-      console.error("Split board load error:", err);
-      setErrorMessage("Unable to load flight data. Check connection.");
-    } finally {
-      isInitialLoad.current = false;
-      if (isMountedRef.current) setLoading(false);
+    } catch {
+      // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
     }
-  }, []);
+
+    if (!hashChanged) {
+      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      isInitialLoad.current = false;
+      setLoading(false);
+      return;
+    }
+
+    // ── PUN FETCH ──
+    let data: any = null;
+    let usedCache = false;
+    try {
+      const res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS);
+      if (!res.ok) throw new Error('Network error');
+      data = await res.json();
+      if (isMountedRef.current) {
+        saveToCache({ arrivals: data.arrivals || [], departures: data.departures || [], lastUpdated: new Date().toLocaleTimeString('en-GB') });
+      }
+    } catch (err) {
+      setErrorMessage('Network error. Using cached data.');
+      const cached = loadFromCache();
+      if (cached) { data = { arrivals: cached.arrivals, departures: cached.departures }; usedCache = true; }
+      else throw err;
+    }
+    if (!isMountedRef.current || !data) return;
+
+    // ── ADMIN OVERRIDE — desk/gate ručne izmjene sa admin panela ──
+    const assignments = await fetchAssignments();
+
+    let rawArrivals = filterRecentFlights(data.arrivals || [], true);
+    rawArrivals = rawArrivals.slice(0, MAX_FLIGHTS_DISPLAY);
+    let rawDepartures = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures || [], false));
+    rawDepartures = rawDepartures.slice(0, MAX_FLIGHTS_DISPLAY);
+
+    const departuresWithMeta = rawDepartures.map(f => {
+      const clone = { ...f };
+      const num = f.FlightNumber ?? '';
+
+      // Admin override za check-in šalter
+      const adminDesk = assignments.desks[num];
+      if (adminDesk) {
+        (clone as any).CheckInDesk = adminDesk;
+      }
+
+      // Admin override za gate — ima prioritet nad podatkom iz /api/flights
+      const adminGate = assignments.gates[num];
+      const effectiveGate = adminGate || f.GateNumber || '';
+      if (effectiveGate && effectiveGate !== '-') {
+        const prevGate = prevGatesRef.current[num];
+        if (prevGate && prevGate !== effectiveGate) {
+          (clone as any)._gateChangedAt = Date.now();
+        }
+        clone.GateNumber = effectiveGate;
+        prevGatesRef.current[num] = effectiveGate;
+      }
+
+      return clone;
+    });
+
+    setArrivals(rawArrivals);
+    setDepartures(departuresWithMeta);
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    if (!usedCache) setErrorMessage(null);
+    else setTimeout(() => setErrorMessage(null), 5_000);
+  } catch (err) {
+    console.error('Split board load error:', err);
+    setErrorMessage('Unable to load flight data. Check connection.');
+  } finally {
+    isInitialLoad.current = false;
+    if (isMountedRef.current) setLoading(false);
+  }
+}, []);
 
   useEffect(() => {
     isMountedRef.current = true;

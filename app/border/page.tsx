@@ -28,6 +28,7 @@ const MAX_FLIGHTS_DISPLAY      = 12;
 const ARRIVED_SHOW_MINUTES     = 60;        // ← prikaži 45 min nakon dolaska
 const CANCELLED_SHOW_MINUTES   = 15;        // ← prikaži cancelled letove 15 minuta
 const HIDDEN_PATTERNS          = ["ZZZ", "G00", "PVT", "TST"];
+let lastKnownHash: string | null = null;
 
 const PLACEHOLDER =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHZpZXdCb3g9IjAgMCA0MCAyNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMjMzMjQ0Ii8+PHRleHQgeD0iMjAiIHk9IjE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNDc2MDdBIiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+";
@@ -703,42 +704,90 @@ function ArrivalsBoard(): JSX.Element {
   }, []);
 
   // Load
-  useEffect(() => {
-    mounted.current = true;
-    let tid: ReturnType<typeof setTimeout>;
+// Load
+useEffect(() => {
+  mounted.current = true;
+  let tid: ReturnType<typeof setTimeout>;
 
-    const cached = loadCache();
-    if (cached?.arrivals) {
-      setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-      setLoading(false);
-    }
+  const cached = loadCache();
+  if (cached?.arrivals) {
+    setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+    setLoading(false);
+  }
 
-    const load = async () => {
-      if (!mounted.current) return;
+  const load = async () => {
+    if (!mounted.current) return;
+    try {
+      // ── HASH CHECK ──
+      let hashChanged = true; // default: pretpostavi da se promijenilo
       try {
-        // const res = await fetch("/api/flights", { headers: { "Cache-Control": "no-cache" } });
-         const res = await fetch("/api/flights");
+        const statusRes = await fetch("/api/flights/status", {
+          headers: { "Cache-Control": "no-cache" }
+        });
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+            // Nema promjena — ne vuci pun payload, samo nastavi sa kešom
+            hashChanged = false;
+            // Ako imamo keširane podatke, samo ih zadrži
+            if (!cached) {
+              // Ako nema keša, možda želimo ipak povući podatke? 
+              // U ovom slučaju, bolje je povući pun fetch nego ostati prazan
+              hashChanged = true;
+            }
+          }
+          lastKnownHash = statusData.hash;
+        }
+      } catch {
+        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+      }
+
+      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
+      let data: any = null;
+      if (hashChanged) {
+        const res = await fetch("/api/flights", {
+          headers: { "Cache-Control": "no-cache" }
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        data = await res.json();
         if (!mounted.current) return;
         saveCache(data);
-        setFlights(filter(data.arrivals ?? []).slice(0, MAX_FLIGHTS_DISPLAY));
-        setLoading(false);
-      } catch {
+      } else {
+        // Ako se hash nije promijenio, koristi keš ako postoji
         const c = loadCache();
-        if (c?.arrivals && mounted.current) {
-          setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-          setLoading(false);
+        if (c?.arrivals) {
+          data = c;
+        } else {
+          // Ako nema keša, ipak povuci podatke (fallback)
+          const res = await fetch("/api/flights", {
+            headers: { "Cache-Control": "no-cache" }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          data = await res.json();
+          if (!mounted.current) return;
+          saveCache(data);
         }
-      } finally {
-        if (mounted.current) tid = setTimeout(load, REFRESH_INTERVAL_MS);
       }
-    };
 
-    if (!cached) load(); else { load(); }
+      if (data?.arrivals) {
+        setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+      }
+    } catch {
+      const c = loadCache();
+      if (c?.arrivals && mounted.current) {
+        setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+      }
+    } finally {
+      if (mounted.current) tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    }
+  };
 
-    return () => { mounted.current = false; clearTimeout(tid); };
-  }, [filter]);
+  if (!cached) load(); else { load(); }
+
+  return () => { mounted.current = false; clearTimeout(tid); };
+}, [filter]);
 
   const sorted = useMemo(() =>
     [...flights].sort((a, b) =>

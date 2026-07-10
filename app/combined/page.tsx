@@ -31,6 +31,7 @@ const HEARTBEAT_TIMEOUT_MS        = 120_000
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000
 const PAGE_SIZE           = 8
 const PAGE_ROTATE_MS      = 6_000   // svakih 6s nova stranica — podesi po želji (5-8s je dobar opseg)
+let lastKnownHash: string | null = null;
 
 // UKLONJEN fetchWithRetry i fetchWithTimeout — nisu se koristili,
 // a generirale su retry pozive koji troše Vercel invocations.
@@ -837,20 +838,43 @@ const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departur
   }, [prepareData])
 
   // ── Polling: jedan fetch, bez retry (Vercel optimizacija) ──
-  useEffect(() => {
-    isMountedRef.current = true
-    let tid: ReturnType<typeof setTimeout>
-    const controller = new AbortController()
+useEffect(() => {
+  isMountedRef.current = true
+  let tid: ReturnType<typeof setTimeout>
+  const controller = new AbortController()
 
-    const load = async () => {
-      if (!isMountedRef.current) return
+  const load = async () => {
+    if (!isMountedRef.current) return
+    try {
+      if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
+        setLoading(true)
+      setErrorMessage(null)
+
+      // ── HASH CHECK ──
+      let hashChanged = true // default: pretpostavi da se promijenilo
       try {
-        if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
-          setLoading(true)
-        setErrorMessage(null)
+        const statusRes = await fetchWithTimeout('/api/flights/status', 5_000)
+        if (statusRes.ok) {
+          const statusData = await statusRes.json()
+          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+            // Nema promjena — ne vuci pun payload, samo update lastUpdate i zakaži sljedeći ciklus
+            hashChanged = false
+            setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+            isInitialLoad.current = false
+            setLoading(false)
+            tid = setTimeout(load, REFRESH_INTERVAL_MS)
+            return
+          }
+          lastKnownHash = statusData.hash
+        }
+      } catch {
+        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+      }
 
-        let data: FlightDataResponse | null = null
-try {
+      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
+      let data: FlightDataResponse | null = null
+      if (hashChanged) {
+        try {
           const res = await fetch("/api/flights", {
             signal: controller.signal,
           })
@@ -868,32 +892,33 @@ try {
             setErrorMessage("Unable to load flight data")
           }
         }
+      }
 
-if (!isMountedRef.current || !data) return
+      if (!isMountedRef.current || !data) return
 
-const assignments = await fetchAssignments()
-const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
-setArrivals(filteredArrivals)
-setDepartures(departuresWithMeta)
-setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-      } catch (e) {
-        console.error("Critical:", e)
-      } finally {
-        isInitialLoad.current = false
-        if (isMountedRef.current) {
-          setLoading(false)
-          tid = setTimeout(load, REFRESH_INTERVAL_MS)
-        }
+      const assignments = await fetchAssignments()
+      const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+      setArrivals(filteredArrivals)
+      setDepartures(departuresWithMeta)
+      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+    } catch (e) {
+      console.error("Critical:", e)
+    } finally {
+      isInitialLoad.current = false
+      if (isMountedRef.current) {
+        setLoading(false)
+        tid = setTimeout(load, REFRESH_INTERVAL_MS)
       }
     }
+  }
 
-    load()
-    return () => {
-      isMountedRef.current = false
-      clearTimeout(tid)
-      controller.abort()
-    }
-  }, [prepareData]) // eslint-disable-line react-hooks/exhaustive-deps
+  load()
+  return () => {
+    isMountedRef.current = false
+    clearTimeout(tid)
+    controller.abort()
+  }
+}, [prepareData]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Close handler ─────────────────────────────────────────
   const handleClose = useCallback(() => {
