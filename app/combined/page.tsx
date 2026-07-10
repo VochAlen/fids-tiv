@@ -788,8 +788,8 @@ useEffect(() => {
       const ft = parseFlightTimeToDate(timeStr)
       if (!ft) return false
       const diff = Math.floor((now.getTime() - ft.getTime()) / 60_000)
-      if (isArrivals && arrived)    return diff <= 20
-      if (!isArrivals && departed)  return diff <= 20
+      if (isArrivals && arrived)    return diff <= 25
+      if (!isArrivals && departed)  return diff <= 15
       return true
     })
   }, [])
@@ -960,12 +960,63 @@ useEffect(() => {
     ]
   }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
+
+
+// Vraća true ako je let po statusu ZAVRŠEN (departed/arrived/cancelled) —
+// koristi isti regex koji već koristi filterRecentFlights, ne novi
+const isFlightTerminated = useCallback((f: Flight, isArrival: boolean): boolean => {
+  const status = (f.StatusEN ?? "").toLowerCase()
+  if (/(cancelled|canceled|otkazan)/i.test(status)) return true
+  if (isArrival) return /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(status)
+  return !/(delay|kasni)/i.test(status) &&
+    (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
+}, [])
+
+// Efektivno vrijeme (minute-of-day) za sortiranje. Namjerno NE koristi
+// parseFlightTimeToDate-ov "gurni na sutra ako je >12h u prošlosti" trik —
+// ovdje nam treba čisto vrijeme-u-danu jer filterRecentFlights već brine
+// o uklanjanju starih/irelevantnih letova iz liste.
+const getTimeOfDayMinutes = useCallback((t: string | null | undefined): number => {
+  if (!t) return Infinity
+  const s = t.trim()
+  if (!s || s === "-" || s === "--:--") return Infinity
+  if (s.includes("T")) {
+    const d = new Date(s)
+    if (!isNaN(d.getTime())) return d.getHours() * 60 + d.getMinutes()
+  }
+  const m = s.match(/^(\d{1,2})[:.](\d{2})$/)
+  if (m) {
+    const h = parseInt(m[1], 10), min = parseInt(m[2], 10)
+    if (h > 23 || min > 59) return Infinity
+    return h * 60 + min
+  }
+  const dg = s.replace(/\D/g, "")
+  if (dg.length === 4) {
+    const h = parseInt(dg.slice(0, 2), 10), min = parseInt(dg.slice(2), 10)
+    if (h > 23 || min > 59) return Infinity
+    return h * 60 + min
+  }
+  return Infinity
+}, [])
+
+// Sortiranje po razlici (vrijemeLeta - sada), rastuće:
+// - Veoma negativno = jako kasni/delayed a status nije ažuriran → na vrhu
+// - Blago negativno = tek sletio/otišao → odmah iza delayed letova
+// - Pozitivno = budući let → hronološki, poslije svega prošlog
+// - Infinity = nevažeće vrijeme → na samom dnu
 const allSortedFlights = useMemo(() => {
   const base = showArrivals ? arrivals : departures
-  return [...base].sort((a, b) =>
-    (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")
-  )
-}, [showArrivals, arrivals, departures])
+  const now = new Date()
+  const nowMinutes = now.getHours() * 60 + now.getMinutes()
+
+  return [...base].sort((a, b) => {
+    const aTime = getTimeOfDayMinutes(a.EstimatedDepartureTime || a.ScheduledDepartureTime)
+    const bTime = getTimeOfDayMinutes(b.EstimatedDepartureTime || b.ScheduledDepartureTime)
+    const aDiff = aTime === Infinity ? Infinity : aTime - nowMinutes
+    const bDiff = bTime === Infinity ? Infinity : bTime - nowMinutes
+    return aDiff - bDiff
+  })
+}, [showArrivals, arrivals, departures, getTimeOfDayMinutes])
 
 const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
 
