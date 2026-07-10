@@ -16,6 +16,7 @@ import {
 import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Building2, Shield, Luggage } from 'lucide-react';
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
@@ -233,13 +234,18 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
   const icao = flight.AirlineICAO || (flight.FlightNumber ?? "").slice(0, 2).toUpperCase();
   const rowBg = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
 
-  const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.dataset.t === "fa") { img.src = PLACEHOLDER; img.onerror = null; return; }
-    if (img.dataset.t === "png") { img.dataset.t = "fa"; img.src = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`; return; }
-    if (img.dataset.t === "jpg") { img.dataset.t = "png"; img.src = `/airlines/${icao}.png`; return; }
-    img.dataset.t = "jpg"; img.src = `/airlines/${icao}.jpg`;
-  }, [icao]);
+const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
+  if (img.dataset.t === 'local') {
+    img.dataset.t = 'fa';
+    const fw = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`;
+    if (icao) { img.src = fw; return; }
+    img.src = PLACEHOLDER; img.onerror = null; return;
+  }
+  // FlightAware je promašio → placeholder
+  img.src = PLACEHOLDER; img.onerror = null;
+}, [icao]);
 
   const estDisplay = useMemo(() => {
     const e = fmt(flight.EstimatedDepartureTime);
@@ -270,15 +276,15 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
 
       <div className="fids-cell fids-w-logo flex items-center justify-center">
         <div className="fids-logo-wrap">
-          <img
-            src={`/airlines/${icao}.png`}
-            alt=""
-            className="object-contain w-full h-full"
-            onError={onErr}
-            data-t="logo"
-            decoding="async"
-            loading={index < 9 ? "eager" : "lazy"}
-          />
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER)}
+  alt=""
+  className="object-contain w-full h-full"
+  onError={onErr}
+  data-t={isKnownLocalLogo(icao) ? 'local' : 'fa'}
+  decoding="async"
+  loading={index < 9 ? "eager" : "lazy"}
+/>
         </div>
       </div>
 

@@ -16,6 +16,7 @@ import {
 import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 
 // ============================================================
 // KONSTANTE
@@ -59,6 +60,8 @@ const COLOR_CONFIG = {
     cardBg:     "bg-[#3a0a30]/80",
   },
 } as const
+
+
 
 interface FlightDataResponse {
   departures:  Flight[]
@@ -447,20 +450,18 @@ const FlightRow = memo(
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ""
 
     // Logo fallback: public/airlines/{ICAO}.png → .jpg → FlightAware → placeholder
-    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.currentTarget
-      if (img.dataset.tried === "png") {
-        img.dataset.tried = "jpg"; img.src = `/airlines/${icao}.jpg`; return
-      }
-      if (img.dataset.tried === "jpg") {
-        img.dataset.tried = "fw"
-        const fw = getFlightawareLogoURL(icao)
-        img.src = fw || PLACEHOLDER_IMAGE
-        if (!fw) img.onerror = null
-        return
-      }
-      img.src = PLACEHOLDER_IMAGE; img.onerror = null
-    }, [icao])
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget
+  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw'
+    const fw = getFlightawareLogoURL(icao)
+    if (fw) { img.src = fw; return }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return
+  }
+  // FlightAware je promašio → placeholder
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null
+}, [icao])
 
     const rowBg          = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
     const gateChangedAt  = (flight as any)._gateChangedAt
@@ -499,16 +500,16 @@ const FlightRow = memo(
           {/* Flight info */}
           <div className="flex items-center gap-3" style={{ width: "280px" }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-              <img
-                src={`/airlines/${icao}.png`}
-                alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full"
-                onError={onImgErr}
-                data-tried="png"
-                decoding="async"
-                loading={index < 9 ? "eager" : "lazy"}
-                fetchPriority={index < 8 ? "high" : "auto"}
-              />
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+  decoding="async"
+  loading={index < 9 ? "eager" : "lazy"}
+  fetchPriority={index < 8 ? "high" : "auto"}
+/>
             </div>
             <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
@@ -585,14 +586,14 @@ const FlightRow = memo(
         <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}>
           <div className="flex items-center gap-2.5">
             <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
-              <img
-                src={`/airlines/${icao}.png`}
-                alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full"
-                onError={onImgErr}
-                data-tried="png"
-                decoding="async"
-              />
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+  decoding="async"
+/>
             </div>
             <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (

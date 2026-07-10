@@ -17,6 +17,7 @@ import {
 import type { Flight } from "@/types/flight";
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service";
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react";
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 
 // ============================================================
 // KONSTANTE
@@ -343,22 +344,16 @@ const FlightRow = memo(function FlightRow({
     [flight, isArrival, formatTime, autoStatusTick]
   );
   const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
-  const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.dataset.tried === 'png') {
-      img.dataset.tried = 'jpg';
-      img.src = `/airlines/${icao}.jpg`;
-      return;
-    }
-    if (img.dataset.tried === 'jpg') {
-      img.dataset.tried = 'flightware';
-      const fwUrl = getFlightawareLogoURL(icao);
-      if (fwUrl) img.src = fwUrl;
-      else { img.src = PLACEHOLDER_IMAGE; img.onerror = null; }
-      return;
-    }
-    img.src = PLACEHOLDER_IMAGE; img.onerror = null;
-  }, [icao]);
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw';
+    const fw = getFlightawareLogoURL(icao);
+    if (fw) { img.src = fw; return; }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return;
+  }
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null;
+}, [icao]);
 
   const gateChangedAt = (flight as any)._gateChangedAt;
   const isGateChanged = gateChangedAt && (Date.now() - gateChangedAt < 15_000);
@@ -397,16 +392,16 @@ const FlightRow = memo(function FlightRow({
         {/* Flight + Logo */}
         <div className="flex items-center gap-2 w-[240px]">
           <div className="relative w-[50px] h-8 bg-white rounded-lg p-0.5 shadow-xl flex-shrink-0">
-            <img
-              src={`/airlines/${icao}.png`}
-              alt={`${flight.AirlineName} logo`}
-              className="object-contain w-full h-full"
-              onError={onImgErr}
-              data-tried="png"
-              decoding="async"
-              loading={index < 9 ? "eager" : "lazy"}
-              fetchPriority={index < 8 ? "high" : "auto"}
-            />
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+  decoding="async"
+  loading={index < 9 ? "eager" : "lazy"}
+  fetchPriority={index < 8 ? "high" : "auto"}
+/>
           </div>
           <div className="text-xl font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
           {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (

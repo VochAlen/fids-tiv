@@ -4,6 +4,7 @@ import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component
 import type { Flight } from '@/types/flight';
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 
 // ============================================================
 // KONSTANTE
@@ -23,6 +24,7 @@ const PAGE_SIZE           = 8;       // koliko letova po stranici
 const PAGE_ROTATE_MS      = 20_000;  // rotacija svakih 20s
 const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
 let lastKnownHash: string | null = null;
+
 
 const HIDDEN_FLIGHT_PATTERNS = ['ZZZ', 'G00', 'PVT', 'TST'];
 
@@ -375,13 +377,16 @@ const FlightRow = memo(
     const rowBg   = index % 2 === 0 ? 'bg-white/15' : 'bg-white/5';
     const icao    = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
-    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.currentTarget;
-      if (img.dataset.fallback === 'png') { img.src = PLACEHOLDER_IMAGE; img.onerror = null; return; }
-      if (img.dataset.fallback === 'jpg') { img.dataset.fallback = 'png'; img.src = `/airlines/${icao}.png`; return; }
-      if (icao) { img.dataset.fallback = 'jpg'; img.src = `/airlines/${icao}.jpg`; }
-      else { img.src = PLACEHOLDER_IMAGE; img.onerror = null; }
-    }, [icao]);
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.fallback === 'local') {
+    img.dataset.fallback = 'fw';
+    const fw = getFlightawareLogoURL(icao);
+    if (fw) { img.src = fw; return; }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return;
+  }
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null;
+}, [icao]);
 
     const gateChangedAt = (flight as any)._gateChangedAt;
     const isGateChanged = gateChangedAt && (Date.now() - gateChangedAt < 15_000);
@@ -426,11 +431,11 @@ const FlightRow = memo(
           <div className="flex items-center gap-3" style={{ width: '280px' }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
 <img 
-  src={`/airlines/${icao}.png`}
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
   alt={`${flight.AirlineName} logo`}
   className="object-contain w-full h-full"
   onError={onImgErr}
-  data-tried="png"  // označavamo da smo prvo probali PNG
+  data-fallback={isKnownLocalLogo(icao) ? 'local' : 'fw'}
   decoding="async" 
   loading={index < 9 ? "eager" : "lazy"} 
   fetchPriority={index < 8 ? "high" : "auto"}
