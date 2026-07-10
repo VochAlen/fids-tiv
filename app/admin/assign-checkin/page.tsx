@@ -329,6 +329,7 @@ const AssignmentCard: React.FC<{
   onRemove: () => void;
   onClassToggle: (next: ClassType) => void;
   isDark: boolean;
+    disabled?: boolean; //dodato
 }> = ({ a, type, classType, onRemove, onClassToggle, isDark }) => {
   const classes = ['ECONOMY', 'BUSINESS', 'PREMIUM', 'PRIORITY'] as const;
   return (
@@ -640,6 +641,9 @@ export default function AssignPanel() {
   const [dailyStats,             setDailyStats]             = useState<DailyStats>({ desks: {}, gates: {} });
   const [loadingStats,           setLoadingStats]           = useState(false);
 
+  // Dodaj state za praćenje "u toku brisanja" — sprečava duplirane klikove
+const [removingResources, setRemovingResources] = useState<Set<string>>(new Set());
+
   const flightsRef            = useRef<Flight[]>([]);
   const selectedFlightRef     = useRef<Flight | null>(null);
   const checkinAssignmentsRef = useRef<Assignment[]>([]);
@@ -847,44 +851,66 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     finally { setRefreshing(false); }
   }, [fetchFlightsData, refreshAll]);
 
-  const assignFlightToResource = useCallback(async (
-    flight: Flight, resourceId: string, resourceType: 'desk' | 'gate',
-  ): Promise<boolean> => {
-    const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
-    const payload  = resourceType === 'desk'
-      ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber }
-      : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
+const assignFlightToResource = useCallback(async (
+  flight: Flight, resourceId: string, resourceType: 'desk' | 'gate',
+): Promise<boolean> => {
+  const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
+  const payload  = resourceType === 'desk'
+    ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber }
+    : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
 
-    try {
-      const res = await fetch(endpoint, {
+  // ── Odredi auto-klasu ODMAH (lokalno, bez čekanja servera) ──
+  let autoClass: ClassType = null;
+  if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
+    const existingBADesks = checkinAssignmentsRef.current.filter(
+      a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
+    );
+    autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
+  }
+
+  // ── OPTIMISTIČKO DODAVANJE — UI se mijenja ODMAH ──
+  const optimisticAssignment: Assignment = {
+    resourceId,
+    flightNumber: flight.FlightNumber,
+    airlineName: flight.AirlineName || '',
+    destinationCity: flight.DestinationCityName || '',
+    scheduledTime: flight.ScheduledDepartureTime || '',
+    assignedAt: new Date().toLocaleTimeString(),
+    classType: autoClass,
+  };
+
+  const setAssignments = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
+  setAssignments(list => [...list.filter(a => a.resourceId !== resourceId), optimisticAssignment]);
+
+  try {
+    // Glavni assign i trackStart idu paralelno — nezavisni su
+    const assignPromise = fetch(endpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const trackPromise = trackStart(resourceType, resourceId, flight);
+
+    const [res] = await Promise.all([assignPromise, trackPromise]);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    // setClass MORA ići poslije assign-a (server treba postojeći zapis) —
+    // ali radimo je u pozadini, ne čekamo je za UI (već je optimistički prikazano)
+    if (autoClass) {
+      fetch(`${API_PREFIX}/desk-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-
-      await trackStart(resourceType, resourceId, flight);
-
-      if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
-        const existingBADesks = checkinAssignmentsRef.current.filter(
-          a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
-        );
-        const autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
-        try {
-          await fetch(`${API_PREFIX}/desk-status-override`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deskNumber: resourceId, action: 'setClass', classType: autoClass }),
-          });
-        } catch (err) { console.error('Auto BA class error:', err); }
-      }
-
-      isDirty = true;
-      await refreshAll(flightsRef.current);
-      return true;
-    } catch (err) {
-      console.error('Greška pri dodjeli:', err);
-      return false;
+        body: JSON.stringify({ deskNumber: resourceId, action: 'setClass', classType: autoClass }),
+      }).catch(err => console.error('Auto BA class error:', err));
     }
-  }, [refreshAll]);
+
+    isDirty = true; // signal za sinhronizaciju sa drugim uređajima na sljedećem checkForChanges ciklusu
+    return true;
+  } catch (err) {
+    console.error('Greška pri dodjeli:', err);
+    // Rollback — ukloni optimistički dodatu stavku
+    setAssignments(list => list.filter(a => a.resourceId !== resourceId));
+    return false;
+  }
+}, []);
 
   const handleResourceTouchAssign = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate',
@@ -902,15 +928,21 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
   }, [assignFlightToResource, setSelectedFlight]);
 
-  const handleConfirmOverride = useCallback(async () => {
-    const p = pendingOverride;
-    setPendingOverride(null);
-    if (!p) return;
-    await trackEnd(p.resourceType, p.resourceId);
-    await assignFlightToResource(p.flight, p.resourceId, p.resourceType);
-    setSelectedFlight(null);
-    if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
-  }, [pendingOverride, assignFlightToResource, setSelectedFlight]);
+const handleConfirmOverride = useCallback(async () => {
+  const p = pendingOverride;
+  setPendingOverride(null);
+  if (!p) return;
+
+  // trackEnd i assignFlightToResource mogu ići paralelno —
+  // trackEnd zatvara staru sesiju u statistici, ne blokira novu dodjelu
+  const trackEndPromise = trackEnd(p.resourceType, p.resourceId);
+  const assignPromise = assignFlightToResource(p.flight, p.resourceId, p.resourceType);
+
+  await Promise.all([trackEndPromise, assignPromise]);
+
+  setSelectedFlight(null);
+  if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
+}, [pendingOverride, assignFlightToResource, setSelectedFlight]);
 
   const handleFlightTouchSelect = useCallback((flight: Flight) => {
     setSelectedFlight(flight);
@@ -918,29 +950,74 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     touchTimeoutRef.current = setTimeout(() => setSelectedFlight(null), TOUCH_TIMEOUT_MS);
   }, [setSelectedFlight]);
 
-  const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
-    try {
-      await trackEnd('desk', deskNumber);
-      await fetch(`${API_PREFIX}/desk-status-override`, {
+const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
+  // Blokiraj duplirani klik dok je operacija u toku
+  if (removingResources.has(`desk:${deskNumber}`)) return;
+  setRemovingResources(prev => new Set(prev).add(`desk:${deskNumber}`));
+
+  // ── OPTIMISTIČKO UKLANJANJE — UI se mijenja ODMAH ──
+  const removed = checkinAssignmentsRef.current.find(a => a.resourceId === deskNumber);
+  setCheckinAssignments(list => list.filter(a => a.resourceId !== deskNumber));
+
+  try {
+    // trackEnd i clear idu paralelno, ne sekvencijalno
+    await Promise.all([
+      trackEnd('desk', deskNumber),
+      fetch(`${API_PREFIX}/desk-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deskNumber, action: 'clear' }),
-      });
-      isDirty = true;
-      await fetchCheckinAssignments(flightsRef.current);
-    } catch { console.error('Greška pri brisanju šaltera', deskNumber); }
-  }, [fetchCheckinAssignments]);
+      }),
+    ]);
+    isDirty = true;
+    // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
+  } catch (err) {
+    console.error('Greška pri brisanju šaltera', deskNumber, err);
+    // Rollback — vrati stavku nazad ako je poziv pao
+    if (removed) {
+      setCheckinAssignments(list =>
+        list.some(a => a.resourceId === deskNumber) ? list : [...list, removed]
+      );
+    }
+  } finally {
+    setRemovingResources(prev => {
+      const next = new Set(prev);
+      next.delete(`desk:${deskNumber}`);
+      return next;
+    });
+  }
+}, [removingResources]);
 
-  const handleRemoveGate = useCallback(async (gateNumber: string) => {
-    try {
-      await trackEnd('gate', gateNumber);
-      await fetch(`${API_PREFIX}/gate-status-override`, {
+const handleRemoveGate = useCallback(async (gateNumber: string) => {
+  if (removingResources.has(`gate:${gateNumber}`)) return;
+  setRemovingResources(prev => new Set(prev).add(`gate:${gateNumber}`));
+
+  const removed = gateAssignmentsRef.current.find(a => a.resourceId === gateNumber);
+  setGateAssignments(list => list.filter(a => a.resourceId !== gateNumber));
+
+  try {
+    await Promise.all([
+      trackEnd('gate', gateNumber),
+      fetch(`${API_PREFIX}/gate-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gateNumber, action: 'clear' }),
-      });
-      isDirty = true;
-      await fetchGateAssignments(flightsRef.current);
-    } catch { console.error('Greška pri brisanju gate-a', gateNumber); }
-  }, [fetchGateAssignments]);
+      }),
+    ]);
+    isDirty = true;
+  } catch (err) {
+    console.error('Greška pri brisanju gate-a', gateNumber, err);
+    if (removed) {
+      setGateAssignments(list =>
+        list.some(a => a.resourceId === gateNumber) ? list : [...list, removed]
+      );
+    }
+  } finally {
+    setRemovingResources(prev => {
+      const next = new Set(prev);
+      next.delete(`gate:${gateNumber}`);
+      return next;
+    });
+  }
+}, [removingResources]);
 
   const handleClassToggle = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate', next: ClassType,
@@ -1170,13 +1247,15 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
                 {checkinAssignments.length === 0
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {checkinAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="desk"
-                          classType={a.classType}
-                          onRemove={() => handleRemoveCheckin(a.resourceId)}
-                          onClassToggle={next => handleClassToggle(a.resourceId, 'desk', next)}
-                          isDark={isDark} />
-                      ))}
+       {checkinAssignments.map(a => (
+  <AssignmentCard key={a.resourceId} a={a} type="desk"
+    classType={a.classType}
+    onRemove={() => handleRemoveCheckin(a.resourceId)}
+    onClassToggle={next => handleClassToggle(a.resourceId, 'desk', next)}
+    isDark={isDark}
+    disabled={removingResources.has(`desk:${a.resourceId}`)}  // ← novo
+  />
+))}
                     </div>
                 }
               </div>

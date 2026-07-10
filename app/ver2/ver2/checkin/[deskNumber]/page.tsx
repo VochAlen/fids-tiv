@@ -27,7 +27,7 @@ import { useAdImages } from '@/hooks/useAdImages';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 35_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 20_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
