@@ -22,6 +22,7 @@ const MAX_FLIGHTS_MEMORY          = 60;
 const PAGE_SIZE           = 8;       // koliko letova po stranici
 const PAGE_ROTATE_MS      = 20_000;  // rotacija svakih 20s
 const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
+let lastKnownHash: string | null = null;
 
 const HIDDEN_FLIGHT_PATTERNS = ['ZZZ', 'G00', 'PVT', 'TST'];
 
@@ -683,18 +684,42 @@ useEffect(() => {
     });
   }, []);
 
-  // Data loading
-  useEffect(() => {
-    isMountedRef.current = true;
-    let tid: ReturnType<typeof setTimeout>;
+// Data loading
+useEffect(() => {
+  isMountedRef.current = true;
+  let tid: ReturnType<typeof setTimeout>;
 
-    const load = async () => {
-      if (!isMountedRef.current) return;
-      let data: any = null;
-      let usedCache = false;
+  const load = async () => {
+    if (!isMountedRef.current) return;
+    let data: any = null;
+    let usedCache = false;
+    try {
+      if (isInitialLoad.current) setLoading(true);
+      setErrorMessage(null);
+      
+      // ── HASH CHECK ──
+      let hashChanged = true; // default: pretpostavi da se promijenilo
       try {
-        if (isInitialLoad.current) setLoading(true);
-        setErrorMessage(null);
+        const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+            // Nema promjena — ne vuci pun payload
+            hashChanged = false;
+            setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+            isInitialLoad.current = false;
+            setLoading(false);
+            tid = setTimeout(load, REFRESH_INTERVAL_MS);
+            return;
+          }
+          lastKnownHash = statusData.hash;
+        }
+      } catch {
+        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+      }
+
+      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
+      if (hashChanged) {
         try {
           data = await fetchWithRetry('/api/flights');
           if (data && isMountedRef.current) saveToCache({ departures: data.departures });
@@ -703,52 +728,62 @@ useEffect(() => {
           const c = loadFromCache();
           if (c) { data = c; usedCache = true; } else throw fe;
         }
-        if (!isMountedRef.current || !data) return;
-const rawDepartures = getUniqueDeparturesWithDeparted(
-  filterRecentDepartures(data.departures)
-);   // ⭐ zadrži sve današnje letove, sijecenje ide kasnije za prikaz
-const assignments = await fetchAssignments().catch(() => ({
-  desks: {} as Record<string, string>,
-  gates: {} as Record<string, string>,
-}));
-
-const departuresWithMeta = rawDepartures.map(f => {
-  const clone = { ...f };
-  const num   = f.FlightNumber ?? '';
-
-  const adminDesk = assignments.desks[num];
-  if (adminDesk) {
-    (clone as any).CheckInDesk = adminDesk;
-  }
-
-  const adminGate     = assignments.gates[num];
-  const effectiveGate = adminGate || f.GateNumber || '';
-  if (effectiveGate && effectiveGate !== '-') {
-    const prevGate = prevGatesRef.current[num];
-    if (prevGate && prevGate !== effectiveGate) {
-      (clone as any)._gateChangedAt = Date.now();
-    }
-    (clone as any).GateNumber = effectiveGate;
-    prevGatesRef.current[num] = effectiveGate;
-  }
-
-  return clone;
-});
-        setFlights(departuresWithMeta);
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        if (!usedCache) setErrorMessage(null);
-        else setTimeout(() => setErrorMessage(null), 5_000);
-      } catch (e) {
-        console.error('Critical:', e); setErrorMessage('Unable to load flight data. Check connection.');
-      } finally {
-        isInitialLoad.current = false;
-        if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS); }
       }
-    };
+      
+      if (!isMountedRef.current || !data) return;
+      
+      const rawDepartures = getUniqueDeparturesWithDeparted(
+        filterRecentDepartures(data.departures)
+      );
+      
+      const assignments = await fetchAssignments().catch(() => ({
+        desks: {} as Record<string, string>,
+        gates: {} as Record<string, string>,
+      }));
 
-    load();
-    return () => { isMountedRef.current = false; clearTimeout(tid); };
-  }, [filterRecentDepartures]);
+      const departuresWithMeta = rawDepartures.map(f => {
+        const clone = { ...f };
+        const num   = f.FlightNumber ?? '';
+
+        const adminDesk = assignments.desks[num];
+        if (adminDesk) {
+          (clone as any).CheckInDesk = adminDesk;
+        }
+
+        const adminGate     = assignments.gates[num];
+        const effectiveGate = adminGate || f.GateNumber || '';
+        if (effectiveGate && effectiveGate !== '-') {
+          const prevGate = prevGatesRef.current[num];
+          if (prevGate && prevGate !== effectiveGate) {
+            (clone as any)._gateChangedAt = Date.now();
+          }
+          (clone as any).GateNumber = effectiveGate;
+          prevGatesRef.current[num] = effectiveGate;
+        }
+
+        return clone;
+      });
+      
+      setFlights(departuresWithMeta);
+      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      if (!usedCache) setErrorMessage(null);
+      else setTimeout(() => setErrorMessage(null), 5_000);
+      
+    } catch (e) {
+      console.error('Critical:', e);
+      setErrorMessage('Unable to load flight data. Check connection.');
+    } finally {
+      isInitialLoad.current = false;
+      if (isMountedRef.current) { 
+        setLoading(false); 
+        tid = setTimeout(load, REFRESH_INTERVAL_MS); 
+      }
+    }
+  };
+
+  load();
+  return () => { isMountedRef.current = false; clearTimeout(tid); };
+}, [filterRecentDepartures]);
 
 const allSortedFlights = useMemo(
   () => [...flights].sort((a, b) =>
