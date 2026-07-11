@@ -1387,8 +1387,8 @@ if (!currentFlight && !next) {
       if (!isMountedRef.current) return;
       try {
         const res = await fetch(`/api/desk-status/${deskNumberParam}`, {
-          cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' },
+          // cache: 'no-store',
+          // headers: { 'Cache-Control': 'no-cache' },
         });
         if (!res.ok) return;
         const data = await res.json();
@@ -1412,7 +1412,7 @@ if (!currentFlight && !next) {
     };
 
     void poll();
-    const id = setInterval(poll, 5_000);
+    const id = setInterval(poll, 15_000);
     return () => clearInterval(id);
   }, [deskNumberParam]);
 
