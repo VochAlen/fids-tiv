@@ -3,28 +3,39 @@ import type { NextRequest } from 'next/server';
 
 export function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
-  
-  // Proverite da li je to admin ruta
+
+  // ──────────────────────────────────────────────
+  // 1. REDIRECT: /checkin/[deskNumber] → /ver2/ver2/checkin/[deskNumber]
+  // ──────────────────────────────────────────────
+  const checkinMatch = path.match(/^\/checkin\/(.+)$/);
+  if (checkinMatch) {
+    const deskNumber = checkinMatch[1];
+    const url = request.nextUrl.clone();
+    url.pathname = `/ver2/ver2/checkin/${deskNumber}`; // ← dupli ver2
+    return NextResponse.redirect(url, 301);
+  }
+
+  // ──────────────────────────────────────────────
+  // 2. ADMIN AUTENTIFIKACIJA (nepromijenjena)
+  // ──────────────────────────────────────────────
   const isAdminRoute = path.startsWith('/admin');
   const isLoginPage = path === '/admin/login';
-  
-  // Proveri autentifikaciju
   const isAuthenticated = request.cookies.get('admin-authenticated')?.value === 'true';
-  
-  // Ako pristupate login stranici i već ste ulogovani, redirect na admin dashboard
+
   if (isLoginPage && isAuthenticated) {
     return NextResponse.redirect(new URL('/admin', request.url));
   }
-  
-  // Ako pristupate zaštićenoj admin ruti bez autentifikacije
+
   if (isAdminRoute && !isLoginPage && !isAuthenticated) {
     return NextResponse.redirect(new URL('/admin/login', request.url));
   }
-  
+
   return NextResponse.next();
 }
 
-// Konfigurišite koje rute treba da budu zaštićene
+// ──────────────────────────────────────────────
+// 3. PROŠIRENI MATCHER
+// ──────────────────────────────────────────────
 export const config = {
-  matcher: ['/admin/:path*']
+  matcher: ['/admin/:path*', '/checkin/:path*'],
 };
