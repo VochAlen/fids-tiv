@@ -76,26 +76,44 @@ export async function GET(request: Request) {
     cachedAllExpiry = now + CACHE_TTL_MS;
   }
 
-  if (deskNumber) {
-    const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
-    return NextResponse.json(entry, { 
-      headers: { 
-        // Ranije 'no-store' — svaki poziv sa deskNumber je bypass-ovao CDN keš
-        // u potpunosti (objašnjava zašto je hit rate bio 83.9% umjesto ~100%).
-        // In-memory keš (readAllCached) već traje 10s, pa je HTTP keš usklađen
-        // sa tim prozorom da ne uvodi dodatnu neusklađenost.
-        'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=10',
-        'X-Cache': cacheRefreshing ? 'stale' : 'fresh', // ← dodatni header za debugging
-      } 
-    });
-  }
+  // if (deskNumber) {
+  //   const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+  //   return NextResponse.json(entry, { 
+  //     headers: { 
+  //       // Ranije 'no-store' — svaki poziv sa deskNumber je bypass-ovao CDN keš
+  //       // u potpunosti (objašnjava zašto je hit rate bio 83.9% umjesto ~100%).
+  //       // In-memory keš (readAllCached) već traje 10s, pa je HTTP keš usklađen
+  //       // sa tim prozorom da ne uvodi dodatnu neusklađenost.
+  //       'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=10',
+  //       'X-Cache': cacheRefreshing ? 'stale' : 'fresh', // ← dodatni header za debugging
+  //     } 
+  //   });
+  // }
 
-  return NextResponse.json(all, {
-    headers: { 
-      'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
+  // return NextResponse.json(all, {
+  //   headers: { 
+  //     'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
+  //     'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  //   },
+  // });
+
+  if (deskNumber) {
+  const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+  return NextResponse.json(entry, {
+    headers: {
+      'Cache-Control': 'public, max-age=4, s-maxage=5, stale-while-revalidate=10',
       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-    },
+    }
   });
+}
+
+return NextResponse.json(all, {
+  headers: {
+    'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+    'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  },
+});
+
 }
 
 export async function POST(request: Request) {

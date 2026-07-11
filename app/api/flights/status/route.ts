@@ -32,15 +32,25 @@ export async function GET() {
       cachedMetaExpiry = now + CACHE_TTL_MS;
     }
 
+    // return NextResponse.json({
+    //   hash: meta.hash || null,
+    //   count: meta.count || 0,
+    //   lastModified: meta.lastModified || null,
+    //   source: meta.source || 'unknown',
+    //   timestamp: new Date().toISOString(),
+    // }, {
+    //   headers: { 'Cache-Control': 'public, s-maxage=45, stale-while-revalidate=30' },
+    // });
+
     return NextResponse.json({
-      hash: meta.hash || null,
-      count: meta.count || 0,
-      lastModified: meta.lastModified || null,
-      source: meta.source || 'unknown',
-      timestamp: new Date().toISOString(),
-    }, {
-      headers: { 'Cache-Control': 'public, s-maxage=45, stale-while-revalidate=30' },
-    });
+  hash: meta.hash || null,
+  count: meta.count || 0,
+  lastModified: meta.lastModified || null,
+  source: meta.source || 'unknown',
+  timestamp: new Date().toISOString(),
+}, {
+  headers: { 'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30' },
+});
 
   } catch (error) {
     console.error('Status endpoint error:', error);

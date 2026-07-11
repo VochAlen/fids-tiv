@@ -87,22 +87,39 @@ export async function GET(request: Request) {
     console.log(`[gate-cleanup] Total cleaned: ${cleanedCount} old gate-status keys`);
   }
 
-  if (gateNumber) {
-    const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
-    return NextResponse.json(entry, { 
-      headers: { 
-        'Cache-Control': 'no-store',
-        'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-      } 
-    });
-  }
+  // if (gateNumber) {
+  //   const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
+  //   return NextResponse.json(entry, { 
+  //     headers: { 
+  //       'Cache-Control': 'no-store',
+  //       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  //     } 
+  //   });
+  // }
 
-  return NextResponse.json(all, {
+  // return NextResponse.json(all, {
+  //   headers: { 
+  //     'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
+  //     'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  //   },
+  // });
+
+  if (gateNumber) {
+  const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
+  return NextResponse.json(entry, { 
     headers: { 
-      'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
+      'Cache-Control': 'public, max-age=4, s-maxage=5, stale-while-revalidate=10',
       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-    },
+    } 
   });
+}
+
+return NextResponse.json(all, {
+  headers: { 
+    'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+    'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  },
+});
 }
 
 export async function POST(request: Request) {
