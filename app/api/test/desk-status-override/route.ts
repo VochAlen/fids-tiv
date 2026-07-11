@@ -7,7 +7,7 @@ const ALL_KEY = 'test:desk-status:all';
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, DeskEntry> | null = null;
 let cachedAllExpiry = 0;
-let cacheRefreshing = false; // ← NOVO: sprečava duple refresh-e
+let cacheRefreshing = false; // ← sprečava duple refresh-e
 const CACHE_TTL_MS = 10_000; // 10s
 
 type DeskEntry = {
@@ -33,21 +33,17 @@ async function writeAll(data: Record<string, DeskEntry>): Promise<void> {
   await client.set(ALL_KEY, JSON.stringify(data), 'EX', 4 * 60 * 60);
 }
 
-// ── NOVA: readAllCached sa zaštitom od duplih refresh-ova ──
 async function readAllCached(): Promise<Record<string, DeskEntry>> {
   const now = Date.now();
-  
-  // 1. Ako keš važi → vrati ga odmah
+
   if (cachedAll && now < cachedAllExpiry) {
     return cachedAll;
   }
-  
-  // 2. Ako keš ne važi, ali se već osvežava → vrati staru verziju (stale)
+
   if (cacheRefreshing && cachedAll) {
     return cachedAll;
   }
-  
-  // 3. Osveži keš (samo jedan zahtev će ući ovde)
+
   cacheRefreshing = true;
   try {
     const fresh = await readAll();
@@ -66,7 +62,6 @@ export async function GET(request: Request) {
 
   const all = await readAllCached();
 
-  // Očisti stare zapise (radi se u memoriji)
   let changed = false;
   for (const key of Object.keys(all)) {
     const entry = all[key];
@@ -77,7 +72,6 @@ export async function GET(request: Request) {
   }
   if (changed) {
     await writeAll(all);
-    // Ažuriraj keš nakon čišćenja
     cachedAll = all;
     cachedAllExpiry = now + CACHE_TTL_MS;
   }
@@ -86,7 +80,11 @@ export async function GET(request: Request) {
     const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
     return NextResponse.json(entry, { 
       headers: { 
-        'Cache-Control': 'no-store',
+        // Ranije 'no-store' — svaki poziv sa deskNumber je bypass-ovao CDN keš
+        // u potpunosti (objašnjava zašto je hit rate bio 83.9% umjesto ~100%).
+        // In-memory keš (readAllCached) već traje 10s, pa je HTTP keš usklađen
+        // sa tim prozorom da ne uvodi dodatnu neusklađenost.
+        'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=10',
         'X-Cache': cacheRefreshing ? 'stale' : 'fresh', // ← dodatni header za debugging
       } 
     });
@@ -133,10 +131,9 @@ export async function POST(request: Request) {
   }
 
   await writeAll(all);
-  
-  // Invalida keš nakon pisanja
+
   cachedAll = all;
   cachedAllExpiry = Date.now() + CACHE_TTL_MS;
-  
+
   return NextResponse.json({ success: true });
 }
