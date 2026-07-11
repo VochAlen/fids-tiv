@@ -12,6 +12,7 @@ import {
   type CheckInStatus,
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
+import { isNightHours } from '@/lib/night-hours';
 
 // ------------------------------------------------------------
 // Konstante
@@ -370,7 +371,11 @@ const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ stat
   // Glavna funkcija za učitavanje podataka
   // ------------------------------------------------------------
 const loadFlights = useCallback(async () => {
-    if (!isMountedRef.current) return;
+  if (!isMountedRef.current) return;
+  if (isNightHours()) {
+    setLoading(false);
+    return;
+  }
     try {
       const data = await fetchFlightData();
 
@@ -501,17 +506,33 @@ const loadFlights = useCallback(async () => {
  // ------------------------------------------------------------
   // Polling interval (glavni)
   // ------------------------------------------------------------
-  useEffect(() => {
-    isMountedRef.current = true;
-    let tid: ReturnType<typeof setTimeout>;
-    const schedule = () => {
-      tid = setTimeout(async () => {
-        if (isMountedRef.current) { await loadFlights(); schedule(); }
-      }, REFRESH_INTERVAL_MS);
-    };
+useEffect(() => {
+  isMountedRef.current = true;
+  let tid: ReturnType<typeof setTimeout>;
+  
+  const schedule = () => {
+    tid = setTimeout(async () => {
+      if (isMountedRef.current) {
+        // Samo pozovi loadFlights ako nije noć
+        if (!isNightHours()) {
+          await loadFlights();
+        }
+        schedule();
+      }
+    }, REFRESH_INTERVAL_MS);
+  };
+  
+  // Prvi poziv - samo ako nije noć
+  if (!isNightHours()) {
     loadFlights().then(schedule);
-    return () => { isMountedRef.current = false; clearTimeout(tid); };
-  }, [loadFlights]);
+  } else {
+    // Noću - postavi loading na false i schedule za kasnije
+    setLoading(false);
+    schedule();
+  }
+  
+  return () => { isMountedRef.current = false; clearTimeout(tid); };
+}, [loadFlights]);
 
   // ------------------------------------------------------------
   // 🔥 KOMBINOVANI POLLING: override status + klasa (svakih 8s)  ← DODATI OVDE

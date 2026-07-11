@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
@@ -388,7 +389,11 @@ const baAdImage = useMemo((): string | null => {
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
-
+  if (isNightHours()) {
+    setLoading(false);   // ← dodaj ovo, da ne ostane zaglavljen na spinneru ako se restartuje noću
+    return;
+  }
+  if (!deskNumberParam) return;
   try {
     // NOVO: Dodajemo query parametar da dobijemo samo podatke za ovaj šalter
     const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`);
@@ -513,15 +518,26 @@ const fetchDeskData = useCallback(async () => {
 }, [deskNumberParam]);
 
   // ── Polling ────────────────────────────────────────────────
-  useEffect(() => {
-    isMountedRef.current = true;
-    void fetchDeskData();
-    const id = setInterval(() => void fetchDeskData(), POLL_INTERVAL);
-    return () => {
-      isMountedRef.current = false;
-      clearInterval(id);
-    };
-  }, [fetchDeskData]);
+useEffect(() => {
+  isMountedRef.current = true;
+  
+  const poll = () => {
+    if (!isNightHours()) {
+      void fetchDeskData();
+    }
+  };
+  
+  // Prvi poziv
+  poll();
+  
+  // Interval
+  const id = setInterval(poll, POLL_INTERVAL);
+  
+  return () => {
+    isMountedRef.current = false;
+    clearInterval(id);
+  };
+}, [fetchDeskData]);
 
   // ── Stanje za render ───────────────────────────────────────
   const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;

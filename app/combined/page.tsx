@@ -17,6 +17,7 @@ import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
@@ -839,6 +840,7 @@ const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departur
   }, [prepareData])
 
   // ── Polling: jedan fetch, bez retry (Vercel optimizacija) ──
+// ── Polling: jedan fetch, bez retry (Vercel optimizacija) ──
 useEffect(() => {
   isMountedRef.current = true
   let tid: ReturnType<typeof setTimeout>
@@ -846,19 +848,28 @@ useEffect(() => {
 
   const load = async () => {
     if (!isMountedRef.current) return
+    
+    // ── NOĆNI REŽIM ──
+    if (isNightHours()) {
+      // Noću ne radimo ništa - čuvamo zadnje stanje
+      setLoading(false)
+      // Zakaži sljedeći ciklus (i dalje će provjeravati da li je noć)
+      tid = setTimeout(load, REFRESH_INTERVAL_MS)
+      return
+    }
+    
     try {
       if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
         setLoading(true)
       setErrorMessage(null)
 
       // ── HASH CHECK ──
-      let hashChanged = true // default: pretpostavi da se promijenilo
+      let hashChanged = true
       try {
         const statusRes = await fetchWithTimeout('/api/flights/status', 5_000)
         if (statusRes.ok) {
           const statusData = await statusRes.json()
           if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
-            // Nema promjena — ne vuci pun payload, samo update lastUpdate i zakaži sljedeći ciklus
             hashChanged = false
             setLastUpdate(new Date().toLocaleTimeString("en-GB"))
             isInitialLoad.current = false
@@ -883,7 +894,7 @@ useEffect(() => {
           data = await res.json()
           if (isMountedRef.current && data) saveToCache(data)
         } catch (fe) {
-          if ((fe as Error).name === "AbortError") return   // unmount — tiho
+          if ((fe as Error).name === "AbortError") return
           const cached = loadFromCache()
           if (cached) {
             data = cached
@@ -964,13 +975,13 @@ useEffect(() => {
 
 // Vraća true ako je let po statusu ZAVRŠEN (departed/arrived/cancelled) —
 // koristi isti regex koji već koristi filterRecentFlights, ne novi
-const isFlightTerminated = useCallback((f: Flight, isArrival: boolean): boolean => {
-  const status = (f.StatusEN ?? "").toLowerCase()
-  if (/(cancelled|canceled|otkazan)/i.test(status)) return true
-  if (isArrival) return /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(status)
-  return !/(delay|kasni)/i.test(status) &&
-    (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
-}, [])
+// const isFlightTerminated = useCallback((f: Flight, isArrival: boolean): boolean => {
+//   const status = (f.StatusEN ?? "").toLowerCase()
+//   if (/(cancelled|canceled|otkazan)/i.test(status)) return true
+//   if (isArrival) return /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(status)
+//   return !/(delay|kasni)/i.test(status) &&
+//     (status.includes("departed") || status.includes("poletio") || status.includes("take off"))
+// }, [])
 
 // Efektivno vrijeme (minute-of-day) za sortiranje. Namjerno NE koristi
 // parseFlightTimeToDate-ov "gurni na sutra ako je >12h u prošlosti" trik —

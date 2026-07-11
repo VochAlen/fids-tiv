@@ -5,6 +5,7 @@ import type { Flight } from '@/types/flight';
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
@@ -690,12 +691,23 @@ useEffect(() => {
   }, []);
 
 // Data loading
+// Data loading
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
 
   const load = async () => {
     if (!isMountedRef.current) return;
+    
+    // ── NOĆNI REŽIM ──
+    if (isNightHours()) {
+      // Noću ne radimo ništa - čuvamo zadnje stanje
+      setLoading(false);
+      // Zakaži sljedeći ciklus (i dalje će provjeravati da li je noć)
+      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      return;
+    }
+    
     let data: any = null;
     let usedCache = false;
     try {

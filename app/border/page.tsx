@@ -17,6 +17,7 @@ import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Building2, Shield, Luggage } from 'lucide-react';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
@@ -711,6 +712,7 @@ function ArrivalsBoard(): JSX.Element {
 
   // Load
 // Load
+// Load
 useEffect(() => {
   mounted.current = true;
   let tid: ReturnType<typeof setTimeout>;
@@ -723,6 +725,15 @@ useEffect(() => {
 
   const load = async () => {
     if (!mounted.current) return;
+    
+    // ── NOĆNI REŽIM ──
+    if (isNightHours()) {
+      // Noću ne radimo ništa - čuvamo zadnje stanje
+      setLoading(false);
+      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      return;
+    }
+    
     try {
       // ── HASH CHECK ──
       let hashChanged = true; // default: pretpostavi da se promijenilo

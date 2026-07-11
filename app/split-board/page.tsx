@@ -18,6 +18,7 @@ import type { Flight } from "@/types/flight";
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service";
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react";
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
@@ -570,6 +571,14 @@ function SplitBoard(): JSX.Element {
   // Učitavanje podataka
 const loadData = useCallback(async () => {
   if (!isMountedRef.current) return;
+  
+  // ── NOĆNI REŽIM ──
+  if (isNightHours()) {
+    // Noću ne radimo ništa - čuvamo zadnje stanje
+    setLoading(false);
+    return;
+  }
+  
   try {
     if (isInitialLoad.current) setLoading(true);
     setErrorMessage(null);

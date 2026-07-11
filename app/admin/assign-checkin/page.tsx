@@ -696,6 +696,7 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
   const data = await res.json();
   const sorted = processFlights(data.departures || []);
   
+  
   cachedFlights = sorted;
   cachedFlightsExpiry = now + FLIGHTS_CACHE_MS;
   return sorted;
