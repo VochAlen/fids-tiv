@@ -16,7 +16,7 @@ const API_PREFIX = '/api/test';
 
 let cachedFlights: Flight[] | null = null;
 let cachedFlightsExpiry = 0;
-const FLIGHTS_CACHE_MS = 30_000;
+const FLIGHTS_CACHE_MS = 60_000;
 
 let isDirty = false;
 let lastHash = '';
@@ -28,7 +28,7 @@ const DESKS = [
 ];
 const GATES = ['2','3','4','5','6','21','22','23','24','25','26','27','28','29','30','31'];
 
-const REFRESH_INTERVAL_MS = 60_000;
+const REFRESH_INTERVAL_MS = 80_000;
 const TOUCH_TIMEOUT_MS    = 8_000;
 const TAP_MOVE_THRESHOLD  = 10;
 

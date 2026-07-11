@@ -16,7 +16,7 @@ const API_PREFIX = '/api/test';
 
 let cachedFlights: Flight[] | null = null;
 let cachedFlightsExpiry = 0;
-const FLIGHTS_CACHE_MS = 30_000;
+const FLIGHTS_CACHE_MS = 60_000;
 
 
 
