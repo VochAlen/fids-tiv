@@ -22,6 +22,9 @@ import Image from 'next/image';
 const REFRESH_INTERVAL_MS    = 20_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 5_000);
+
+
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
   ECONOMY:  { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
@@ -536,6 +539,9 @@ const loadFlights = useCallback(async () => {
  // ------------------------------------------------------------
   // Polling interval (glavni)
   // ------------------------------------------------------------
+// ------------------------------------------------------------
+// Polling interval (glavni)
+// ------------------------------------------------------------
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
@@ -543,20 +549,17 @@ useEffect(() => {
   const schedule = () => {
     tid = setTimeout(async () => {
       if (isMountedRef.current) {
-        // Samo pozovi loadFlights ako nije noć
         if (!isNightHours()) {
           await loadFlights();
         }
         schedule();
       }
-    }, REFRESH_INTERVAL_MS);
+    }, getIntervalWithJitter());
   };
   
-  // Prvi poziv - samo ako nije noć
   if (!isNightHours()) {
     loadFlights().then(schedule);
   } else {
-    // Noću - postavi loading na false i schedule za kasnije
     setLoading(false);
     schedule();
   }
@@ -604,10 +607,12 @@ useEffect(() => {
   // ------------------------------------------------------------
   // Hard reset nakon 6h
   // ------------------------------------------------------------
-  useEffect(() => {
-    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS);
-    return () => clearTimeout(id);
-  }, []);
+// ── Hard reset nakon ~6h (sa jitterom da se izbjegne sinhroni reload svih ekrana) ──
+useEffect(() => {
+  const jitteredResetMs = HARD_RESET_INTERVAL_MS + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
+  const id = setTimeout(() => window.location.reload(), jitteredResetMs);
+  return () => clearTimeout(id);
+}, []);
 
   // ------------------------------------------------------------
   // Kiosk mode

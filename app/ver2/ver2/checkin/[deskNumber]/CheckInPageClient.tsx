@@ -31,6 +31,10 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 const POLL_INTERVAL = 20_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
+// ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
+const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5_000);
+
+
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
 
@@ -340,9 +344,11 @@ const baAdImage = useMemo((): string | null => {
     };
   }, []);
 
-  // ── Hard reset svakih 6h ───────────────────────────────────
+  // ── Hard reset svakih ~6h (sa jitterom da se izbjegne sinhroni
+  // reload svih desk ekrana u istoj sekundi) ──────────────────
   useEffect(() => {
-    const id = setTimeout(() => window.location.reload(), 6 * 60 * 60 * 1000);
+    const jitteredResetMs = 6 * 60 * 60 * 1000 + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
+    const id = setTimeout(() => window.location.reload(), jitteredResetMs);
     return () => clearTimeout(id);
   }, []);
 
@@ -500,25 +506,31 @@ if (icao) {
   // ── Polling ────────────────────────────────────────────────
 useEffect(() => {
   isMountedRef.current = true;
-  
-  const poll = () => {
-    // NAPOMENA: fetchDeskData() već sama provjerava isNightHours() na
-    // početku i tada zove setLoading(false) prije return-a. Raniji vanjski
-    // 'if (!isNightHours())' ovdje je sprečavao da se fetchDeskData()
-    // uopšte pozove noću — što je značilo da se setLoading(false) nikad
-    // nije izvršio, pa je spinner ostajao zaglavljen do jutra.
-    void fetchDeskData();
+  let tid: ReturnType<typeof setTimeout>;
+  let initialTid: ReturnType<typeof setTimeout>;
+
+  const schedule = () => {
+    tid = setTimeout(async () => {
+      if (isMountedRef.current) {
+        await fetchDeskData();
+        schedule();
+      }
+    }, getIntervalWithJitter());
   };
-  
-  // Prvi poziv
-  poll();
-  
-  // Interval
-  const id = setInterval(poll, POLL_INTERVAL);
-  
+
+  // Mali nasumičan delay na prvi poziv (0-3s) da se izbjegne
+  // sinhroni fetch ako se više ekrana upali u istom trenutku
+  initialTid = setTimeout(() => {
+    if (isMountedRef.current) {
+      void fetchDeskData();
+      schedule();
+    }
+  }, Math.floor(Math.random() * 3_000));
+
   return () => {
     isMountedRef.current = false;
-    clearInterval(id);
+    clearTimeout(tid);
+    clearTimeout(initialTid);
   };
 }, [fetchDeskData]);
 

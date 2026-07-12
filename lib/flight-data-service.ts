@@ -188,104 +188,105 @@ async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): P
   inProcessFlightData = slimmed;
   inProcessFlightExpiry = Date.now() + IN_PROCESS_FLIGHT_TTL_MS;
 }
+//ne radi-stari kod-ne funkcionise vise -POCETAK 12JUL2026
+// async function loadOverridesMap(): Promise<Record<string, Record<string, string>>> {
+//   if (Date.now() < overrideCacheExpiry) {
+//     return overrideCacheData;
+//   }
 
-async function loadOverridesMap(): Promise<Record<string, Record<string, string>>> {
-  if (Date.now() < overrideCacheExpiry) {
-    return overrideCacheData;
-  }
+//   const timeoutPromise = new Promise<null>(resolve =>
+//     setTimeout(() => resolve(null), 3_000)
+//   );
 
-  const timeoutPromise = new Promise<null>(resolve =>
-    setTimeout(() => resolve(null), 3_000)
-  );
+//   const fetchPromise = (async () => {
+//     try {
+//       const client = getRedisClient();
+//       const keys: string[] = [];
+//       let cursor = '0';
 
-  const fetchPromise = (async () => {
-    try {
-      const client = getRedisClient();
-      const keys: string[] = [];
-      let cursor = '0';
+//       do {
+//         const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
+//         cursor = scanResult[0];
+//         keys.push(...scanResult[1]);
+//         if (keys.length > 200) break;
+//       } while (cursor !== '0');
 
-      do {
-        const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
-        cursor = scanResult[0];
-        keys.push(...scanResult[1]);
-        if (keys.length > 200) break;
-      } while (cursor !== '0');
+//       if (keys.length === 0) {
+//         overrideCacheData = {};
+//         overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
+//         return overrideCacheData;
+//       }
 
-      if (keys.length === 0) {
-        overrideCacheData = {};
-        overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-        return overrideCacheData;
-      }
+//       const pipeline = client.pipeline();
+//       keys.forEach(key => pipeline.hgetall(key));
+//       const results = await pipeline.exec();
 
-      const pipeline = client.pipeline();
-      keys.forEach(key => pipeline.hgetall(key));
-      const results = await pipeline.exec();
+//       const map: Record<string, Record<string, string>> = {};
+//       if (results) {
+//         keys.forEach((key, i) => {
+//           const result = results[i];
+//           if (result && !result[0] && result[1]) {
+//             const flightNumber = key.replace('override:', '');
+//             const data = result[1] as Record<string, string>;
+//             if (Object.keys(data).length > 0) map[flightNumber] = data;
+//           }
+//         });
+//       }
 
-      const map: Record<string, Record<string, string>> = {};
-      if (results) {
-        keys.forEach((key, i) => {
-          const result = results[i];
-          if (result && !result[0] && result[1]) {
-            const flightNumber = key.replace('override:', '');
-            const data = result[1] as Record<string, string>;
-            if (Object.keys(data).length > 0) map[flightNumber] = data;
-          }
-        });
-      }
+//       overrideCacheData = map;
+//       overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
+//       return overrideCacheData;
+//     } catch {
+//       return null;
+//     }
+//   })();
 
-      overrideCacheData = map;
-      overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-      return overrideCacheData;
-    } catch {
-      return null;
-    }
-  })();
+//   const result = await Promise.race([fetchPromise, timeoutPromise]);
 
-  const result = await Promise.race([fetchPromise, timeoutPromise]);
+//   if (result === null) {
+//     console.warn('[loadOverridesMap] Timeout ili greška — vraćam stari cache');
+//     overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
+//   }
 
-  if (result === null) {
-    console.warn('[loadOverridesMap] Timeout ili greška — vraćam stari cache');
-    overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-  }
+//   return overrideCacheData;
+// }
 
-  return overrideCacheData;
-}
+// async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
+//   try {
+//     const overridesMap = await loadOverridesMap();
+//     if (Object.keys(overridesMap).length === 0) return flights;
 
-async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
-  try {
-    const overridesMap = await loadOverridesMap();
-    if (Object.keys(overridesMap).length === 0) return flights;
+//     const resolveField = (overrideVal: string | undefined, apiVal: string | undefined): string => {
+//       if (overrideVal === undefined) return apiVal ?? '';
+//       if (overrideVal === '__EMPTY__') return '';
+//       return overrideVal;
+//     };
 
-    const resolveField = (overrideVal: string | undefined, apiVal: string | undefined): string => {
-      if (overrideVal === undefined) return apiVal ?? '';
-      if (overrideVal === '__EMPTY__') return '';
-      return overrideVal;
-    };
+//     return flights.map(flight => {
+//       const localOverride = overridesMap[flight.FlightNumber];
+//       if (!localOverride) return flight;
+//       return {
+//         ...flight,
+//         GateNumber:     resolveField(localOverride.GateNumber,     flight.GateNumber),
+//         CheckInDesk:    resolveField(localOverride.CheckInDesk,    flight.CheckInDesk),
+//         BaggageReclaim: resolveField(localOverride.BaggageReclaim, flight.BaggageReclaim),
+//         StatusEN:       resolveField(localOverride.StatusEN,       flight.StatusEN),
+//         Terminal:       resolveField(localOverride.Terminal,       flight.Terminal),
+//       };
+//     });
+//   } catch {
+//     return flights;
+//   }
+// }
 
-    return flights.map(flight => {
-      const localOverride = overridesMap[flight.FlightNumber];
-      if (!localOverride) return flight;
-      return {
-        ...flight,
-        GateNumber:     resolveField(localOverride.GateNumber,     flight.GateNumber),
-        CheckInDesk:    resolveField(localOverride.CheckInDesk,    flight.CheckInDesk),
-        BaggageReclaim: resolveField(localOverride.BaggageReclaim, flight.BaggageReclaim),
-        StatusEN:       resolveField(localOverride.StatusEN,       flight.StatusEN),
-        Terminal:       resolveField(localOverride.Terminal,       flight.Terminal),
-      };
-    });
-  } catch {
-    return flights;
-  }
-}
-
-async function applyOverridesToFlightData(data: FlightData): Promise<FlightData> {
-  const [departures, arrivals] = await Promise.all([
-    applyKvOverrides(data.departures),
-    applyKvOverrides(data.arrivals),
-  ]);
-  return { ...data, departures, arrivals };
-}
+// async function applyOverridesToFlightData(data: FlightData): Promise<FlightData> {
+//   const [departures, arrivals] = await Promise.all([
+//     applyKvOverrides(data.departures),
+//     applyKvOverrides(data.arrivals),
+//   ]);
+//   return { ...data, departures, arrivals };
+// }
+// ne radi-stari kod-ne funkcionise vise -POCETAK 12JUL2026
 
 async function fetchWithQuickRetry(
   url: string,
@@ -511,10 +512,31 @@ try {
     warning: 'System will recover when connection is restored.',
   };
 }
-// ── LOCK WRAPPER — sprečava "cache stampede" ka eksternom API-ju ──
+// ── LOCK WRAPPER — sprečava "cache stampede" ka eksternom API-ju ── STARI NACIN-NE RADI
+// export async function getCurrentFlightDataSafe(): Promise<FlightData> {
+//   const cached = await getFlightDataFromCache();
+//   if (cached) return applyOverridesToFlightData(cached);
+
+//   const client = getRedisClient();
+//   const lockKey = 'lock:flights:fetch';
+//   const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
+
+//   if (!gotLock) {
+//     await new Promise(r => setTimeout(r, 500));
+//     const retryCache = await getFlightDataFromCache();
+//     if (retryCache) return applyOverridesToFlightData(retryCache);
+//   }
+
+//   try {
+//     const fresh = await getCurrentFlightData();
+//     return applyOverridesToFlightData(fresh);
+//   } finally {
+//     await client.del(lockKey);
+//   }
+// }
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   const cached = await getFlightDataFromCache();
-  if (cached) return applyOverridesToFlightData(cached);
+  if (cached) return cached;
 
   const client = getRedisClient();
   const lockKey = 'lock:flights:fetch';
@@ -523,12 +545,11 @@ export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   if (!gotLock) {
     await new Promise(r => setTimeout(r, 500));
     const retryCache = await getFlightDataFromCache();
-    if (retryCache) return applyOverridesToFlightData(retryCache);
+    if (retryCache) return retryCache;
   }
 
   try {
-    const fresh = await getCurrentFlightData();
-    return applyOverridesToFlightData(fresh);
+    return await getCurrentFlightData();
   } finally {
     await client.del(lockKey);
   }
