@@ -5,7 +5,8 @@ import type { Flight, RawFlightData } from '@/types/flight';
 // Smanjuje log šum u produkciji (Vercel logovi imaju kvote/retenciju),
 // bez gubitka mogućnosti debagovanja lokalno.
 const isDev = process.env.NODE_ENV !== 'production';
-const dlog = (...args: unknown[]) => { if (isDev) dlog(...args); };
+const dlog = (...args: unknown[]) => { if (isDev) console.log(...args); };
+
 
 // Cache for logo URLs
 const logoCache = new Map<string, string>();

@@ -60,11 +60,6 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|api/test/stats|api/flights/status).*)',
-    '/api/:path*',
-    '/admin/:path*',
-    '/checkin/:path*',
-    '/gate/:path*',      // ← DODAJ GATE
-    '/ver2/:path*',
+    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
   ],
 };
