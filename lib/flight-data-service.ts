@@ -12,7 +12,8 @@ import {
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
-const FLIGHT_CACHE_TTL_SECONDS = 180;
+// const FLIGHT_CACHE_TTL_SECONDS = 180;
+const FLIGHT_CACHE_TTL_SECONDS = 240;
 const FLIGHT_META_KEY = 'cache:flights:meta';
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────

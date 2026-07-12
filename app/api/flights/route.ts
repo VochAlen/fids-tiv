@@ -59,7 +59,8 @@ const cacheControl = isCritical
     ? 'public, max-age=20, s-maxage=30, stale-while-revalidate=60'
     : isBackupLike
       ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
-      : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
+      // : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
+      : 'public, max-age=60, s-maxage=240, stale-while-revalidate=360';
 
     const headers: Record<string, string> = {
       'Cache-Control': cacheControl,
