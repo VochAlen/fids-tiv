@@ -421,8 +421,8 @@ export async function getCurrentFlightData(): Promise<FlightData> {
 
     const finalFlights = removeDuplicateFlights(expandedFlights);
 
-    try {
-      backupService.saveBackup(finalFlights);
+try {
+      await backupService.saveBackup(finalFlights);
     } catch (e) {
       console.error('⚠️ Backup save failed:', e);
     }
@@ -441,8 +441,8 @@ export async function getCurrentFlightData(): Promise<FlightData> {
   }
 
   // ── 4. BACKUP MODE ────────────────────────────────────────
-  try {
-    const latestBackup = backupService.getLatestBackup();
+ try {
+    const latestBackup = await backupService.getLatestBackup();
 
     if (latestBackup.flights.length > 0) {
       console.log(`🔄 Using backup: ${latestBackup.flights.length} flights from ${latestBackup.timestamp}`);
@@ -478,7 +478,7 @@ export async function getCurrentFlightData(): Promise<FlightData> {
   const emergencyFlights = await performEmergencyFetch();
 
   if (emergencyFlights && emergencyFlights.length > 0) {
-    backupService.saveBackup(emergencyFlights);
+    await backupService.saveBackup(emergencyFlights);
     const processor = new FlightAutoProcessor(emergencyFlights);
     const processedFlights = processor.processFlights();
 
@@ -506,4 +506,25 @@ export async function getCurrentFlightData(): Promise<FlightData> {
     error: 'All data sources unavailable.',
     warning: 'System will recover when connection is restored.',
   };
+}
+// ── LOCK WRAPPER — sprečava "cache stampede" ka eksternom API-ju ──
+export async function getCurrentFlightDataSafe(): Promise<FlightData> {
+  const cached = await getFlightDataFromCache();
+  if (cached) return cached;
+
+  const client = getRedisClient();
+  const lockKey = 'lock:flights:fetch';
+  const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
+
+  if (!gotLock) {
+    await new Promise(r => setTimeout(r, 500));
+    const retryCache = await getFlightDataFromCache();
+    if (retryCache) return retryCache;
+  }
+
+  try {
+    return await getCurrentFlightData();
+  } finally {
+    await client.del(lockKey);
+  }
 }

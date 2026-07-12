@@ -44,11 +44,11 @@
 // app/api/flights/route.ts
 // app/api/flights/route.ts
 import { NextResponse } from 'next/server';
-import { getCurrentFlightData } from '@/lib/flight-data-service';
+import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const data = await getCurrentFlightData();
+    const data = await getCurrentFlightDataSafe();
     const isCritical = data.error === 'All data sources unavailable.';
     const isEmergency = data.source === 'emergency' && !isCritical;
     const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
