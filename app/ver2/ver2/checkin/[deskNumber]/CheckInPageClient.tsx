@@ -517,9 +517,12 @@ useEffect(() => {
   isMountedRef.current = true;
   
   const poll = () => {
-    if (!isNightHours()) {
-      void fetchDeskData();
-    }
+    // NAPOMENA: fetchDeskData() već sama provjerava isNightHours() na
+    // početku i tada zove setLoading(false) prije return-a. Raniji vanjski
+    // 'if (!isNightHours())' ovdje je sprečavao da se fetchDeskData()
+    // uopšte pozove noću — što je značilo da se setLoading(false) nikad
+    // nije izvršio, pa je spinner ostajao zaglavljen do jutra.
+    void fetchDeskData();
   };
   
   // Prvi poziv
