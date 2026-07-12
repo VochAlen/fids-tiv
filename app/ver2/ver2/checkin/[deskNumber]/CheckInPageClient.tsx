@@ -24,6 +24,7 @@ import {
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 import { isNightHours } from '@/lib/night-hours';
+import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 
 // ============================================================
 // KONSTANTE
@@ -444,36 +445,20 @@ const fetchDeskData = useCallback(async () => {
     }
 
     // Logo URL — keširaj rezultat provjere po ICAO kodu
-    const icao =
-      (flightDetails.AirlineICAO as string) ||
-      myData.flightNumber.substring(0, 2).toUpperCase();
-    let logoUrl = '/airlines/placeholder.jpg';
-    if (icao) {
-      const cachedLogo = logoCacheRef.current.get(icao);
-      if (cachedLogo) {
-        logoUrl = cachedLogo;
-      } else {
-        const checkImg = (src: string): Promise<boolean> =>
-          new Promise((resolve) => {
-            if (typeof window === 'undefined') return resolve(false);
-            const img = new window.Image();
-            img.onload = () => resolve(true);
-            img.onerror = () => resolve(false);
-            setTimeout(() => resolve(false), 1000);
-            img.src = src;
-          });
-        const [hasJpg, hasPng] = await Promise.all([
-          checkImg(`/airlines/${icao}.jpg`),
-          checkImg(`/airlines/${icao}.png`),
-        ]);
-        if (hasJpg) logoUrl = `/airlines/${icao}.jpg`;
-        else if (hasPng) logoUrl = `/airlines/${icao}.png`;
-        else if (flightDetails.AirlineLogoURL)
-          logoUrl = flightDetails.AirlineLogoURL as string;
+const icao =
+  (flightDetails.AirlineICAO as string) ||
+  myData.flightNumber.substring(0, 2).toUpperCase();
 
-        logoCacheRef.current.set(icao, logoUrl);
-      }
-    }
+let logoUrl = '/airlines/placeholder.jpg';
+if (icao) {
+  const cachedLogo = logoCacheRef.current.get(icao);
+  if (cachedLogo) {
+    logoUrl = cachedLogo;
+  } else {
+    logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.jpg');
+    logoCacheRef.current.set(icao, logoUrl);
+  }
+}
 
     const destCode = (flightDetails.DestinationAirportCode as string) || '';
     const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';

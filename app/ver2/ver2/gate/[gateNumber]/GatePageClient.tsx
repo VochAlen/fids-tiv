@@ -13,6 +13,8 @@ import {
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
 import { isNightHours } from '@/lib/night-hours';
+import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
+import Image from 'next/image';
 
 // ------------------------------------------------------------
 // Konstante
@@ -103,38 +105,53 @@ const AirlineLogo = memo(function AirlineLogo(
   const [src, setSrc] = useState('');
   const [errored, setErrored] = useState(false);
 
-  useEffect(() => {
-    if (!code) return;
-    let cancelled = false;
-    const checkImg = (url: string): Promise<boolean> =>
-      new Promise(resolve => {
-        const img = new window.Image();
-        img.onload  = () => resolve(true);
-        img.onerror = () => resolve(false);
-        setTimeout(() => resolve(false), 1500);
-        img.src = url;
-      });
-    (async () => {
-      const [hasJpg, hasPng] = await Promise.all([
-        checkImg(`/airlines/${code}.jpg`),
-        checkImg(`/airlines/${code}.png`),
-      ]);
-      if (cancelled) return;
-      if (hasJpg)      setSrc(`/airlines/${code}.jpg`);
-      else if (hasPng) setSrc(`/airlines/${code}.png`);
-      else             setSrc(`https://www.flightaware.com/images/airline_logos/180px/${code}.png`);
-    })();
-    return () => { cancelled = true; };
-  }, [code]);
+  // useEffect(() => {
+  //   if (!code) return;
+  //   let cancelled = false;
+  //   const checkImg = (url: string): Promise<boolean> =>
+  //     new Promise(resolve => {
+  //       const img = new window.Image();
+  //       img.onload  = () => resolve(true);
+  //       img.onerror = () => resolve(false);
+  //       setTimeout(() => resolve(false), 1500);
+  //       img.src = url;
+  //     });
+  //   (async () => {
+  //     const [hasJpg, hasPng] = await Promise.all([
+  //       checkImg(`/airlines/${code}.jpg`),
+  //       checkImg(`/airlines/${code}.png`),
+  //     ]);
+  //     if (cancelled) return;
+  //     if (hasJpg)      setSrc(`/airlines/${code}.jpg`);
+  //     else if (hasPng) setSrc(`/airlines/${code}.png`);
+  //     else             setSrc(`https://www.flightaware.com/images/airline_logos/180px/${code}.png`);
+  //   })();
+  //   return () => { cancelled = true; };
+  // }, [code]);
 
-  return (
-    <div style={styles.logoCard} className="fids-logo-card">
-      {src && !errored
-        ? <img src={src} alt={name} style={styles.logoImg} onError={() => setErrored(true)} />
-        : <span style={styles.logoFallback}>{name || code || '—'}</span>
-      }
-    </div>
-  );
+
+  useEffect(() => {
+  if (!code) return;
+  setSrc(getInitialAirlineLogoSrc(code, ''));
+}, [code]);
+
+return (
+  <div style={styles.logoCard} className="fids-logo-card">
+    {src && !errored
+      ? (
+        <Image
+          src={src}
+          alt={name}
+          fill
+          style={{ objectFit: 'contain', padding: '10px 20px' }}
+          onError={() => setErrored(true)}
+          unoptimized
+        />
+      )
+      : <span style={styles.logoFallback}>{name || code || '—'}</span>
+    }
+  </div>
+);
 });
 
 // ------------------------------------------------------------
@@ -974,8 +991,7 @@ const styles: Record<string, React.CSSProperties> = {
   divider: { height: '1px', background: `linear-gradient(90deg, transparent 0%, ${C.border} 20%, ${C.border} 80%, transparent 100%)`, flexShrink: 0 },
   main: { display: 'flex', flex: 1, overflow: 'visible', padding: '1.5rem 2.5rem', gap: '0', minHeight: 0 },
   leftCol: { display: 'flex', flexDirection: 'column', justifyContent: 'space-evenly', flex: '0 0 52%', gap: '.8rem', paddingRight: '2.5rem', overflow: 'visible' },
-  logoCard: { width: '100%', height: 'clamp(120px, 14vh, 200px)', background: '#ffffff', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxShadow: `0 0 0 1px ${C.border}, 0 4px 40px rgba(30,144,255,0.12)`, flexShrink: 0 },
-  logoImg: { width: '100%', height: '100%', objectFit: 'contain' as const, padding: '10px 20px' },
+logoCard: { width: '100%', height: 'clamp(120px, 14vh, 200px)', background: '#ffffff', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxShadow: `0 0 0 1px ${C.border}, 0 4px 40px rgba(30,144,255,0.12)`, flexShrink: 0, position: 'relative' },  logoImg: { width: '100%', height: '100%', objectFit: 'contain' as const, padding: '10px 20px' },
   logoFallback: { color: '#6b7280', fontSize: '14px', fontFamily: FONT_MONO, fontWeight: 600, letterSpacing: '.12em' },
   flightNumber: { fontSize: 'clamp(4.5rem, 9vw, 8rem)', fontWeight: 700, letterSpacing: '.05em', color: C.white, lineHeight: 1 },
   codeshare: { fontSize: '1rem', color: C.textMuted, letterSpacing: '.08em', fontFamily: FONT_MONO },
