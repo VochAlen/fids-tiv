@@ -13,7 +13,7 @@ export const AIRLINE_LOGO_EXT: Record<string, 'png' | 'jpg'> = {
   SQP: 'jpg', SQY: 'jpg', THY: 'jpg', UZB: 'jpg', VLG: 'jpg', WMT: 'jpg',
   WUK: 'jpg', WZZ: 'jpg',NAX: 'jpg', 
   // Kodovi sa oba fajla — png je dovoljan, prvi pokušaj uvijek uspijeva
-  ASL: 'png', ELY: 'png', ENT: 'png', EXS: 'png', EZY: 'png', FIE: 'png',
+  ASL: 'png', ELY: 'jpg', ENT: 'png', EXS: 'png', EZY: 'png', FIE: 'png',
   IBE: 'png', TVF: 'png',TDR: 'png',
 };
 
