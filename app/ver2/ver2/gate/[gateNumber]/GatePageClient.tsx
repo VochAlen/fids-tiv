@@ -35,6 +35,7 @@ const CLASS_EMOJI: Record<string, string> = {
   PRIORITY: '⭐',
 };
 
+
 // ------------------------------------------------------------
 // Error Boundary
 // ------------------------------------------------------------
@@ -266,11 +267,15 @@ function GateDisplay() {
   const [nextUpdate,         setNextUpdate]         = useState('');
   const [timeUntilDeparture, setTimeUntilDeparture] = useState<number | null>(null);
 
-  const isMountedRef        = useRef(true);
-  const currentFlightRef    = useRef<Flight | null>(null);
-  const currentStatusRef    = useRef<CheckInStatus | null>(null);
-  const manualGateStatusRef = useRef<string | null>(null);
-  const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+const isMountedRef        = useRef(true);
+const currentFlightRef    = useRef<Flight | null>(null);
+const currentStatusRef    = useRef<CheckInStatus | null>(null);
+const manualGateStatusRef = useRef<string | null>(null);
+const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+// ── NOVO: hash-check da se izbjegne nepotreban /api/flights fetch ──
+const lastKnownHashRef  = useRef<string | null>(null);
+const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
 
   // ------------------------------------------------------------
   // Dohvatanje gate status override-a
@@ -362,132 +367,154 @@ const loadFlights = useCallback(async () => {
     setLoading(false);
     return;
   }
+  try {
+    // ── HASH CHECK — preskoči puni /api/flights fetch ako se ništa
+    // nije promijenilo od prošlog poziva (isti princip kao combined/split-board) ──
+    let hashChanged = true;
     try {
-      const data = await fetchFlightData();
-
-      // 1. Override za ovaj gate (uključuje i klasu)
-      let overrideStatus: string | null = null;
-      let overrideFlightNumber: string | null = null;
-      let classType: string | null = null;
-      try {
-        const override = await fetchGateStatusOverride(gateNumber);
-        if (override) {
-          overrideStatus = override.status;
-          overrideFlightNumber = override.flightNumber;
-          classType = override.classType;
-        }
-      } catch (err) {
-        console.error('Override fetch error:', err);
-      }
-
-      manualGateStatusRef.current = overrideStatus;
-
-      // 2. Ako je ručno zatvoren -> prazan ekran
-      if (overrideStatus === 'closed') {
-        if (!isMountedRef.current) return;
-        currentFlightRef.current = null;
-        currentStatusRef.current = null;
-        setDisplay({
-          flight: null,
-          checkInStatus: null,
-          nextFlight: null,
-          gateChangedAt: undefined,
-          manualGateStatus: 'closed',
-          overrideFlightNumber: null,
-          classType,                    // ← NOVO (čuva klasu čak i kad je closed)
-        });
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
-        setLoading(false);
-        return;
-      }
-
-      // 3. Kandidati za prikaz
-      let candidates: Flight[] = [];
-      if (overrideStatus === 'open' && overrideFlightNumber) {
-        const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-        if (overriddenFlight) candidates = [overriddenFlight];
-      } else {
-        candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
-      }
-
-      // 4. Check-in status za svakog kandidata
-      const withStatus = await Promise.all(
-        candidates.map(async (f) => ({
-          ...f,
-          checkInStatus: await getFlightCheckInStatus(f),
-        }))
-      );
-
-      // 5. Sortiranje
-      const sorted = [...withStatus].sort((a, b) => {
-        if (overrideStatus === 'open') {
-          const ta = parseDepartureTime(a.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
-          const tb = parseDepartureTime(b.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
-          return ta - tb;
-        }
-        return getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b);
-      });
-
-      // 6. Odaberi current let
-      let current: (typeof sorted)[number] | null = null;
-      if (overrideStatus === 'open') {
-        current = sorted[0] ?? null;
-      } else {
-        current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
-      }
-
-      // 7. Next flight
-      let nextFlight: (typeof sorted)[number] | null = null;
-      const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
-      if (idx >= 0) {
-        for (let i = idx + 1; i < sorted.length; i++) {
-          if (overrideStatus === 'open' || shouldDisplayFlight(sorted[i])) {
-            nextFlight = sorted[i];
-            break;
-          }
+      const statusRes = await fetch('/api/flights/status');
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
+          hashChanged = false;
+        } else {
+          lastKnownHashRef.current = statusData.hash;
         }
       }
+    } catch {
+      // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+    }
 
-      // 8. Detekcija promjene gate-a
-      let gateChangedAt: number | undefined;
-      if (
-        overrideStatus !== 'open' &&
-        current?.GateNumber &&
-        currentFlightRef.current?.GateNumber !== current.GateNumber
-      ) {
-        const prev = currentFlightRef.current?.GateNumber;
-        if (prev && prev !== '-') gateChangedAt = Date.now();
+    let data: { departures: Flight[]; arrivals: Flight[] };
+    if (hashChanged || !lastFlightsDataRef.current) {
+      data = await fetchFlightData();
+      lastFlightsDataRef.current = data;
+    } else {
+      data = lastFlightsDataRef.current;
+    }
+
+    // 1. Override za ovaj gate (uključuje i klasu)
+    let overrideStatus: string | null = null;
+    let overrideFlightNumber: string | null = null;
+    let classType: string | null = null;
+    try {
+      const override = await fetchGateStatusOverride(gateNumber);
+      if (override) {
+        overrideStatus = override.status;
+        overrideFlightNumber = override.flightNumber;
+        classType = override.classType;
       }
+    } catch (err) {
+      console.error('Override fetch error:', err);
+    }
 
+    manualGateStatusRef.current = overrideStatus;
+
+    // 2. Ako je ručno zatvoren -> prazan ekran
+    if (overrideStatus === 'closed') {
       if (!isMountedRef.current) return;
-
-      // 9. Ažuriranje state-a
-      if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
-        currentFlightRef.current = current;
-        currentStatusRef.current = current?.checkInStatus ?? null;
-        setDisplay({
-          flight: current,
-          checkInStatus: current?.checkInStatus ?? null,
-          nextFlight,
-          gateChangedAt,
-          manualGateStatus: overrideStatus,
-          overrideFlightNumber,
-          classType,                    // ← NOVO
-        });
-        updateCountdown(current);
-      } else {
-        // Klasa se može promijeniti bez promjene leta — uvijek ažuriraj
-        setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
-      }
-
+      currentFlightRef.current = null;
+      currentStatusRef.current = null;
+      setDisplay({
+        flight: null,
+        checkInStatus: null,
+        nextFlight: null,
+        gateChangedAt: undefined,
+        manualGateStatus: 'closed',
+        overrideFlightNumber: null,
+        classType,
+      });
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
       setLoading(false);
-    } catch (err) {
-      console.error('Gate load error:', err);
-      if (isMountedRef.current) setLoading(false);
+      return;
     }
+
+    // 3. Kandidati za prikaz
+    let candidates: Flight[] = [];
+    if (overrideStatus === 'open' && overrideFlightNumber) {
+      const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+      if (overriddenFlight) candidates = [overriddenFlight];
+    } else {
+      candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
+    }
+
+    // 4. Check-in status za svakog kandidata
+    const withStatus = await Promise.all(
+      candidates.map(async (f) => ({
+        ...f,
+        checkInStatus: await getFlightCheckInStatus(f),
+      }))
+    );
+
+    // 5. Sortiranje
+    const sorted = [...withStatus].sort((a, b) => {
+      if (overrideStatus === 'open') {
+        const ta = parseDepartureTime(a.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
+        const tb = parseDepartureTime(b.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
+        return ta - tb;
+      }
+      return getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b);
+    });
+
+    // 6. Odaberi current let
+    let current: (typeof sorted)[number] | null = null;
+    if (overrideStatus === 'open') {
+      current = sorted[0] ?? null;
+    } else {
+      current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
+    }
+
+    // 7. Next flight
+    let nextFlight: (typeof sorted)[number] | null = null;
+    const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
+    if (idx >= 0) {
+      for (let i = idx + 1; i < sorted.length; i++) {
+        if (overrideStatus === 'open' || shouldDisplayFlight(sorted[i])) {
+          nextFlight = sorted[i];
+          break;
+        }
+      }
+    }
+
+    // 8. Detekcija promjene gate-a
+    let gateChangedAt: number | undefined;
+    if (
+      overrideStatus !== 'open' &&
+      current?.GateNumber &&
+      currentFlightRef.current?.GateNumber !== current.GateNumber
+    ) {
+      const prev = currentFlightRef.current?.GateNumber;
+      if (prev && prev !== '-') gateChangedAt = Date.now();
+    }
+
+    if (!isMountedRef.current) return;
+
+    // 9. Ažuriranje state-a
+    if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
+      currentFlightRef.current = current;
+      currentStatusRef.current = current?.checkInStatus ?? null;
+      setDisplay({
+        flight: current,
+        checkInStatus: current?.checkInStatus ?? null,
+        nextFlight,
+        gateChangedAt,
+        manualGateStatus: overrideStatus,
+        overrideFlightNumber,
+        classType,
+      });
+      updateCountdown(current);
+    } else {
+      setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+    }
+
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+    setLoading(false);
+  } catch (err) {
+    console.error('Gate load error:', err);
+    if (isMountedRef.current) setLoading(false);
+  }
 }, [gateNumber, fetchGateStatusOverride, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
  // ------------------------------------------------------------
   // Polling interval (glavni)

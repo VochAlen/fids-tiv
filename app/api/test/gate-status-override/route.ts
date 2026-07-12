@@ -108,7 +108,7 @@ export async function GET(request: Request) {
   const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
   return NextResponse.json(entry, { 
     headers: { 
-      'Cache-Control': 'public, max-age=4, s-maxage=5, stale-while-revalidate=10',
+ 'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
     } 
   });
