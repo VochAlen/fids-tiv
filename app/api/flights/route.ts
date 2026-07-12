@@ -53,13 +53,13 @@ export async function GET(): Promise<NextResponse> {
     const isEmergency = data.source === 'emergency' && !isCritical;
     const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
 
-    const cacheControl = isCritical
-      ? 'no-cache, no-store, must-revalidate'
-      : isEmergency
-        ? 'public, max-age=10, s-maxage=15, stale-while-revalidate=30'
-        : isBackupLike
-          ? 'public, max-age=15, s-maxage=30, stale-while-revalidate=30'
-          : 'public, max-age=20, s-maxage=90, stale-while-revalidate=30';
+const cacheControl = isCritical
+  ? 'no-cache, no-store, must-revalidate'
+  : isEmergency
+    ? 'public, max-age=20, s-maxage=30, stale-while-revalidate=60'
+    : isBackupLike
+      ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
+      : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
 
     const headers: Record<string, string> = {
       'Cache-Control': cacheControl,

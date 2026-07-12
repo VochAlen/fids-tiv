@@ -12,18 +12,18 @@ import {
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
-const FLIGHT_CACHE_TTL_SECONDS = 90;
+const FLIGHT_CACHE_TTL_SECONDS = 180;
 const FLIGHT_META_KEY = 'cache:flights:meta';
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
 let overrideCacheExpiry = 0;
-const OVERRIDE_CACHE_MS = 40_000;
+const OVERRIDE_CACHE_MS = 10_000;
 
 // ── IN-PROCESS FLIGHT DATA CACHE ──────────────────────────────
 let inProcessFlightData: FlightData | null = null;
 let inProcessFlightExpiry = 0;
-const IN_PROCESS_FLIGHT_TTL_MS = 20_000;
+const IN_PROCESS_FLIGHT_TTL_MS = 60_000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 let lastRedisCleanup = 0;
@@ -278,6 +278,14 @@ async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
   }
 }
 
+async function applyOverridesToFlightData(data: FlightData): Promise<FlightData> {
+  const [departures, arrivals] = await Promise.all([
+    applyKvOverrides(data.departures),
+    applyKvOverrides(data.arrivals),
+  ]);
+  return { ...data, departures, arrivals };
+}
+
 async function fetchWithQuickRetry(
   url: string,
   options: RequestInit,
@@ -354,13 +362,8 @@ async function buildFlightData(
   lastUpdated: string,
   options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number }
 ): Promise<FlightData> {
-  let departures = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'departure'));
+  const departures = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'departure'));
   let arrivals = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'arrival'));
-
-  [departures, arrivals] = await Promise.all([
-    applyKvOverrides(departures),
-    applyKvOverrides(arrivals),
-  ]);
 
   arrivals = applyDefaultBaggageBelt(arrivals);
 
@@ -510,7 +513,7 @@ try {
 // ── LOCK WRAPPER — sprečava "cache stampede" ka eksternom API-ju ──
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   const cached = await getFlightDataFromCache();
-  if (cached) return cached;
+  if (cached) return applyOverridesToFlightData(cached);
 
   const client = getRedisClient();
   const lockKey = 'lock:flights:fetch';
@@ -519,11 +522,12 @@ export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   if (!gotLock) {
     await new Promise(r => setTimeout(r, 500));
     const retryCache = await getFlightDataFromCache();
-    if (retryCache) return retryCache;
+    if (retryCache) return applyOverridesToFlightData(retryCache);
   }
 
   try {
-    return await getCurrentFlightData();
+    const fresh = await getCurrentFlightData();
+    return applyOverridesToFlightData(fresh);
   } finally {
     await client.del(lockKey);
   }
