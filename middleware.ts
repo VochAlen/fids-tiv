@@ -1,30 +1,65 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+const BLOCKED_USER_AGENT_PATTERNS = [
+  /GPTBot/i,
+  /ChatGPT-User/i,
+  /CCBot/i,
+  /anthropic-ai/i,
+  /ClaudeBot/i,
+  /SemrushBot/i,
+  /AhrefsBot/i,
+  /MJ12bot/i,
+  /DotBot/i,
+  /PetalBot/i,
+  /Bytespider/i,
+];
+
 export function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
-  
-  // Proverite da li je to admin ruta
+
+  // ── BOT BLOKIRANJE ──
+  const userAgent = request.headers.get('user-agent') || '';
+  if (BLOCKED_USER_AGENT_PATTERNS.some((pattern) => pattern.test(userAgent))) {
+    return new NextResponse('Blocked', { status: 403 });
+  }
+
+  // ── REDIRECT: /checkin/[deskNumber] → /ver2/ver2/checkin/[deskNumber] ──
+  const checkinMatch = path.match(/^\/checkin\/(.+)$/);
+  if (checkinMatch) {
+    const deskNumber = checkinMatch[1];
+    const url = request.nextUrl.clone();
+    url.pathname = `/ver2/ver2/checkin/${deskNumber}`;
+    return NextResponse.redirect(url, 301);
+  }
+
+  // ── REDIRECT: /gate/[gateNumber] → /ver2/ver2/gate/[gateNumber] ──
+  const gateMatch = path.match(/^\/gate\/(.+)$/);
+  if (gateMatch) {
+    const gateNumber = gateMatch[1];
+    const url = request.nextUrl.clone();
+    url.pathname = `/ver2/ver2/gate/${gateNumber}`;
+    return NextResponse.redirect(url, 301);
+  }
+
+  // ── ADMIN AUTENTIFIKACIJA ──
   const isAdminRoute = path.startsWith('/admin');
   const isLoginPage = path === '/admin/login';
-  
-  // Proveri autentifikaciju
   const isAuthenticated = request.cookies.get('admin-authenticated')?.value === 'true';
-  
-  // Ako pristupate login stranici i već ste ulogovani, redirect na admin dashboard
+
   if (isLoginPage && isAuthenticated) {
     return NextResponse.redirect(new URL('/admin', request.url));
   }
-  
-  // Ako pristupate zaštićenoj admin ruti bez autentifikacije
+
   if (isAdminRoute && !isLoginPage && !isAuthenticated) {
     return NextResponse.redirect(new URL('/admin/login', request.url));
   }
-  
+
   return NextResponse.next();
 }
 
-// Konfigurišite koje rute treba da budu zaštićene
 export const config = {
-  matcher: ['/admin/:path*']
+  matcher: [
+    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
+  ],
 };

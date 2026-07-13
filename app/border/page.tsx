@@ -16,6 +16,8 @@ import {
 import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Building2, Shield, Luggage } from 'lucide-react';
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
@@ -28,6 +30,7 @@ const MAX_FLIGHTS_DISPLAY      = 12;
 const ARRIVED_SHOW_MINUTES     = 60;        // ← prikaži 45 min nakon dolaska
 const CANCELLED_SHOW_MINUTES   = 15;        // ← prikaži cancelled letove 15 minuta
 const HIDDEN_PATTERNS          = ["ZZZ", "G00", "PVT", "TST"];
+let lastKnownHash: string | null = null;
 
 const PLACEHOLDER =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHZpZXdCb3g9IjAgMCA0MCAyNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMjMzMjQ0Ii8+PHRleHQgeD0iMjAiIHk9IjE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNDc2MDdBIiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+";
@@ -232,13 +235,18 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
   const icao = flight.AirlineICAO || (flight.FlightNumber ?? "").slice(0, 2).toUpperCase();
   const rowBg = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
 
-  const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.dataset.t === "fa") { img.src = PLACEHOLDER; img.onerror = null; return; }
-    if (img.dataset.t === "png") { img.dataset.t = "fa"; img.src = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`; return; }
-    if (img.dataset.t === "jpg") { img.dataset.t = "png"; img.src = `/airlines/${icao}.png`; return; }
-    img.dataset.t = "jpg"; img.src = `/airlines/${icao}.jpg`;
-  }, [icao]);
+const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
+  if (img.dataset.t === 'local') {
+    img.dataset.t = 'fa';
+    const fw = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`;
+    if (icao) { img.src = fw; return; }
+    img.src = PLACEHOLDER; img.onerror = null; return;
+  }
+  // FlightAware je promašio → placeholder
+  img.src = PLACEHOLDER; img.onerror = null;
+}, [icao]);
 
   const estDisplay = useMemo(() => {
     const e = fmt(flight.EstimatedDepartureTime);
@@ -269,15 +277,15 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
 
       <div className="fids-cell fids-w-logo flex items-center justify-center">
         <div className="fids-logo-wrap">
-          <img
-            src={`/airlines/${icao}.png`}
-            alt=""
-            className="object-contain w-full h-full"
-            onError={onErr}
-            data-t="logo"
-            decoding="async"
-            loading={index < 9 ? "eager" : "lazy"}
-          />
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER)}
+  alt=""
+  className="object-contain w-full h-full"
+  onError={onErr}
+  data-t={isKnownLocalLogo(icao) ? 'local' : 'fa'}
+  decoding="async"
+  loading={index < 9 ? "eager" : "lazy"}
+/>
         </div>
       </div>
 
@@ -703,42 +711,100 @@ function ArrivalsBoard(): JSX.Element {
   }, []);
 
   // Load
-  useEffect(() => {
-    mounted.current = true;
-    let tid: ReturnType<typeof setTimeout>;
+// Load
+// Load
+useEffect(() => {
+  mounted.current = true;
+  let tid: ReturnType<typeof setTimeout>;
 
-    const cached = loadCache();
-    if (cached?.arrivals) {
-      setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+  const cached = loadCache();
+  if (cached?.arrivals) {
+    setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+    setLoading(false);
+  }
+
+  const load = async () => {
+    if (!mounted.current) return;
+    
+    // ── NOĆNI REŽIM ──
+    if (isNightHours()) {
+      // Noću ne radimo ništa - čuvamo zadnje stanje
       setLoading(false);
+      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      return;
     }
-
-    const load = async () => {
-      if (!mounted.current) return;
+    
+    try {
+      // ── HASH CHECK ──
+      let hashChanged = true; // default: pretpostavi da se promijenilo
       try {
-        // const res = await fetch("/api/flights", { headers: { "Cache-Control": "no-cache" } });
-         const res = await fetch("/api/flights");
+        const statusRes = await fetch("/api/flights/status", {
+          headers: { "Cache-Control": "no-cache" }
+        });
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+            // Nema promjena — ne vuci pun payload, samo nastavi sa kešom
+            hashChanged = false;
+            // Ako imamo keširane podatke, samo ih zadrži
+            if (!cached) {
+              // Ako nema keša, možda želimo ipak povući podatke? 
+              // U ovom slučaju, bolje je povući pun fetch nego ostati prazan
+              hashChanged = true;
+            }
+          }
+          lastKnownHash = statusData.hash;
+        }
+      } catch {
+        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+      }
+
+      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
+      let data: any = null;
+      if (hashChanged) {
+        const res = await fetch("/api/flights", {
+          headers: { "Cache-Control": "no-cache" }
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        data = await res.json();
         if (!mounted.current) return;
         saveCache(data);
-        setFlights(filter(data.arrivals ?? []).slice(0, MAX_FLIGHTS_DISPLAY));
-        setLoading(false);
-      } catch {
+      } else {
+        // Ako se hash nije promijenio, koristi keš ako postoji
         const c = loadCache();
-        if (c?.arrivals && mounted.current) {
-          setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-          setLoading(false);
+        if (c?.arrivals) {
+          data = c;
+        } else {
+          // Ako nema keša, ipak povuci podatke (fallback)
+          const res = await fetch("/api/flights", {
+            headers: { "Cache-Control": "no-cache" }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          data = await res.json();
+          if (!mounted.current) return;
+          saveCache(data);
         }
-      } finally {
-        if (mounted.current) tid = setTimeout(load, REFRESH_INTERVAL_MS);
       }
-    };
 
-    if (!cached) load(); else { load(); }
+      if (data?.arrivals) {
+        setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+      }
+    } catch {
+      const c = loadCache();
+      if (c?.arrivals && mounted.current) {
+        setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+      }
+    } finally {
+      if (mounted.current) tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    }
+  };
 
-    return () => { mounted.current = false; clearTimeout(tid); };
-  }, [filter]);
+  if (!cached) load(); else { load(); }
+
+  return () => { mounted.current = false; clearTimeout(tid); };
+}, [filter]);
 
   const sorted = useMemo(() =>
     [...flights].sort((a, b) =>

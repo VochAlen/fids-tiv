@@ -1,6 +1,13 @@
 // lib/flight-api-helpers.ts
 import type { Flight, RawFlightData } from '@/types/flight';
 
+// ── Debug logger — aktivan samo u development modu ──────────
+// Smanjuje log šum u produkciji (Vercel logovi imaju kvote/retenciju),
+// bez gubitka mogućnosti debagovanja lokalno.
+const isDev = process.env.NODE_ENV !== 'production';
+const dlog = (...args: unknown[]) => { if (isDev) console.log(...args); };
+
+
 // Cache for logo URLs
 const logoCache = new Map<string, string>();
 
@@ -23,7 +30,7 @@ function cleanFlightNumber(flightNumber: string, airlineCode: string): string {
     const [, iataCode, icaoCode, numbers] = match;
     // Zadrži samo IATA kod i brojeve, ukloni ICAO kod
     cleaned = `${iataCode}${numbers}`;
-    console.log(`✈️ Cleaned flight (removed ICAO ${icaoCode}): ${flightNumber} → ${cleaned}`);
+    dlog(`✈️ Cleaned flight (removed ICAO ${icaoCode}): ${flightNumber} → ${cleaned}`);
     return cleaned;
   }
   
@@ -36,7 +43,7 @@ function cleanFlightNumber(flightNumber: string, airlineCode: string): string {
     // Ako je ICAO kod različit od airlineCode, ukloni ga i dodaj airlineCode
     if (icaoCode !== airlineCode) {
       cleaned = `${airlineCode}${numbers}`;
-      console.log(`✈️ Cleaned flight (ICAO only): ${flightNumber} → ${cleaned}`);
+      dlog(`✈️ Cleaned flight (ICAO only): ${flightNumber} → ${cleaned}`);
     } else {
       cleaned = numbers;
     }
@@ -108,7 +115,7 @@ async function findExistingLogo(icaoCode: string): Promise<string | null> {
       });
       
       if (exists) {
-        console.log(`✅ Found logo for ${normalizedIcao}: ${logoUrl}`);
+        dlog(`✅ Found logo for ${normalizedIcao}: ${logoUrl}`);
         logoCache.set(cacheKey, logoUrl);
         return logoUrl;
       }
@@ -117,7 +124,7 @@ async function findExistingLogo(icaoCode: string): Promise<string | null> {
     }
   }
 
-  console.log(`❌ No logo found for ${normalizedIcao}`);
+  dlog(`❌ No logo found for ${normalizedIcao}`);
   logoCache.set(cacheKey, 'none');
   return null;
 }
@@ -277,7 +284,7 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
         hours = 0;
         minutes = 0;
       }
-      console.log(`RAW Planirano za HN2392: "${raw.Planirano}", BrojLeta: "${raw.BrojLeta}"`);
+      dlog(`RAW Planirano za HN2392: "${raw.Planirano}", BrojLeta: "${raw.BrojLeta}"`);
 
       
       if (!isNaN(day) && !isNaN(month) && !isNaN(year) && !isNaN(hours) && !isNaN(minutes)) {
@@ -287,7 +294,7 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
 const tzOffset = new Date().getTimezoneOffset() * 60 * 1000;
 const scheduledDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0, 0));
 sortTime = scheduledDate.getTime() + tzOffset;
-console.log(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduledDate.getHours()}:${scheduledDate.getMinutes()} | timestamp=${sortTime}`);
+dlog(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduledDate.getHours()}:${scheduledDate.getMinutes()} | timestamp=${sortTime}`);
         sortTime = scheduledDate.getTime();
       }
     } catch (err) {
@@ -295,7 +302,7 @@ console.log(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduled
     }
   }
 
-  console.log(`📝 Mapping flight: ${raw.Kompanija}${raw.BrojLeta} | TipLeta: ${raw.TipLeta} → FlightType: ${flightType} | SortTime: ${sortTime ? new Date(sortTime).toLocaleString() : 'N/A'}`);
+  dlog(`📝 Mapping flight: ${raw.Kompanija}${raw.BrojLeta} | TipLeta: ${raw.TipLeta} → FlightType: ${flightType} | SortTime: ${sortTime ? new Date(sortTime).toLocaleString() : 'N/A'}`);
 
   return {
     id: flightId,

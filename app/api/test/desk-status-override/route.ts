@@ -1,116 +1,157 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 
-// ⭐ NOVO: Konstanta za starost ključeva (20 sati)
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
+const ALL_KEY = 'test:desk-status:all';
+
+// ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
+let cachedAll: Record<string, DeskEntry> | null = null;
+let cachedAllExpiry = 0;
+let cacheRefreshing = false; // ← sprečava duple refresh-e
+const CACHE_TTL_MS = 10_000; // 10s
+
+type DeskEntry = {
+  status: 'open' | 'closed' | null;
+  flightNumber: string;
+  classType: string | null;
+  setAt: number | null;
+};
+
+async function readAll(): Promise<Record<string, DeskEntry>> {
+  const client = getRedisClient();
+  const raw = await client.get(ALL_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function writeAll(data: Record<string, DeskEntry>): Promise<void> {
+  const client = getRedisClient();
+  await client.set(ALL_KEY, JSON.stringify(data), 'EX', 4 * 60 * 60);
+}
+
+async function readAllCached(): Promise<Record<string, DeskEntry>> {
+  const now = Date.now();
+
+  if (cachedAll && now < cachedAllExpiry) {
+    return cachedAll;
+  }
+
+  if (cacheRefreshing && cachedAll) {
+    return cachedAll;
+  }
+
+  cacheRefreshing = true;
+  try {
+    const fresh = await readAll();
+    cachedAll = fresh;
+    cachedAllExpiry = now + CACHE_TTL_MS;
+    return fresh;
+  } finally {
+    cacheRefreshing = false;
+  }
+}
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const deskNumber = searchParams.get('deskNumber');
-  const client = getRedisClient();
-
-  // Ako je specificiran deskNumber – vrati samo njega (bez čišćenja)
-  if (deskNumber) {
-    const redisKey = `test:desk-status:${deskNumber}`;
-    const value = await client.get(redisKey);
-if (!value) {
-      return NextResponse.json(
-        { status: null, flightNumber: null },
-        { headers: { 'Cache-Control': 'no-store' } }
-      );
-    }
-    
-    // ⭐ PROVJERI DA LI JE KLJUČ STAR
-    const data = JSON.parse(value);
-    if (data.setAt && (Date.now() - data.setAt > MAX_AGE_MS)) {
-      // Ključ je star - obriši ga
-      await client.del(redisKey);
-      return NextResponse.json({ status: null, flightNumber: null });
-    }
-    
-return NextResponse.json(
-      {
-        status: data.status,
-        flightNumber: data.flightNumber,
-        setAt: data.setAt,
-      },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
-  }
-
-  // Inače – vrati SVE testne dodjele (uz čišćenje starih)
-  const all: Record<string, any> = {};
-  let cursor = '0';
   const now = Date.now();
-  let cleanedCount = 0;
-  
-  do {
-    const [nextCursor, keys] = await client.scan(cursor, 'MATCH', 'test:desk-status:*', 'COUNT', 100);
-    cursor = nextCursor;
-    for (const key of keys) {
-      const desk = key.replace('test:desk-status:', '');
-      const value = await client.get(key);
-      if (value) {
-        try {
-          const data = JSON.parse(value);
-          
-          // ⭐ PROVJERI DA LI JE KLJUČ STAR
-          if (data.setAt && (now - data.setAt > MAX_AGE_MS)) {
-            // Obriši stari ključ
-            await client.del(key);
-            cleanedCount++;
-            console.log(`[cleanup] Deleted old desk-status key: ${key} (age: ${Math.round((now - data.setAt) / 3600000)}h)`);
-            continue;
-          }
-          
-          all[desk] = {
-            status: data.status,
-            flightNumber: data.flightNumber,
-            setAt: data.setAt,
-          };
-        } catch (err) {
-          // Ako ne može parsirati, vjerovatno je korumpiran - obriši
-          console.warn(`[cleanup] Deleting invalid key: ${key}`);
-          await client.del(key);
-          cleanedCount++;
-        }
-      }
-    }
-  } while (cursor !== '0');
 
-if (cleanedCount > 0) {
-    console.log(`[cleanup] Total cleaned: ${cleanedCount} old desk-status keys`);
+  const all = await readAllCached();
+
+  let changed = false;
+  for (const key of Object.keys(all)) {
+    const entry = all[key];
+    if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
+      delete all[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await writeAll(all);
+    cachedAll = all;
+    cachedAllExpiry = now + CACHE_TTL_MS;
   }
 
-  return NextResponse.json(all, {
-    headers: { 'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=15' },
+  // if (deskNumber) {
+  //   const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+  //   return NextResponse.json(entry, { 
+  //     headers: { 
+  //       // Ranije 'no-store' — svaki poziv sa deskNumber je bypass-ovao CDN keš
+  //       // u potpunosti (objašnjava zašto je hit rate bio 83.9% umjesto ~100%).
+  //       // In-memory keš (readAllCached) već traje 10s, pa je HTTP keš usklađen
+  //       // sa tim prozorom da ne uvodi dodatnu neusklađenost.
+  //       'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=10',
+  //       'X-Cache': cacheRefreshing ? 'stale' : 'fresh', // ← dodatni header za debugging
+  //     } 
+  //   });
+  // }
+
+  // return NextResponse.json(all, {
+  //   headers: { 
+  //     'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
+  //     'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  //   },
+  // });
+
+  if (deskNumber) {
+  const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+  return NextResponse.json(entry, {
+    headers: {
+ 'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
+      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+    }
   });
 }
-export async function POST(request: Request) {
-  const { deskNumber, action, flightNumber } = await request.json();
-  const client = getRedisClient();
-  const redisKey = `test:desk-status:${deskNumber}`;
 
+return NextResponse.json(all, {
+  headers: {
+    'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+    'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+  },
+});
+
+}
+
+export async function POST(request: Request) {
+  const { deskNumber, action, flightNumber, classType } = await request.json();
   if (!deskNumber) {
     return NextResponse.json({ error: 'deskNumber required' }, { status: 400 });
   }
 
+  const all = await readAll();
+  const existing = all[deskNumber];
+
   if (action === 'open' && flightNumber) {
-    const value = JSON.stringify({ status: 'open', flightNumber, setAt: Date.now() });
-    await client.set(redisKey, value, 'EX', 3600);
-    return NextResponse.json({ success: true, ttl: 3600 });
+    all[deskNumber] = {
+      status: 'open',
+      flightNumber,
+      classType: existing?.classType ?? null,
+      setAt: Date.now(),
+    };
+  } else if (action === 'closed') {
+    all[deskNumber] = {
+      status: 'closed',
+      flightNumber: flightNumber || '',
+      classType: existing?.classType ?? null,
+      setAt: Date.now(),
+    };
+  } else if (action === 'clear') {
+    delete all[deskNumber];
+  } else if (action === 'setClass') {
+    if (!existing) return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
+    all[deskNumber] = { ...existing, classType: classType ?? null };
+  } else {
+    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-  if (action === 'closed') {
-    const value = JSON.stringify({ status: 'closed', flightNumber: flightNumber || '', setAt: Date.now() });
-    await client.set(redisKey, value, 'EX', 3600);
-    return NextResponse.json({ success: true, ttl: 3600 });
-  }
+  await writeAll(all);
 
-  if (action === 'clear') {
-    await client.del(redisKey);
-    return NextResponse.json({ success: true });
-  }
+  cachedAll = all;
+  cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 
-  return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+  return NextResponse.json({ success: true });
 }

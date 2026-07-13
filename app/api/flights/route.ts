@@ -1,570 +1,110 @@
 // app/api/flights/route.ts
+// import { NextResponse } from 'next/server';
+// import { getCurrentFlightData } from '@/lib/flight-data-service';
+
+// export async function GET(): Promise<NextResponse> {
+//   const data = await getCurrentFlightData();
+
+//   const isCritical = data.error === 'All data sources unavailable.';
+//   const isEmergency = data.source === 'emergency' && !isCritical;
+//   const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
+
+  // const cacheControl = isCritical
+  //   ? 'no-cache, no-store, must-revalidate'
+  //   : isEmergency
+  //     ? 'public, s-maxage=15, stale-while-revalidate=30'
+  //     : isBackupLike
+  //       ? 'public, s-maxage=30, stale-while-revalidate=30'
+  //       : 'public, s-maxage=90, stale-while-revalidate=30';
+
+//   const cacheControl = isCritical
+//   ? 'no-cache, no-store, must-revalidate'
+//   : isEmergency
+//     ? 'public, max-age=10, s-maxage=15, stale-while-revalidate=30'
+//     : isBackupLike
+//       ? 'public, max-age=15, s-maxage=30, stale-while-revalidate=30'
+//       : 'public, max-age=20, s-maxage=90, stale-while-revalidate=30';
+
+//   const headers: Record<string, string> = {
+//     'Cache-Control': cacheControl,
+//     'X-Data-Source': data.source ?? 'unknown',
+//     'X-Total-Flights': data.totalFlights.toString(),
+//   };
+
+//   if (data.departures) headers['X-Departures'] = data.departures.length.toString();
+//   if (data.arrivals) headers['X-Arrivals'] = data.arrivals.length.toString();
+//   if (data.isOfflineMode) headers['X-Offline-Mode'] = 'true';
+
+//   return NextResponse.json(data, {
+//     status: 200,
+//     headers,
+//   });
+// }
+
+// app/api/flights/route.ts
+// app/api/flights/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
-import { FlightBackupService } from '@/lib/backup/flight-backup-service';
-import { FlightAutoProcessor, type AutoProcessedFlight } from '@/lib/backup/flight-auto-processor';
-import type { Flight, FlightData, RawFlightData } from '@/types/flight';
-import {
-  mapRawFlight,
-  expandFlightForMultipleGates,
-  sortFlightsByTime,
-  filterTodayFlights
-} from '@/lib/flight-api-helpers';
-// import Redis from 'ioredis';
-
-// ── CACHE CONSTANTS ───────────────────────────────────────────
-const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
-const FLIGHT_CACHE_TTL_SECONDS = 90; // 1 minuta — smanjuje broj invokacija za ~60x
-
-// ── METADATA CACHE ─────────────────────────────────────────────
-const FLIGHT_HASH_KEY = 'cache:flights:hash';
-const FLIGHT_COUNT_KEY = 'cache:flights:count';
-const FLIGHT_MODIFIED_KEY = 'cache:flights:last_modified';
-const FLIGHT_SOURCE_KEY = 'cache:flights:source';
-
-// ── IN-PROCESS OVERRIDE CACHE (izbjegava Redis round-trip na svakom requestu) ──
-let overrideCacheData: Record<string, Record<string, string>> = {};
-let overrideCacheExpiry = 0;
-const OVERRIDE_CACHE_MS = 40_000; // 30 sekundi
-
-// ── REDIS CLEANUP ─────────────────────────────────────────────
-let lastRedisCleanup = 0;
-const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h umjesto 6h
-
-const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/javascript, */*; q=0.01',
-  'Accept-Language': 'en-US,en;q=0.9,hr;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://montenegroairports.com/tivat/en/flights/departures',
-  'Origin': 'https://montenegroairports.com',
-  'X-Requested-With': 'XMLHttpRequest',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  'Connection': 'keep-alive',
-  'DNT': '1',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
-} as const;
-
-
-// Polja koja check-in stranica STVARNO koristi
-// Sve ostalo se bacuje — smanjuje payload ~60-70%
-const SLIM_FIELDS = [
-  'FlightNumber',
-  'FlightType',
-  'AirlineName',
-  'AirlineICAO',
-  'AirlineLogoURL',
-  'DestinationCityName',
-  'DestinationAirportCode',
-  'ScheduledDepartureTime',
-  'EstimatedDepartureTime',
-  'StatusEN',
-  'GateNumber',
-  'CheckInDesk',
-  'BaggageReclaim',
-  'Terminal',
-  'CodeShareFlights',
-  '_sortTime',
-] as const;
-
-type SlimFlight = Pick<Flight, typeof SLIM_FIELDS[number]>;
-
-function slimFlight(f: Flight): SlimFlight {
-  const out = {} as SlimFlight;
-  for (const key of SLIM_FIELDS) {
-    if (key in f) (out as any)[key] = (f as any)[key];
-  }
-  return out;
-}
-
-function slimFlightData(data: FlightData): FlightData {
-  return {
-    ...data,
-    departures: data.departures.map(slimFlight) as Flight[],
-    arrivals:   data.arrivals.map(slimFlight)   as Flight[],
-  };
-}
-
-
-const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-const MAX_RETRIES = 2;
-const RETRY_DELAY = 1000;
-
-async function runRedisCleanupIfNeeded(): Promise<void> {
-  if (Date.now() - lastRedisCleanup < REDIS_CLEANUP_INTERVAL_MS) return;
-  lastRedisCleanup = Date.now();
-
-  const TTL_RULES: Record<string, number> = {
-    'cache:flights':  180,
-    'override:':      21_600,
-    'gate-status:':   21_600,
-    'desk-status:':   21_600,
-    'desk-class:':    21_600,
-  };
-
-  // ✅ Fire-and-forget sa hard timeout 5s — nikad ne blokira main request
-  Promise.race([
-    (async () => {
-      try {
-        const client = getRedisClient();
-        const keysToFix: string[] = [];
-        let cursor = '0';
-
-        do {
-          const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 100);
-          cursor = nextCursor;
-
-          if (keys.length > 0) {
-            // ✅ Pipeline umjesto sekvencijalnih ttl() poziva
-            const pipeline = client.pipeline();
-            keys.forEach(key => pipeline.ttl(key));
-            const results = await pipeline.exec();
-            results?.forEach((result, i) => {
-              if (!result[0] && result[1] === -1) keysToFix.push(keys[i]);
-            });
-          }
-
-          if (keysToFix.length > 200) break;
-        } while (cursor !== '0');
-
-        if (keysToFix.length > 0) {
-          const fixPipeline = client.pipeline();
-          keysToFix.forEach(key => {
-            const rule = Object.entries(TTL_RULES).find(([p]) => key.startsWith(p));
-            fixPipeline.expire(key, rule ? rule[1] : 3_600);
-          });
-          await fixPipeline.exec();
-          console.log(`🧹 Redis cleanup: ${keysToFix.length} keys fixed`);
-        }
-      } catch (e) {
-        console.error('⚠️ Redis cleanup failed (non-critical):', e);
-      }
-    })(),
-    new Promise<void>(resolve => setTimeout(resolve, 5_000)),
-  ]);
-}
-
-// ── REDIS FLIGHT CACHE ────────────────────────────────────────
-// Ovo je najvažnija optimizacija: kešira cijeli FlightData odgovor u Redis.
-// Svaki request koji dođe unutar 60s dobija cached podatke bez ikakve compute logike.
-async function getFlightDataFromCache(): Promise<FlightData | null> {
-  try {
-    const client = getRedisClient();
-    const cached = await client.get(FLIGHT_CACHE_KEY);
-    if (cached) {
-      return JSON.parse(cached) as FlightData;
-    }
-  } catch {
-    // Tiho — cache miss, nastavi normalno
-  }
-  return null;
-}
-
-async function saveFlightDataToCache(data: FlightData): Promise<void> {
-  try {
-    const client = getRedisClient();
-    await client.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(data));
-  } catch {
-    // Non-critical, nastavi
-  }
-}
-
-
-// ── METADATA FUNCTIONS ────────────────────────────────────────
-async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): Promise<void> {
-  try {
-    const client = getRedisClient();
-    const hash = Buffer.from(JSON.stringify({
-      dCount: slimmed.departures.length,
-      aCount: slimmed.arrivals.length,
-      source,
-      timestamp: new Date().toISOString(),
-    })).toString('base64').substring(0, 32);
-
-    const pipeline = client.pipeline();
-    pipeline.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(slimmed));
-    pipeline.setex(FLIGHT_HASH_KEY, FLIGHT_CACHE_TTL_SECONDS, hash);
-    pipeline.setex(FLIGHT_COUNT_KEY, FLIGHT_CACHE_TTL_SECONDS, String(slimmed.departures.length + slimmed.arrivals.length));
-    pipeline.setex(FLIGHT_MODIFIED_KEY, FLIGHT_CACHE_TTL_SECONDS, new Date().toISOString());
-    pipeline.setex(FLIGHT_SOURCE_KEY, FLIGHT_CACHE_TTL_SECONDS, source);
-    await pipeline.exec();
-  } catch (e) {
-    console.warn('⚠️ Failed to save flight data/metadata:', e);
-  }
-}
-
-// ── OVERRIDE CACHE (in-process, 30s TTL) ─────────────────────
-// Svaki request je ranije radio SCAN + pipeline na Redis.
-// Sada se overrides kešira lokalno u memoriji procesa.
-async function loadOverridesMap(): Promise<Record<string, Record<string, string>>> {
-  if (Date.now() < overrideCacheExpiry) {
-    return overrideCacheData;
-  }
-
-  // ✅ Hard timeout 3s — ako Redis ne odgovori, vrati stari cache
-  const timeoutPromise = new Promise<null>(resolve => 
-    setTimeout(() => resolve(null), 3_000)
-  );
-
-  const fetchPromise = (async () => {
-    try {
-      const client = getRedisClient();
-      const keys: string[] = [];
-      let cursor = '0';
-
-      do {
-        const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
-        cursor = scanResult[0];
-        keys.push(...scanResult[1]);
-        if (keys.length > 200) break;
-      } while (cursor !== '0');
-
-      if (keys.length === 0) {
-        overrideCacheData = {};
-        overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-        return overrideCacheData;
-      }
-
-      const pipeline = client.pipeline();
-      keys.forEach(key => pipeline.hgetall(key));
-      const results = await pipeline.exec();
-
-      const map: Record<string, Record<string, string>> = {};
-      if (results) {
-        keys.forEach((key, i) => {
-          const result = results[i];
-          if (result && !result[0] && result[1]) {
-            const flightNumber = key.replace('override:', '');
-            const data = result[1] as Record<string, string>;
-            if (Object.keys(data).length > 0) map[flightNumber] = data;
-          }
-        });
-      }
-
-      overrideCacheData = map;
-      overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-      return overrideCacheData;
-    } catch {
-      return null; // timeout handler će vratiti stari cache
-    }
-  })();
-
-  const result = await Promise.race([fetchPromise, timeoutPromise]);
-
-  if (result === null) {
-    console.warn('[loadOverridesMap] Timeout ili greška — vraćam stari cache');
-    // Produžimo expiry da ne hammera Redis svaki request dok je down
-    overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-  }
-
-  return overrideCacheData;
-}
-
-
-async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
-  try {
-    const overridesMap = await loadOverridesMap();
-    if (Object.keys(overridesMap).length === 0) return flights;
-
-    const resolveField = (overrideVal: string | undefined, apiVal: string | undefined): string => {
-      if (overrideVal === undefined) return apiVal ?? '';
-      if (overrideVal === '__EMPTY__') return '';
-      return overrideVal;
-    };
-
-    return flights.map(flight => {
-      const localOverride = overridesMap[flight.FlightNumber];
-      if (!localOverride) return flight;
-      return {
-        ...flight,
-        GateNumber:     resolveField(localOverride.GateNumber,     flight.GateNumber),
-        CheckInDesk:    resolveField(localOverride.CheckInDesk,    flight.CheckInDesk),
-        BaggageReclaim: resolveField(localOverride.BaggageReclaim, flight.BaggageReclaim),
-        StatusEN:       resolveField(localOverride.StatusEN,       flight.StatusEN),
-        Terminal:       resolveField(localOverride.Terminal,       flight.Terminal),
-      };
-    });
-  } catch {
-    return flights;
-  }
-}
-
-async function fetchWithQuickRetry(
-  url: string,
-  options: RequestInit,
-  retries = MAX_RETRIES
-): Promise<Response> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (response.ok) return response;
-      console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries}`);
-      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`❌ Fetch attempt ${attempt}/${retries} failed: ${errMsg}`);
-      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
-    }
-  }
-  throw new Error(`Live API fetch failed after ${retries} attempts`);
-}
-
-async function performEmergencyFetch(): Promise<Flight[] | null> {
-  try {
-    const emergencyResponse = await fetch(FLIGHT_API_URL, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: FETCH_HEADERS,
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!emergencyResponse.ok) return null;
-
-    const rawData: RawFlightData[] = await emergencyResponse.json();
-    if (!Array.isArray(rawData) || rawData.length === 0) return null;
-
-    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapRawFlight(raw)));
-    return mapped;
-  } catch {
-    return null;
-  }
-}
-
-function removeDuplicateFlights(flights: Flight[]): Flight[] {
-  const seen = new Map<string, Flight>();
-  flights.forEach(flight => {
-    const key = `${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${flight.FlightType}`;
-    if (seen.has(key)) {
-      const existing = seen.get(key)!;
-      if ((flight.GateNumber && !existing.GateNumber) || (flight.CheckInDesk && !existing.CheckInDesk)) {
-        seen.set(key, flight);
-      }
-    } else {
-      seen.set(key, flight);
-    }
-  });
-  return Array.from(seen.values());
-}
-
-function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
-  return arrivals.map(flight => {
-    const statusLower = (flight.StatusEN || '').toLowerCase();
-    const isArrived = statusLower.includes('arrived') || statusLower.includes('sletio') || statusLower.includes('landed');
-    if (!isArrived && !flight.BaggageReclaim) {
-      return { ...flight, BaggageReclaim: '2' };
-    }
-    return flight;
-  });
-}
-
-async function buildFlightData(
-  rawFlights: Flight[],
-  source: 'live' | 'backup' | 'auto-processed' | 'emergency',
-  lastUpdated: string,
-  options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number }
-): Promise<FlightData> {
-  let departures = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'departure'));
-  let arrivals = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'arrival'));
-
-  [departures, arrivals] = await Promise.all([
-    applyKvOverrides(departures),
-    applyKvOverrides(arrivals),
-  ]);
-
-  arrivals = applyDefaultBaggageBelt(arrivals);
-
-  return {
-    departures,
-    arrivals,
-    lastUpdated,
-    source,
-    totalFlights: departures.length + arrivals.length,
-    isOfflineMode: options?.isOfflineMode ?? false,
-    ...(options?.warning && { warning: options.warning }),
-    ...(options?.backupTimestamp && { backupTimestamp: options.backupTimestamp }),
-    ...(options?.autoProcessedCount !== undefined && { autoProcessedCount: options.autoProcessedCount }),
-  };
-}
+import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 
 export async function GET(): Promise<NextResponse> {
-  // ── 1. PROVJERI REDIS CACHE PRVO ──────────────────────────
-  // Ovo sprečava da svaki korisnikov request poziva Montenegro API i troši Vercel compute.
-  const cached = await getFlightDataFromCache();
-  if (cached) {
-    return NextResponse.json(cached, {
-      headers: {
-        'Cache-Control': 'public, s-maxage=80, stale-while-revalidate=90',
-        'X-Data-Source': cached.source + '-cached',
-        'X-Total-Flights': cached.totalFlights.toString(),
-      }
-    });
-  }
-
-  // ── 2. REDIS CLEANUP (background, ne blokira) ─────────────
-  runRedisCleanupIfNeeded().catch(() => {});
-
-  const backupService = FlightBackupService.getInstance();
-
-  // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
   try {
-    const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: FETCH_HEADERS,
+    const data = await getCurrentFlightDataSafe();
+    const isCritical = data.error === 'All data sources unavailable.';
+    const isEmergency = data.source === 'emergency' && !isCritical;
+    const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
+
+const cacheControl = isCritical
+  ? 'no-cache, no-store, must-revalidate'
+  : isEmergency
+    ? 'public, max-age=20, s-maxage=30, stale-while-revalidate=60'
+    : isBackupLike
+      ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
+      // : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
+      : 'public, max-age=60, s-maxage=240, stale-while-revalidate=360';
+
+    const headers: Record<string, string> = {
+      'Cache-Control': cacheControl,
+      'X-Data-Source': data.source ?? 'unknown',
+      'X-Total-Flights': data.totalFlights.toString(),
+    };
+    if (data.departures) headers['X-Departures'] = data.departures.length.toString();
+    if (data.arrivals) headers['X-Arrivals'] = data.arrivals.length.toString();
+    if (data.isOfflineMode) headers['X-Offline-Mode'] = 'true';
+
+    return NextResponse.json(data, {
+      status: 200,
+      headers,
     });
+  } catch (err) {
+    // Krajnja zaštita: ako getCurrentFlightData() ili bilo šta iznad neočekivano
+    // baci grešku (mrežni problem, parsiranje, Redis, itd.), ne rušimo funkciju
+    // (što bi Vercel brojao kao Error) — vraćamo prazan ali validan odgovor
+    // da checkin/gate/combined ekrani imaju šta da parsiraju i padnu na svoj
+    // vlastiti fallback (cache/prazan prikaz) umjesto na network error.
+    console.error('[api/flights] Unhandled error:', err instanceof Error ? err.message : err);
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const rawData: RawFlightData[] = await response.json();
-    if (!Array.isArray(rawData)) throw new Error('Invalid data format');
-
-    console.log(`✅ Live fetch: ${rawData.length} flights`);
-
-    const mappedFlights = await Promise.all(rawData.map((raw: RawFlightData) => mapRawFlight(raw)));
-    let todayFlights = filterTodayFlights(mappedFlights);
-    todayFlights = removeDuplicateFlights(todayFlights);
-
-    const expandedFlights: Flight[] = [];
-    todayFlights.forEach(flight => {
-      if ((flight.GateNumber?.includes(',')) || (flight.CheckInDesk?.includes(','))) {
-        expandedFlights.push(...expandFlightForMultipleGates(flight));
-      } else {
-        expandedFlights.push(flight);
+    return NextResponse.json(
+      {
+        departures: [],
+        arrivals: [],
+        totalFlights: 0,
+        lastUpdated: new Date().toISOString(),
+        source: 'emergency',
+        isOfflineMode: true,
+        error: 'Route handler caught unexpected error.',
+      },
+      {
+        status: 200,
+        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
       }
-    });
-
-    const finalFlights = removeDuplicateFlights(expandedFlights);
-
-    try {
-      backupService.saveBackup(finalFlights);
-    } catch (e) {
-      console.error('⚠️ Backup save failed:', e);
-    }
-
- const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
-    const slimmed = slimFlightData(flightData);
-
-    // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
-    await saveFlightDataAndMetadata(slimmed, 'live');
-
-    console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
-
-    return NextResponse.json(slimmed, {
-      headers: {
-          'Cache-Control': 'public, s-maxage=80, stale-while-revalidate=90',
-        'X-Data-Source': 'live',
-        'X-Total-Flights': flightData.totalFlights.toString(),
-        'X-Departures': flightData.departures.length.toString(),
-        'X-Arrivals': flightData.arrivals.length.toString(),
-      }
-    });
-
-  } catch (liveError) {
-    console.error('❌ Live API failed:', liveError instanceof Error ? liveError.message : liveError);
-  }
-
-  // ── 4. BACKUP MODE ────────────────────────────────────────
-  try {
-    const latestBackup = backupService.getLatestBackup();
-
-    if (latestBackup.flights.length > 0) {
-      console.log(`🔄 Using backup: ${latestBackup.flights.length} flights from ${latestBackup.timestamp}`);
-
-      const processor = new FlightAutoProcessor(latestBackup.flights);
-      const processedFlights = processor.processFlights();
-      const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
-      const autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
-      const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
-
-      const flightData = await buildFlightData(
-        simulatedFlights,
-        source,
-        latestBackup.timestamp,
-        {
-          isOfflineMode: true,
-          backupTimestamp: latestBackup.timestamp,
-          autoProcessedCount,
-          warning: 'Using backup data. Live API temporarily unavailable.',
-        }
-      );
-
-      // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
-const slimmed = slimFlightData(flightData);
-
-      // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
-      await saveFlightDataAndMetadata(slimmed, source);
-
-      return NextResponse.json(slimmed, {
-        headers: {
-            'Cache-Control': 'public, s-maxage=80, stale-while-revalidate=90',
-          'X-Data-Source': source,
-          'X-Offline-Mode': 'true',
-          'X-Total-Flights': flightData.totalFlights.toString(),
-        }
-      });
-    }
-  } catch (backupError) {
-    console.error('❌ Backup system failed:', backupError instanceof Error ? backupError.message : backupError);
-  }
-
-  // ── 5. EMERGENCY FETCH ────────────────────────────────────
-  const emergencyFlights = await performEmergencyFetch();
-
-  if (emergencyFlights && emergencyFlights.length > 0) {
-    backupService.saveBackup(emergencyFlights);
-    const processor = new FlightAutoProcessor(emergencyFlights);
-    const processedFlights = processor.processFlights();
-
-    const flightData = await buildFlightData(
-      processedFlights,
-      'emergency',
-      new Date().toISOString(),
-      { isOfflineMode: true, warning: 'Emergency mode: Using directly fetched data.' }
     );
-
-    // ── SPREMI METADATA ZA STATUS ENDPOINT ──────────────────────
-const slimmed = slimFlightData(flightData);
-
-    // ── SPREMI SLIM PODATKE + METADATA U JEDNOM PIPELINE-U ──────
-    await saveFlightDataAndMetadata(slimmed, 'emergency');
-
-    return NextResponse.json(slimmed, {
-      headers: {
-         'Cache-Control': 'public, s-maxage=80, stale-while-revalidate=90',
-        'X-Data-Source': 'emergency',
-        'X-Offline-Mode': 'true',
-        'X-Total-Flights': flightData.totalFlights.toString(),
-      }
-    });
   }
-
-  // ── 6. CRITICAL FAILURE ───────────────────────────────────
-  const emptyData: FlightData = {
-    departures: [],
-    arrivals: [],
-    lastUpdated: new Date().toISOString(),
-    source: 'emergency',
-    isOfflineMode: true,
-    totalFlights: 0,
-    error: 'All data sources unavailable.',
-    warning: 'System will recover when connection is restored.',
-  };
-
-  return NextResponse.json(emptyData, {
-    status: 200,
-    headers: {
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'X-Data-Source': 'critical-emergency',
-      'X-Total-Flights': '0',
-    }
-  });
 }
 
-// export const dynamic = 'force-dynamic';
-// export const revalidate = 0;
-export const revalidate = 80;
+// NAPOMENA: 'export const revalidate = 120' je namjerno UKLONJEN.
+// Taj segment-level ISR postavka je u sukobu sa ručno postavljenim
+// 'Cache-Control: no-store' u isCritical grani (Next.js baca
+// "Invariant: invalid Cache-Control duration provided: 0 < 1"),
+// što je bio pravi uzrok Error Rate skokova na ovoj ruti.
+// Pošto svaki mogući ishod već ima svoj eksplicitan Cache-Control header
+// gore, segment-level revalidate nije ni potreban.

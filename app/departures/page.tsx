@@ -4,11 +4,13 @@ import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component
 import type { Flight } from '@/types/flight';
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 80_000;
+const REFRESH_INTERVAL_MS         = 90_000;
 const FETCH_TIMEOUT_MS            = 20_000;
 const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
@@ -18,8 +20,12 @@ const HEARTBEAT_TIMEOUT_MS        = 120_000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY         = 9;
-const MAX_FLIGHTS_MEMORY          = 15;
+const MAX_FLIGHTS_MEMORY          = 60;
+const PAGE_SIZE           = 8;       // koliko letova po stranici
+const PAGE_ROTATE_MS      = 20_000;  // rotacija svakih 20s
 const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
+let lastKnownHash: string | null = null;
+
 
 const HIDDEN_FLIGHT_PATTERNS = ['ZZZ', 'G00', 'PVT', 'TST'];
 
@@ -204,37 +210,15 @@ const fetchAssignments = async (): Promise<{
   gates: Record<string, string>;
 }> => {
   try {
-    // Čitamo direktno iz istog izvora koji koriste fizički check-in i gate
-    // ekrani (desk-status-override / gate-status-override) — garantuje da
-    // se departures/combined board NIKAD ne razmimoiđe sa stvarnim stanjem
-    // koje osoblje postavlja u admin panelu.
-    const [deskRes, gateRes] = await Promise.all([
-      fetchWithTimeout('/api/test/desk-status-override', 5_000),
-      fetchWithTimeout('/api/test/gate-status-override', 5_000),
-    ]);
-
-    const deskData: Record<string, any> = deskRes.ok ? await deskRes.json() : {};
-    const gateData: Record<string, any> = gateRes.ok ? await gateRes.json() : {};
-
-    const desks: Record<string, string> = {};
-    const gates: Record<string, string> = {};
-
-    // flightNumber → "1, 2, 3" (podržava više šaltera po letu)
-    for (const [deskNumber, val] of Object.entries(deskData)) {
-      if (val?.status === 'open' && val.flightNumber) {
-        const fn = val.flightNumber as string;
-        desks[fn] = desks[fn] ? `${desks[fn]}, ${deskNumber}` : deskNumber;
-      }
-    }
-
-    // flightNumber → gate broj
-    for (const [gateNumber, val] of Object.entries(gateData)) {
-      if (val?.status === 'open' && val.flightNumber) {
-        gates[val.flightNumber as string] = gateNumber;
-      }
-    }
-
-    return { desks, gates };
+    // Jedan poziv umjesto dva, 20s keš umjesto 5s — endpoint već postoji
+    // i radi tačno ovaj posao (vidi stats/route.ts, type=assignments)
+    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
+    if (!res.ok) return { desks: {}, gates: {} };
+    const data = await res.json();
+    return {
+      desks: data.desks ?? {},
+      gates: data.gates ?? {},
+    };
   } catch {
     return { desks: {}, gates: {} };
   }
@@ -404,13 +388,16 @@ const FlightRow = memo(
     const rowBg   = index % 2 === 0 ? 'bg-white/15' : 'bg-white/5';
     const icao    = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
-    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.currentTarget;
-      if (img.dataset.fallback === 'png') { img.src = PLACEHOLDER_IMAGE; img.onerror = null; return; }
-      if (img.dataset.fallback === 'jpg') { img.dataset.fallback = 'png'; img.src = `/airlines/${icao}.png`; return; }
-      if (icao) { img.dataset.fallback = 'jpg'; img.src = `/airlines/${icao}.jpg`; }
-      else { img.src = PLACEHOLDER_IMAGE; img.onerror = null; }
-    }, [icao]);
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.fallback === 'local') {
+    img.dataset.fallback = 'fw';
+    const fw = getFlightawareLogoURL(icao);
+    if (fw) { img.src = fw; return; }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return;
+  }
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null;
+}, [icao]);
 
     const gateChangedAt = (flight as any)._gateChangedAt;
     const isGateChanged = gateChangedAt && (Date.now() - gateChangedAt < 15_000);
@@ -455,11 +442,11 @@ const FlightRow = memo(
           <div className="flex items-center gap-3" style={{ width: '280px' }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
 <img 
-  src={`/airlines/${icao}.png`}
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
   alt={`${flight.AirlineName} logo`}
   className="object-contain w-full h-full"
   onError={onImgErr}
-  data-tried="png"  // označavamo da smo prvo probali PNG
+  data-fallback={isKnownLocalLogo(icao) ? 'local' : 'fw'}
   decoding="async" 
   loading={index < 9 ? "eager" : "lazy"} 
   fetchPriority={index < 8 ? "high" : "auto"}
@@ -610,6 +597,7 @@ function DeparturesBoard(): JSX.Element {
   const [errorMessage,   setErrorMessage]   = useState<string | null>(null);
   const [isRecovering,   setIsRecovering]   = useState<boolean>(false);
   const [autoStatusTick, setAutoStatusTick] = useState<number>(0);
+  const [pageIndex, setPageIndex] = useState(0);
 
   const isMountedRef  = useRef(true);
   const prevGatesRef  = useRef<Record<string, string>>({});
@@ -621,6 +609,13 @@ function DeparturesBoard(): JSX.Element {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000);
     return () => clearInterval(id);
   }, []);
+  // ── Rotacija stranica (prikaz sledeće grupe letova svakih 20s) ──
+useEffect(() => {
+  const id = setInterval(() => {
+    setPageIndex(p => p + 1);
+  }, PAGE_ROTATE_MS);
+  return () => clearInterval(id);
+}, []);
 
   // Hard reset
   useEffect(() => {
@@ -705,18 +700,53 @@ function DeparturesBoard(): JSX.Element {
     });
   }, []);
 
-  // Data loading
-  useEffect(() => {
-    isMountedRef.current = true;
-    let tid: ReturnType<typeof setTimeout>;
+// Data loading
+// Data loading
+useEffect(() => {
+  isMountedRef.current = true;
+  let tid: ReturnType<typeof setTimeout>;
 
-    const load = async () => {
-      if (!isMountedRef.current) return;
-      let data: any = null;
-      let usedCache = false;
+  const load = async () => {
+    if (!isMountedRef.current) return;
+    
+    // ── NOĆNI REŽIM ──
+    if (isNightHours()) {
+      // Noću ne radimo ništa - čuvamo zadnje stanje
+      setLoading(false);
+      // Zakaži sljedeći ciklus (i dalje će provjeravati da li je noć)
+      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      return;
+    }
+    
+    let data: any = null;
+    let usedCache = false;
+    try {
+      if (isInitialLoad.current) setLoading(true);
+      setErrorMessage(null);
+      
+      // ── HASH CHECK ──
+      let hashChanged = true; // default: pretpostavi da se promijenilo
       try {
-        if (isInitialLoad.current) setLoading(true);
-        setErrorMessage(null);
+        const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+            // Nema promjena — ne vuci pun payload
+            hashChanged = false;
+            setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+            isInitialLoad.current = false;
+            setLoading(false);
+            tid = setTimeout(load, REFRESH_INTERVAL_MS);
+            return;
+          }
+          lastKnownHash = statusData.hash;
+        }
+      } catch {
+        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+      }
+
+      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
+      if (hashChanged) {
         try {
           data = await fetchWithRetry('/api/flights');
           if (data && isMountedRef.current) saveToCache({ departures: data.departures });
@@ -725,60 +755,78 @@ function DeparturesBoard(): JSX.Element {
           const c = loadFromCache();
           if (c) { data = c; usedCache = true; } else throw fe;
         }
-        if (!isMountedRef.current || !data) return;
-
-        const rawDepartures = getUniqueDeparturesWithDeparted(
-          filterRecentDepartures(data.departures)
-        ).slice(0, MAX_FLIGHTS_DISPLAY);
-const assignments = await fetchAssignments().catch(() => ({
-  desks: {} as Record<string, string>,
-  gates: {} as Record<string, string>,
-}));
-
-const departuresWithMeta = rawDepartures.map(f => {
-  const clone = { ...f };
-  const num   = f.FlightNumber ?? '';
-
-  const adminDesk = assignments.desks[num];
-  if (adminDesk) {
-    (clone as any).CheckInDesk = adminDesk;
-  }
-
-  const adminGate     = assignments.gates[num];
-  const effectiveGate = adminGate || f.GateNumber || '';
-  if (effectiveGate && effectiveGate !== '-') {
-    const prevGate = prevGatesRef.current[num];
-    if (prevGate && prevGate !== effectiveGate) {
-      (clone as any)._gateChangedAt = Date.now();
-    }
-    (clone as any).GateNumber = effectiveGate;
-    prevGatesRef.current[num] = effectiveGate;
-  }
-
-  return clone;
-});
-        setFlights(departuresWithMeta);
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        if (!usedCache) setErrorMessage(null);
-        else setTimeout(() => setErrorMessage(null), 5_000);
-      } catch (e) {
-        console.error('Critical:', e); setErrorMessage('Unable to load flight data. Check connection.');
-      } finally {
-        isInitialLoad.current = false;
-        if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS); }
       }
-    };
+      
+      if (!isMountedRef.current || !data) return;
+      
+      const rawDepartures = getUniqueDeparturesWithDeparted(
+        filterRecentDepartures(data.departures)
+      );
+      
+      const assignments = await fetchAssignments().catch(() => ({
+        desks: {} as Record<string, string>,
+        gates: {} as Record<string, string>,
+      }));
 
-    load();
-    return () => { isMountedRef.current = false; clearTimeout(tid); };
-  }, [filterRecentDepartures]);
+      const departuresWithMeta = rawDepartures.map(f => {
+        const clone = { ...f };
+        const num   = f.FlightNumber ?? '';
 
-  const sortedFlights = useMemo(
-    () => [...flights].sort((a, b) =>
-      (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
-    ).slice(0, MAX_FLIGHTS_DISPLAY),
-    [flights]
-  );
+        const adminDesk = assignments.desks[num];
+        if (adminDesk) {
+          (clone as any).CheckInDesk = adminDesk;
+        }
+
+        const adminGate     = assignments.gates[num];
+        const effectiveGate = adminGate || f.GateNumber || '';
+        if (effectiveGate && effectiveGate !== '-') {
+          const prevGate = prevGatesRef.current[num];
+          if (prevGate && prevGate !== effectiveGate) {
+            (clone as any)._gateChangedAt = Date.now();
+          }
+          (clone as any).GateNumber = effectiveGate;
+          prevGatesRef.current[num] = effectiveGate;
+        }
+
+        return clone;
+      });
+      
+      setFlights(departuresWithMeta);
+      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      if (!usedCache) setErrorMessage(null);
+      else setTimeout(() => setErrorMessage(null), 5_000);
+      
+    } catch (e) {
+      console.error('Critical:', e);
+      setErrorMessage('Unable to load flight data. Check connection.');
+    } finally {
+      isInitialLoad.current = false;
+      if (isMountedRef.current) { 
+        setLoading(false); 
+        tid = setTimeout(load, REFRESH_INTERVAL_MS); 
+      }
+    }
+  };
+
+  load();
+  return () => { isMountedRef.current = false; clearTimeout(tid); };
+}, [filterRecentDepartures]);
+
+const allSortedFlights = useMemo(
+  () => [...flights].sort((a, b) =>
+    (a.ScheduledDepartureTime || '99:99').localeCompare(b.ScheduledDepartureTime || '99:99')
+  ),
+  [flights]
+);
+
+const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE));
+
+const sortedFlights = useMemo(() => {
+  if (allSortedFlights.length === 0) return [];
+  const currentPage = pageIndex % totalPages;
+  const start = currentPage * PAGE_SIZE;
+  return allSortedFlights.slice(start, start + PAGE_SIZE);
+}, [allSortedFlights, pageIndex, totalPages]);
 
   const DepartureIcon = useCallback(({ className = 'w-5 h-5' }: { className?: string }) =>
     <Plane className={`${className} text-orange-500`} />, []);
@@ -870,8 +918,7 @@ const departuresWithMeta = rawDepartures.map(f => {
           </div>
         </div>
       </div>
-
-      {/* ── Footer ── */}
+{/* ── Footer ── */}
       <div className="w-full mx-auto mt-1 text-center flex-shrink-0">
         <div className={`${COLOR_CONFIG.subtitle} text-xs py-1`}>
           <div className="flex items-center justify-center gap-2 mb-0">
@@ -882,6 +929,20 @@ const departuresWithMeta = rawDepartures.map(f => {
             <span>Auto Refresh every 60s</span>
           </div>
         </div>
+
+        {/* ⭐ Indikator stranice — dodano ovdje */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-1.5 mt-1">
+            {Array.from({ length: totalPages }).map((_, i) => (
+              <div
+                key={i}
+                className={`w-1.5 h-1.5 rounded-full transition-all ${
+                  i === (pageIndex % totalPages) ? 'bg-yellow-400 w-4' : 'bg-white/20'
+                }`}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       <style jsx global>{`

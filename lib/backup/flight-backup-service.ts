@@ -1,5 +1,6 @@
 // app/lib/backup/flight-backup-service.ts
 import type { Flight, RawFlightData } from '@/types/flight';
+import { getRedisClient } from '@/lib/redis';
 
 export interface BackupData {
   id: string;
@@ -34,6 +35,7 @@ export class FlightBackupService {
     this.initialize();
   }
 
+  
   public static getInstance(): FlightBackupService {
     if (!FlightBackupService.instance) {
       FlightBackupService.instance = new FlightBackupService();
@@ -160,108 +162,61 @@ private async fetchInitialBackupData(): Promise<Flight[]> {
     }
   }
 
-  /**
-   * Save flight data to backup
-   */
-  public saveBackup(flights: Flight[]): string {
-    return this.saveBackupInternal(flights);
-  }
+/**
+ * Save flight data to backup
+ */
+public async saveBackup(flights: Flight[]): Promise<string> {
+  return this.saveBackupInternal(flights);
+}
 
   /**
    * Save flight data to backup (internal method)
    */
-  private saveBackupInternal(flights: Flight[]): string {
-    try {
-      const now = new Date();
-      const dateStr = now.toISOString().split('T')[0];
-      const timestamp = now.toISOString();
-      const backupId = `backup_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+ private async saveBackupInternal(flights: Flight[]): Promise<string> {
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const backupId = `backup_${Date.now()}`;
 
-      const departures = flights.filter(f => f.FlightType === 'departure');
-      const arrivals = flights.filter(f => f.FlightType === 'arrival');
+  const backupData: BackupData = {
+    id: backupId,
+    flights: flights.map(f => ({ ...f, IsBackupData: true, BackupTimestamp: timestamp })),
+    date: now.toISOString().split('T')[0],
+    timestamp,
+    metadata: {
+      totalFlights: flights.length,
+      departures: flights.filter(f => f.FlightType === 'departure').length,
+      arrivals: flights.filter(f => f.FlightType === 'arrival').length,
+    },
+  };
 
-      const backupData: BackupData = {
-        id: backupId,
-        flights: flights.map(flight => ({
-          ...flight,
-          IsBackupData: true,
-          BackupTimestamp: timestamp
-        })),
-        date: dateStr,
-        timestamp,
-        metadata: {
-          totalFlights: flights.length,
-          departures: departures.length,
-          arrivals: arrivals.length
-        }
-      };
-
-      this.backupStorage.set(backupId, backupData);
-      this.cleanupOldBackups();
-      
-      return backupId;
-    } catch (error) {
-      console.error('Error saving backup:', error);
-      return `emergency_backup_${Date.now()}`;
-    }
+  try {
+    const client = getRedisClient();
+    await client.setex('backup:flights:latest', 172800, JSON.stringify(backupData)); // 48h
+  } catch (e) {
+    console.error('⚠️ Redis backup save failed:', e);
   }
 
-  /**
-   * Get latest backup - UVJEK vraća nešto
-   */
-  public getLatestBackup(): BackupData {
-    try {
-      void this.ensureInitialized().catch(() => {
-        console.warn('Initialization check failed, continuing anyway');
-      });
-      
-      const backupSize = this.backupStorage.size;
-      if (backupSize === 0) {
-        console.log('⚠️ No backups found in storage');
-        const now = new Date();
-        return {
-          id: 'empty',
-          flights: [],
-          date: now.toISOString().split('T')[0],
-          timestamp: now.toISOString(),
-          metadata: {
-            totalFlights: 0,
-            departures: 0,
-            arrivals: 0
-          }
-        };
-      }
+  return backupId;
+}
 
-      const backupEntries: Array<[string, BackupData]> = [];
-      this.backupStorage.forEach((value, key) => {
-        backupEntries.push([key, value]);
-      });
-      
-      backupEntries.sort(([, a], [, b]) => 
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      );
-
-      if (backupEntries.length === 0) {
-        throw new Error('No backup data available after sort');
-      }
-
-      return backupEntries[0][1];
-    } catch (error) {
-      console.error('Error getting latest backup:', error);
-      const now = new Date();
-      return {
-        id: 'error',
-        flights: [],
-        date: now.toISOString().split('T')[0],
-        timestamp: now.toISOString(),
-        metadata: {
-          totalFlights: 0,
-          departures: 0,
-          arrivals: 0
-        }
-      };
-    }
+public async getLatestBackup(): Promise<BackupData> {
+  try {
+    const client = getRedisClient();
+    const raw = await client.get('backup:flights:latest');
+    if (raw) return JSON.parse(raw) as BackupData;
+  } catch (e) {
+    console.error('⚠️ Redis backup read failed:', e);
   }
+
+  const now = new Date();
+  return {
+    id: 'empty',
+    flights: [],
+    date: now.toISOString().split('T')[0],
+    timestamp: now.toISOString(),
+    metadata: { totalFlights: 0, departures: 0, arrivals: 0 },
+  };
+}
 
   /**
    * Get all backups (for dashboard)

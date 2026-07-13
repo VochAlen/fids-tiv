@@ -14,7 +14,7 @@ const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights
 export async function GET() {
   try {
     const backupService = FlightBackupService.getInstance();
-    const latestBackup = backupService.getLatestBackup();
+ const latestBackup = await backupService.getLatestBackup();
     
     // Uvek koristimo backup podatke za statistiku
     const flights = latestBackup.flights || [];

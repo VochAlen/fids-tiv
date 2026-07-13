@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
-import { resetExpiredCheckInOverrides, startAutoResetTimer, stopAutoResetTimer, isTimerRunning } from '@/lib/override-utils';
+import { resetExpiredCheckInOverrides } from '@/lib/override-utils';
+import { getCurrentFlightData } from '@/lib/flight-data-service';
 
 // ============================================================
 // SIGURNOSNA LISTA: Dozvoljava samo ova polja za upis u Redis
@@ -15,50 +16,7 @@ const ALLOWED_FIELDS = [
   'Terminal'
 ];
 
-// ============================================================
-// BASE URL — osigurava da uvijek ima https://
-// ============================================================
-function getBaseUrl(): string {
-  const raw = process.env.NEXT_PUBLIC_BASE_URL || '';
-  if (raw.startsWith('http://') || raw.startsWith('https://')) {
-    return raw.replace(/\/$/, '');
-  }
-  if (raw) {
-    return `https://${raw.replace(/\/$/, '')}`;
-  }
-  return 'http://localhost:3000';
-}
-
-// Helper za parsiranje vremena
-// function parseTimeToMinutes(timeStr: string): number {
-//   if (!timeStr) return 0;
-//   const [hours, minutes] = timeStr.split(':').map(Number);
-//   if (isNaN(hours) || isNaN(minutes)) return 0;
-//   return hours * 60 + minutes;
-// }
-
-// function getCurrentMinutes(): number {
-//   const now = new Date();
-//   return now.getHours() * 60 + now.getMinutes();
-// }
-
-// function shouldAutoResetCheckIn(scheduledTime: string): boolean {
-//   if (!scheduledTime) return false;
-//   const currentMinutes = getCurrentMinutes();
-//   const scheduledMinutes = parseTimeToMinutes(scheduledTime);
-//   const minutesUntilDeparture = scheduledMinutes - currentMinutes;
-//   return minutesUntilDeparture <= 30 && minutesUntilDeparture > -120;
-// }
-
-// BRIŠI OVE 3 FUNKCIJE:
-// function parseTimeToMinutes(...) { ... }
-// function getCurrentMinutes() { ... }
-// function shouldAutoResetCheckIn(...) { ... }
-
-// DODAJ OVE UMJESTO NJIH:
-
 // Vraća Date za HH:MM, SAMO ako nije stariji od 20 sati
-// (sprječava da let od juče dobije TTL za sutra)
 function parseSTDtoDate(timeStr: string): Date | null {
   if (!timeStr) return null;
   const [hours, minutes] = timeStr.split(':').map(Number);
@@ -73,19 +31,15 @@ function parseSTDtoDate(timeStr: string): Date | null {
   const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
 
   if (diffMs > THIRTY_MIN_MS && diffMs < TWENTY_HOURS_MS) {
-    // STD je prošao, ali nije stariji od 20h → let je sutra
     d.setDate(d.getDate() + 1);
   } else if (diffMs >= TWENTY_HOURS_MS) {
-    // Stariji od 20h → let je bio juče ili ranije → odbaci
     console.warn(`[parseSTDtoDate] Zastarjeli STD "${timeStr}" (diff: ${Math.round(diffMs / 3600000)}h) — odbačen`);
     return null;
   }
-  // diffMs <= 0 → STD je u budućnosti → d je ispravan
 
   return d;
 }
 
-// Vraća minute do polaska, ili null ako je STD zastarjeli (let od juče)
 function minutesUntilSTD(timeStr: string): number | null {
   const stdDate = parseSTDtoDate(timeStr);
   if (!stdDate) return null;
@@ -95,42 +49,30 @@ function minutesUntilSTD(timeStr: string): number | null {
 function shouldAutoResetCheckIn(scheduledTime: string): boolean {
   if (!scheduledTime) return false;
   const mins = minutesUntilSTD(scheduledTime);
-  // null = zastarjeli STD → reset; inače reset ako je ≤ 30min
   return mins === null || (mins <= 30 && mins > -120);
 }
 
-async function getFlightScheduledTime(flightNumber: string): Promise<string | null> {
+// ── ZAMJENA za sve self-fetch funkcije ────────────────────────
+// Umjesto HTTP poziva ka /api/flights, direktan poziv iste funkcije
+// koju ta ruta koristi — nema round-trip-a, nema dodatne invokacije.
+async function getFlightScheduleAndStatus(flightNumber: string): Promise<{ scheduledTime: string | null; status: string | null }> {
   try {
-    const response = await fetch(`${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`, {
-      cache: 'no-store',
-      headers: { 'Cache-Control': 'no-cache' }
-    });
-    if (!response.ok) return null;
-    const data = await response.json();
+    const data = await getCurrentFlightData();
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
     const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    return flight?.ScheduledDepartureTime || null;
+    return {
+      scheduledTime: flight?.ScheduledDepartureTime || null,
+      status: flight?.StatusEN || null,
+    };
   } catch (error) {
-    console.error(`Error fetching scheduled time for ${flightNumber}:`, error);
-    return null;
+    console.error(`Error fetching flight data for ${flightNumber}:`, error);
+    return { scheduledTime: null, status: null };
   }
 }
 
-async function getFlightStatus(flightNumber: string): Promise<string | null> {
-  try {
-    const response = await fetch(`${getBaseUrl()}/api/flights?flightNumber=${flightNumber}`, {
-      cache: 'no-store',
-      headers: { 'Cache-Control': 'no-cache' }
-    });
-    if (!response.ok) return null;
-    const data = await response.json();
-    const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
-    const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-    return flight?.StatusEN || null;
-  } catch (error) {
-    console.error(`Error fetching status for ${flightNumber}:`, error);
-    return null;
-  }
+async function getFlightScheduledTime(flightNumber: string): Promise<string | null> {
+  const { scheduledTime } = await getFlightScheduleAndStatus(flightNumber);
+  return scheduledTime;
 }
 
 // ============================================================
@@ -147,22 +89,6 @@ export async function POST(request: Request) {
         success: true,
         resetCount,
         message: `Resetovano ${resetCount} override-ova`
-      });
-    }
-
-    if (body.action === 'startTimer') {
-      startAutoResetTimer();
-      return NextResponse.json({
-        success: true,
-        message: 'Auto-reset timer pokrenut'
-      });
-    }
-
-    if (body.action === 'stopTimer') {
-      stopAutoResetTimer();
-      return NextResponse.json({
-        success: true,
-        message: 'Auto-reset timer zaustavljen'
       });
     }
 
@@ -188,7 +114,7 @@ export async function POST(request: Request) {
 
     // CheckInDesk logika
     if (field === 'CheckInDesk' && action === 'assign') {
-      const scheduledTime = await getFlightScheduledTime(flightNumber);
+      const { scheduledTime, status: flightStatus } = await getFlightScheduleAndStatus(flightNumber);
 
       if (scheduledTime && shouldAutoResetCheckIn(scheduledTime)) {
         return NextResponse.json({
@@ -196,44 +122,29 @@ export async function POST(request: Request) {
         }, { status: 400 });
       }
 
-      const flightStatus = await getFlightStatus(flightNumber);
       const statusLower = (flightStatus || '').toLowerCase();
-
       if (statusLower.includes('departed') || statusLower.includes('poletio')) {
-        return NextResponse.json({
-          message: `Ne možete otvoriti check-in za let ${flightNumber} jer je već poletio`
-        }, { status: 400 });
+        return NextResponse.json({ message: `Ne možete otvoriti check-in za let ${flightNumber} jer je već poletio` }, { status: 400 });
       }
       if (statusLower.includes('cancelled') || statusLower.includes('otkazan')) {
-        return NextResponse.json({
-          message: `Ne možete otvoriti check-in za let ${flightNumber} jer je otkazan`
-        }, { status: 400 });
+        return NextResponse.json({ message: `Ne možete otvoriti check-in za let ${flightNumber} jer je otkazan` }, { status: 400 });
       }
       if (statusLower.includes('diverted') || statusLower.includes('preusmjeren')) {
-        return NextResponse.json({
-          message: `Ne možete otvoriti check-in za let ${flightNumber} jer je preusmjeren`
-        }, { status: 400 });
+        return NextResponse.json({ message: `Ne možete otvoriti check-in za let ${flightNumber} jer je preusmjeren` }, { status: 400 });
       }
     }
 
     // GateNumber logika
     if (field === 'GateNumber' && action === 'assign') {
-      const flightStatus = await getFlightStatus(flightNumber);
+      const { status: flightStatus } = await getFlightScheduleAndStatus(flightNumber);
       const statusLower = (flightStatus || '').toLowerCase();
-
       const isTerminated =
-        statusLower.includes('departed') ||
-        statusLower.includes('poletio') ||
-        statusLower.includes('cancelled') ||
-        statusLower.includes('canceled') ||
-        statusLower.includes('otkazan') ||
-        statusLower.includes('diverted') ||
-        statusLower.includes('preusmjeren');
+        statusLower.includes('departed') || statusLower.includes('poletio') ||
+        statusLower.includes('cancelled') || statusLower.includes('canceled') || statusLower.includes('otkazan') ||
+        statusLower.includes('diverted') || statusLower.includes('preusmjeren');
 
       if (isTerminated) {
-        return NextResponse.json({
-          message: `Ne možete promijeniti Gate za let ${flightNumber} jer je let ${flightStatus}`
-        }, { status: 400 });
+        return NextResponse.json({ message: `Ne možete promijeniti Gate za let ${flightNumber} jer je let ${flightStatus}` }, { status: 400 });
       }
     }
 
@@ -244,30 +155,28 @@ export async function POST(request: Request) {
       const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
       await client.hset(redisKey, { [field]: cleanValue });
 
-      // Dinamički TTL baziran na STD leta
       if (field !== 'Terminal') {
         try {
-          const scheduledTime = await getFlightScheduledTime(flightNumber);
-if (scheduledTime) {
-  const stdDate = parseSTDtoDate(scheduledTime);
-  if (stdDate) {
-    const secondsUntilSTD = Math.floor((stdDate.getTime() - Date.now()) / 1000);
-    const ttl = Math.max(300, secondsUntilSTD + 7200); // STD + 2h, minimum 5min
-    await client.expire(redisKey, ttl);
-    console.log(`[flight-override] ${flightNumber} TTL: ${ttl}s (STD: ${scheduledTime}, istekne: ${new Date(Date.now() + ttl * 1000).toLocaleTimeString()})`);
-  } else {
-    // Zastarjeli STD (let od juče) → kratak TTL, ne prenosimo override
-    await client.expire(redisKey, 300); // 5 minuta, potom Redis sam briše
-    console.warn(`[flight-override] ${flightNumber} zastarjeli STD "${scheduledTime}" — TTL=300s`);
-  }
-} else {
-  await client.expire(redisKey, 21600); // fallback 6h ako STD nije poznat
-}
+          const { scheduledTime } = await getFlightScheduleAndStatus(flightNumber);
+          if (scheduledTime) {
+            const stdDate = parseSTDtoDate(scheduledTime);
+            if (stdDate) {
+              const secondsUntilSTD = Math.floor((stdDate.getTime() - Date.now()) / 1000);
+              const ttl = Math.max(300, secondsUntilSTD + 7200);
+              await client.expire(redisKey, ttl);
+              console.log(`[flight-override] ${flightNumber} TTL: ${ttl}s (STD: ${scheduledTime}, istekne: ${new Date(Date.now() + ttl * 1000).toLocaleTimeString()})`);
+            } else {
+              await client.expire(redisKey, 300);
+              console.warn(`[flight-override] ${flightNumber} zastarjeli STD "${scheduledTime}" — TTL=300s`);
+            }
+          } else {
+            await client.expire(redisKey, 21600);
+          }
         } catch {
-          await client.expire(redisKey, 21600); // fallback pri grešci
+          await client.expire(redisKey, 21600);
         }
       } else {
-        await client.expire(redisKey, 86400); // Terminal traje 24h
+        await client.expire(redisKey, 86400);
       }
 
     } else if (action === 'clear') {
@@ -299,71 +208,83 @@ export async function GET(request: Request) {
   if (action === 'getAllOverrides') {
     try {
       const client = getRedisClient();
-      const keys = await client.keys('override:*');
+
+      const keys: string[] = [];
+      let cursor = '0';
+      do {
+        const [nextCursor, foundKeys] = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
+        cursor = nextCursor;
+        keys.push(...foundKeys);
+      } while (cursor !== '0');
+
       const overrides: Record<string, any> = {};
 
-      // Dohvati letove jednom za sve provjere
-      const baseUrl = getBaseUrl();
-      let allFlights: any[] = [];
-      try {
-        const flightsRes = await fetch(`${baseUrl}/api/flights?nocache=${Date.now()}`, {
-          cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' }
-        });
-        const flightsData = await flightsRes.json();
-        allFlights = [...(flightsData.departures || []), ...(flightsData.arrivals || [])];
-      } catch (e) {
-        console.error('Could not fetch flights for auto-reset check:', e);
-      }
+      if (keys.length > 0) {
+        const pipeline = client.pipeline();
+        keys.forEach(key => pipeline.hgetall(key));
+        const results = await pipeline.exec();
 
-      // const currentMinutes = getCurrentMinutes();
-
-      for (const key of keys) {
-        const flightNumber = key.replace('override:', '');
-        const data = await client.hgetall(key);
-        if (!Object.keys(data).length) continue;
-
-        // Auto-reset CheckInDesk ako je STD - 30min, ali SAMO ako let nije već poletio/otkazan
-        if (data.CheckInDesk !== undefined && allFlights.length > 0) {
-          const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-          if (flight?.ScheduledDepartureTime) {
-const minsUntil = minutesUntilSTD(flight.ScheduledDepartureTime);
-
-const statusLower = (flight.StatusEN || '').toLowerCase();
-const isTerminated =
-  statusLower.includes('departed') || statusLower.includes('poletio') ||
-  statusLower.includes('cancelled') || statusLower.includes('otkazan') ||
-  statusLower.includes('diverted') || statusLower.includes('preusmjeren');
-
-// minsUntil === null znači zastarjeli STD (let od juče) → auto-reset
-if ((minsUntil === null || minsUntil <= 30) && !isTerminated) {
-              await client.hdel(key, 'CheckInDesk');
-              delete data.CheckInDesk;
-              console.log(`Auto-reset CheckInDesk za ${flightNumber} (STD: ${flight.ScheduledDepartureTime})`);
-              const remaining = await client.hlen(key);
-              if (remaining === 0) { await client.del(key); continue; }
-            }
-          }
+        let allFlights: any[] = [];
+        try {
+          const data = await getCurrentFlightData(); // ← direktan poziv, bez fetch-a
+          allFlights = [...(data.departures || []), ...(data.arrivals || [])];
+        } catch (e) {
+          console.error('Could not fetch flights for auto-reset check:', e);
         }
 
-        overrides[flightNumber] = data;
+        const keysToResetCheckIn: string[] = [];
+
+        results?.forEach((result, i) => {
+          const key = keys[i];
+          const data = (result?.[1] as Record<string, string>) || {};
+          if (!Object.keys(data).length) return;
+
+          const flightNumber = key.replace('override:', '');
+
+          if (data.CheckInDesk !== undefined && allFlights.length > 0) {
+            const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
+            if (flight?.ScheduledDepartureTime) {
+              const minsUntil = minutesUntilSTD(flight.ScheduledDepartureTime);
+              const statusLower = (flight.StatusEN || '').toLowerCase();
+              const isTerminated =
+                statusLower.includes('departed') || statusLower.includes('poletio') ||
+                statusLower.includes('cancelled') || statusLower.includes('otkazan') ||
+                statusLower.includes('diverted') || statusLower.includes('preusmjeren');
+
+              if ((minsUntil === null || minsUntil <= 30) && !isTerminated) {
+                keysToResetCheckIn.push(key);
+                delete data.CheckInDesk;
+                console.log(`Auto-reset CheckInDesk za ${flightNumber} (STD: ${flight.ScheduledDepartureTime})`);
+              }
+            }
+          }
+
+          if (Object.keys(data).length > 0) overrides[flightNumber] = data;
+        });
+
+        if (keysToResetCheckIn.length > 0) {
+          const resetPipeline = client.pipeline();
+          keysToResetCheckIn.forEach(key => resetPipeline.hdel(key, 'CheckInDesk'));
+          await resetPipeline.exec();
+
+          const lenPipeline = client.pipeline();
+          keysToResetCheckIn.forEach(key => lenPipeline.hlen(key));
+          const lenResults = await lenPipeline.exec();
+
+          const emptyKeys = keysToResetCheckIn.filter((_, i) => lenResults?.[i]?.[1] === 0);
+          if (emptyKeys.length > 0) {
+            const delPipeline = client.pipeline();
+            emptyKeys.forEach(key => delPipeline.del(key));
+            await delPipeline.exec();
+          }
+        }
       }
-      // Tiho pokreni cleanup u pozadini (ne čeka odgovor)
-    fetch(`${getBaseUrl()}/api/admin/cleanup-overrides`, { method: 'POST' }).catch(() => {});
 
       return NextResponse.json(overrides);
     } catch (error) {
       console.error('Error getting overrides:', error);
       return NextResponse.json({ error: 'Failed to get overrides' }, { status: 500 });
     }
-  }
-
-  if (action === 'timerStatus') {
-    return NextResponse.json({
-      timerRunning: isTimerRunning(),
-      intervalMinutes: 5,
-      thresholdMinutes: 30
-    });
   }
 
   if (action === 'triggerReset') {
