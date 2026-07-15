@@ -208,6 +208,7 @@ const CityImage = memo(function CityImage({
         placeholder="blur"
         blurDataURL={BLUR_DATA_URL}
         decoding="async"
+        unoptimized
       />
       <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
     </div>
@@ -231,7 +232,7 @@ const AdBanner = memo(function AdBanner({
   baImageSrc: string | null;
 }) {
   // BA let — prikaži statičnu sliku umjesto ads
-  if (baImageSrc) {
+if (baImageSrc) {
     return (
       <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
         <div className="relative w-full h-full">
@@ -246,6 +247,7 @@ const AdBanner = memo(function AdBanner({
             placeholder="blur"
             blurDataURL={BLUR_DATA_URL}
             decoding="async"
+            unoptimized        
           />
         </div>
       </div>
@@ -268,6 +270,7 @@ const AdBanner = memo(function AdBanner({
           placeholder="blur"
           blurDataURL={BLUR_DATA_URL}
           decoding="async"
+          unoptimized
         />
       </div>
       <div className={`ad-image ${isTransitioning ? 'active' : 'inactive'}`}>
@@ -281,6 +284,7 @@ const AdBanner = memo(function AdBanner({
           placeholder="blur"
           blurDataURL={BLUR_DATA_URL}
           decoding="async"
+          unoptimized
         />
       </div>
     </div>
@@ -577,6 +581,7 @@ useEffect(() => {
             blurDataURL={BLUR_DATA_URL}
             sizes="100vw"
             decoding="async"
+            unoptimized
           />
           <div className="absolute inset-0 bg-black/50" />
         </div>

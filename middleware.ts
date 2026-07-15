@@ -86,6 +86,6 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
+    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|reklame|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
   ],
-};
+}
