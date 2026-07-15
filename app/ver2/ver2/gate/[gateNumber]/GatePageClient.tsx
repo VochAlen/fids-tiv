@@ -390,7 +390,9 @@ const loadFlights = useCallback(async () => {
   try {
     // ── HASH CHECK — preskoči puni /api/flights fetch ako se ništa
     // nije promijenilo od prošlog poziva (isti princip kao combined/split-board) ──
-    let hashChanged = true;
+let hashChanged = true;
+    let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
+
     try {
       const statusRes = await fetch('/api/flights/status');
       if (statusRes.ok) {
@@ -400,6 +402,12 @@ const loadFlights = useCallback(async () => {
         } else {
           lastKnownHashRef.current = statusData.hash;
         }
+
+        // ── Gate override stiže u ISTOM odgovoru — nema više posebnog poziva ──
+        const entry = statusData.gateEntries?.[gateNumber];
+        gateOverrideFromStatus = entry
+          ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
+          : { status: null, flightNumber: null, classType: null };
       }
     } catch {
       // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
@@ -413,19 +421,27 @@ const loadFlights = useCallback(async () => {
       data = lastFlightsDataRef.current;
     }
 
-    // 1. Override za ovaj gate (uključuje i klasu)
+ // 1. Override za ovaj gate — stigao je već u statusData iznad.
+    // Fallback na stari poziv SAMO ako status ruta nije uspjela (npr. mrežni prekid).
     let overrideStatus: string | null = null;
     let overrideFlightNumber: string | null = null;
     let classType: string | null = null;
-    try {
-      const override = await fetchGateStatusOverride(gateNumber);
-      if (override) {
-        overrideStatus = override.status;
-        overrideFlightNumber = override.flightNumber;
-        classType = override.classType;
+
+    if (gateOverrideFromStatus) {
+      overrideStatus = gateOverrideFromStatus.status;
+      overrideFlightNumber = gateOverrideFromStatus.flightNumber;
+      classType = gateOverrideFromStatus.classType;
+    } else {
+      try {
+        const override = await fetchGateStatusOverride(gateNumber);
+        if (override) {
+          overrideStatus = override.status;
+          overrideFlightNumber = override.flightNumber;
+          classType = override.classType;
+        }
+      } catch (err) {
+        console.error('Override fetch error:', err);
       }
-    } catch (err) {
-      console.error('Override fetch error:', err);
     }
 
     manualGateStatusRef.current = overrideStatus;

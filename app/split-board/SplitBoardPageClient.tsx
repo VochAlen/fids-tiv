@@ -23,7 +23,7 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 60_000;
+const REFRESH_INTERVAL_MS          = 70_000;
 const FETCH_TIMEOUT_MS             = 15_000;
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
@@ -32,7 +32,7 @@ const CACHE_DURATION               = 5 * 60 * 1_000;
 const HEARTBEAT_TIMEOUT_MS         = 120_000;
 const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000;
-const MAX_FLIGHTS_DISPLAY          = 9;
+const MAX_FLIGHTS_DISPLAY          = 18;
 const MAX_FLIGHTS_MEMORY           = 15;
 const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
@@ -189,24 +189,28 @@ const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] =
   });
 };
 
-const fetchAssignments = async (): Promise<{
-  desks: Record<string, string>;
-  gates: Record<string, string>;
-}> => {
-  try {
-    // Koristi već keširanu rutu (in-process keš na serveru) —
-    // isti izvor koji koristi combined/departures board
-    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
-    if (!res.ok) return { desks: {}, gates: {} };
-    const data = await res.json();
-    return {
-      desks: data.desks ?? {},
-      gates: data.gates ?? {},
-    };
-  } catch {
-    return { desks: {}, gates: {} };
-  }
-};
+
+
+// const fetchAssignments = async (): Promise<{
+//   desks: Record<string, string>;
+//   gates: Record<string, string>;
+// }> => {
+//   try {
+//     // Popravljeno: /api/test/stats?type=assignments nikad nije radio —
+//     // ta ruta ne čita query parametar i vraća flight-meta hash, ne
+//     // desk/gate podatke. /api/test/assignments je ispravan izvor,
+//     // čita oba Redis ključa paralelno na backend-u.
+//     const res = await fetchWithTimeout('/api/test/assignments', 5_000);
+//     if (!res.ok) return { desks: {}, gates: {} };
+//     const data = await res.json();
+//     return {
+//       desks: data.desks ?? {},
+//       gates: data.gates ?? {},
+//     };
+//   } catch {
+//     return { desks: {}, gates: {} };
+//   }
+// };
 
 // ============================================================
 // AUTO-STATUS (isti)
@@ -283,8 +287,24 @@ const ClockDisplay = memo(function ClockDisplay() {
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
     tick(); const id = setInterval(tick, 1000); return () => clearInterval(id);
   }, []);
-  if (!mounted) return <div className="text-7xl font-black text-white leading-none">--:--</div>;
-  return <div className="text-7xl font-black text-white drop-shadow-2xl leading-none">{time}</div>;
+  if (!mounted) return <div className="text-5xl font-black text-white leading-none">--:--</div>;
+  return <div className="text-5xl font-black text-white drop-shadow-2xl leading-none">{time}</div>;
+});
+
+// ── NOĆNI SAT — pun ekran, HH:MM, font 72px, žuta boja, po centru ──
+const NightClock = memo(function NightClock() {
+  const [time, setTime] = useState("");
+  useEffect(() => {
+    const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
+    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="h-screen w-full flex items-center justify-center bg-black select-none">
+      <div className="font-black text-yellow-400 drop-shadow-2xl tabular-nums" style={{ fontSize: "72px", lineHeight: 1 }}>
+        {time || "--:--"}
+      </div>
+    </div>
+  );
 });
 
 type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime";
@@ -366,7 +386,6 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime]);
 
   const rowBg = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
-  // Status pill klase sa 1rem fontom
   const pillCls = `w-[95%] flex items-center justify-center gap-2 text-base font-extrabold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
   const mobilePillCls = `flex items-center gap-1 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
 
@@ -407,14 +426,12 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           )}
         </div>
         {isArrival ? (
-          // ARRIVALS: From
           <div className="flex items-center w-[500px]">
             <div className="text-2xl font-black text-white truncate drop-shadow-lg">
               {flight.DestinationCityName || flight.DestinationAirportName}
             </div>
           </div>
         ) : (
-          // DEPARTURES: Destination
           <div className="flex items-center w-[320px]">
             <div className="text-2xl font-black text-white truncate drop-shadow-lg">
               {flight.DestinationCityName || flight.DestinationAirportName}
@@ -422,7 +439,6 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           </div>
         )}
         {isArrival ? (
-          // ARRIVALS: status pill (širi)
           <div className="flex items-center justify-center w-[600px]">
             {pill.hasStatusText ? (
               <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "1.8rem" : "0.75rem", paddingRight: "0.75rem", width: "95%" }}>
@@ -432,7 +448,6 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
             ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
           </div>
         ) : (
-          // DEPARTURES: Check-In + Gate + Status
           <>
             <div className="flex items-center justify-center w-[280px]">
               {flight.CheckInDesk && flight.CheckInDesk !== "-"
@@ -456,12 +471,19 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
         )}
       </div>
 
-      {/* Mobilni prikaz (ispod 1024px) – malo smanjen zbog konzistencije */}
+      {/* Mobilni prikaz (ispod 1024px) */}
       <div className={`flex lg:hidden flex-col gap-1.5 px-3 py-2 border-b border-white/10 ${rowBg}`}>
         <div className="flex items-center gap-2">
-          <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
-            <img src={getFlightawareLogoURL(icao) || PLACEHOLDER_IMAGE} alt="logo" className="object-contain w-full h-full" onError={onImgErr} decoding="async" />
-          </div>
+    <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
+  <img
+    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+    alt="logo"
+    className="object-contain w-full h-full"
+    onError={onImgErr}
+    data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+    decoding="async"
+  />
+</div>
           <span className="text-lg font-black text-white tracking-wide">{flight.FlightNumber}</span>
           {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && <span className="text-[10px] text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>}
           <div className="ml-auto flex items-center gap-1">
@@ -497,7 +519,7 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
 );
 
 // ============================================================
-// GLAVNA KOMPONENTA SPLIT BOARD (nepromijenjena osim fontova)
+// GLAVNA KOMPONENTA SPLIT BOARD
 // ============================================================
 const SECURITY_MESSAGES = [
   { text: "⚠️ DEAR PASSENGERS, PLEASE DO NOT LEAVE YOUR BAGGAGE UNATTENDED AT THE AIRPORT - UNATTENDED BAGGAGE WILL BE CONFISCATED AND DESTROYED •", language: "en" },
@@ -517,12 +539,43 @@ function SplitBoard(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autoStatusTick, setAutoStatusTick] = useState(0);
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
+
+  // ── Noćni režim — kad je true, prikazuje se samo NightClock,
+  // bez ijednog network poziva. Prvi ciklus poslije 04:00 automatski
+  // vraća normalan prikaz — self-healing, isti princip kao hash-check.
+  const [nightMode, setNightMode] = useState(false);
+
   const isMountedRef = useRef(true);
   const lastHeartbeat = useRef(Date.now());
   const prevGatesRef = useRef<Record<string, string>>({});
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const applyAssignmentsOnly = useCallback((
+  deps: Flight[],
+  assignments: { desks: Record<string, string>; gates: Record<string, string> }
+): Flight[] => {
+  return deps.map(f => {
+    const num = f.FlightNumber ?? '';
+    const clone = { ...f };
+
+    const adminDesk = assignments.desks[num];
+    if (adminDesk) (clone as any).CheckInDesk = adminDesk;
+
+    const adminGate = assignments.gates[num];
+    const effectiveGate = adminGate || f.GateNumber || '';
+    if (effectiveGate && effectiveGate !== '-') {
+      const prevGate = prevGatesRef.current[num];
+      if (prevGate && prevGate !== effectiveGate) {
+        (clone as any)._gateChangedAt = Date.now();
+      }
+      clone.GateNumber = effectiveGate;
+      prevGatesRef.current[num] = effectiveGate;
+    }
+
+    return clone;
+  });
+}, []);
   // Auto-status tick
   useEffect(() => {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000);
@@ -567,25 +620,38 @@ function SplitBoard(): JSX.Element {
   // Učitavanje podataka
 const loadData = useCallback(async () => {
   if (!isMountedRef.current) return;
-  
+
   // ── NOĆNI REŽIM ──
+  // Noću (21:00-04:00) ne radimo NIKAKAV network poziv — ni hash-check,
+  // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
+  // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
+  // blok se preskače i nastavlja se normalan tok — self-healing.
   if (isNightHours()) {
-    // Noću ne radimo ništa - čuvamo zadnje stanje
+    if (isMountedRef.current) setNightMode(true);
     setLoading(false);
     return;
   }
-  
+  if (isMountedRef.current) setNightMode(false);
+
   try {
     if (isInitialLoad.current) setLoading(true);
     setErrorMessage(null);
 
     // ── HASH CHECK ──
+    // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moguća
+    // desinhronizacija (stale meta, noćni prelaz i sl.). U tom slučaju
+    // UVIJEK radi pun fetch, da se ekran sam "izliječi".
+const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0;
     let hashChanged = true;
+    let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
+
     try {
       const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
       if (statusRes.ok) {
         const statusData = await statusRes.json();
-        if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
+        statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+
+        if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
           hashChanged = false;
         } else {
           lastKnownHash = statusData.hash;
@@ -596,6 +662,9 @@ const loadData = useCallback(async () => {
     }
 
     if (!hashChanged) {
+      if (statusAssignments) {
+        setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!));
+      }
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       isInitialLoad.current = false;
       setLoading(false);
@@ -620,8 +689,7 @@ const loadData = useCallback(async () => {
     }
     if (!isMountedRef.current || !data) return;
 
-    // ── ADMIN OVERRIDE — desk/gate ručne izmjene sa admin panela ──
-    const assignments = await fetchAssignments();
+const assignments = statusAssignments ?? { desks: {}, gates: {} };
 
     let rawArrivals = filterRecentFlights(data.arrivals || [], true);
     rawArrivals = rawArrivals.slice(0, MAX_FLIGHTS_DISPLAY);
@@ -632,13 +700,11 @@ const loadData = useCallback(async () => {
       const clone = { ...f };
       const num = f.FlightNumber ?? '';
 
-      // Admin override za check-in šalter
       const adminDesk = assignments.desks[num];
       if (adminDesk) {
         (clone as any).CheckInDesk = adminDesk;
       }
 
-      // Admin override za gate — ima prioritet nad podatkom iz /api/flights
       const adminGate = assignments.gates[num];
       const effectiveGate = adminGate || f.GateNumber || '';
       if (effectiveGate && effectiveGate !== '-') {
@@ -665,7 +731,7 @@ const loadData = useCallback(async () => {
     isInitialLoad.current = false;
     if (isMountedRef.current) setLoading(false);
   }
-}, []);
+}, [arrivals.length, departures.length]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -695,6 +761,15 @@ const loadData = useCallback(async () => {
     () => [...departures].sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")),
     [departures]
   );
+
+  // ── NOĆNI PRIKAZ — pun ekran, samo sat, bez kolona/tickera/headera ──
+  if (nightMode) {
+    return (
+      <div className="h-screen bg-black select-none">
+        <NightClock />
+      </div>
+    );
+  }
 
   if (loading && arrivals.length === 0 && departures.length === 0) {
     return (
@@ -780,20 +855,6 @@ const loadData = useCallback(async () => {
           </div>
         </div>
       </div>
-
-      {/* Ticker */}
-      {/* <div className="flex-shrink-0 overflow-hidden bg-black/40 border-t border-white/10 h-10 relative">
-        <div className="ticker-wrap">
-          <div className="ticker-move font-bold text-xs sm:text-sm flex items-center h-full text-white/80">
-            {SECURITY_MESSAGES.map((msg, i) => (
-              <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>
-            ))}
-            {SECURITY_MESSAGES.map((msg, i) => (
-              <span key={`dup-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>
-            ))}
-          </div>
-        </div>
-      </div> */}
 
       {/* Globalni stilovi */}
       <style jsx global>{`

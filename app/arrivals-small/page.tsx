@@ -285,7 +285,7 @@ function ArrivalsSmallBoard(): JSX.Element {
       if (!isMountedRef.current) return; let data: any | null = null; let usedCache = false
       try {
         setLoading(true)
-        try { data = await fetchWithRetry("/api/flights"); if (data && isMountedRef.current) saveToCache(data); } catch { const c = loadFromCache(); if (c) { data = c; usedCache = true; } else throw new Error("No cache"); }
+        try { data = await fetchWithRetry("/api/flights?type=arrivals"); if (data && isMountedRef.current) saveToCache(data); } catch { const c = loadFromCache(); if (c) { data = c; usedCache = true; } else throw new Error("No cache"); }
         if (!isMountedRef.current || !data) return
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY))
       } catch (e) { console.error("Arrivals Small load error:", e); } finally { if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS); } }

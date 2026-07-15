@@ -131,9 +131,12 @@ const AirlineLogo = memo(function AirlineLogo({
   airlineName: string;
   portrait: boolean;
 }) {
-  const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    e.currentTarget.src = '/airlines/placeholder.jpg';
-  }, []);
+const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.fallback === 'true') return; // već smo probali fallback, stop
+  img.dataset.fallback = 'true';
+  img.src = '/airlines/placeholder.avif';
+}, []);
 
   if (!logoUrl) return null;
 
@@ -141,24 +144,25 @@ const AirlineLogo = memo(function AirlineLogo({
     return (
       <div className="relative w-full max-w-[90vw] bg-white rounded-xl shadow-lg mb-3 flex items-center justify-center" style={{ height: 'clamp(120px, 18vh, 280px)' }}>
         <div className="relative w-full h-full">
-          <Image
-            src={logoUrl}
-            alt={airlineName}
-            fill
-            sizes="(max-width: 768px) 90vw, 800px"
-            className="object-contain p-4"
-            priority
-            fetchPriority="high"
-            loading="eager"
-            decoding="async"
-            onError={handleError}
-          />
+ <Image
+  src={logoUrl}
+  alt={airlineName}
+  fill
+  sizes="(max-width: 768px) 90vw, 800px"
+  className="object-contain p-4"
+  priority
+  fetchPriority="high"
+  loading="eager"
+  decoding="async"
+  unoptimized
+  onError={handleError}
+/>
         </div>
       </div>
     );
   }
 
-  return (
+return (
     <div className="w-72 h-36 bg-white rounded-2xl p-3 shadow-lg flex items-center justify-center flex-shrink-0">
       <Image
         src={logoUrl}
@@ -168,6 +172,7 @@ const AirlineLogo = memo(function AirlineLogo({
         className="object-contain w-full h-full"
         priority
         decoding="async"
+        unoptimized
         onError={handleError}
       />
     </div>

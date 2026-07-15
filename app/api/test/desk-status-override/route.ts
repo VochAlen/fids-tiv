@@ -1,5 +1,10 @@
+// app/api/test/desk-status-override/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
+import { getRedisClient, safeRedisGet, safeRedisSet } from '@/lib/redis';
+
+// ── KRITIČNO: garantuje da Next.js ne tretira ovu rutu kao statičku
+// i ne zamrzne odgovor preko svog internog Data Cache-a. ──────────
+export const dynamic = 'force-dynamic';
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
 const ALL_KEY = 'test:desk-status:all';
@@ -18,8 +23,9 @@ type DeskEntry = {
 };
 
 async function readAll(): Promise<Record<string, DeskEntry>> {
-  const client = getRedisClient();
-  const raw = await client.get(ALL_KEY);
+  // ── safeRedisGet umjesto direktnog client.get() — dobija
+  // circuit-breaker zaštitu (15s cooldown nakon pada Redis-a). ──
+  const raw = await safeRedisGet(ALL_KEY);
   if (!raw) return {};
   try {
     return JSON.parse(raw);
@@ -29,8 +35,7 @@ async function readAll(): Promise<Record<string, DeskEntry>> {
 }
 
 async function writeAll(data: Record<string, DeskEntry>): Promise<void> {
-  const client = getRedisClient();
-  await client.set(ALL_KEY, JSON.stringify(data), 'EX', 4 * 60 * 60);
+  await safeRedisSet(ALL_KEY, JSON.stringify(data), 4 * 60 * 60);
 }
 
 async function readAllCached(): Promise<Record<string, DeskEntry>> {
@@ -56,64 +61,47 @@ async function readAllCached(): Promise<Record<string, DeskEntry>> {
 }
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const deskNumber = searchParams.get('deskNumber');
-  const now = Date.now();
+  try {
+    const { searchParams } = new URL(request.url);
+    const deskNumber = searchParams.get('deskNumber');
+    const now = Date.now();
 
-  const all = await readAllCached();
+    const all = await readAllCached();
 
-  let changed = false;
-  for (const key of Object.keys(all)) {
-    const entry = all[key];
-    if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
-      delete all[key];
-      changed = true;
+    let changed = false;
+    for (const key of Object.keys(all)) {
+      const entry = all[key];
+      if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
+        delete all[key];
+        changed = true;
+      }
     }
-  }
-  if (changed) {
-    await writeAll(all);
-    cachedAll = all;
-    cachedAllExpiry = now + CACHE_TTL_MS;
-  }
-
-  // if (deskNumber) {
-  //   const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
-  //   return NextResponse.json(entry, { 
-  //     headers: { 
-  //       // Ranije 'no-store' — svaki poziv sa deskNumber je bypass-ovao CDN keš
-  //       // u potpunosti (objašnjava zašto je hit rate bio 83.9% umjesto ~100%).
-  //       // In-memory keš (readAllCached) već traje 10s, pa je HTTP keš usklađen
-  //       // sa tim prozorom da ne uvodi dodatnu neusklađenost.
-  //       'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=10',
-  //       'X-Cache': cacheRefreshing ? 'stale' : 'fresh', // ← dodatni header za debugging
-  //     } 
-  //   });
-  // }
-
-  // return NextResponse.json(all, {
-  //   headers: { 
-  //     'Cache-Control': 'public, s-maxage=25, stale-while-revalidate=30',
-  //     'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-  //   },
-  // });
-
-  if (deskNumber) {
-  const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
-  return NextResponse.json(entry, {
-    headers: {
- 'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
-      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+    if (changed) {
+      await writeAll(all);
+      cachedAll = all;
+      cachedAllExpiry = now + CACHE_TTL_MS;
     }
-  });
-}
 
-return NextResponse.json(all, {
-  headers: {
-    'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
-    'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-  },
-});
+    if (deskNumber) {
+      const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+      return NextResponse.json(entry, {
+        headers: {
+          'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
+          'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+        }
+      });
+    }
 
+    return NextResponse.json(all, {
+      headers: {
+        'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+        'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+      },
+    });
+  } catch (err) {
+    console.error('[desk-status-override] GET error:', err instanceof Error ? err.message : err);
+    return NextResponse.json({}, { status: 200, headers: { 'Cache-Control': 'no-cache' } });
+  }
 }
 
 export async function POST(request: Request) {

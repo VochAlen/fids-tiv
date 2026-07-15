@@ -1,6 +1,7 @@
 // app/lib/backup/flight-backup-service.ts
 import type { Flight, RawFlightData } from '@/types/flight';
 import { getRedisClient } from '@/lib/redis';
+import { getPodgoricaDateString } from '@/lib/night-hours';
 
 export interface BackupData {
   id: string;
@@ -180,7 +181,8 @@ public async saveBackup(flights: Flight[]): Promise<string> {
   const backupData: BackupData = {
     id: backupId,
     flights: flights.map(f => ({ ...f, IsBackupData: true, BackupTimestamp: timestamp })),
-    date: now.toISOString().split('T')[0],
+    // date: now.toISOString().split('T')[0],
+    date: getPodgoricaDateString(now),
     timestamp,
     metadata: {
       totalFlights: flights.length,
@@ -410,15 +412,21 @@ public async getLatestBackup(): Promise<BackupData> {
   /**
    * Clear all backups (for testing/reset)
    */
-  public clearAllBackups(): number {
-    const backupCount = this.backupStorage.size;
-    this.backupStorage.clear();
-    console.log(`🧹 All ${backupCount} backups cleared`);
-    
-    void this.initialize().catch(error => {
-      console.error('Failed to reinitialize after clear:', error);
-    });
-    
-    return backupCount;
+public async clearAllBackups(): Promise<number> {
+  const backupCount = this.backupStorage.size;
+  this.backupStorage.clear();
+
+  try {
+    const client = getRedisClient();
+    await client.del('backup:flights:latest');   // ← OVO JE NEDOSTAJALO
+  } catch (e) {
+    console.error('Failed to clear Redis backup key:', e);
   }
+
+  void this.initialize().catch(error => {
+    console.error('Failed to reinitialize after clear:', error);
+  });
+
+  return backupCount;
+}
 }

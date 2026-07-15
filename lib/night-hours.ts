@@ -79,6 +79,19 @@ function getMontenegroParts(date: Date): MontenegroParts {
   };
 }
 
+// lib/night-hours.ts — dodaj OVO (ispod postojeće getMontenegroParts funkcije)
+
+// Datum "danas" po lokalnom (Podgorica) vremenu, u YYYY-MM-DD formatu.
+// KORISTITI OVO svuda gdje se poredi "da li je backup od danas" —
+// new Date().toISOString() daje UTC datum, što je pogrešno blizu ponoći
+// (Podgorica je UTC+1/+2, pa lokalni dan počinje ranije nego UTC dan).
+export function getPodgoricaDateString(date: Date = new Date()): string {
+  const p = getMontenegroParts(date);
+  const mm = String(p.month).padStart(2, '0');
+  const dd = String(p.day).padStart(2, '0');
+  return `${p.year}-${mm}-${dd}`;
+}
+
 // Zadnja subota u datom mjesecu (month je 1-12), vraća "kalendarski broj"
 // oblika YYYYMMDD radi lakog poređenja, bez uticaja vremenske zone.
 function lastSaturdayOfMonth(year: number, month: number): number {

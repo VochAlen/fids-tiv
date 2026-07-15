@@ -93,6 +93,7 @@ export interface EnhancedFlight extends Flight {
 
 export interface FlightData {
   departures: Flight[];
+  isNightMode?: boolean;
   arrivals: Flight[];
   lastUpdated: string;
   source?: 'live' | 'cached' | 'fallback' | 'backup' | 'auto-processed' | 'emergency';

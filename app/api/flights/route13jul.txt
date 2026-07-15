@@ -1,0 +1,68 @@
+// app/api/flights/route.ts
+import { NextResponse } from 'next/server';
+import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
+import type { FlightData } from '@/types/flight';
+
+export async function GET(request: Request): Promise<NextResponse> {
+  try {
+    const { searchParams } = new URL(request.url);
+    const type = searchParams.get('type'); // 'departures' | 'arrivals' | null
+
+    const data = await getCurrentFlightDataSafe();
+
+    // ── Filtriranje po smjeru — SAMO za payload koji ide klijentu.
+    // Keš u Redisu i hash u saveFlightDataAndMetadata() i dalje rade
+    // nad punim setom, ovo je čisto view-layer optimizacija. ──────
+    const responseData: FlightData =
+      type === 'departures'
+        ? { ...data, arrivals: [] }
+        : type === 'arrivals'
+        ? { ...data, departures: [] }
+        : data;
+
+    const isCritical = data.error === 'All data sources unavailable.';
+    const isEmergency = data.source === 'emergency' && !isCritical;
+    const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
+
+    const cacheControl = isCritical
+      ? 'no-cache, no-store, must-revalidate'
+      : isEmergency
+        ? 'public, max-age=20, s-maxage=30, stale-while-revalidate=60'
+        : isBackupLike
+          ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
+          : 'public, max-age=60, s-maxage=240, stale-while-revalidate=360';
+
+    const headers: Record<string, string> = {
+      'Cache-Control': cacheControl,
+      'X-Data-Source': data.source ?? 'unknown',
+      'X-Total-Flights': data.totalFlights.toString(),
+    };
+    if (responseData.departures) headers['X-Departures'] = responseData.departures.length.toString();
+    if (responseData.arrivals) headers['X-Arrivals'] = responseData.arrivals.length.toString();
+    if (data.isOfflineMode) headers['X-Offline-Mode'] = 'true';
+    if (type) headers['X-Filtered-By'] = type;
+
+    return NextResponse.json(responseData, {
+      status: 200,
+      headers,
+    });
+  } catch (err) {
+    console.error('[api/flights] Unhandled error:', err instanceof Error ? err.message : err);
+
+    return NextResponse.json(
+      {
+        departures: [],
+        arrivals: [],
+        totalFlights: 0,
+        lastUpdated: new Date().toISOString(),
+        source: 'emergency',
+        isOfflineMode: true,
+        error: 'Route handler caught unexpected error.',
+      },
+      {
+        status: 200,
+        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
+      }
+    );
+  }
+}

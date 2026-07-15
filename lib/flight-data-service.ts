@@ -10,11 +10,18 @@ import {
   filterTodayFlights
 } from '@/lib/flight-api-helpers';
 
+import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
+
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
 // const FLIGHT_CACHE_TTL_SECONDS = 180;
 const FLIGHT_CACHE_TTL_SECONDS = 240;
 const FLIGHT_META_KEY = 'cache:flights:meta';
+
+// ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
+// Promijeni na false da potpuno isključiš korišćenje backup podataka
+// (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
+const BACKUP_ENABLED = false;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
@@ -160,14 +167,17 @@ async function getFlightDataFromCache(): Promise<FlightData | null> {
   return null;
 }
 
-async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): Promise<void> {
+async function saveFlightDataAndMetadata(
+  slimmed: FlightData,
+  source: string,
+  ttlSeconds: number = FLIGHT_CACHE_TTL_SECONDS
+): Promise<void> {
   try {
     const client = getRedisClient();
+
     const hash = Buffer.from(JSON.stringify({
-      dCount: slimmed.departures.length,
-      aCount: slimmed.arrivals.length,
-      source,
-      timestamp: new Date().toISOString(),
+      d: slimmed.departures.map(f => `${f.FlightNumber}|${f.GateNumber}|${f.CheckInDesk}|${f.StatusEN}|${f.EstimatedDepartureTime}`),
+      a: slimmed.arrivals.map(f => `${f.FlightNumber}|${f.GateNumber}|${f.StatusEN}`),
     })).toString('base64').substring(0, 32);
 
     const meta = {
@@ -178,8 +188,8 @@ async function saveFlightDataAndMetadata(slimmed: FlightData, source: string): P
     };
 
     const pipeline = client.pipeline();
-    pipeline.setex(FLIGHT_CACHE_KEY, FLIGHT_CACHE_TTL_SECONDS, JSON.stringify(slimmed));
-    pipeline.setex(FLIGHT_META_KEY, 60, JSON.stringify(meta));
+    pipeline.setex(FLIGHT_CACHE_KEY, ttlSeconds, JSON.stringify(slimmed));
+    pipeline.setex(FLIGHT_META_KEY, ttlSeconds, JSON.stringify(meta));
     await pipeline.exec();
   } catch (e) {
     console.warn('⚠️ Failed to save flight data/metadata:', e);
@@ -362,7 +372,7 @@ async function buildFlightData(
   rawFlights: Flight[],
   source: 'live' | 'backup' | 'auto-processed' | 'emergency',
   lastUpdated: string,
-  options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number }
+  options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number; isNightMode?: boolean }
 ): Promise<FlightData> {
   const departures = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'departure'));
   let arrivals = sortFlightsByTime(rawFlights.filter(f => f.FlightType === 'arrival'));
@@ -376,6 +386,7 @@ async function buildFlightData(
     source,
     totalFlights: departures.length + arrivals.length,
     isOfflineMode: options?.isOfflineMode ?? false,
+    isNightMode: options?.isNightMode ?? false,   // ← NOVO
     ...(options?.warning && { warning: options.warning }),
     ...(options?.backupTimestamp && { backupTimestamp: options.backupTimestamp }),
     ...(options?.autoProcessedCount !== undefined && { autoProcessedCount: options.autoProcessedCount }),
@@ -385,16 +396,59 @@ async function buildFlightData(
 // ── GLAVNA FUNKCIJA — pozivaju je i /api/flights ruta i cleanup-overrides cron,
 // direktno, bez HTTP self-fetch-a ──────────────────────────────────────────
 export async function getCurrentFlightData(): Promise<FlightData> {
+ const nightNow = isNightHours();   // ← izračunaj JEDNOM, koristi svuda ispod
   // ── 1. PROVJERI CACHE PRVO (in-process → Redis) ──────────
   const cached = await getFlightDataFromCache();
   if (cached) {
-    return cached;
+    // ── JUTARNJI PRELAZ: ako je keširan podatak markiran kao NOĆNI,
+    // a sada VIŠE nije noć — odbaci ga i uradi svjež live fetch.
+    // Sprečava da se ujutro (npr. 04:00–04:30) i dalje prikazuje stari
+    // prazan/noćni cache dok mu TTL (do 1h) sam ne istekne.
+    if (!(cached.isNightMode && !nightNow)) {
+      return cached;
+    }
+    console.log('🌅 Prelazak iz noći u dan — odbacujem stari noćni cache, radim svjež live fetch');
+    // ne vraćamo cached — nastavljamo dolje na svjež fetch
   }
 
   // ── 2. REDIS CLEANUP (background, ne blokira) ─────────────
   runRedisCleanupIfNeeded().catch(() => {});
 
   const backupService = FlightBackupService.getInstance();
+
+// ── 2.5 NOĆNA PAUZA — probaj live fetch najviše 1x na sat, inače koristi zadnji keširan live rezultat ──
+const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
+const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
+
+if (isNightHours()) {
+  const client = getRedisClient();
+  const nightFetchGateKey = 'night:fetch:gate';
+
+  // Atomic: uspije samo ako ključ ne postoji (znači nije fetch-ovano u zadnjih 1h)
+  const canFetchNow = await client.set(nightFetchGateKey, '1', 'EX', NIGHT_FETCH_INTERVAL_SECONDS, 'NX');
+
+if (!canFetchNow) {
+    // Već smo probali live fetch ovog sata — ne gađaj API ponovo.
+    // Cache je ovdje garantovano prazan (inače bi već bio vraćen u koraku 1),
+    // pa ne pravimo dodatni Redis poziv — direktno vraćamo prazan noćni odgovor.
+    console.log('🌙 Noćni period — live fetch već probavan u zadnjih 1h, nema keširanih podataka');
+
+    return {
+      departures: [],
+      arrivals: [],
+      lastUpdated: new Date().toISOString(),
+      source: 'emergency',
+      isOfflineMode: true,
+      isNightMode: nightNow,
+      totalFlights: 0,
+      warning: 'Aerodrom trenutno ne radi (noćna pauza). Nema keširanih live podataka.',
+    };
+  }
+
+  // canFetchNow === 'OK' → dozvoljeno, probaj live fetch ovog sata.
+  // Ne vraćamo se ovdje — nastavljamo dolje na korak 3 (live fetch) kao inače.
+  console.log('🌙 Noćni period — probam live fetch (dozvoljeno 1x/h)');
+}
 
   // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
   try {
@@ -424,18 +478,49 @@ export async function getCurrentFlightData(): Promise<FlightData> {
       }
     });
 
-    const finalFlights = removeDuplicateFlights(expandedFlights);
+const finalFlights = removeDuplicateFlights(expandedFlights);
 
-try {
-      await backupService.saveBackup(finalFlights);
-    } catch (e) {
-      console.error('⚠️ Backup save failed:', e);
-    }
+// ── BACKUP_ENABLED je false, čitanje backupa se nikad ne dešava —
+// pisanje isključeno da se ne troši Redis uzalud (write + storage
+// trošak za podatke koji se nikad ne čitaju). Vrati blok ako se
+// BACKUP_ENABLED ponovo aktivira.
+// if (finalFlights.length > 0) {
+//   try {
+//     await backupService.saveBackup(finalFlights);
+//   } catch (e) {
+//     console.error('⚠️ Backup save failed:', e);
+//   }
+// } else {
+//   console.warn('⚠️ Live vratio 0 letova — preskačem backup save da ne pregazim dobar backup');
+// }
+// isto u lib/flight-data-service.ts — unutar step 3, blok "finalFlights.length === 0":
 
-    const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString());
+if (finalFlights.length === 0 && BACKUP_ENABLED) {
+  const existingBackup = await backupService.getLatestBackup();
+  
+  const todayPodgorica = getPodgoricaDateString();
+
+  if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica) {
+    const bd = await buildFlightData(existingBackup.flights, 'backup', existingBackup.timestamp, {
+      isOfflineMode: true,
+      backupTimestamp: existingBackup.timestamp,
+      warning: 'Nema aktivnih letova (noćna pauza ili API pauza). Prikazan zadnji poznati raspored.',
+    });
+    const slimmed = slimFlightData(bd);
+    await saveFlightDataAndMetadata(slimmed, 'backup');
+    return slimmed;
+  } else if (existingBackup.flights.length > 0) {
+    // backup postoji, ali NIJE od danas — ne smijemo ga tiho prikazati
+    // kao da je današnji raspored. Radije padamo dalje na BACKUP MODE / emergency,
+    // koji će sami odlučiti (i tamo je ista provjera ispravljena ispod).
+    console.warn(`⚠️ Live vratio 0 letova, backup postoji ali je od ${existingBackup.date} (ne od danas ${todayPodgorica}) — preskačem ga`);
+  }
+}
+
+const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow });
     const slimmed = slimFlightData(flightData);
 
-    await saveFlightDataAndMetadata(slimmed, 'live');
+ await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
@@ -445,39 +530,64 @@ try {
     console.error('❌ Live API failed:', liveError instanceof Error ? liveError.message : liveError);
   }
 
-  // ── 4. BACKUP MODE ────────────────────────────────────────
- try {
-    const latestBackup = await backupService.getLatestBackup();
+// ── 4. BACKUP MODE ────────────────────────────────────────
 
-    if (latestBackup.flights.length > 0) {
-      console.log(`🔄 Using backup: ${latestBackup.flights.length} flights from ${latestBackup.timestamp}`);
-
-      const processor = new FlightAutoProcessor(latestBackup.flights);
-      const processedFlights = processor.processFlights();
-      const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
-      const autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
-      const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
-
-      const flightData = await buildFlightData(
-        simulatedFlights,
-        source,
-        latestBackup.timestamp,
-        {
-          isOfflineMode: true,
-          backupTimestamp: latestBackup.timestamp,
-          autoProcessedCount,
-          warning: 'Using backup data. Live API temporarily unavailable.',
-        }
-      );
-
-      const slimmed = slimFlightData(flightData);
-      await saveFlightDataAndMetadata(slimmed, source);
-
-      return slimmed;
-    }
-  } catch (backupError) {
-    console.error('❌ Backup system failed:', backupError instanceof Error ? backupError.message : backupError);
+try {
+  if (!BACKUP_ENABLED) {
+    return {
+      departures: [],
+      arrivals: [],
+      totalFlights: 0,
+      lastUpdated: new Date().toISOString(),
+      source: 'emergency',
+      isOfflineMode: true,
+      warning: 'Live API nedostupan. Backup je isključen — nema podataka za prikaz.',
+    };
   }
+  const latestBackup = await backupService.getLatestBackup();
+  const today = getPodgoricaDateString(); // ← bilo: new Date().toISOString().split('T')[0]
+
+  if (latestBackup.flights.length > 0 && latestBackup.date === today) {
+    console.log(`🔄 Using backup: ${latestBackup.flights.length} flights from today (${latestBackup.timestamp})`);
+
+    const processor = new FlightAutoProcessor(latestBackup.flights);
+    const processedFlights = processor.processFlights();
+    const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
+    const autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
+    const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
+
+const flightData = await buildFlightData(
+  simulatedFlights,
+  source,
+  latestBackup.timestamp,
+  {
+    isOfflineMode: true,
+    isNightMode: nightNow,   // ← DODATO
+    backupTimestamp: latestBackup.timestamp,
+    autoProcessedCount,
+    warning: 'Using backup data. Live API temporarily unavailable.',
+  }
+);
+
+    const slimmed = slimFlightData(flightData);
+    await saveFlightDataAndMetadata(slimmed, source);
+    return slimmed;
+  } else {
+    // Backup je star ili prazan – vrati prazan odgovor
+    console.warn('⚠️ Backup is from a previous day or empty – returning no-data state');
+    return {
+      departures: [],
+      arrivals: [],
+      totalFlights: 0,
+      lastUpdated: new Date().toISOString(),
+      source: 'emergency',  // ← ispravljeno
+      isOfflineMode: true,
+      warning: 'Trenutno nema dostupnih podataka o letovima. Molimo pokušajte ponovo za nekoliko minuta.',
+    };
+  }
+} catch (backupError) {
+  console.error('❌ Backup system failed:', backupError instanceof Error ? backupError.message : backupError);
+}
 
   // ── 5. EMERGENCY FETCH ────────────────────────────────────
   const emergencyFlights = await performEmergencyFetch();
@@ -487,12 +597,12 @@ try {
     const processor = new FlightAutoProcessor(emergencyFlights);
     const processedFlights = processor.processFlights();
 
-    const flightData = await buildFlightData(
-      processedFlights,
-      'emergency',
-      new Date().toISOString(),
-      { isOfflineMode: true, warning: 'Emergency mode: Using directly fetched data.' }
-    );
+const flightData = await buildFlightData(
+  processedFlights,
+  'emergency',
+  new Date().toISOString(),
+  { isOfflineMode: true, isNightMode: nightNow, warning: 'Emergency mode: Using directly fetched data.' }
+);
 
     const slimmed = slimFlightData(flightData);
     await saveFlightDataAndMetadata(slimmed, 'emergency');

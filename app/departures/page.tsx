@@ -56,7 +56,7 @@ const SECURITY_MESSAGES = [
   { text: '📶 BESPLATAN WIFI: Mreža: "One Crna Gora" | Bez lozinke | Povežite se na One Crna Gora •', language: 'cnr' },
 ];
 
-// ============================================================
+/// ============================================================
 // ERROR BOUNDARY
 // ============================================================
 interface ErrorBoundaryState { hasError: boolean; errorMessage: string }
@@ -89,7 +89,6 @@ class FlightBoardErrorBoundary extends Component<
     return this.props.children;
   }
 }
-
 // ============================================================
 // HELPER FUNKCIJE
 // ============================================================
@@ -205,24 +204,25 @@ const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_
   throw last || new Error('All retries failed');
 };
 
-const fetchAssignments = async (): Promise<{
-  desks: Record<string, string>;
-  gates: Record<string, string>;
-}> => {
-  try {
-    // Jedan poziv umjesto dva, 20s keš umjesto 5s — endpoint već postoji
-    // i radi tačno ovaj posao (vidi stats/route.ts, type=assignments)
-    const res = await fetchWithTimeout('/api/test/stats?type=assignments', 5_000);
-    if (!res.ok) return { desks: {}, gates: {} };
-    const data = await res.json();
-    return {
-      desks: data.desks ?? {},
-      gates: data.gates ?? {},
-    };
-  } catch {
-    return { desks: {}, gates: {} };
-  }
-};
+// const fetchAssignments = async (): Promise<{
+//   desks: Record<string, string>;
+//   gates: Record<string, string>;
+// }> => {
+//   try {
+//     // Popravljeno: /api/test/stats?type=assignments nikad nije radio —
+//     // ta ruta ne čita query parametar i vraća flight-meta hash, ne
+//     // desk/gate podatke. /api/test/assignments je ispravan izvor.
+//     const res = await fetchWithTimeout('/api/test/assignments', 5_000);
+//     if (!res.ok) return { desks: {}, gates: {} };
+//     const data = await res.json();
+//     return {
+//       desks: data.desks ?? {},
+//       gates: data.gates ?? {},
+//     };
+//   } catch {
+//     return { desks: {}, gates: {} };
+//   }
+// };
 
 const checkStatus = {
   isDelayed:    (f: Flight) => /(delay|kasni)/i.test(f.StatusEN ?? ''),
@@ -286,6 +286,22 @@ const ClockDisplay = memo(function ClockDisplay() {
   }, []);
   if (!mounted) return <div className="text-[3rem] sm:text-[7rem] font-black text-white leading-none">--:--</div>;
   return <div className="text-[3rem] sm:text-[7rem] font-black text-white drop-shadow-2xl leading-none">{time}</div>;
+});
+
+// ── NOĆNI SAT — pun ekran, HH:MM, font 72px, žuta boja, po centru ──
+const NightClock = memo(function NightClock() {
+  const [time, setTime] = useState('');
+  useEffect(() => {
+    const tick = () => setTime(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
+    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="h-screen w-full flex items-center justify-center bg-black select-none">
+      <div className="font-black text-yellow-400 drop-shadow-2xl tabular-nums" style={{ fontSize: '72px', lineHeight: 1 }}>
+        {time || '--:--'}
+      </div>
+    </div>
+  );
 });
 
 // ============================================================
@@ -511,10 +527,17 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
         <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}>
           {/* Red 1: Logo + broj leta | Scheduled → Estimated */}
           <div className="flex items-center gap-2.5">
-            <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
-              <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full" onError={onImgErr} decoding="async" />
-            </div>
+     {/* Red 1: Logo + broj leta */}
+<div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
+  <img
+    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+    alt={`${flight.AirlineName} logo`}
+    className="object-contain w-full h-full"
+    onError={onImgErr}
+    data-fallback={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+    decoding="async"
+  />
+</div>
             <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
               <span className="text-xs text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>
@@ -598,6 +621,12 @@ function DeparturesBoard(): JSX.Element {
   const [isRecovering,   setIsRecovering]   = useState<boolean>(false);
   const [autoStatusTick, setAutoStatusTick] = useState<number>(0);
   const [pageIndex, setPageIndex] = useState(0);
+
+  // ── Noćni režim — kad je true, prikazuje se samo NightClock,
+  // bez ijednog network poziva (/api/flights, /api/flights/status,
+  // fetchAssignments). Prvi ciklus poslije 04:00 automatski vraća
+  // normalan prikaz — self-healing, isti princip kao hash-check.
+  const [nightMode, setNightMode] = useState(false);
 
   const isMountedRef  = useRef(true);
   const prevGatesRef  = useRef<Record<string, string>>({});
@@ -700,7 +729,32 @@ useEffect(() => {
     });
   }, []);
 
-// Data loading
+  const applyAssignmentsOnly = useCallback((
+  deps: Flight[],
+  assignments: { desks: Record<string, string>; gates: Record<string, string> }
+): Flight[] => {
+  return deps.map(f => {
+    const num = f.FlightNumber ?? '';
+    const clone = { ...f };
+
+    const adminDesk = assignments.desks[num];
+    if (adminDesk) (clone as any).CheckInDesk = adminDesk;
+
+    const adminGate = assignments.gates[num];
+    const effectiveGate = adminGate || f.GateNumber || '';
+    if (effectiveGate && effectiveGate !== '-') {
+      const prevGate = prevGatesRef.current[num];
+      if (prevGate && prevGate !== effectiveGate) {
+        (clone as any)._gateChangedAt = Date.now();
+      }
+      (clone as any).GateNumber = effectiveGate;
+      prevGatesRef.current[num] = effectiveGate;
+    }
+
+    return clone;
+  });
+}, []);
+
 // Data loading
 useEffect(() => {
   isMountedRef.current = true;
@@ -710,13 +764,17 @@ useEffect(() => {
     if (!isMountedRef.current) return;
     
     // ── NOĆNI REŽIM ──
+    // Noću (21:00-04:00) ne radimo NIKAKAV network poziv — ni hash-check,
+    // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
+    // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
+    // blok se preskače i nastavlja se normalan tok — self-healing.
     if (isNightHours()) {
-      // Noću ne radimo ništa - čuvamo zadnje stanje
+      if (isMountedRef.current) setNightMode(true);
       setLoading(false);
-      // Zakaži sljedeći ciklus (i dalje će provjeravati da li je noć)
       tid = setTimeout(load, REFRESH_INTERVAL_MS);
       return;
     }
+    if (isMountedRef.current) setNightMode(false);
     
     let data: any = null;
     let usedCache = false;
@@ -725,19 +783,22 @@ useEffect(() => {
       setErrorMessage(null);
       
       // ── HASH CHECK ──
-      let hashChanged = true; // default: pretpostavi da se promijenilo
+      // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moguća
+      // desinhronizacija (stale meta, noćni prelaz i sl.). U tom slučaju
+      // UVIJEK radi pun fetch, da se ekran sam "izliječi".
+  const boardIsCurrentlyEmpty = flights.length === 0;
+      let hashChanged = true;
+      let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
+
+      // ── Status ruta se sad zove UVIJEK — nosi hash i dodjele u istom odgovoru ──
       try {
         const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
         if (statusRes.ok) {
           const statusData = await statusRes.json();
-          if (statusData.hash === lastKnownHash && lastKnownHash !== null) {
-            // Nema promjena — ne vuci pun payload
+          statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+
+          if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
             hashChanged = false;
-            setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-            isInitialLoad.current = false;
-            setLoading(false);
-            tid = setTimeout(load, REFRESH_INTERVAL_MS);
-            return;
           }
           lastKnownHash = statusData.hash;
         }
@@ -745,28 +806,35 @@ useEffect(() => {
         // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
       }
 
-      // ── PUN FETCH (samo ako se hash promijenio ili status check nije uspio) ──
-      if (hashChanged) {
-        try {
-          data = await fetchWithRetry('/api/flights');
-          if (data && isMountedRef.current) saveToCache({ departures: data.departures });
-        } catch (fe) {
-          setErrorMessage('Network error. Using cached data.');
-          const c = loadFromCache();
-          if (c) { data = c; usedCache = true; } else throw fe;
+      if (!hashChanged) {
+        // Hash letova nepromijenjen, ali dodjele šaltera/gate-ova mogu biti — primijeni ih
+        if (statusAssignments) {
+          setFlights(prev => applyAssignmentsOnly(prev, statusAssignments!));
         }
+        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+        isInitialLoad.current = false;
+        setLoading(false);
+        tid = setTimeout(load, REFRESH_INTERVAL_MS);
+        return;
       }
-      
+
+      // ── PUN FETCH ──
+      try {
+        data = await fetchWithRetry('/api/flights?type=departures');
+        if (data && isMountedRef.current) saveToCache({ departures: data.departures });
+      } catch (fe) {
+        setErrorMessage('Network error. Using cached data.');
+        const c = loadFromCache();
+        if (c) { data = c; usedCache = true; } else throw fe;
+      }
+
       if (!isMountedRef.current || !data) return;
-      
-      const rawDepartures = getUniqueDeparturesWithDeparted(
+
+    const rawDepartures = getUniqueDeparturesWithDeparted(
         filterRecentDepartures(data.departures)
       );
-      
-      const assignments = await fetchAssignments().catch(() => ({
-        desks: {} as Record<string, string>,
-        gates: {} as Record<string, string>,
-      }));
+
+      const assignments = statusAssignments ?? { desks: {}, gates: {} };
 
       const departuresWithMeta = rawDepartures.map(f => {
         const clone = { ...f };
@@ -840,6 +908,19 @@ const sortedFlights = useMemo(() => {
     { label: 'Gate',        width: '180px', icon: DoorOpen      },
     { label: 'Status',      width: '420px', icon: Info          },
   ], [DepartureIcon]);
+
+  // ── NOĆNI PRIKAZ — pun ekran, samo sat, bez tabele/tickera/headera ──
+  if (nightMode) {
+    return (
+      <div
+        className="h-screen bg-black select-none"
+        onDragOver={e => e.preventDefault()}
+        onDrop={e => e.preventDefault()}
+      >
+        <NightClock />
+      </div>
+    );
+  }
 
   return (
     <div

@@ -711,65 +711,63 @@ const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> =>
     finally { setLoadingFlights(false); }
   }, [fetchFlightsData]);
 
-  const fetchCheckinAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res = await fetch(`${API_PREFIX}/desk-status-override`);
-      if (!res.ok) return {};
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [deskNumber, value] of Object.entries(data)) {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId:      deskNumber,
-            flightNumber:    parsed.flightNumber as string,
-            airlineName:     flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime:   flight?.ScheduledDepartureTime || '',
-            assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-            classType:       (parsed.classType as ClassType) ?? null,
-          });
-        }
-      }
-      setCheckinAssignments(list);
-      return data;
-    } catch (err) { console.error(err); return {}; }
-  }, []);
+const fetchAllAssignments = useCallback(async (currentFlights: Flight[]) => {
+  try {
+    const res = await fetch('/api/test/assignments');
+    if (!res.ok) return { deskEntries: {}, gateEntries: {} };
+    const data = await res.json();
 
-  const fetchGateAssignments = useCallback(async (currentFlights: Flight[]) => {
-    try {
-      const res = await fetch(`${API_PREFIX}/gate-status-override`);
-      if (!res.ok) return {};
-      const data = await res.json();
-      const list: Assignment[] = [];
-      for (const [gateNumber, value] of Object.entries(data)) {
-        const parsed = typeof value === 'string' ? JSON.parse(value) : value as Record<string, unknown>;
-        if (parsed.flightNumber && parsed.status === 'open') {
-          const flight = currentFlights.find(f => f.FlightNumber === parsed.flightNumber);
-          list.push({
-            resourceId:      gateNumber,
-            flightNumber:    parsed.flightNumber as string,
-            airlineName:     flight?.AirlineName || '',
-            destinationCity: flight?.DestinationCityName || '',
-            scheduledTime:   flight?.ScheduledDepartureTime || '',
-            assignedAt:      parsed.setAt ? new Date(parsed.setAt as string).toLocaleTimeString() : 'unknown',
-            classType:       (parsed.classType as ClassType) ?? null,
-          });
-        }
-      }
-      setGateAssignments(list);
-      return data;
-    } catch (err) { console.error(err); return {}; }
-  }, []);
+    const parseAssignedAt = (setAt: unknown): string => {
+      if (!setAt) return 'unknown';
+      const n = Number(setAt);
+      const d = new Date(!isNaN(n) && n > 0 ? n : (setAt as string));
+      return isNaN(d.getTime()) ? 'unknown' : d.toLocaleTimeString();
+    };
 
-  const refreshAll = useCallback(async (currentFlights: Flight[]) => {
-    const [deskData, gateData] = await Promise.all([
-      fetchCheckinAssignments(currentFlights),
-      fetchGateAssignments(currentFlights),
-    ]);
-    return { deskData, gateData };
-  }, [fetchCheckinAssignments, fetchGateAssignments]);
+    const deskList: Assignment[] = [];
+    for (const [deskNumber, entry] of Object.entries<any>(data.deskEntries ?? {})) {
+      if (entry?.flightNumber && entry.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
+        deskList.push({
+          resourceId: deskNumber,
+          flightNumber: entry.flightNumber,
+          airlineName: flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime: flight?.ScheduledDepartureTime || '',
+          assignedAt: parseAssignedAt(entry.setAt),
+          classType: (entry.classType as ClassType) ?? null,
+        });
+      }
+    }
+
+    const gateList: Assignment[] = [];
+    for (const [gateNumber, entry] of Object.entries<any>(data.gateEntries ?? {})) {
+      if (entry?.flightNumber && entry.status === 'open') {
+        const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
+        gateList.push({
+          resourceId: gateNumber,
+          flightNumber: entry.flightNumber,
+          airlineName: flight?.AirlineName || '',
+          destinationCity: flight?.DestinationCityName || '',
+          scheduledTime: flight?.ScheduledDepartureTime || '',
+          assignedAt: parseAssignedAt(entry.setAt),
+          classType: (entry.classType as ClassType) ?? null,
+        });
+      }
+    }
+
+    setCheckinAssignments(deskList);
+    setGateAssignments(gateList);
+    return data;
+  } catch (err) {
+    console.error(err);
+    return { deskEntries: {}, gateEntries: {} };
+  }
+}, []);
+
+const refreshAll = useCallback(async (currentFlights: Flight[]) => {
+  return fetchAllAssignments(currentFlights);
+}, [fetchAllAssignments]);
 
   // checkForChanges funkcija - proverava da li ima promena pre refresha
   const checkForChanges = useCallback(async () => {
