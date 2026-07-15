@@ -1,9 +1,8 @@
 // app/api/test/gate-status-override/route.ts
 import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { createHash } from 'crypto'; // ← DODANO
 
-// ── KRITIČNO: garantuje da Next.js ne tretira ovu rutu kao statičku
-// i ne zamrzne odgovor preko svog internog Data Cache-a. ──────────
 export const dynamic = 'force-dynamic';
 
 const MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 sati
@@ -13,8 +12,8 @@ const ALL_KEY = 'test:gate-status:all';
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, GateEntry> | null = null;
 let cachedAllExpiry = 0;
-let cacheRefreshing = false; // ← sprečava duple refresh-e
-const CACHE_TTL_MS = 10_000; // 10s
+let cacheRefreshing = false;
+const CACHE_TTL_MS = 30_000; // ← povećano sa 10s na 30s
 
 type GateEntry = {
   status: 'open' | 'closed' | null;
@@ -24,8 +23,6 @@ type GateEntry = {
 };
 
 async function readAll(): Promise<Record<string, GateEntry>> {
-  // ── safeRedisGet umjesto direktnog client.get() — dobija
-  // circuit-breaker zaštitu (15s cooldown nakon pada Redis-a). ──
   const raw = await safeRedisGet(ALL_KEY);
   if (!raw) return {};
   try {
@@ -39,21 +36,17 @@ async function writeAll(data: Record<string, GateEntry>): Promise<void> {
   await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
 }
 
-// ── readAllCached sa zaštitom od duplih refresh-ova ──
 async function readAllCached(): Promise<Record<string, GateEntry>> {
   const now = Date.now();
 
-  // 1. Ako keš važi → vrati ga odmah
   if (cachedAll && now < cachedAllExpiry) {
     return cachedAll;
   }
 
-  // 2. Ako keš ne važi, ali se već osvežava → vrati staru verziju (stale)
   if (cacheRefreshing && cachedAll) {
     return cachedAll;
   }
 
-  // 3. Osveži keš (samo jedan zahtev će ući ovde)
   cacheRefreshing = true;
   try {
     const fresh = await readAll();
@@ -73,7 +66,7 @@ export async function GET(request: Request) {
 
     const all = await readAllCached();
 
-    // Očisti stare zapise u memoriji
+    // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
     let cleanedCount = 0;
     for (const key of Object.keys(all)) {
@@ -86,28 +79,46 @@ export async function GET(request: Request) {
     }
     if (changed) {
       await writeAll(all);
-      // Ažuriraj keš nakon čišćenja
       cachedAll = all;
       cachedAllExpiry = now + CACHE_TTL_MS;
       console.log(`[gate-cleanup] Total cleaned: ${cleanedCount} old gate-status keys`);
     }
 
-    if (gateNumber) {
-      const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
-      return NextResponse.json(entry, {
+    // ── IZRAČUNAVANJE ETag ──────────────────────────────────
+    const payload = gateNumber
+      ? { gateNumber, entry: all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null } }
+      : { all };
+    const hash = createHash('md5')
+      .update(JSON.stringify(payload))
+      .digest('hex')
+      .substring(0, 16);
+    const etag = `"${hash}"`;
+
+    // ── PROVJERA If-None-Match ──────────────────────────────
+    const ifNoneMatch = request.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, {
+        status: 304,
         headers: {
-          'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
-          'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-        }
+          'ETag': etag,
+          'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+        },
       });
     }
 
-    return NextResponse.json(all, {
-      headers: {
-        'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
-        'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-      },
-    });
+    // ── NORMALAN ODGOVOR ────────────────────────────────────
+    const headers: Record<string, string> = {
+      'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+      'ETag': etag,
+      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+    };
+
+    if (gateNumber) {
+      const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
+      return NextResponse.json(entry, { headers });
+    }
+
+    return NextResponse.json(all, { headers });
   } catch (err) {
     console.error('[gate-status-override] GET error:', err instanceof Error ? err.message : err);
     return NextResponse.json({}, { status: 200, headers: { 'Cache-Control': 'no-cache' } });
@@ -151,7 +162,6 @@ export async function POST(request: Request) {
 
   await writeAll(all);
 
-  // Invalida keš nakon pisanja
   cachedAll = all;
   cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 

@@ -10,12 +10,12 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 90_000;
+const REFRESH_INTERVAL_MS         = 120_000;
 const FETCH_TIMEOUT_MS            = 20_000;
 const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
 const CACHE_KEY                   = 'dep_board_cache';
-const CACHE_DURATION              = 7 * 60 * 1_000;
+const CACHE_DURATION              = 8 * 60 * 1_000;
 const HEARTBEAT_TIMEOUT_MS        = 120_000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60 * 1_000;
@@ -180,13 +180,17 @@ const loadFromCache = (): { departures: Flight[] } | null => {
   } catch { return null; }
 };
 
-const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
+const fetchWithTimeout = async (url: string, ms: number, headers?: HeadersInit): Promise<Response> => {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
-    clearTimeout(id); return r;
-  } catch (e) { clearTimeout(id); throw e; }
+    const r = await fetch(url, { signal: ctrl.signal, headers });
+    clearTimeout(id);
+    return r;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
 };
 
 const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_DELAY_MS): Promise<any> => {
@@ -632,6 +636,8 @@ function DeparturesBoard(): JSX.Element {
   const prevGatesRef  = useRef<Record<string, string>>({});
   const isInitialLoad = useRef(true);
   const lastHeartbeat = useRef(Date.now());
+  // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
+const etagStatusRef = useRef<string | null>(null);
 
   // Auto-status tick
   useEffect(() => {
@@ -791,20 +797,40 @@ useEffect(() => {
       let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
 
       // ── Status ruta se sad zove UVIJEK — nosi hash i dodjele u istom odgovoru ──
-      try {
-        const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+ // ── Status ruta sa ETag ──────────────────────────────────────
+const headers: HeadersInit = {};
+if (etagStatusRef.current) {
+  headers['If-None-Match'] = etagStatusRef.current;
+}
 
-          if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
-            hashChanged = false;
-          }
-          lastKnownHash = statusData.hash;
-        }
-      } catch {
-        // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
-      }
+try {
+  const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers);
+  
+  // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
+  if (statusRes.status === 304) {
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    isInitialLoad.current = false;
+    setLoading(false);
+    tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    return;
+  }
+
+  if (statusRes.ok) {
+    const statusData = await statusRes.json();
+    // Sačuvaj novi ETag iz headera
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+
+    statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+
+    if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+      hashChanged = false;
+    }
+    lastKnownHash = statusData.hash;
+  }
+} catch {
+  // ignoriši grešku, nastavi na pun fetch kao fallback
+}
 
       if (!hashChanged) {
         // Hash letova nepromijenjen, ali dodjele šaltera/gate-ova mogu biti — primijeni ih

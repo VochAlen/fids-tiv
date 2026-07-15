@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
+import { createHash } from 'crypto'; // ⬅️ dodaj
 
 export const revalidate = 45;
 
@@ -11,7 +12,7 @@ let cachedMeta: { hash?: string; count?: number; lastModified?: string; source?:
 let cachedMetaExpiry = 0;
 const CACHE_TTL_MS = 20_000;
 
-export async function GET() {
+export async function GET(request: Request) { // ⬅️ dodaj request parametar
   try {
     const now = Date.now();
 
@@ -33,32 +34,65 @@ export async function GET() {
       cachedMetaExpiry = now + CACHE_TTL_MS;
     }
 
-    // ── NOVO: dodjele šaltera/gate-ova idu u ISTI odgovor — koristi
-    // isti 10s in-process keš kao /api/test/assignments, tako da ovo
-    // NE dodaje mjerljiv trošak, a FlightBoard više nikad ne mora
-    // zvati /api/test/assignments posebno. ──────────────────────────
+    // ── Dohvati dodjele ──────────────────────────────────────
     const rawAssignments = await getRawAssignments();
     const { desks, gates } = buildSimpleMaps(rawAssignments);
 
-    return NextResponse.json({
-      hash: meta.hash || null,
-      count: meta.count || 0,
-      lastModified: meta.lastModified || null,
-      source: meta.source || 'unknown',
-      timestamp: new Date().toISOString(),
+    // ── Izračunaj ETag (hash + dodjele) ─────────────────────
+    const etagPayload = {
+      hash: meta.hash || '',
       desks,
       gates,
-            gateEntries: rawAssignments.gates, // ← NOVO: puni gate zapisi (status, classType, setAt) po broju gate-a
+    };
+    const etagHash = createHash('md5')
+      .update(JSON.stringify(etagPayload))
+      .digest('hex')
+      .substring(0, 16);
+    const etag = `"${etagHash}"`;
 
-    }, {
-      headers: { 'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30' },
-    });
+    // ── Provjeri If-None-Match ──────────────────────────────
+    const ifNoneMatch = request.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
+        },
+      });
+    }
 
+    // ── Normalan odgovor sa ETag ────────────────────────────
+    return NextResponse.json(
+      {
+        hash: meta.hash || null,
+        count: meta.count || 0,
+        lastModified: meta.lastModified || null,
+        source: meta.source || 'unknown',
+        timestamp: new Date().toISOString(),
+        desks,
+        gates,
+      },
+      {
+        headers: {
+          'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
+          'ETag': etag, // ⬅️ dodaj
+        },
+      }
+    );
   } catch (error) {
     console.error('Status endpoint error:', error);
-    return NextResponse.json({
-      hash: null, count: 0, lastModified: null, source: 'error',
-      timestamp: new Date().toISOString(), desks: {}, gates: {},
-    }, { status: 200, headers: { 'Cache-Control': 'no-cache' } });
+    return NextResponse.json(
+      {
+        hash: null,
+        count: 0,
+        lastModified: null,
+        source: 'error',
+        timestamp: new Date().toISOString(),
+        desks: {},
+        gates: {},
+      },
+      { status: 200, headers: { 'Cache-Control': 'no-cache' } }
+    );
   }
 }

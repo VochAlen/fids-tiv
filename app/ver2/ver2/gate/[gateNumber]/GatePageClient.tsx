@@ -292,34 +292,53 @@ const currentFlightRef    = useRef<Flight | null>(null);
 const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+const etagStatusRef = useRef<string | null>(null);
 
 // ── NOVO: hash-check da se izbjegne nepotreban /api/flights fetch ──
 const lastKnownHashRef  = useRef<string | null>(null);
 const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
+const etagGateRef = useRef<string | null>(null);
 
   // ------------------------------------------------------------
   // Dohvatanje gate status override-a
   // ------------------------------------------------------------
 const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
-    try {
-      // Dodajemo query parametar da dobijemo samo podatke za ovaj gate
-      const res = await fetch(`/api/test/gate-status-override?gateNumber=${gate}`);
-      if (!res.ok) return null;
-      // Ruta sada vraća direktno entry za taj gate
-      const data = await res.json();
-      if (!data || data.status === undefined) {
-        return { status: null, flightNumber: null, classType: null };
-      }
-      return { 
-        status: data.status, 
-        flightNumber: data.flightNumber || null, 
-        classType: data.classType ?? null 
-      };
-    } catch (err) {
-      console.error('fetchGateStatusOverride error:', err);
-      return null;
+  try {
+    // ── DODAJ If-None-Match ──────────────────────────────────
+    const headers: HeadersInit = {};
+    if (etagGateRef.current) {
+      headers['If-None-Match'] = etagGateRef.current;
     }
-  }, []);
+
+    const res = await fetch(`/api/test/gate-status-override?gateNumber=${gate}`, { headers });
+
+    // ── OBRADI 304 ───────────────────────────────────────────
+    if (res.status === 304) {
+      const newEtag = res.headers.get('ETag');
+      if (newEtag) etagGateRef.current = newEtag;
+      return null; // nema promjene
+    }
+
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    // ── SAČUVAJ NOVI ETag ───────────────────────────────────
+    const newEtag = res.headers.get('ETag');
+    if (newEtag) etagGateRef.current = newEtag;
+
+    if (!data || data.status === undefined) {
+      return { status: null, flightNumber: null, classType: null };
+    }
+    return {
+      status: data.status,
+      flightNumber: data.flightNumber || null,
+      classType: data.classType ?? null
+    };
+  } catch (err) {
+    console.error('fetchGateStatusOverride error:', err);
+    return null;
+  }
+}, []); // ⬅️ zavisnosti prazne (ref je stabilan)
 
   // ------------------------------------------------------------
   // Provjera da li let odgovara gate-u
@@ -393,25 +412,48 @@ const loadFlights = useCallback(async () => {
 let hashChanged = true;
     let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
 
-    try {
-      const statusRes = await fetch('/api/flights/status');
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        if (statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
-          hashChanged = false;
-        } else {
-          lastKnownHashRef.current = statusData.hash;
-        }
+// ── Status ruta sa ETag ──────────────────────────────────────
+const headers: HeadersInit = {};
+if (etagStatusRef.current) {
+  headers['If-None-Match'] = etagStatusRef.current;
+}
 
-        // ── Gate override stiže u ISTOM odgovoru — nema više posebnog poziva ──
-        const entry = statusData.gateEntries?.[gateNumber];
-        gateOverrideFromStatus = entry
-          ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
-          : { status: null, flightNumber: null, classType: null };
-      }
-    } catch {
-      // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+try {
+  const statusRes = await fetch('/api/flights/status', { headers });
+  
+  // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
+  if (statusRes.status === 304) {
+    // Sačuvaj novi ETag (ako stigne – server može vratiti i 304 bez ETag, ali obično ga vrati)
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+    
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+    setLoading(false);
+    return; // preskoči čitav ciklus
+  }
+
+  if (statusRes.ok) {
+    const statusData = await statusRes.json();
+    // Sačuvaj novi ETag iz headera
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+
+    if (statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
+      hashChanged = false;
+    } else {
+      lastKnownHashRef.current = statusData.hash;
     }
+
+    // ── Gate override stiže u ISTOM odgovoru ──
+    const entry = statusData.gateEntries?.[gateNumber];
+    gateOverrideFromStatus = entry
+      ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
+      : { status: null, flightNumber: null, classType: null };
+  }
+} catch {
+  // ignoriši grešku, nastavi na pun fetch kao fallback
+}
 
     let data: { departures: Flight[]; arrivals: Flight[] };
     if (hashChanged || !lastFlightsDataRef.current) {

@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useEffect, useState, useMemo } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams } from "next/navigation"
 import type { Flight } from "@/types/flight"
 import { fetchFlightData, getFlightsByBaggage } from "@/lib/flight-service"
@@ -42,33 +42,65 @@ export default function BaggagePage() {
   const [isLoading, setIsLoading] = useState(true)
 
   // Fetch podataka (čisti, bez logike filtera)
-  useEffect(() => {
-    let isActive = true;
-    
-    const loadFlights = async () => {
-      try {
-        const data = await fetchFlightData()
-        if (isActive) {
-          setAllArrivals(data.arrivals || [])
-          setLastUpdate(new Date().toLocaleTimeString("en-GB", { 
-            hour: '2-digit', minute: '2-digit', second: '2-digit' 
-          }))
-        }
-      } catch (error) {
-        console.error("Failed to load arrivals:", error)
-      } finally {
-        if (isActive) setIsLoading(false)
-      }
-    }
+const etagRef = useRef<string | null>(null);
+const lastKnownHashRef = useRef<string | null>(null);
 
-    loadFlights()
-    const interval = setInterval(loadFlights, 60000) // Svaki minut
-    
-    return () => {
-      isActive = false;
-      clearInterval(interval)
+useEffect(() => {
+  let isActive = true;
+  let tid: ReturnType<typeof setTimeout>;
+
+  const loadFlights = async () => {
+    if (!isActive) return;
+
+    try {
+      // Hash check
+      let hashChanged = true;
+      const headers: HeadersInit = { "Cache-Control": "no-cache" };
+      if (etagRef.current) headers["If-None-Match"] = etagRef.current;
+
+      try {
+        const statusRes = await fetch("/api/flights/status", { headers });
+        if (statusRes.status === 304) {
+          const newEtag = statusRes.headers.get('ETag');
+          if (newEtag) etagRef.current = newEtag;
+          // Preskoči pun fetch
+          tid = setTimeout(loadFlights, 60000);
+          return;
+        }
+        if (statusRes.ok) {
+          const data = await statusRes.json();
+          const newEtag = statusRes.headers.get('ETag');
+          if (newEtag) etagRef.current = newEtag;
+          if (data.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
+            hashChanged = false;
+          }
+          lastKnownHashRef.current = data.hash;
+        }
+      } catch { /* nastavi na pun fetch */ }
+
+      if (!hashChanged) {
+        // Nema promjene – zadrži trenutne podatke
+        tid = setTimeout(loadFlights, 60000);
+        return;
+      }
+
+      // Pun fetch
+      const data = await fetchFlightData();
+      if (isActive) {
+        setAllArrivals(data.arrivals || []);
+        setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      }
+    } catch (error) {
+      console.error("Failed to load arrivals:", error);
+    } finally {
+      if (isActive) setIsLoading(false);
+      tid = setTimeout(loadFlights, 60000);
     }
-  }, [])
+  };
+
+  loadFlights();
+  return () => { isActive = false; clearTimeout(tid); };
+}, []);
 
   // MAGIJA: Kompletna logika filtriranja u useMemo.
   // Ne trigeruje re-render ukoliko se podaci ne promijene!

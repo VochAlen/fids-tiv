@@ -23,7 +23,7 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 70_000;
+const REFRESH_INTERVAL_MS          = 100_000;
 const FETCH_TIMEOUT_MS             = 15_000;
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
@@ -550,6 +550,8 @@ function SplitBoard(): JSX.Element {
   const prevGatesRef = useRef<Record<string, string>>({});
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
+const etagStatusRef = useRef<string | null>(null);
 
   const applyAssignmentsOnly = useCallback((
   deps: Flight[],
@@ -645,21 +647,44 @@ const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0;
     let hashChanged = true;
     let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
 
-    try {
-      const statusRes = await fetchWithTimeout('/api/flights/status', 5_000);
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+// ── Status ruta sa ETag ──────────────────────────────────────
+try {
+  const headers: HeadersInit = {};
+  if (etagStatusRef.current) {
+    headers['If-None-Match'] = etagStatusRef.current;
+  }
 
-        if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
-          hashChanged = false;
-        } else {
-          lastKnownHash = statusData.hash;
-        }
-      }
-    } catch {
-      // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
+  const statusRes = await fetch('/api/flights/status', { headers });
+  
+  // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
+  if (statusRes.status === 304) {
+    // Sačuvaj novi ETag (ako stigne)
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+    
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    isInitialLoad.current = false;
+    setLoading(false);
+    return; // preskoči čitav ciklus
+  }
+
+  if (statusRes.ok) {
+    const statusData = await statusRes.json();
+    // Sačuvaj novi ETag iz headera
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+
+    statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+
+    if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+      hashChanged = false;
+    } else {
+      lastKnownHash = statusData.hash;
     }
+  }
+} catch {
+  // ignoriši grešku, nastavi na pun fetch kao fallback
+}
 
     if (!hashChanged) {
       if (statusAssignments) {

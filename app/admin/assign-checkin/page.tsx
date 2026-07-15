@@ -18,10 +18,6 @@ let cachedFlights: Flight[] | null = null;
 let cachedFlightsExpiry = 0;
 const FLIGHTS_CACHE_MS = 60_000;
 
-let isDirty = false;
-let lastHash = '';
-let isCheckingChanges = false;
-
 const DESKS = [
   ...Array.from({ length: 12 }, (_, i) => String(i + 1)),
   '21', '22', '23', '24', '25', '26',
@@ -622,7 +618,6 @@ const StatsModal: React.FC<{
 // ─────────────────────────────────────────────
 // GLAVNA KOMPONENTA
 // ─────────────────────────────────────────────
-
 export default function AssignPanel() {
   const router = useRouter();
 
@@ -641,14 +636,15 @@ export default function AssignPanel() {
   const [dailyStats,             setDailyStats]             = useState<DailyStats>({ desks: {}, gates: {} });
   const [loadingStats,           setLoadingStats]           = useState(false);
 
-  // Dodaj state za praćenje "u toku brisanja" — sprečava duplirane klikove
-const [removingResources, setRemovingResources] = useState<Set<string>>(new Set());
+  const [removingResources, setRemovingResources] = useState<Set<string>>(new Set());
 
   const flightsRef            = useRef<Flight[]>([]);
   const selectedFlightRef     = useRef<Flight | null>(null);
   const checkinAssignmentsRef = useRef<Assignment[]>([]);
   const gateAssignmentsRef    = useRef<Assignment[]>([]);
   const touchTimeoutRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ETag za /api/flights (ne više za status)
+  const flightsEtagRef        = useRef<string | null>(null);
 
   useEffect(() => { flightsRef.current = flights; }, [flights]);
   useEffect(() => { checkinAssignmentsRef.current = checkinAssignments; }, [checkinAssignments]);
@@ -684,125 +680,120 @@ const [removingResources, setRemovingResources] = useState<Set<string>>(new Set(
     setLoadingStats(false);
   }, []);
 
-  // API
-// Dodaj opcioni parametar za prisilno osvježavanje
-const fetchFlightsData = useCallback(async (force = false): Promise<Flight[]> => {
-  const now = Date.now();
-  if (!force && cachedFlights && now < cachedFlightsExpiry) {
-    return cachedFlights;
-  }
-  
-  const res = await fetch('/api/flights');
-  const data = await res.json();
-  const sorted = processFlights(data.departures || []);
-  
-  
-  cachedFlights = sorted;
-  cachedFlightsExpiry = now + FLIGHTS_CACHE_MS;
-  return sorted;
-}, []);
+  // ─── FETCH FLIGHTS SA ETag (umjesto statusa) ─────────────
+  const fetchFlightsData = useCallback(async (force = false): Promise<Flight[] | null> => {
+    const now = Date.now();
+    // Ako nije forsirano i keš važi, vrati keš (i dalje koristimo)
+    if (!force && cachedFlights && now < cachedFlightsExpiry) {
+      return cachedFlights;
+    }
+
+    const headers: HeadersInit = {};
+    if (flightsEtagRef.current) {
+      headers['If-None-Match'] = flightsEtagRef.current;
+    }
+
+    const res = await fetch('/api/flights', { headers });
+
+    // 304 – nema promjene
+    if (res.status === 304) {
+      // Produži keš
+      if (cachedFlights) {
+        cachedFlightsExpiry = now + FLIGHTS_CACHE_MS;
+        // Ne ažuriramo ETag jer se nije promijenio (server ga obično ne vraća kod 304)
+        return null;
+      }
+      // Ako nema keša (prvi put), resetuj ETag i ponovi (fallback)
+      flightsEtagRef.current = null;
+      return fetchFlightsData(true);
+    }
+
+    // Normalan odgovor
+    const data = await res.json();
+    const newEtag = res.headers.get('ETag');
+    if (newEtag) flightsEtagRef.current = newEtag;
+
+    const sorted = processFlights(data.departures || []);
+    cachedFlights = sorted;
+    cachedFlightsExpiry = now + FLIGHTS_CACHE_MS;
+    return sorted;
+  }, []);
 
   const fetchFlights = useCallback(async () => {
     try {
       const sorted = await fetchFlightsData();
-      setFlights(sorted);
+      if (sorted) setFlights(sorted);
       setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
     } catch (err) { console.error('Error fetching flights:', err); }
     finally { setLoadingFlights(false); }
   }, [fetchFlightsData]);
 
-const fetchAllAssignments = useCallback(async (currentFlights: Flight[]) => {
-  try {
-    const res = await fetch('/api/test/assignments');
-    if (!res.ok) return { deskEntries: {}, gateEntries: {} };
-    const data = await res.json();
+  // ─── FETCH DODJELA (uvijek svježe) ──────────────────────────
+  const fetchAllAssignments = useCallback(async (currentFlights: Flight[]) => {
+    try {
+      const res = await fetch('/api/test/assignments');
+      if (!res.ok) return { deskEntries: {}, gateEntries: {} };
+      const data = await res.json();
 
-    const parseAssignedAt = (setAt: unknown): string => {
-      if (!setAt) return 'unknown';
-      const n = Number(setAt);
-      const d = new Date(!isNaN(n) && n > 0 ? n : (setAt as string));
-      return isNaN(d.getTime()) ? 'unknown' : d.toLocaleTimeString();
-    };
+      const parseAssignedAt = (setAt: unknown): string => {
+        if (!setAt) return 'unknown';
+        const n = Number(setAt);
+        const d = new Date(!isNaN(n) && n > 0 ? n : (setAt as string));
+        return isNaN(d.getTime()) ? 'unknown' : d.toLocaleTimeString();
+      };
 
-    const deskList: Assignment[] = [];
-    for (const [deskNumber, entry] of Object.entries<any>(data.deskEntries ?? {})) {
-      if (entry?.flightNumber && entry.status === 'open') {
-        const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
-        deskList.push({
-          resourceId: deskNumber,
-          flightNumber: entry.flightNumber,
-          airlineName: flight?.AirlineName || '',
-          destinationCity: flight?.DestinationCityName || '',
-          scheduledTime: flight?.ScheduledDepartureTime || '',
-          assignedAt: parseAssignedAt(entry.setAt),
-          classType: (entry.classType as ClassType) ?? null,
-        });
+      const deskList: Assignment[] = [];
+      for (const [deskNumber, entry] of Object.entries<any>(data.deskEntries ?? {})) {
+        if (entry?.flightNumber && entry.status === 'open') {
+          const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
+          deskList.push({
+            resourceId: deskNumber,
+            flightNumber: entry.flightNumber,
+            airlineName: flight?.AirlineName || '',
+            destinationCity: flight?.DestinationCityName || '',
+            scheduledTime: flight?.ScheduledDepartureTime || '',
+            assignedAt: parseAssignedAt(entry.setAt),
+            classType: (entry.classType as ClassType) ?? null,
+          });
+        }
       }
-    }
 
-    const gateList: Assignment[] = [];
-    for (const [gateNumber, entry] of Object.entries<any>(data.gateEntries ?? {})) {
-      if (entry?.flightNumber && entry.status === 'open') {
-        const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
-        gateList.push({
-          resourceId: gateNumber,
-          flightNumber: entry.flightNumber,
-          airlineName: flight?.AirlineName || '',
-          destinationCity: flight?.DestinationCityName || '',
-          scheduledTime: flight?.ScheduledDepartureTime || '',
-          assignedAt: parseAssignedAt(entry.setAt),
-          classType: (entry.classType as ClassType) ?? null,
-        });
+      const gateList: Assignment[] = [];
+      for (const [gateNumber, entry] of Object.entries<any>(data.gateEntries ?? {})) {
+        if (entry?.flightNumber && entry.status === 'open') {
+          const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
+          gateList.push({
+            resourceId: gateNumber,
+            flightNumber: entry.flightNumber,
+            airlineName: flight?.AirlineName || '',
+            destinationCity: flight?.DestinationCityName || '',
+            scheduledTime: flight?.ScheduledDepartureTime || '',
+            assignedAt: parseAssignedAt(entry.setAt),
+            classType: (entry.classType as ClassType) ?? null,
+          });
+        }
       }
-    }
 
-    setCheckinAssignments(deskList);
-    setGateAssignments(gateList);
-    return data;
-  } catch (err) {
-    console.error(err);
-    return { deskEntries: {}, gateEntries: {} };
-  }
-}, []);
-
-const refreshAll = useCallback(async (currentFlights: Flight[]) => {
-  return fetchAllAssignments(currentFlights);
-}, [fetchAllAssignments]);
-
-  // checkForChanges funkcija - proverava da li ima promena pre refresha
-  const checkForChanges = useCallback(async () => {
-  if (isCheckingChanges) return;
-  isCheckingChanges = true;
-  
-  try {
-    const res = await fetch('/api/flights/status');
-    const meta = await res.json();
-    
-    if (meta.hash !== lastHash) {
-      lastHash = meta.hash;
-      isDirty = true;
+      setCheckinAssignments(deskList);
+      setGateAssignments(gateList);
+      return data;
+    } catch (err) {
+      console.error(err);
+      return { deskEntries: {}, gateEntries: {} };
     }
-    
-    if (isDirty) {
-      const sorted = await fetchFlightsData(true); // ← force=true, zaobiđi lokalni keš
-      setFlights(sorted);
-      await refreshAll(sorted);
-      setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
-      isDirty = false;
-    }
-  } catch (err) {
-    console.error('Check for changes error:', err);
-  } finally {
-    isCheckingChanges = false;
-  }
-}, [fetchFlightsData, refreshAll]);
-  // Inicijalno učitavanje - JEDAN poziv
+  }, []);
+
+  const refreshAll = useCallback(async (currentFlights: Flight[]) => {
+    return fetchAllAssignments(currentFlights);
+  }, [fetchAllAssignments]);
+
+  // ─── INICIJALNO UČITAVANJE ──────────────────────────────
   useEffect(() => {
     const loadAllData = async () => {
       try {
         const sorted = await fetchFlightsData();
-        setFlights(sorted);
-        await refreshAll(sorted);
+        if (sorted) setFlights(sorted);
+        await refreshAll(sorted || []);
         setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
         setLoadingFlights(false);
       } catch (err) {
@@ -810,11 +801,10 @@ const refreshAll = useCallback(async (currentFlights: Flight[]) => {
         setLoadingFlights(false);
       }
     };
-    
     loadAllData();
   }, [fetchFlightsData, refreshAll]);
 
-  // Auto-refresh timer sa dirty flag-om
+  // ─── AUTO-REFRESH (BEZ /api/flights/status) ──────────────
   useEffect(() => {
     const ticker = setInterval(
       () => setTickSec(prev => (prev <= 1 ? REFRESH_INTERVAL_MS / 1000 : prev - 1)),
@@ -823,29 +813,44 @@ const refreshAll = useCallback(async (currentFlights: Flight[]) => {
 
     const interval = setInterval(async () => {
       setTickSec(REFRESH_INTERVAL_MS / 1000);
-      await checkForChanges();
+      try {
+        // 1. Provjeri da li su se letovi promijenili (ETag)
+        const sorted = await fetchFlightsData(true); // true = zaobiđi lokalni keš, ali koristi ETag
+
+        // 2. Uvijek osvježi dodjele (male su)
+        if (sorted) {
+          // Letovi su se promijenili – osvježi i letove i dodjele
+          setFlights(sorted);
+          await refreshAll(sorted);
+        } else {
+          // Letovi nisu promijenjeni – osvježi samo dodjele (možda su se promijenile)
+          await refreshAll(flightsRef.current);
+        }
+        setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
+      } catch (err) {
+        console.error('Auto-refresh error:', err);
+      }
     }, REFRESH_INTERVAL_MS);
 
-    return () => { 
-      clearInterval(ticker); 
-      clearInterval(interval); 
+    return () => {
+      clearInterval(ticker);
+      clearInterval(interval);
     };
-  }, [checkForChanges]);
+  }, [fetchFlightsData, refreshAll]);
 
+  // ─── RUČNI REFRESH ──────────────────────────────────────
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     setTickSec(REFRESH_INTERVAL_MS / 1000);
     try {
-      const sorted = await fetchFlightsData();
-      setFlights(sorted);
+      const sorted = await fetchFlightsData(true);
+      if (sorted) {
+        setFlights(sorted);
+        await refreshAll(sorted);
+      } else {
+        await refreshAll(flightsRef.current);
+      }
       setLastUpdate(new Date().toLocaleTimeString('sr-Latn-RS'));
-      await refreshAll(sorted);
-      
-      // Resetuj dirty flag i hash
-      isDirty = false;
-      const statusRes = await fetch('/api/flights/status');
-      const meta = await statusRes.json();
-      lastHash = meta.hash || '';
     } catch (err) { console.error(err); }
     finally { setRefreshing(false); }
   }, [fetchFlightsData, refreshAll]);
@@ -901,7 +906,7 @@ const assignFlightToResource = useCallback(async (
       }).catch(err => console.error('Auto BA class error:', err));
     }
 
-    isDirty = true; // signal za sinhronizaciju sa drugim uređajima na sljedećem checkForChanges ciklusu
+    //isDirty = true; // signal za sinhronizaciju sa drugim uređajima na sljedećem checkForChanges ciklusu
     return true;
   } catch (err) {
     console.error('Greška pri dodjeli:', err);
@@ -967,7 +972,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
         body: JSON.stringify({ deskNumber, action: 'clear' }),
       }),
     ]);
-    isDirty = true;
+   // isDirty = true;
     // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
@@ -1001,7 +1006,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
         body: JSON.stringify({ gateNumber, action: 'clear' }),
       }),
     ]);
-    isDirty = true;
+ //   isDirty = true;
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
     if (removed) {
@@ -1042,7 +1047,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       });
       if (!res.ok) throw new Error('setClass failed');
       
-      isDirty = true;
+   //   isDirty = true;
     } catch (err) {
       console.error('Class toggle error:', err);
       setAssignments(list => list.map(a =>

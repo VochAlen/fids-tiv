@@ -1,9 +1,8 @@
 // app/api/test/desk-status-override/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient, safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { createHash } from 'crypto'; // ← DODANO
 
-// ── KRITIČNO: garantuje da Next.js ne tretira ovu rutu kao statičku
-// i ne zamrzne odgovor preko svog internog Data Cache-a. ──────────
 export const dynamic = 'force-dynamic';
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
@@ -12,8 +11,8 @@ const ALL_KEY = 'test:desk-status:all';
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, DeskEntry> | null = null;
 let cachedAllExpiry = 0;
-let cacheRefreshing = false; // ← sprečava duple refresh-e
-const CACHE_TTL_MS = 10_000; // 10s
+let cacheRefreshing = false;
+const CACHE_TTL_MS = 30_000; // ← povećano sa 10s na 30s
 
 type DeskEntry = {
   status: 'open' | 'closed' | null;
@@ -23,8 +22,6 @@ type DeskEntry = {
 };
 
 async function readAll(): Promise<Record<string, DeskEntry>> {
-  // ── safeRedisGet umjesto direktnog client.get() — dobija
-  // circuit-breaker zaštitu (15s cooldown nakon pada Redis-a). ──
   const raw = await safeRedisGet(ALL_KEY);
   if (!raw) return {};
   try {
@@ -68,6 +65,7 @@ export async function GET(request: Request) {
 
     const all = await readAllCached();
 
+    // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
     for (const key of Object.keys(all)) {
       const entry = all[key];
@@ -82,22 +80,41 @@ export async function GET(request: Request) {
       cachedAllExpiry = now + CACHE_TTL_MS;
     }
 
-    if (deskNumber) {
-      const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
-      return NextResponse.json(entry, {
+    // ── IZRAČUNAVANJE ETag ──────────────────────────────────
+    const payload = deskNumber
+      ? { deskNumber, entry: all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null } }
+      : { all };
+    const hash = createHash('md5')
+      .update(JSON.stringify(payload))
+      .digest('hex')
+      .substring(0, 16);
+    const etag = `"${hash}"`;
+
+    // ── PROVJERA If-None-Match ──────────────────────────────
+    const ifNoneMatch = request.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, {
+        status: 304,
         headers: {
-          'Cache-Control': 'public, max-age=18, s-maxage=20, stale-while-revalidate=30',
-          'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-        }
+          'ETag': etag,
+          'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+        },
       });
     }
 
-    return NextResponse.json(all, {
-      headers: {
-        'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
-        'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-      },
-    });
+    // ── NORMALAN ODGOVOR ────────────────────────────────────
+    const headers: Record<string, string> = {
+      'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+      'ETag': etag,
+      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+    };
+
+    if (deskNumber) {
+      const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+      return NextResponse.json(entry, { headers });
+    }
+
+    return NextResponse.json(all, { headers });
   } catch (err) {
     console.error('[desk-status-override] GET error:', err instanceof Error ? err.message : err);
     return NextResponse.json({}, { status: 200, headers: { 'Cache-Control': 'no-cache' } });

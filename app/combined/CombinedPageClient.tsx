@@ -20,11 +20,12 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 
+
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 80_000   // ↑ 60s→90s: -33% Vercel poziva
-const CACHE_DURATION              = 4 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
+const REFRESH_INTERVAL_MS         = 100_000   // ↑ 60s→90s: -33% Vercel poziva
+const CACHE_DURATION              = 5 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
 const MAX_FLIGHTS_DISPLAY         = 9
@@ -254,10 +255,10 @@ const loadFromCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
-const fetchWithTimeout = (url: string, timeout: number): Promise<Response> => {
+const fetchWithTimeout = (url: string, timeout: number, headers?: HeadersInit): Promise<Response> => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
-  return fetch(url, { signal: controller.signal })
+  return fetch(url, { signal: controller.signal, headers })
     .finally(() => clearTimeout(timeoutId))
     .catch(err => {
       if (err.name === 'AbortError') {
@@ -266,7 +267,6 @@ const fetchWithTimeout = (url: string, timeout: number): Promise<Response> => {
       throw err;
     });
 };
-
 
 const fetchAssignments = async (): Promise<{
   desks: Record<string, string>;
@@ -693,6 +693,9 @@ const [pageIndex, setPageIndex] = useState(0)
   const isInitialLoad = useRef(true)
   const lastHeartbeat = useRef(Date.now())
 
+  // unutar FlightBoard komponente
+const etagStatusRef = useRef<string | null>(null);
+
   const colors = useMemo(() => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures, [showArrivals])
 
   // ── Hard reset u 03:00 (ne interval) ─────────────────────
@@ -913,16 +916,39 @@ const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0
     // nosi i hash i desk/gate dodjele u istom odgovoru, pa nam više
     // ne treba poseban poziv na /api/test/assignments nikad. ────────
     try {
-      const statusRes = await fetchWithTimeout('/api/flights/status', 5_000)
-      if (statusRes.ok) {
-        const statusData = await statusRes.json()
-        statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} }
+// ── Status ruta sa ETag ──────────────────────────────────────
+const headers: HeadersInit = {};
+if (etagStatusRef.current) {
+  headers['If-None-Match'] = etagStatusRef.current;
+}
 
-        if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
-          hashChanged = false
-        }
-        lastKnownHash = statusData.hash
-      }
+try {
+  const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers); // ⬅️ dodaj headers
+  if (statusRes.status === 304) {
+    // Nema promjene – ni hash ni dodjele – preskoči sve
+    setLastUpdate(new Date().toLocaleTimeString("en-GB"));
+    isInitialLoad.current = false;
+    setLoading(false);
+    tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    return;
+  }
+
+  if (statusRes.ok) {
+    const statusData = await statusRes.json();
+    // Sačuvaj novi ETag iz headera
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+
+    statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+
+    if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+      hashChanged = false;
+    }
+    lastKnownHash = statusData.hash;
+  }
+} catch {
+  // ignoriši grešku, nastavi na pun fetch
+}
     } catch {
       // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
     }

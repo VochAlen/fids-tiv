@@ -320,6 +320,8 @@ const isMountedRef = useRef(true);
   const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastFlightNumberRef = useRef<string>('');
   const logoCacheRef = useRef<Map<string, string>>(new Map());
+  // const etagDeskRef = useRef<string | null>(null);
+ const etagDeskRef = useRef<string | null>(null);
 
   const { adImages } = useAdImages();
   // BA override za ad banner
@@ -401,16 +403,34 @@ const baAdImage = useMemo((): string | null => {
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (isNightHours()) {
-    setLoading(false);   // ← dodaj ovo, da ne ostane zaglavljen na spinneru ako se restartuje noću
+    setLoading(false);
     return;
   }
   if (!deskNumberParam) return;
+
   try {
-    // NOVO: Dodajemo query parametar da dobijemo samo podatke za ovaj šalter
-    const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`);
+    // ── DODAJ If-None-Match ──────────────────────────────────
+    const headers: HeadersInit = {};
+    if (etagDeskRef.current) {
+      headers['If-None-Match'] = etagDeskRef.current;
+    }
+
+    const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
+
+    // ── OBRADI 304 ───────────────────────────────────────────
+    if (res.status === 304) {
+      const newEtag = res.headers.get('ETag');
+      if (newEtag) etagDeskRef.current = newEtag;
+      // Nema promjene – ne ažuriramo assignment
+      return;
+    }
+
     if (!res.ok) throw new Error('Failed to fetch desk status');
-    
-    // NOVO: Ruta sada vraća direktno entry za taj desk, ne ceo objekat
+
+    // ── SAČUVAJ NOVI ETag ───────────────────────────────────
+    const newEtag = res.headers.get('ETag');
+    if (newEtag) etagDeskRef.current = newEtag;
+
     const myData = await res.json();
 
     if (!isMountedRef.current) return;
@@ -418,7 +438,7 @@ const fetchDeskData = useCallback(async () => {
     setLastUpdate(new Date().toLocaleTimeString('en-GB'));
     setLoading(false);
 
-    // Nema dodjele → instant reset, bez ikakvog dodatnog fetch-a
+    // Nema dodjele → instant reset
     if (!myData || !myData.flightNumber || myData.status === null) {
       lastFlightNumberRef.current = '';
       setAssignment(EMPTY_ASSIGNMENT);
@@ -427,9 +447,7 @@ const fetchDeskData = useCallback(async () => {
 
     const classType: string | null = myData.classType ?? null;
 
-    // Isti let kao prošli put → samo status (open/closed) i/ili klasa su se
-    // promijenili. Ne radimo ponovo fetch cijelog /api/flights, ne
-    // provjeravamo logo sliku — instant update, minimalan trošak.
+    // Isti let – samo status/klasa
     if (myData.flightNumber === lastFlightNumberRef.current) {
       setAssignment((prev) => ({
         ...prev,
@@ -442,7 +460,7 @@ const fetchDeskData = useCallback(async () => {
 
     lastFlightNumberRef.current = myData.flightNumber;
 
-    // Novi let dodijeljen ovom šalteru → tek sada dohvati pune podatke.
+    // Novi let – dohvati detalje
     let flightDetails: Record<string, string | string[] | boolean | null> = {};
     try {
       const flightsRes = await fetch('/api/flights');
@@ -456,24 +474,24 @@ const fetchDeskData = useCallback(async () => {
       );
       if (match) flightDetails = match;
     } catch {
-      // Nastavljamo s minimalnim podacima
+      // Nastavi sa minimalnim podacima
     }
 
-    // Logo URL — keširaj rezultat provjere po ICAO kodu
-const icao =
-  (flightDetails.AirlineICAO as string) ||
-  myData.flightNumber.substring(0, 2).toUpperCase();
+    // Logo URL (keširan)
+    const icao =
+      (flightDetails.AirlineICAO as string) ||
+      myData.flightNumber.substring(0, 2).toUpperCase();
 
-let logoUrl = '/airlines/placeholder.jpg';
-if (icao) {
-  const cachedLogo = logoCacheRef.current.get(icao);
-  if (cachedLogo) {
-    logoUrl = cachedLogo;
-  } else {
-    logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.jpg');
-    logoCacheRef.current.set(icao, logoUrl);
-  }
-}
+    let logoUrl = '/airlines/placeholder.jpg';
+    if (icao) {
+      const cachedLogo = logoCacheRef.current.get(icao);
+      if (cachedLogo) {
+        logoUrl = cachedLogo;
+      } else {
+        logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.jpg');
+        logoCacheRef.current.set(icao, logoUrl);
+      }
+    }
 
     const destCode = (flightDetails.DestinationAirportCode as string) || '';
     const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';

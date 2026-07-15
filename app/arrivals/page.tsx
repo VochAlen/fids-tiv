@@ -250,6 +250,8 @@ function ArrivalsBoard(): JSX.Element {
   const [currentTime, setCurrentTime] = useState<string>("");
   const [autoStatusTick, setAutoStatusTick] = useState<number>(0);
   const isMountedRef = useRef(true);
+  const etagRef = useRef<string | null>(null);
+  const lastKnownHash = useRef<string | null>(null);
 
   useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
@@ -271,19 +273,112 @@ function ArrivalsBoard(): JSX.Element {
     });
   }, []);
 
-  useEffect(() => {
-    isMountedRef.current = true; let tid: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      if (!isMountedRef.current) return; let data: any | null = null; let usedCache = false;
+useEffect(() => {
+  isMountedRef.current = true;
+  let tid: ReturnType<typeof setTimeout>;
+
+  const cached = loadFromCache();
+  if (cached?.arrivals) {
+    setFlights(filterRecentFlights(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+    setLoading(false);
+  }
+
+  const load = async () => {
+    if (!isMountedRef.current) return;
+
+    try {
+      let hashChanged = true;
+      const statusHeaders: HeadersInit = { "Cache-Control": "no-cache" };
+      if (etagRef.current) {
+        statusHeaders["If-None-Match"] = etagRef.current;
+      }
+
       try {
-        setLoading(true);
-        try { data = await fetchWithRetry("/api/flights?type=arrivals"); if (data && isMountedRef.current) saveToCache(data); } catch { const c = loadFromCache(); if (c) { data = c; usedCache = true; } else throw new Error("No cache"); }
-        if (!isMountedRef.current || !data) return;
+        const statusRes = await fetch("/api/flights/status", { headers: statusHeaders });
+
+        if (statusRes.status === 304) {
+          const newEtag = statusRes.headers.get('ETag');
+          if (newEtag) etagRef.current = newEtag;
+          setLoading(false);
+          tid = setTimeout(load, REFRESH_INTERVAL_MS);
+          return;
+        }
+
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          const newEtag = statusRes.headers.get('ETag');
+          if (newEtag) etagRef.current = newEtag;
+
+          // ⭐ POPRAVKA: lastKnownHash je ref, koristi .current
+          if (statusData.hash === lastKnownHash.current && lastKnownHash.current !== null) {
+            hashChanged = false;
+          }
+          lastKnownHash.current = statusData.hash;
+        }
+      } catch {
+        // ignoriši
+      }
+
+      let data: any = null;
+      if (hashChanged) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+        try {
+          const res = await fetch("/api/flights?type=arrivals", {
+            signal: controller.signal,
+            headers: { "Cache-Control": "no-cache" }
+          });
+          clearTimeout(timeoutId);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          data = await res.json();
+          if (isMountedRef.current) saveToCache(data);
+        } catch (err) {
+          if ((err as Error).name === "AbortError") {
+            // timeout – pokušaj sa kešom
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        const c = loadFromCache();
+        if (c?.arrivals) {
+          data = c;
+        } else {
+          const res = await fetch("/api/flights?type=arrivals", {
+            headers: { "Cache-Control": "no-cache" }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          data = await res.json();
+          if (isMountedRef.current) saveToCache(data);
+        }
+      }
+
+      if (data?.arrivals && isMountedRef.current) {
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-      } catch (e) { console.error("Arrivals load error:", e); } finally { if (isMountedRef.current) { setLoading(false); tid = setTimeout(load, REFRESH_INTERVAL_MS); } }
-    };
-    load(); return () => { isMountedRef.current = false; clearTimeout(tid); };
-  }, [filterRecentFlights]);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Arrivals load error:", err);
+      const c = loadFromCache();
+      if (c?.arrivals && isMountedRef.current) {
+        setFlights(filterRecentFlights(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setLoading(false);
+        tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      }
+    }
+  };
+
+  load();
+
+  return () => {
+    isMountedRef.current = false;
+    clearTimeout(tid);
+  };
+}, [filterRecentFlights]);
 
   const sortedFlights = useMemo(() => [...flights].sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")), [flights]);
 
