@@ -1,36 +1,57 @@
 // app/api/flights/route.ts
 import { NextResponse } from 'next/server';
 import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
+import { getRedisClient } from '@/lib/redis';
 import type { FlightData } from '@/types/flight';
-import { createHash } from 'crypto'; // ⬅️ DODAJ OVO
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+const FLIGHT_META_KEY = 'cache:flights:meta';
+
+async function getMetaHash(): Promise<string | null> {
+  try {
+    const client = getRedisClient();
+    const rawMeta = await client.get(FLIGHT_META_KEY);
+    if (!rawMeta) return null;
+    const meta = JSON.parse(rawMeta);
+    return meta?.hash ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export async function GET(request: Request): Promise<NextResponse> {
   try {
     const { searchParams } = new URL(request.url);
     const type = searchParams.get('type');
+    const ifNoneMatch = request.headers.get('if-none-match');
 
+    // ── 1. LAGANI META-CHECK PRVO — jedan mali Redis GET, bez parsiranja punog bloba ──
+    const metaHash = await getMetaHash();
+    const metaEtag = metaHash ? `"${metaHash}"` : null;
+
+    if (ifNoneMatch && metaEtag && ifNoneMatch === metaEtag) {
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          'ETag': metaEtag,
+          'Cache-Control': 'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
+        },
+      });
+    }
+
+    // ── 2. PUN FETCH — samo kad je stvarno promijenjeno (ili meta nedostupna/prvi poziv) ──
     const data = await getCurrentFlightDataSafe();
 
-    // ── IZRAČUNAJ ETag (hash) ──────────────────────────────────
-    const hashPayload = {
-      dCount: data.departures?.length || 0,
-      aCount: data.arrivals?.length || 0,
-      source: data.source,
-      lastUpdated: data.lastUpdated,
-    };
-    const hash = createHash('md5')
-      .update(JSON.stringify(hashPayload))
-      .digest('hex')
-      .substring(0, 16);
-    const etag = `"${hash}"`;
+    // Koristimo ISTI hash izvor kao u koraku 1 (meta.hash), da 304-logika
+    // ubuduće stvarno pogađa. Ako meta iz nekog razloga nije bila dostupna
+    // u koraku 1 (npr. race sa upisom), probaj ponovo ovdje pošto je data
+    // sad garantovano svježe/keširano.
+    const finalHash = metaHash ?? (await getMetaHash()) ?? data.lastUpdated; // krajnji fallback, nikad prazan etag
+    const etag = `"${finalHash}"`;
 
-    // ── PROVJERI If-None-Match ──────────────────────────────────
-    const ifNoneMatch = request.headers.get('if-none-match');
     if (ifNoneMatch && ifNoneMatch === etag) {
-      // Vrati 304 – nema promjene, bez tijela
       return new NextResponse(null, {
         status: 304,
         headers: {
@@ -40,7 +61,6 @@ export async function GET(request: Request): Promise<NextResponse> {
       });
     }
 
-    // ── Filtriranje po smjeru ────────────────────────────────────
     const responseData: FlightData =
       type === 'departures'
         ? { ...data, arrivals: [] }
@@ -52,17 +72,17 @@ export async function GET(request: Request): Promise<NextResponse> {
     const isEmergency = data.source === 'emergency' && !isCritical;
     const isBackupLike = data.source === 'backup' || data.source === 'auto-processed';
 
-const cacheControl = isCritical
-  ? 'no-cache, no-store, must-revalidate'
-  : isEmergency
-    ? 'public, max-age=30, s-maxage=45, stale-while-revalidate=90'
-    : isBackupLike
-      ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
-      : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'; // ← povećano
+    const cacheControl = isCritical
+      ? 'no-cache, no-store, must-revalidate'
+      : isEmergency
+        ? 'public, max-age=30, s-maxage=45, stale-while-revalidate=90'
+        : isBackupLike
+          ? 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'
+          : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
 
     const headers: Record<string, string> = {
       'Cache-Control': cacheControl,
-      'ETag': etag, // ⬅️ DODAJ OVO
+      'ETag': etag,
       'X-Data-Source': data.source ?? 'unknown',
       'X-Total-Flights': data.totalFlights.toString(),
     };
@@ -71,13 +91,9 @@ const cacheControl = isCritical
     if (data.isOfflineMode) headers['X-Offline-Mode'] = 'true';
     if (type) headers['X-Filtered-By'] = type;
 
-    return NextResponse.json(responseData, {
-      status: 200,
-      headers,
-    });
+    return NextResponse.json(responseData, { status: 200, headers });
   } catch (err) {
     console.error('[api/flights] Unhandled error:', err instanceof Error ? err.message : err);
-
     return NextResponse.json(
       {
         departures: [],
@@ -88,10 +104,7 @@ const cacheControl = isCritical
         isOfflineMode: true,
         error: 'Route handler caught unexpected error.',
       },
-      {
-        status: 200,
-        headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
-      }
+      { status: 200, headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' } }
     );
   }
 }

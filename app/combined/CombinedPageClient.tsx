@@ -18,7 +18,7 @@ import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
-import { isNightHours } from '@/lib/night-hours';
+// import { isNightHours } from '@/lib/night-hours';
 
 
 // ============================================================
@@ -891,13 +891,13 @@ const load = async () => {
   // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
   // blok se preskače i nastavlja se normalan tok — self-healing, isti
   // princip kao "odbaci noćni cache" logika na backendu.
-  if (isNightHours()) {
-    if (isMountedRef.current) setNightMode(true)
-    setLoading(false)
-    tid = setTimeout(load, REFRESH_INTERVAL_MS)
-    return
-  }
-  if (isMountedRef.current) setNightMode(false)
+  // if (isNightHours()) {
+  //   if (isMountedRef.current) setNightMode(true)
+  //   setLoading(false)
+  //   tid = setTimeout(load, REFRESH_INTERVAL_MS)
+  //   return
+  // }
+  // if (isMountedRef.current) setNightMode(false)
 
   try {
     if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
@@ -932,20 +932,19 @@ try {
     tid = setTimeout(load, REFRESH_INTERVAL_MS);
     return;
   }
-
-  if (statusRes.ok) {
+if (statusRes.ok) {
     const statusData = await statusRes.json();
-    // Sačuvaj novi ETag iz headera
     const newEtag = statusRes.headers.get('ETag');
     if (newEtag) etagStatusRef.current = newEtag;
 
     statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+    if (isMountedRef.current) setNightMode(!!statusData.isNightMode);   // ← NOVO
 
     if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
       hashChanged = false;
     }
     lastKnownHash = statusData.hash;
-  }
+}
 } catch {
   // ignoriši grešku, nastavi na pun fetch
 }

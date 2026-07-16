@@ -4,6 +4,7 @@ import { safeRedisGet, safeRedisSet } from '@/lib/redis';
 import { createHash } from 'crypto'; // ← DODANO
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
 const ALL_KEY = 'test:desk-status:all';

@@ -2,7 +2,8 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
-import { createHash } from 'crypto'; // ⬅️ dodaj
+import { createHash } from 'crypto';
+import { isNightHours } from '@/lib/night-hours';   // ← DODANO
 
 export const revalidate = 45;
 
@@ -12,9 +13,10 @@ let cachedMeta: { hash?: string; count?: number; lastModified?: string; source?:
 let cachedMetaExpiry = 0;
 const CACHE_TTL_MS = 20_000;
 
-export async function GET(request: Request) { // ⬅️ dodaj request parametar
+export async function GET(request: Request) {
   try {
     const now = Date.now();
+    const nightNow = isNightHours();   // ← DODANO — jednom po requestu, pouzdan server sat
 
     let meta: { hash?: string; count?: number; lastModified?: string; source?: string };
 
@@ -38,11 +40,15 @@ export async function GET(request: Request) { // ⬅️ dodaj request parametar
     const rawAssignments = await getRawAssignments();
     const { desks, gates } = buildSimpleMaps(rawAssignments);
 
-    // ── Izračunaj ETag (hash + dodjele) ─────────────────────
+    // ── Izračunaj ETag (hash + dodjele + noćni status) ──────
+    // isNightMode MORA biti u ETag payload-u — inače bi tranzicija
+    // dan→noć (ili noć→dan) mogla ostati "zarobljena" iza 304 odgovora
+    // sve dok se hash/desks/gates ne promijene iz nekog drugog razloga.
     const etagPayload = {
       hash: meta.hash || '',
       desks,
       gates,
+      isNightMode: nightNow,   // ← DODANO
     };
     const etagHash = createHash('md5')
       .update(JSON.stringify(etagPayload))
@@ -72,11 +78,12 @@ export async function GET(request: Request) { // ⬅️ dodaj request parametar
         timestamp: new Date().toISOString(),
         desks,
         gates,
+        isNightMode: nightNow,   // ← DODANO
       },
       {
         headers: {
           'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
-          'ETag': etag, // ⬅️ dodaj
+          'ETag': etag,
         },
       }
     );
@@ -91,6 +98,7 @@ export async function GET(request: Request) { // ⬅️ dodaj request parametar
         timestamp: new Date().toISOString(),
         desks: {},
         gates: {},
+        isNightMode: isNightHours(),   // ← DODANO — čak i u error grani, sigurnosti radi
       },
       { status: 200, headers: { 'Cache-Control': 'no-cache' } }
     );

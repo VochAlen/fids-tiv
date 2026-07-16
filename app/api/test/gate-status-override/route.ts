@@ -101,14 +101,14 @@ export async function GET(request: Request) {
         status: 304,
         headers: {
           'ETag': etag,
-          'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+          'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=90',
         },
       });
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
     const headers: Record<string, string> = {
-      'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+      'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=90',
       'ETag': etag,
       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
     };

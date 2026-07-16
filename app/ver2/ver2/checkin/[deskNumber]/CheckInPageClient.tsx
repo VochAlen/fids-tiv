@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
-import { isNightHours } from '@/lib/night-hours';
+// import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 
 // ============================================================
@@ -402,10 +402,6 @@ const baAdImage = useMemo((): string | null => {
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
-  if (isNightHours()) {
-    setLoading(false);
-    return;
-  }
   if (!deskNumberParam) return;
 
   try {
@@ -415,7 +411,8 @@ const fetchDeskData = useCallback(async () => {
       headers['If-None-Match'] = etagDeskRef.current;
     }
 
-    const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
+    // const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
+    const res = await fetch(`/api/test/desk-status-override`, { headers });
 
     // ── OBRADI 304 ───────────────────────────────────────────
     if (res.status === 304) {
@@ -431,7 +428,9 @@ const fetchDeskData = useCallback(async () => {
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagDeskRef.current = newEtag;
 
-    const myData = await res.json();
+    // const myData = await res.json();
+    const allData = await res.json();
+const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', classType: null, setAt: null };
 
     if (!isMountedRef.current) return;
 

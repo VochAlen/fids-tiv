@@ -9,6 +9,7 @@ import {
   sortFlightsByTime,
   filterTodayFlights
 } from '@/lib/flight-api-helpers';
+import { cleanupRedisTTLs } from '@/lib/redis-cleanup';
 
 import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
 
@@ -95,56 +96,17 @@ const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 1000;
 
+// ── REDIS CLEANUP ──────────────────────────────────────────────
+// Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
+// Glavni cleanup i dalje ide preko cron rute /api/cron/redis-cleanup (03:00),
+// ovo je samo dodatna zaštitna mreža ako cron ne stigne/padne.
 async function runRedisCleanupIfNeeded(): Promise<void> {
   if (Date.now() - lastRedisCleanup < REDIS_CLEANUP_INTERVAL_MS) return;
   lastRedisCleanup = Date.now();
 
-  const TTL_RULES: Record<string, number> = {
-    'cache:flights':  180,
-    'override:':      21_600,
-    'gate-status:':   21_600,
-    'desk-status:':   21_600,
-    'desk-class:':    21_600,
-  };
-
-  Promise.race([
-    (async () => {
-      try {
-        const client = getRedisClient();
-        const keysToFix: string[] = [];
-        let cursor = '0';
-
-        do {
-          const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 100);
-          cursor = nextCursor;
-
-          if (keys.length > 0) {
-            const pipeline = client.pipeline();
-            keys.forEach(key => pipeline.ttl(key));
-            const results = await pipeline.exec();
-            results?.forEach((result, i) => {
-              if (!result[0] && result[1] === -1) keysToFix.push(keys[i]);
-            });
-          }
-
-          if (keysToFix.length > 200) break;
-        } while (cursor !== '0');
-
-        if (keysToFix.length > 0) {
-          const fixPipeline = client.pipeline();
-          keysToFix.forEach(key => {
-            const rule = Object.entries(TTL_RULES).find(([p]) => key.startsWith(p));
-            fixPipeline.expire(key, rule ? rule[1] : 3_600);
-          });
-          await fixPipeline.exec();
-          console.log(`🧹 Redis cleanup: ${keysToFix.length} keys fixed`);
-        }
-      } catch (e) {
-        console.error('⚠️ Redis cleanup failed (non-critical):', e);
-      }
-    })(),
-    new Promise<void>(resolve => setTimeout(resolve, 5_000)),
-  ]);
+  cleanupRedisTTLs().catch(e => {
+    console.error('⚠️ Redis cleanup failed (non-critical):', e);
+  });
 }
 
 async function getFlightDataFromCache(): Promise<FlightData | null> {
