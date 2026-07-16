@@ -29,7 +29,7 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 20_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 25_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
 const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5_000);
@@ -42,8 +42,8 @@ const BLUR_DATA_URL =
   flightNumber.toUpperCase().startsWith('BA');
 
 const BA_IMAGES: Record<string, string> = {
-  BUSINESS: '/british/ba1.jpg',
-  ECONOMY:  '/british/ba2.jpg',
+  BUSINESS: '/british/ba1.avif',
+  ECONOMY:  '/british/ba2.avif',
 };
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
