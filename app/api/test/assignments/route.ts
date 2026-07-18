@@ -1,24 +1,47 @@
 // app/api/test/assignments/route.ts
 import { NextResponse } from 'next/server';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
+import { createHash } from 'crypto';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const raw = await getRawAssignments();
     const simple = buildSimpleMaps(raw);
 
-    return NextResponse.json({
+    const responseBody = {
       // ── FlightBoard format (flightNumber -> deskNumber/gateNumber) ──
       desks: simple.desks,
       gates: simple.gates,
       // ── Admin panel format (deskNumber/gateNumber -> puni entry) ──
       deskEntries: raw.desks,
       gateEntries: raw.gates,
-    }, {
+    };
+
+    // ── IZRAČUNAJ ETag ────────────────────────────────────────
+    const hash = createHash('md5')
+      .update(JSON.stringify(responseBody))
+      .digest('hex')
+      .substring(0, 16);
+    const etag = `"${hash}"`;
+
+    // ── PROVJERI If-None-Match ────────────────────────────────
+    const ifNoneMatch = request.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+        },
+      });
+    }
+
+    return NextResponse.json(responseBody, {
       headers: {
         'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+        'ETag': etag,
       },
     });
   } catch (err) {

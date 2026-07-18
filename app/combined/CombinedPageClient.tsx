@@ -18,7 +18,7 @@ import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
-// import { isNightHours } from '@/lib/night-hours';
+ import { isNightHours } from '@/lib/night-hours';
 
 
 // ============================================================
@@ -891,13 +891,21 @@ const load = async () => {
   // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
   // blok se preskače i nastavlja se normalan tok — self-healing, isti
   // princip kao "odbaci noćni cache" logika na backendu.
-  // if (isNightHours()) {
-  //   if (isMountedRef.current) setNightMode(true)
-  //   setLoading(false)
-  //   tid = setTimeout(load, REFRESH_INTERVAL_MS)
-  //   return
-  // }
-  // if (isMountedRef.current) setNightMode(false)
+const wasNightMode = nightMode  // vrijednost PRIJE ovog ciklusa
+
+if (isNightHours()) {
+  if (isMountedRef.current) setNightMode(true)
+  setLoading(false)
+  tid = setTimeout(load, REFRESH_INTERVAL_MS)
+  return
+}
+if (isMountedRef.current) setNightMode(false)
+
+// ── Prelaz noć → dan: forsiraj svjež fetch bez obzira na hash-check
+// ovog ciklusa. Sprečava (rijedak, ali moguć) rubni slučaj gdje bi se
+// stari, jučerašnji dnevni podaci u state-u poklopili sa server hash-om
+// prije nego server stigne odbaciti svoj noćni cache. ─────────────────
+const justExitedNightMode = wasNightMode
 
   try {
     if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
@@ -909,6 +917,7 @@ const load = async () => {
     // do desinhronizacije (stale meta u Redisu, noćni prelaz i sl.).
     // U tom slučaju UVIJEK radi pun fetch, da se ekran sam "izliječi".
 const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0
+const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
     let hashChanged = true
     let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null
 
@@ -940,10 +949,10 @@ if (statusRes.ok) {
     statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
     if (isMountedRef.current) setNightMode(!!statusData.isNightMode);   // ← NOVO
 
-    if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
-      hashChanged = false;
-    }
-    lastKnownHash = statusData.hash;
+if (!forceRefresh && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+  hashChanged = false;
+}
+lastKnownHash = statusData.hash;
 }
 } catch {
   // ignoriši grešku, nastavi na pun fetch

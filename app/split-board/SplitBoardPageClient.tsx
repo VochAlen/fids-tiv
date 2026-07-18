@@ -628,6 +628,8 @@ const loadData = useCallback(async () => {
   // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
   // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
   // blok se preskače i nastavlja se normalan tok — self-healing.
+  const wasNightMode = nightMode; // vrijednost PRIJE ovog ciklusa
+
   if (isNightHours()) {
     if (isMountedRef.current) setNightMode(true);
     setLoading(false);
@@ -635,15 +637,22 @@ const loadData = useCallback(async () => {
   }
   if (isMountedRef.current) setNightMode(false);
 
+  // ── Prelaz noć → dan: forsiraj svjež fetch bez obzira na hash-check
+  // ovog ciklusa. Sprečava rubni slučaj gdje bi stari, jučerašnji
+  // podaci u state-u slučajno imali isti hash kao server prije nego
+  // server stigne odbaciti svoj noćni cache. ─────────────────────────
+  const justExitedNightMode = wasNightMode;
+
   try {
     if (isInitialLoad.current) setLoading(true);
     setErrorMessage(null);
 
-    // ── HASH CHECK ──
+// ── HASH CHECK ──
     // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moguća
     // desinhronizacija (stale meta, noćni prelaz i sl.). U tom slučaju
     // UVIJEK radi pun fetch, da se ekran sam "izliječi".
 const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0;
+const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
     let hashChanged = true;
     let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
 
@@ -676,7 +685,7 @@ try {
 
     statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
 
-    if (!boardIsCurrentlyEmpty && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+if (!forceRefresh && statusData.hash === lastKnownHash && lastKnownHash !== null) {
       hashChanged = false;
     } else {
       lastKnownHash = statusData.hash;
