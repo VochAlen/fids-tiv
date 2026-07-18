@@ -93,19 +93,21 @@ export async function GET(request: Request) {
 
     // ── PROVJERA If-None-Match ──────────────────────────────
     const ifNoneMatch = request.headers.get('if-none-match');
-    if (ifNoneMatch && ifNoneMatch === etag) {
-      return new NextResponse(null, {
-        status: 304,
-        headers: {
-          'ETag': etag,
-          'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
-        },
-      });
-    }
+if (ifNoneMatch && ifNoneMatch === etag) {
+
+  return new NextResponse(null, {
+    status: 304,
+    headers: {
+      'ETag': etag,
+      'Cache-Control': 'public, max-age=15, s-maxage=15, stale-while-revalidate=30',
+    },
+  });
+}
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
     const headers: Record<string, string> = {
-      'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+      // 'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
+   'Cache-Control': 'public, max-age=15, s-maxage=15, stale-while-revalidate=30',
       'ETag': etag,
       'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
     };
