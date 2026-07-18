@@ -314,27 +314,29 @@ const etagGateRef = useRef<string | null>(null);
   // ------------------------------------------------------------
 const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
   try {
-    // ── DODAJ If-None-Match ──────────────────────────────────
     const headers: HeadersInit = {};
     if (etagGateRef.current) {
       headers['If-None-Match'] = etagGateRef.current;
     }
 
-    const res = await fetch(`/api/test/gate-status-override?gateNumber=${gate}`, { headers });
+    // ── Bez query parametra — svi gate ekrani dijele ISTI CDN cache
+    // ključ (isti princip kao desk-status-override), umjesto da svaki
+    // gate broj pravi svoj poseban, rijetko pogođen cache unos. ──────
+    const res = await fetch(`/api/test/gate-status-override`, { headers });
 
-    // ── OBRADI 304 ───────────────────────────────────────────
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagGateRef.current = newEtag;
-      return null; // nema promjene
+      return null;
     }
 
     if (!res.ok) return null;
-    const data = await res.json();
+    const allData = await res.json();
 
-    // ── SAČUVAJ NOVI ETag ───────────────────────────────────
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagGateRef.current = newEtag;
+
+    const data = allData[gate];
 
     if (!data || data.status === undefined) {
       return { status: null, flightNumber: null, classType: null };
@@ -348,7 +350,7 @@ const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ stat
     console.error('fetchGateStatusOverride error:', err);
     return null;
   }
-}, []); // ⬅️ zavisnosti prazne (ref je stabilan)
+}, []);
 
   // ------------------------------------------------------------
   // Provjera da li let odgovara gate-u
