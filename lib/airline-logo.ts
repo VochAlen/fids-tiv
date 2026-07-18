@@ -39,6 +39,7 @@ export const AIRLINE_LOGO_CODES: ReadonlySet<string> = new Set([
 const LOGO_VERSIONS: Record<string, number> = {
   FDB: 2,
   VLG: 2,
+  IBE: 2,
 };
 const DEFAULT_LOGO_VERSION = 1;
 
