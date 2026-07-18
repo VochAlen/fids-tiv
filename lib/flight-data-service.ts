@@ -260,6 +260,44 @@ async function saveFlightDataAndMetadata(
 // }
 // ne radi-stari kod-ne funkcionise vise -POCETAK 12JUL2026
 
+// ── Normalizuje odgovor eksternog API-ja u niz letova, bez obzira na
+// tačan oblik koji PHP keš skripta vrati. cache-flights.php je server-side
+// keš fajl koji se periodično regeneriše — u tom prozoru može vratiti
+// null, {}, {"error": "..."} ili slično umjesto praznog niza. Ovo NIKAD
+// ne baca grešku zbog oblika — nepoznat/prazan oblik se tretira kao
+// "trenutno nema letova", ne kao kvar sistema. ─────────────────────────
+function normalizeRawFlightArray(payload: unknown): RawFlightData[] {
+  // Najčešći, ispravan slučaj
+  if (Array.isArray(payload)) return payload as RawFlightData[];
+
+  // null / undefined → nema podataka
+  if (payload === null || payload === undefined) {
+    console.warn('⚠️ Live API vratio null/undefined — tretiram kao 0 letova');
+    return [];
+  }
+
+  // boolean / string / number → nešto neočekivano, ali i dalje ne rušimo sistem
+  if (typeof payload !== 'object') {
+    console.warn(`⚠️ Live API vratio primitivan tip (${typeof payload}) — tretiram kao 0 letova:`, payload);
+    return [];
+  }
+
+  // Objekat — probaj naći niz unutar poznatih wrapper ključeva
+  const obj = payload as Record<string, unknown>;
+  const candidateKeys = ['data', 'flights', 'result', 'results', 'response', 'items', 'Flights'];
+  for (const key of candidateKeys) {
+    if (Array.isArray(obj[key])) {
+      console.warn(`⚠️ Live API vratio objekat sa nizom unutar "${key}" — koristim taj niz`);
+      return obj[key] as RawFlightData[];
+    }
+  }
+
+  // Objekat bez prepoznatog niza (npr. {"error": "..."}, {} ili {"status": "..."})
+  console.warn('⚠️ Live API vratio objekat bez prepoznatog niza letova — tretiram kao 0 letova:',
+    JSON.stringify(obj).substring(0, 500));
+  return [];
+}
+
 async function fetchWithQuickRetry(
   url: string,
   options: RequestInit,
@@ -422,8 +460,10 @@ if (!canFetchNow) {
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    const rawData: RawFlightData[] = await response.json();
-    if (!Array.isArray(rawData)) throw new Error('Invalid data format');
+const rawPayload: unknown = await response.json();
+const rawData: RawFlightData[] = normalizeRawFlightArray(rawPayload);
+
+if (!Array.isArray(rawData)) throw new Error('Invalid data format');
 
     console.log(`✅ Live fetch: ${rawData.length} flights`);
 

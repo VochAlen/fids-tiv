@@ -19,11 +19,21 @@ import Image from 'next/image';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 25_000;
+const REFRESH_INTERVAL_MS    = 20_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 5_000);
 
+
+// ── BRZI POLL — prati SAMO promjenu dodjele na ovom gate-u, odvojeno
+// od glavnog (skupljeg) ciklusa koji povlači cijelu listu letova.
+// Cilj: kad osoblje dodijeli let, on se pojavi na ekranu za ≤5s,
+// bez da se glavni REFRESH_INTERVAL_MS smanjuje (što bi poskupilo
+// CIJEL ciklus 4-5x). Ovaj poll pogađa mali, već ETag-ovan i CDN-
+// keširan endpoint (/api/test/gate-status-override?gateNumber=X) —
+// dok se ništa ne mijenja, CDN sam vraća 304 bez pozivanja funkcije.
+const FAST_POLL_BASE_MS = 3_000;
+const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * 1_500);
 
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
@@ -625,6 +635,55 @@ useEffect(() => {
   return () => { isMountedRef.current = false; clearTimeout(tid); };
 }, [loadFlights]);
 
+// ------------------------------------------------------------
+// BRZI POLL — otkriva promjenu dodjele na gate-u unutar ~3-4.5s,
+// nezavisno od glavnog 20-25s ciklusa. Kad detektuje promjenu
+// (server vrati 200 umjesto 304, znači ETag se promijenio jer je
+// osoblje dodijelilo/uklonilo let), odmah pokreće puni loadFlights().
+// ------------------------------------------------------------
+useEffect(() => {
+  let tid: ReturnType<typeof setTimeout>;
+  let cancelled = false;
+
+  const fastCheck = async () => {
+    if (cancelled || !isMountedRef.current) {
+      return;
+    }
+
+    if (isNightHours()) {
+      tid = setTimeout(fastCheck, getFastPollInterval());
+      return;
+    }
+
+    try {
+      // fetchGateStatusOverride vraća null kad je 304 (nema promjene)
+      // ili kad je ETag isti — u tom slučaju je ovaj poll bio praktično
+      // besplatan (edge cache je vratio 304 bez dodirivanja funkcije).
+      // Vraća objekat (ne-null) SAMO kad se sadržaj stvarno promijenio.
+      const changed = await fetchGateStatusOverride(gateNumber);
+      if (changed !== null && isMountedRef.current) {
+        // Stvarna promjena dodjele — ne čekaj sljedeći spori ciklus,
+        // odmah povuci pun raspored da se detalji leta prikažu.
+        loadFlights();
+      }
+    } catch {
+      // ignoriši grešku, probaj ponovo na sljedećem otkucaju
+    }
+
+    if (!cancelled) {
+      tid = setTimeout(fastCheck, getFastPollInterval());
+    }
+  };
+
+  // Mali nasumičan početni delay da se izbjegne sinhroni start
+  // svih gate ekrana u istom trenutku
+  tid = setTimeout(fastCheck, Math.floor(Math.random() * 2_000));
+
+  return () => {
+    cancelled = true;
+    clearTimeout(tid);
+  };
+}, [gateNumber, fetchGateStatusOverride, loadFlights]);
   // ------------------------------------------------------------
   // Timer za automatsko prebacivanje na STD-1min
   // ------------------------------------------------------------
