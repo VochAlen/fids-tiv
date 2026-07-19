@@ -520,14 +520,17 @@ try {
       return;
     }
 
-    // 3. Kandidati za prikaz
+
+// 3. Kandidati za prikaz — ISKLJUČIVO let koji je osoblje ručno
+    // dodijelilo ovom gate-u (Redis override). Auto-match na osnovu
+    // GateNumber polja iz API-ja je namjerno uklonjen — ekran više
+    // NIKAD ne prikazuje let koji nije eksplicitno dodijeljen. ────────
     let candidates: Flight[] = [];
     if (overrideStatus === 'open' && overrideFlightNumber) {
       const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
       if (overriddenFlight) candidates = [overriddenFlight];
-    } else {
-      candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
     }
+    // else: candidates ostaje prazan niz → ekran prikazuje "NO FLIGHTS SCHEDULED"
 
     // 4. Check-in status za svakog kandidata
     const withStatus = await Promise.all(

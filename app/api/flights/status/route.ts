@@ -44,12 +44,13 @@ export async function GET(request: Request) {
     // isNightMode MORA biti u ETag payload-u — inače bi tranzicija
     // dan→noć (ili noć→dan) mogla ostati "zarobljena" iza 304 odgovora
     // sve dok se hash/desks/gates ne promijene iz nekog drugog razloga.
-    const etagPayload = {
-      hash: meta.hash || '',
-      desks,
-      gates,
-      isNightMode: nightNow,   // ← DODANO
-    };
+const etagPayload = {
+  hash: meta.hash || '',
+  desks,
+  gates,
+  deskEntries: rawAssignments.desks,
+  gateEntries: rawAssignments.gates,
+};
     const etagHash = createHash('md5')
       .update(JSON.stringify(etagPayload))
       .digest('hex')
@@ -69,24 +70,28 @@ export async function GET(request: Request) {
     }
 
     // ── Normalan odgovor sa ETag ────────────────────────────
-    return NextResponse.json(
-      {
-        hash: meta.hash || null,
-        count: meta.count || 0,
-        lastModified: meta.lastModified || null,
-        source: meta.source || 'unknown',
-        timestamp: new Date().toISOString(),
-        desks,
-        gates,
-        isNightMode: nightNow,   // ← DODANO
-      },
-      {
-        headers: {
-          'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
-          'ETag': etag,
-        },
-      }
-    );
+return NextResponse.json(
+  {
+    hash: meta.hash || null,
+    count: meta.count || 0,
+    lastModified: meta.lastModified || null,
+    source: meta.source || 'unknown',
+    timestamp: new Date().toISOString(),
+    desks,
+    gates,
+    // ── Pune verzije (status/flightNumber/classType po broju šaltera/gate-a) —
+    // potrebno GatePageClient.tsx-u za tačnu Redis-baziranu dodjelu,
+    // ne samo pojednostavljenu flightNumber→broj mapu. ──────────
+    deskEntries: rawAssignments.desks,
+    gateEntries: rawAssignments.gates,
+  },
+  {
+    headers: {
+      'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
+      'ETag': etag,
+    },
+  }
+);
   } catch (error) {
     console.error('Status endpoint error:', error);
     return NextResponse.json(
