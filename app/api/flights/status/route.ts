@@ -11,7 +11,7 @@ const FLIGHT_META_KEY = 'cache:flights:meta';
 
 let cachedMeta: { hash?: string; count?: number; lastModified?: string; source?: string } | null = null;
 let cachedMetaExpiry = 0;
-const CACHE_TTL_MS = 20_000;
+const CACHE_TTL_MS = 10_000;
 
 export async function GET(request: Request) {
   try {

@@ -64,7 +64,7 @@ export async function GET(request: Request) {
     const gateNumber = searchParams.get('gateNumber');
     const now = Date.now();
 
-    const all = await readAllCached();
+ const all = await readAll();
 
     // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
@@ -162,8 +162,8 @@ export async function POST(request: Request) {
 
   await writeAll(all);
 
-  cachedAll = all;
-  cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+  // cachedAll = all;
+  // cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 
   const ttl = action === 'clear' ? undefined : TTL_SECONDS;
   return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });
