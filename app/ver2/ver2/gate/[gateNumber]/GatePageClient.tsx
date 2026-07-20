@@ -525,12 +525,33 @@ try {
     // dodijelilo ovom gate-u (Redis override). Auto-match na osnovu
     // GateNumber polja iz API-ja je namjerno uklonjen — ekran više
     // NIKAD ne prikazuje let koji nije eksplicitno dodijeljen. ────────
-    let candidates: Flight[] = [];
-    if (overrideStatus === 'open' && overrideFlightNumber) {
-      const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-      if (overriddenFlight) candidates = [overriddenFlight];
+let candidates: Flight[] = [];
+if (overrideStatus === 'open' && overrideFlightNumber) {
+  let overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+
+  // Override je aktivan, ali let nije u trenutno keširanoj listi.
+  // Ne odustaj odmah — prisilno povuci svježe podatke prije nego
+  // što zaključimo da leta nema.
+  if (!overriddenFlight) {
+    console.warn(`[gate:${gateNumber}] Override za let ${overrideFlightNumber} aktivan, ali nije nađen u keširanim podacima — prisilno osvježavam.`);
+    try {
+      const freshData = await fetchFlightData();
+      lastFlightsDataRef.current = freshData;
+      data = freshData;
+      overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+    } catch (e) {
+      console.error('Prisilno osvježavanje letova nije uspjelo:', e);
     }
-    // else: candidates ostaje prazan niz → ekran prikazuje "NO FLIGHTS SCHEDULED"
+    if (!overriddenFlight) {
+      console.error(
+        `[gate:${gateNumber}] Let "${overrideFlightNumber}" i dalje nije pronađen. ` +
+        `Dostupni brojevi leta:`, data.departures.map(f => f.FlightNumber)
+      );
+    }
+  }
+
+  if (overriddenFlight) candidates = [overriddenFlight];
+}
 
     // 4. Check-in status za svakog kandidata
     const withStatus = await Promise.all(
