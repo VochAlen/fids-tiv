@@ -745,12 +745,12 @@ useEffect(() => {
 
 
   // ── Rotacija stranica unutar trenutno prikazane liste (brže od 20s switcha) ──
-  useEffect(() => {
-    const id = setInterval(() => {
-      setPageIndex(p => p + 1)
-    }, PAGE_ROTATE_MS)
-    return () => clearInterval(id)
-  }, [])
+  // useEffect(() => {
+  //   const id = setInterval(() => {
+  //     setPageIndex(p => p + 1)
+  //   }, PAGE_ROTATE_MS)
+  //   return () => clearInterval(id)
+  // }, [])
 
   // ── Heartbeat (kiosk — bez mouse/key listenera) ───────────
   useEffect(() => {
@@ -1120,14 +1120,18 @@ const allSortedFlights = useMemo(() => {
   })
 }, [showArrivals, arrivals, departures, getTimeOfDayMinutes])
 
-const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
+// const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
 
-const sortedFlights = useMemo(() => {
-  if (allSortedFlights.length === 0) return []
-  const currentPage = pageIndex % totalPages
-  const start = currentPage * PAGE_SIZE
-  return allSortedFlights.slice(start, start + PAGE_SIZE)
-}, [allSortedFlights, pageIndex, totalPages])
+// const sortedFlights = useMemo(() => {
+//   if (allSortedFlights.length === 0) return []
+//   const currentPage = pageIndex % totalPages
+//   const start = currentPage * PAGE_SIZE
+//   return allSortedFlights.slice(start, start + PAGE_SIZE)
+// }, [allSortedFlights, pageIndex, totalPages])
+const sortedFlights = useMemo(
+  () => allSortedFlights.slice(0, MAX_FLIGHTS_DISPLAY),
+  [allSortedFlights]
+)
 
   // ── Render ────────────────────────────────────────────────
 
@@ -1234,20 +1238,7 @@ const sortedFlights = useMemo(() => {
           </div>
         </div>
       </div>
-      {totalPages > 1 && (
-  <div className="flex items-center justify-center gap-1.5 mt-2">
-    {Array.from({ length: totalPages }).map((_, i) => (
-      <div
-        key={i}
-        className={`w-1.5 h-1.5 rounded-full transition-all ${
-          i === ((showArrivals ? arrivalsPage : departuresPage) % totalPages)
-            ? `${colors.accent} w-4`
-            : 'bg-white/20'
-        }`}
-      />
-    ))}
-  </div>
-)}
+
 
       <style jsx global>{`
         #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
