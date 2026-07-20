@@ -24,19 +24,16 @@ export type RawAssignments = {
 };
 
 export type SimpleAssignments = {
-  desks: Record<string, string>; // flightNumber -> deskNumber(s)
-  gates: Record<string, string>; // flightNumber -> gateNumber
+  desks: Record<string, string>;
+  gates: Record<string, string>;
 };
 
-// ── IN-PROCESS KEŠ — dijeli ga i /api/test/assignments i /api/flights/status,
-// tako da čak i kad obje rute čitaju u istom ciklusu, Redis se pogađa
-// najviše jednom na 10s po serverless instanci ──────────────────────────
-let cachedRaw: RawAssignments | null = null;
-let cachedRawExpiry = 0;
-let refreshing = false;
-const CACHE_TTL_MS = 40_000;
+// OBRISANO: cachedRaw, cachedRawExpiry, refreshing, CACHE_TTL_MS
+// Dodjele su podaci koji se mijenjaju na zahtjev osoblja u realnom
+// vremenu — ne smiju se keširati u memoriji funkcije, jer serverless
+// instance nisu međusobno sinhronizovane.
 
-async function readRaw(): Promise<RawAssignments> {
+export async function getRawAssignments(): Promise<RawAssignments> {
   const [deskRaw, gateRaw] = await Promise.all([
     safeRedisGet(DESK_ALL_KEY),
     safeRedisGet(GATE_ALL_KEY),
@@ -53,23 +50,6 @@ async function readRaw(): Promise<RawAssignments> {
   }
 
   return { desks, gates };
-}
-
-export async function getRawAssignments(): Promise<RawAssignments> {
-  const now = Date.now();
-
-  if (cachedRaw && now < cachedRawExpiry) return cachedRaw;
-  if (refreshing && cachedRaw) return cachedRaw;
-
-  refreshing = true;
-  try {
-    const fresh = await readRaw();
-    cachedRaw = fresh;
-    cachedRawExpiry = now + CACHE_TTL_MS;
-    return fresh;
-  } finally {
-    refreshing = false;
-  }
 }
 
 export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {

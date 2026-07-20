@@ -64,7 +64,7 @@ const etagPayload = {
         status: 304,
         headers: {
           'ETag': etag,
-          'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
+          'Cache-Control': 'private, no-cache',   // ← promijenjeno
         },
       });
     }
@@ -87,7 +87,7 @@ return NextResponse.json(
   },
   {
     headers: {
-      'Cache-Control': 'public, max-age=20, s-maxage=45, stale-while-revalidate=30',
+       'Cache-Control': 'private, no-cache',   // ← promijenjeno
       'ETag': etag,
     },
   }

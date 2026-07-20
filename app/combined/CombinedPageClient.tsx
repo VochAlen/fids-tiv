@@ -682,9 +682,9 @@ function FlightBoard(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [autoStatusTick, setAutoStatusTick] = useState(0)
 
-  const [arrivalsPage,   setArrivalsPage]   = useState(0)
-const [departuresPage, setDeparturesPage] = useState(0)
-const [toggleCount, setToggleCount] = useState(0)
+//   const [arrivalsPage,   setArrivalsPage]   = useState(0)
+// const [departuresPage, setDeparturesPage] = useState(0)
+// const [toggleCount, setToggleCount] = useState(0)
 
 const [pageIndex, setPageIndex] = useState(0)
 
@@ -738,7 +738,7 @@ const etagStatusRef = useRef<string | null>(null);
 useEffect(() => {
   const id = setInterval(() => {
     setShowArrivals(p => !p)
-    setPageIndex(0)   // ⭐ reset — nova lista uvijek počinje od prve stranice
+    // setPageIndex(0)   // ⭐ reset — nova lista uvijek počinje od prve stranice
   }, 20_000)
   return () => clearInterval(id)
 }, [])
