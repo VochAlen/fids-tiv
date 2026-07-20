@@ -96,21 +96,26 @@ async function checkForChanges(): Promise<boolean> {
 
 
 // ── IZMIJENJENA fetchFlightData FUNKCIJA ────────────────────
-export async function fetchFlightData(): Promise<FlightData> {
-  // Prvo provjeri da li ima promjena preko status endpointa
-  const hasChanges = await checkForChanges();
-  
-  // Ako nema promjena i imamo keširane podatke, vrati ih odmah
-  if (!hasChanges && lastKnownData) {
-    console.log('📦 Returning cached flight data (no changes)');
-    return { ...lastKnownData, source: 'cached' };
-  }
-  
-  // Ograničenje učestalosti fetch-a (dodatna zaštita)
-  const now = Date.now();
-  if (now - lastFetchTime < MIN_FETCH_INTERVAL && lastKnownData) {
-    console.log('⏱️ Skipping fetch - too soon after last request');
-    return { ...lastKnownData, source: 'cached' };
+
+export async function fetchFlightData(force = false): Promise<FlightData> {
+  // Force zaobilazi i hash-check throttle i min-fetch-interval throttle —
+  // koristi se kad pozivalac EKSPLICITNO zna da mu trebaju svježi podaci
+  // (npr. GatePageClient kad override postoji ali let nije nađen u kešu).
+  if (!force) {
+    const hasChanges = await checkForChanges();
+
+    if (!hasChanges && lastKnownData) {
+      console.log('📦 Returning cached flight data (no changes)');
+      return { ...lastKnownData, source: 'cached' };
+    }
+
+    const now = Date.now();
+    if (now - lastFetchTime < MIN_FETCH_INTERVAL && lastKnownData) {
+      console.log('⏱️ Skipping fetch - too soon after last request');
+      return { ...lastKnownData, source: 'cached' };
+    }
+  } else {
+    console.log('⚡ Force refresh requested — bypassing hash-check and throttle');
   }
 
   try {

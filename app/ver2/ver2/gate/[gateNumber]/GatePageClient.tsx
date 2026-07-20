@@ -532,15 +532,15 @@ if (overrideStatus === 'open' && overrideFlightNumber) {
   // Override je aktivan, ali let nije u trenutno keširanoj listi.
   // Ne odustaj odmah — prisilno povuci svježe podatke prije nego
   // što zaključimo da leta nema.
-  if (!overriddenFlight) {
-    console.warn(`[gate:${gateNumber}] Override za let ${overrideFlightNumber} aktivan, ali nije nađen u keširanim podacima — prisilno osvježavam.`);
-    try {
-      const freshData = await fetchFlightData();
-      lastFlightsDataRef.current = freshData;
-      data = freshData;
-      overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-    } catch (e) {
-      console.error('Prisilno osvježavanje letova nije uspjelo:', e);
+if (!overriddenFlight) {
+  console.warn(`[gate:${gateNumber}] Override za let ${overrideFlightNumber} aktivan, ali nije nađen — prisilno osvježavam.`);
+  try {
+    const freshData = await fetchFlightData(true);   // ← force=true, sad zaista zaobilazi throttle
+    lastFlightsDataRef.current = freshData;
+    data = freshData;
+    overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+  } catch (e) {
+    console.error('Prisilno osvježavanje letova nije uspjelo:', e);
     }
     if (!overriddenFlight) {
       console.error(
