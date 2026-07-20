@@ -33,14 +33,14 @@ export async function GET(request: Request) {
         status: 304,
         headers: {
           'ETag': etag,
-          'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+        'Cache-Control': 'private, no-cache',
         },
       });
     }
 
     return NextResponse.json(responseBody, {
       headers: {
-        'Cache-Control': 'public, max-age=15, s-maxage=25, stale-while-revalidate=30',
+       'Cache-Control': 'private, no-cache',
         'ETag': etag,
       },
     });

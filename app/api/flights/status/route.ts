@@ -5,7 +5,8 @@ import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
 import { createHash } from 'crypto';
 import { isNightHours } from '@/lib/night-hours';   // ← DODANO
 
-export const revalidate = 45;
+export const dynamic = 'force-dynamic';   // ← DODANO — zamjenjuje revalidate
+// export const revalidate = 45;          // ← OBRISANO — sukobljavalo se sa dynamic i uzrokovalo ISR keš do 45s
 
 const FLIGHT_META_KEY = 'cache:flights:meta';
 

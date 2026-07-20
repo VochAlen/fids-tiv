@@ -28,10 +28,7 @@ export type SimpleAssignments = {
   gates: Record<string, string>;
 };
 
-// OBRISANO: cachedRaw, cachedRawExpiry, refreshing, CACHE_TTL_MS
-// Dodjele su podaci koji se mijenjaju na zahtjev osoblja u realnom
-// vremenu — ne smiju se keširati u memoriji funkcije, jer serverless
-// instance nisu međusobno sinhronizovane.
+// NEMA više cachedRaw / cachedRawExpiry / refreshing / CACHE_TTL_MS
 
 export async function getRawAssignments(): Promise<RawAssignments> {
   const [deskRaw, gateRaw] = await Promise.all([

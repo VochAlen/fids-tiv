@@ -11,7 +11,7 @@ let redis: Redis | null = null;
 // dok se ne stabilizuje
 let circuitOpen = false;
 let circuitOpenedAt = 0;
-const CIRCUIT_COOLDOWN_MS = 15_000; // 15s pauza nakon pada
+const CIRCUIT_COOLDOWN_MS = 3_000; // 15s pauza nakon pada
 
 export function getRedisClient(): Redis {
   if (!redis) {
@@ -37,15 +37,11 @@ export function getRedisClient(): Redis {
         return Math.min(times * 500, 8_000);
       },
     });
-
-    redis.on('error', (err: Error) => {
-      // Logiraj samo poruku, ne cijeli stack (smanjuje log spam)
-      console.error(`[Redis] Error: ${err.message}`);
-
-      // Otvori circuit breaker — sljedeće komande odmah vraćaju null
-      circuitOpen = true;
-      circuitOpenedAt = Date.now();
-    });
+redis.on('error', (err: Error) => {
+  console.error(`[Redis] Error: ${err.message} — circuit breaker OPEN for ${CIRCUIT_COOLDOWN_MS}ms`);
+  circuitOpen = true;
+  circuitOpenedAt = Date.now();
+});
 
     redis.on('connect', () => {
       console.log('[Redis] Connected');
