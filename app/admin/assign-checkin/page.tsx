@@ -50,7 +50,7 @@ const isBAFlight = (fn: string) => fn.toUpperCase().startsWith('BA');
 const EASYJET_PREFIXES = ['U2', 'EZY', 'EC', 'EJU', 'DS', 'EZS'];
 
 const isEasyJetFlight = (flight: Flight): boolean => {
-  const name = (flight.AirlineName || '').toLowerCase();
+  const name = (flight.AirlineName || '').toLowerCase().replace(/\s+/g, '');
   if (name.includes('easyjet')) return true;
 
   const icao = (flight.AirlineICAO || '').toUpperCase();

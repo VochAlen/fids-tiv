@@ -51,8 +51,11 @@ const BA_IMAGES: Record<string, string> = {
 const EASYJET_PREFIXES = ['U2', 'EZY', 'EC', 'EJU', 'DS', 'EZS'];
 
 const isEasyJetFlight = (flightNumber: string, airlineName?: string): boolean => {
-  const name = (airlineName || '').toLowerCase();
+  // Ukloni sve razmake i pretvori u mala slova — hvata "easyJet",
+  // "EasyJet", "EASY JET", "Easy Jet Europe", "easyjet switzerland" itd.
+  const name = (airlineName || '').toLowerCase().replace(/\s+/g, '');
   if (name.includes('easyjet')) return true;
+
   const fn = flightNumber.toUpperCase();
   return EASYJET_PREFIXES.some(prefix => fn.startsWith(prefix));
 };
