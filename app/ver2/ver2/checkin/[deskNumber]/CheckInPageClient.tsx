@@ -724,25 +724,27 @@ useEffect(() => {
                 portrait
               />
 
-              {assignment.classType && (
-                <div className="w-full max-w-[90vw] mb-3">
-                  <div
-                    className={`rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
-                      assignment.classType.toUpperCase().includes('BUSINESS')
-                        ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
-                        : assignment.classType.toUpperCase().includes('PREMIUM')
-                        ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
-                        : assignment.classType.toUpperCase().includes('PRIORITY')
-                        ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
-                        : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
-                    }`}
-                  >
-                    <h1 className="text-7xl font-black text-white tracking-wider">
-                      {assignment.classType.toUpperCase()}
-                    </h1>
-                  </div>
-                </div>
-              )}
+           {assignment.classType && (
+  <div className="w-full max-w-[90vw] mb-3">
+    <div
+      className={`rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
+        assignment.classType === 'EASYJET_PLUS'
+          ? 'bg-gradient-to-r from-orange-500 to-orange-600 border-orange-300'
+          : assignment.classType.toUpperCase().includes('BUSINESS')
+          ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
+          : assignment.classType.toUpperCase().includes('PREMIUM')
+          ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
+          : assignment.classType.toUpperCase().includes('PRIORITY')
+          ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
+          : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
+      }`}
+    >
+      <h1 className={assignment.classType === 'EASYJET_PLUS' ? 'text-5xl font-black text-white tracking-wider' : 'text-7xl font-black text-white tracking-wider'}>
+        {assignment.classType === 'EASYJET_PLUS' ? 'easyJet Plus Class' : assignment.classType.toUpperCase()}
+      </h1>
+    </div>
+  </div>
+)}
 
               {/* Broj leta */}
               <div className="text-center w-full">
@@ -924,25 +926,27 @@ useEffect(() => {
                 portrait={false}
               />
               <div className="flex-1">
-                {assignment.classType && (
-                  <div className="mb-4">
-                    <div
-                      className={`inline-block rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
-                        assignment.classType.toUpperCase().includes('BUSINESS')
-                          ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
-                          : assignment.classType.toUpperCase().includes('PREMIUM')
-                          ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
-                          : assignment.classType.toUpperCase().includes('PRIORITY')
-                          ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
-                          : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
-                      }`}
-                    >
-                      <h1 className="text-5xl font-black text-white tracking-wider">
-                        {assignment.classType.toUpperCase()}
-                      </h1>
-                    </div>
-                  </div>
-                )}
+     {assignment.classType && (
+  <div className="mb-4">
+    <div
+      className={`inline-block rounded-xl px-6 py-3 text-center shadow-lg border-2 ${
+        assignment.classType === 'EASYJET_PLUS'
+          ? 'bg-gradient-to-r from-orange-500 to-orange-600 border-orange-300'
+          : assignment.classType.toUpperCase().includes('BUSINESS')
+          ? 'bg-gradient-to-r from-red-600 to-red-700 border-red-400'
+          : assignment.classType.toUpperCase().includes('PREMIUM')
+          ? 'bg-gradient-to-r from-purple-600 to-purple-700 border-purple-400'
+          : assignment.classType.toUpperCase().includes('PRIORITY')
+          ? 'bg-gradient-to-r from-green-600 to-green-700 border-green-400'
+          : 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400'
+      }`}
+    >
+      <h1 className="text-5xl font-black text-white tracking-wider">
+        {assignment.classType === 'EASYJET_PLUS' ? 'easyJet Plus Class' : assignment.classType.toUpperCase()}
+      </h1>
+    </div>
+  </div>
+)}
                 <div className="text-[12rem] font-black text-yellow-500 mb-2 leading-none">
                   {assignment.flightNumber}
                 </div>

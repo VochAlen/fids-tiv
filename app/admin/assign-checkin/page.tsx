@@ -29,20 +29,38 @@ const TOUCH_TIMEOUT_MS    = 8_000;
 const TAP_MOVE_THRESHOLD  = 10;
 
 const CLASS_CYCLE = [null, 'ECONOMY', 'BUSINESS', 'PREMIUM', 'PRIORITY'] as const;
-type ClassType = typeof CLASS_CYCLE[number];
-
+type ClassType = typeof CLASS_CYCLE[number] | 'EASYJET_PLUS';
 const CLASS_BADGE_STYLES: Record<string, { bg: string; text: string; border: string }> = {
-  ECONOMY:  { bg: 'rgba(37,99,235,0.15)',  text: '#93c5fd', border: '#3b82f6' },
-  BUSINESS: { bg: 'rgba(194,65,12,0.20)',  text: '#fdba74', border: '#f97316' },
-  PREMIUM:  { bg: 'rgba(109,40,217,0.20)', text: '#d8b4fe', border: '#a855f7' },
-  PRIORITY: { bg: 'rgba(22,101,52,0.20)',  text: '#86efac', border: '#22c55e' },
+  ECONOMY:      { bg: 'rgba(37,99,235,0.15)',  text: '#93c5fd', border: '#3b82f6' },
+  BUSINESS:     { bg: 'rgba(194,65,12,0.20)',  text: '#fdba74', border: '#f97316' },
+  PREMIUM:      { bg: 'rgba(109,40,217,0.20)', text: '#d8b4fe', border: '#a855f7' },
+  PRIORITY:     { bg: 'rgba(22,101,52,0.20)',  text: '#86efac', border: '#22c55e' },
+  EASYJET_PLUS: { bg: 'rgba(234,88,12,0.20)',  text: '#fdba74', border: '#f97316' },
 };
 
 const CLASS_EMOJI: Record<string, string> = {
-  ECONOMY: '💺', BUSINESS: '💼', PREMIUM: '👑', PRIORITY: '⭐',
+  ECONOMY: '💺', BUSINESS: '💼', PREMIUM: '👑', PRIORITY: '⭐', EASYJET_PLUS: '🟠',
+};
+const isBAFlight = (fn: string) => fn.toUpperCase().startsWith('BA');
+
+// EasyJet grupa posluje pod više IATA/ICAO kodova zavisno od
+// registracije (UK, Europe/Austria, Switzerland). Provjeravamo
+// i naziv avio-kompanije (najpouzdanije) i sve poznate prefikse
+// broja leta kao fallback.
+const EASYJET_PREFIXES = ['U2', 'EZY', 'EC', 'EJU', 'DS', 'EZS'];
+
+const isEasyJetFlight = (flight: Flight): boolean => {
+  const name = (flight.AirlineName || '').toLowerCase();
+  if (name.includes('easyjet')) return true;
+
+  const icao = (flight.AirlineICAO || '').toUpperCase();
+  if (EASYJET_PREFIXES.includes(icao)) return true;
+
+  const fn = (flight.FlightNumber || '').toUpperCase();
+  return EASYJET_PREFIXES.some(prefix => fn.startsWith(prefix));
 };
 
-const isBAFlight = (fn: string) => fn.toUpperCase().startsWith('BA');
+
 
 // ─────────────────────────────────────────────
 // Tipovi
@@ -318,6 +336,10 @@ const FlightRow: React.FC<{
 // Komponenta: AssignmentCard
 // ─────────────────────────────────────────────
 
+const CLASS_LABELS: Record<string, string> = {
+  EASYJET_PLUS: 'PLUS',
+};
+
 const AssignmentCard: React.FC<{
   a: Assignment;
   type: 'desk' | 'gate';
@@ -325,9 +347,12 @@ const AssignmentCard: React.FC<{
   onRemove: () => void;
   onClassToggle: (next: ClassType) => void;
   isDark: boolean;
-    disabled?: boolean; //dodato
-}> = ({ a, type, classType, onRemove, onClassToggle, isDark }) => {
-  const classes = ['ECONOMY', 'BUSINESS', 'PREMIUM', 'PRIORITY'] as const;
+  isEasyJet?: boolean;   // ← NOVO
+  disabled?: boolean;
+}> = ({ a, type, classType, onRemove, onClassToggle, isDark, isEasyJet }) => {
+  const classes = isEasyJet
+    ? (['ECONOMY', 'EASYJET_PLUS', 'PREMIUM', 'PRIORITY'] as const)
+    : (['ECONOMY', 'BUSINESS', 'PREMIUM', 'PRIORITY'] as const);
   return (
     <div className={`flex flex-col gap-2 rounded-xl border p-3 ${
       type === 'desk'
@@ -357,28 +382,28 @@ const AssignmentCard: React.FC<{
         </TouchFeedback>
       </div>
       <div className="grid grid-cols-4 gap-1">
-        {classes.map(cls => {
-          const isActive = classType === cls;
-          const style    = CLASS_BADGE_STYLES[cls];
-          return (
-            <TouchFeedback key={cls} onTap={() => onClassToggle(isActive ? null : cls)}>
-              <button
-                className="w-full rounded-lg py-1.5 text-[10px] font-bold tracking-wide border transition-all active:scale-95"
-                style={isActive ? {
-                  background: style.bg, color: style.text, borderColor: style.border,
-                  boxShadow: `0 0 8px ${style.border}55`,
-                } : {
-                  background:  isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)',
-                  color:       isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.30)',
-                  borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.12)',
-                }}
-              >
-                <div>{CLASS_EMOJI[cls]}</div>
-                <div>{cls}</div>
-              </button>
-            </TouchFeedback>
-          );
-        })}
+{classes.map(cls => {
+  const isActive = classType === cls;
+  const style    = CLASS_BADGE_STYLES[cls];
+  return (
+    <TouchFeedback key={cls} onTap={() => onClassToggle(isActive ? null : cls)}>
+      <button
+        className="w-full rounded-lg py-1.5 text-[10px] font-bold tracking-wide border transition-all active:scale-95"
+        style={isActive ? {
+          background: style.bg, color: style.text, borderColor: style.border,
+          boxShadow: `0 0 8px ${style.border}55`,
+        } : {
+          background:  isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)',
+          color:       isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.30)',
+          borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.12)',
+        }}
+      >
+        <div>{CLASS_EMOJI[cls]}</div>
+        <div>{CLASS_LABELS[cls] ?? cls}</div>
+      </button>
+    </TouchFeedback>
+  );
+})}
       </div>
     </div>
   );
@@ -864,14 +889,23 @@ const assignFlightToResource = useCallback(async (
     : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
 
   // ── Odredi auto-klasu ODMAH (lokalno, bez čekanja servera) ──
-  let autoClass: ClassType = null;
-  if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
-    const existingBADesks = checkinAssignmentsRef.current.filter(
-      a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
-    );
-    autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
-  }
+let autoClass: ClassType = null;
+if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
+  const existingBADesks = checkinAssignmentsRef.current.filter(
+    a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
+  );
+  autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
+} else if (resourceType === 'desk' && isEasyJetFlight(flight)) {
+  // Poredi po broju leta (isti let, drugi šalter) — ne po avio-
+  // kompaniji uopšte, inače bi dva različita easyJet leta na dva
+  // različita šaltera međusobno blokirala jedno drugom Plus Class.
+  const existingEasyJetDesksForThisFlight = checkinAssignmentsRef.current.filter(
+    a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
+  );
+  autoClass = existingEasyJetDesksForThisFlight.length === 0 ? 'EASYJET_PLUS' : null;
+}
 
+  
   // ── OPTIMISTIČKO DODAVANJE — UI se mijenja ODMAH ──
   const optimisticAssignment: Assignment = {
     resourceId,
@@ -1251,13 +1285,14 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
                 {checkinAssignments.length === 0
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-       {checkinAssignments.map(a => (
+{checkinAssignments.map(a => (
   <AssignmentCard key={a.resourceId} a={a} type="desk"
     classType={a.classType}
     onRemove={() => handleRemoveCheckin(a.resourceId)}
     onClassToggle={next => handleClassToggle(a.resourceId, 'desk', next)}
     isDark={isDark}
-    disabled={removingResources.has(`desk:${a.resourceId}`)}  // ← novo
+    isEasyJet={isEasyJetFlight({ AirlineName: a.airlineName, FlightNumber: a.flightNumber } as Flight)}  // ← NOVO
+    disabled={removingResources.has(`desk:${a.resourceId}`)}
   />
 ))}
                     </div>
@@ -1295,13 +1330,14 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
                 {gateAssignments.length === 0
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {gateAssignments.map(a => (
-                        <AssignmentCard key={a.resourceId} a={a} type="gate"
-                          classType={a.classType}
-                          onRemove={() => handleRemoveGate(a.resourceId)}
-                          onClassToggle={next => handleClassToggle(a.resourceId, 'gate', next)}
-                          isDark={isDark} />
-                      ))}
+      {gateAssignments.map(a => (
+  <AssignmentCard key={a.resourceId} a={a} type="gate"
+    classType={a.classType}
+    onRemove={() => handleRemoveGate(a.resourceId)}
+    onClassToggle={next => handleClassToggle(a.resourceId, 'gate', next)}
+    isDark={isDark} />
+    // isEasyJet se ne prosljeđuje — ostaje undefined/false, standardna 4 dugmeta
+))}
                     </div>
                 }
               </div>
