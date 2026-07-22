@@ -45,6 +45,20 @@ const BA_IMAGES: Record<string, string> = {
   BUSINESS: '/british/ba1.avif',
   ECONOMY:  '/british/ba2.avif',
 };
+// EasyJet grupa posluje pod više IATA/ICAO kodova zavisno od
+// registracije (UK, Europe/Austria, Switzerland) — isti princip
+// kao u admin panelu.
+const EASYJET_PREFIXES = ['U2', 'EZY', 'EC', 'EJU', 'DS', 'EZS'];
+
+const isEasyJetFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase();
+  if (name.includes('easyjet')) return true;
+  const fn = flightNumber.toUpperCase();
+  return EASYJET_PREFIXES.some(prefix => fn.startsWith(prefix));
+};
+
+const EASYJET_PLUS_IMAGE = '/easyjet/easyjet_plus.avif';
+
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
 `;
@@ -224,15 +238,17 @@ const AdBanner = memo(function AdBanner({
   nextIndex,
   isTransitioning,
   baImageSrc,
+  overrideImageSrc,   // ← NOVO — generički override (BA ili easyJet ili bilo šta ubuduće)
 }: {
   adImages: string[];
   currentIndex: number;
   nextIndex: number;
   isTransitioning: boolean;
   baImageSrc: string | null;
+  overrideImageSrc?: string | null;   // ← NOVO
 }) {
   // BA let — prikaži statičnu sliku umjesto ads
-if (baImageSrc) {
+  if (baImageSrc) {
     return (
       <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
         <div className="relative w-full h-full">
@@ -253,6 +269,31 @@ if (baImageSrc) {
       </div>
     );
   }
+
+  // ── NOVO: generički override (npr. easyJet Plus) ──
+  if (overrideImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={overrideImageSrc}
+            alt="easyJet Plus"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (!adImages.length) return null;
 
   if (!adImages.length) return null;
   return (
@@ -331,6 +372,12 @@ const baAdImage = useMemo((): string | null => {
   if (assignment.classType === 'ECONOMY')  return BA_IMAGES.ECONOMY;
   return null;
 }, [assignment.flightNumber, assignment.classType]);
+
+const easyJetPlusImage = useMemo((): string | null => {
+  if (!isEasyJetFlight(assignment.flightNumber, assignment.airlineName)) return null;
+  if (assignment.classType === 'EASYJET_PLUS') return EASYJET_PLUS_IMAGE;
+  return null;
+}, [assignment.flightNumber, assignment.airlineName, assignment.classType]);
 
   // ── CSS injection ──────────────────────────────────────────
   useEffect(() => {
@@ -873,6 +920,7 @@ useEffect(() => {
   nextIndex={nextAdIndex}
   isTransitioning={isAdTransitioning}
   baImageSrc={baAdImage}
+  overrideImageSrc={easyJetPlusImage}
 />
 
           {/* Footer */}
