@@ -60,6 +60,15 @@ const isEasyJetFlight = (flight: Flight): boolean => {
   return EASYJET_PREFIXES.some(prefix => fn.startsWith(prefix));
 };
 
+// Vrijednosti koje se smiju automatski pomjerati — ručno postavljen
+// BUSINESS/PREMIUM/PRIORITY se NIKAD ne dira automatski.
+const isAutoAdjustable = (c: ClassType) => c === null || c === 'EASYJET_PLUS';
+
+const numericId = (id: string): number => {
+  const n = parseInt(id.replace(/\D/g, ''), 10);
+  return isNaN(n) ? Infinity : n;
+};
+
 
 
 // ─────────────────────────────────────────────
@@ -879,6 +888,49 @@ export default function AssignPanel() {
     } catch (err) { console.error(err); }
     finally { setRefreshing(false); }
   }, [fetchFlightsData, refreshAll]);
+  // Nakon dodjele ili uklanjanja resursa za easyJet let, provjeri da li
+// numerički najniži dodijeljeni resurs (gate ili šalter) nosi PLUS.
+// Ako ne — pomjeri oznaku na njega, i skini je sa bilo kog drugog koji
+// je slučajno zadržao. Ne dira ručno postavljene BUSINESS/PREMIUM/PRIORITY.
+const rebalanceEasyJetPlus = useCallback((
+  flightNumber: string,
+  resourceType: 'desk' | 'gate',
+) => {
+  const setAssignments = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
+  const endpoint = resourceType === 'desk'
+    ? `${API_PREFIX}/desk-status-override`
+    : `${API_PREFIX}/gate-status-override`;
+
+  setAssignments(list => {
+    const siblings = list.filter(a => a.flightNumber === flightNumber);
+    if (siblings.length === 0) return list;
+
+    const sorted = [...siblings].sort((a, b) => numericId(a.resourceId) - numericId(b.resourceId));
+    const winnerId = sorted[0].resourceId;
+
+    let changed = false;
+    const next = list.map(a => {
+      if (a.flightNumber !== flightNumber) return a;
+      if (!isAutoAdjustable(a.classType)) return a;
+
+      const nextClass: ClassType = a.resourceId === winnerId ? 'EASYJET_PLUS' : null;
+      if (a.classType !== nextClass) {
+        changed = true;
+        const body = resourceType === 'desk'
+          ? { deskNumber: a.resourceId, action: 'setClass', classType: nextClass }
+          : { gateNumber: a.resourceId, action: 'setClass', classType: nextClass };
+        fetch(endpoint, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(err => console.error('Rebalance class error:', err));
+        return { ...a, classType: nextClass };
+      }
+      return a;
+    });
+
+    return changed ? next : list;
+  });
+}, []);
 
 const assignFlightToResource = useCallback(async (
   flight: Flight, resourceId: string, resourceType: 'desk' | 'gate',
@@ -895,20 +947,11 @@ if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
     a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
   );
   autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
-} else if (isEasyJetFlight(flight)) {
-  // Radi i za desk i za gate — poredi po broju leta (isti let,
-  // drugi resurs), tako da svaki easyJet let nezavisno dobija
-  // svoju "prvi u nizu" logiku, bez obzira da li je riječ o
-  // šalteru ili gate-u.
-  const existingResourcesForThisFlight = resourceType === 'desk'
-    ? checkinAssignmentsRef.current.filter(
-        a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
-      )
-    : gateAssignmentsRef.current.filter(
-        a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
-      );
-  autoClass = existingResourcesForThisFlight.length === 0 ? 'EASYJET_PLUS' : null;
 }
+// EasyJet PLUS se NE određuje ovdje — uvijek se rekalkuliše NAKON
+// uspješne dodjele u rebalanceEasyJetPlus(), na osnovu numerički
+// najnižeg dodijeljenog resursa za taj let, bez obzira na redoslijed
+// kojim je osoblje kliknulo.
   
   // ── OPTIMISTIČKO DODAVANJE — UI se mijenja ODMAH ──
   const optimisticAssignment: Assignment = {
@@ -932,11 +975,9 @@ if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
     });
     const trackPromise = trackStart(resourceType, resourceId, flight);
 
-    const [res] = await Promise.all([assignPromise, trackPromise]);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+ const [res] = await Promise.all([assignPromise, trackPromise]);
+if (!res.ok) throw new Error('HTTP ' + res.status);
 
-    // setClass MORA ići poslije assign-a (server treba postojeći zapis) —
-    // ali radimo je u pozadini, ne čekamo je za UI (već je optimistički prikazano)
 if (autoClass) {
   const classEndpoint = resourceType === 'desk'
     ? `${API_PREFIX}/desk-status-override`
@@ -949,6 +990,11 @@ if (autoClass) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(classBody),
   }).catch(err => console.error('Auto class error:', err));
+} else if (isEasyJetFlight(flight)) {
+  // Assign je uspio — sad je bezbjedno rekalkulisati PLUS na numerički
+  // najniži resurs za ovaj let (setClass zahtijeva da assignment već
+  // postoji na serveru, zato ide TEK nakon uspješnog 'open' poziva).
+  rebalanceEasyJetPlus(flight.FlightNumber, resourceType);
 }
 
     //isDirty = true; // signal za sinhronizaciju sa drugim uređajima na sljedećem checkForChanges ciklusu
@@ -959,7 +1005,7 @@ if (autoClass) {
     setAssignments(list => list.filter(a => a.resourceId !== resourceId));
     return false;
   }
-}, []);
+}, [rebalanceEasyJetPlus]);
 
   const handleResourceTouchAssign = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate',
@@ -1000,16 +1046,13 @@ const handleConfirmOverride = useCallback(async () => {
   }, [setSelectedFlight]);
 
 const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
-  // Blokiraj duplirani klik dok je operacija u toku
   if (removingResources.has(`desk:${deskNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`desk:${deskNumber}`));
 
-  // ── OPTIMISTIČKO UKLANJANJE — UI se mijenja ODMAH ──
   const removed = checkinAssignmentsRef.current.find(a => a.resourceId === deskNumber);
   setCheckinAssignments(list => list.filter(a => a.resourceId !== deskNumber));
 
   try {
-    // trackEnd i clear idu paralelno, ne sekvencijalno
     await Promise.all([
       trackEnd('desk', deskNumber),
       fetch(`${API_PREFIX}/desk-status-override`, {
@@ -1017,8 +1060,10 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
         body: JSON.stringify({ deskNumber, action: 'clear' }),
       }),
     ]);
+    if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
+      rebalanceEasyJetPlus(removed.flightNumber, 'desk');
+    }
    // isDirty = true;
-    // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
     // Rollback — vrati stavku nazad ako je poziv pao
@@ -1034,7 +1079,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources]);
+}, [removingResources, rebalanceEasyJetPlus]);
 
 const handleRemoveGate = useCallback(async (gateNumber: string) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
@@ -1051,6 +1096,9 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
         body: JSON.stringify({ gateNumber, action: 'clear' }),
       }),
     ]);
+    if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
+      rebalanceEasyJetPlus(removed.flightNumber, 'gate');
+    }
  //   isDirty = true;
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
@@ -1066,7 +1114,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources]);
+}, [removingResources, rebalanceEasyJetPlus]);
 
   const handleClassToggle = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate', next: ClassType,
