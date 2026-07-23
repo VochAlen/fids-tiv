@@ -37,17 +37,23 @@ const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() *
 
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
-  ECONOMY:  { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
-  BUSINESS: { bg: 'rgba(194,65,12,0.25)',  border: '#f97316', text: '#fdba74' },
-  PREMIUM:  { bg: 'rgba(109,40,217,0.25)', border: '#a855f7', text: '#d8b4fe' },
-  PRIORITY: { bg: 'rgba(22,101,52,0.25)',  border: '#22c55e', text: '#86efac' },
+  ECONOMY:      { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
+  BUSINESS:     { bg: 'rgba(194,65,12,0.25)',  border: '#f97316', text: '#fdba74' },
+  PREMIUM:      { bg: 'rgba(109,40,217,0.25)', border: '#a855f7', text: '#d8b4fe' },
+  PRIORITY:     { bg: 'rgba(22,101,52,0.25)',  border: '#22c55e', text: '#86efac' },
+  EASYJET_PLUS: { bg: 'rgba(234,88,12,0.25)',  border: '#f97316', text: '#fdba74' },
 };
 
 const CLASS_EMOJI: Record<string, string> = {
-  ECONOMY:  '💺',
-  BUSINESS: '💼',
-  PREMIUM:  '👑',
-  PRIORITY: '⭐',
+  ECONOMY:      '💺',
+  BUSINESS:     '💼',
+  PREMIUM:      '👑',
+  PRIORITY:     '⭐',
+  EASYJET_PLUS: '🟠',
+};
+
+const CLASS_LABELS: Record<string, string> = {
+  EASYJET_PLUS: 'EASYJET PLUS',
 };
 
 
@@ -103,7 +109,7 @@ const ClassBadge = memo(function ClassBadge({ classType }: { classType: string |
       lineHeight:     1,
     }} className="fids-class-badge">
       <span style={{ fontSize: 'clamp(1.5rem, 3vw, 2.5rem)', lineHeight: 1 }}>{emoji}</span>
-      <span>{key}</span>
+      <span>{CLASS_LABELS[key] ?? key}</span>
     </div>
   );
 });

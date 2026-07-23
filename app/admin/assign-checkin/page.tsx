@@ -895,16 +895,20 @@ if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
     a => isBAFlight(a.flightNumber) && a.resourceId !== resourceId,
   );
   autoClass = existingBADesks.length < 2 ? 'BUSINESS' : 'ECONOMY';
-} else if (resourceType === 'desk' && isEasyJetFlight(flight)) {
-  // Poredi po broju leta (isti let, drugi šalter) — ne po avio-
-  // kompaniji uopšte, inače bi dva različita easyJet leta na dva
-  // različita šaltera međusobno blokirala jedno drugom Plus Class.
-  const existingEasyJetDesksForThisFlight = checkinAssignmentsRef.current.filter(
-    a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
-  );
-  autoClass = existingEasyJetDesksForThisFlight.length === 0 ? 'EASYJET_PLUS' : null;
+} else if (isEasyJetFlight(flight)) {
+  // Radi i za desk i za gate — poredi po broju leta (isti let,
+  // drugi resurs), tako da svaki easyJet let nezavisno dobija
+  // svoju "prvi u nizu" logiku, bez obzira da li je riječ o
+  // šalteru ili gate-u.
+  const existingResourcesForThisFlight = resourceType === 'desk'
+    ? checkinAssignmentsRef.current.filter(
+        a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
+      )
+    : gateAssignmentsRef.current.filter(
+        a => a.flightNumber === flight.FlightNumber && a.resourceId !== resourceId,
+      );
+  autoClass = existingResourcesForThisFlight.length === 0 ? 'EASYJET_PLUS' : null;
 }
-
   
   // ── OPTIMISTIČKO DODAVANJE — UI se mijenja ODMAH ──
   const optimisticAssignment: Assignment = {
@@ -933,12 +937,19 @@ if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
 
     // setClass MORA ići poslije assign-a (server treba postojeći zapis) —
     // ali radimo je u pozadini, ne čekamo je za UI (već je optimistički prikazano)
-    if (autoClass) {
-      fetch(`${API_PREFIX}/desk-status-override`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber: resourceId, action: 'setClass', classType: autoClass }),
-      }).catch(err => console.error('Auto BA class error:', err));
-    }
+if (autoClass) {
+  const classEndpoint = resourceType === 'desk'
+    ? `${API_PREFIX}/desk-status-override`
+    : `${API_PREFIX}/gate-status-override`;
+  const classBody = resourceType === 'desk'
+    ? { deskNumber: resourceId, action: 'setClass', classType: autoClass }
+    : { gateNumber: resourceId, action: 'setClass', classType: autoClass };
+
+  fetch(classEndpoint, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(classBody),
+  }).catch(err => console.error('Auto class error:', err));
+}
 
     //isDirty = true; // signal za sinhronizaciju sa drugim uređajima na sljedećem checkForChanges ciklusu
     return true;
@@ -1330,13 +1341,14 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
                 {gateAssignments.length === 0
                   ? <div className={`text-center py-8 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>Nema dodjela</div>
                   : <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-      {gateAssignments.map(a => (
+{gateAssignments.map(a => (
   <AssignmentCard key={a.resourceId} a={a} type="gate"
     classType={a.classType}
     onRemove={() => handleRemoveGate(a.resourceId)}
     onClassToggle={next => handleClassToggle(a.resourceId, 'gate', next)}
-    isDark={isDark} />
-    // isEasyJet se ne prosljeđuje — ostaje undefined/false, standardna 4 dugmeta
+    isDark={isDark}
+    isEasyJet={isEasyJetFlight({ AirlineName: a.airlineName, FlightNumber: a.flightNumber } as Flight)}
+  />
 ))}
                     </div>
                 }
