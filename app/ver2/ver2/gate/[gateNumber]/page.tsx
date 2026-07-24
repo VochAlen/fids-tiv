@@ -21,6 +21,9 @@ export function generateStaticParams() {
 // Fiksan spisak fizičkih gate-ova — onemogući on-demand SSR fallback.
 export const dynamicParams = false;
 
+// ── DODAJ OVO: Forsira SSG umjesto SSR ──────────────────────
+export const dynamic = 'force-static';
+
 // NAPOMENA: 'revalidate' NIJE dodat namjerno. Ova stranica nema nikakav
 // server-side fetch/podatak koji bi ISR trebalo da osvježava — sav sadržaj
 // dolazi klijentski (polling u GatePageClient.tsx). Dodavanje revalidate-a

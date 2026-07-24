@@ -32,8 +32,8 @@ const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random
 // CIJEL ciklus 4-5x). Ovaj poll pogađa mali, već ETag-ovan i CDN-
 // keširan endpoint (/api/test/gate-status-override?gateNumber=X) —
 // dok se ništa ne mijenja, CDN sam vraća 304 bez pozivanja funkcije.
-const FAST_POLL_BASE_MS = 3_000;
-const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * 1_500);
+const FAST_POLL_BASE_MS = 10_000;
+const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * 3_000);
 
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {

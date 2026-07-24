@@ -30,6 +30,9 @@ export function generateStaticParams() {
 // šaltera, dobiće 404 umjesto da Vercel tiho renderuje novu stranicu.
 export const dynamicParams = false;
 
+// ── DODAJ OVO: Forsira SSG umjesto SSR ──────────────────────
+export const dynamic = 'force-static';
+
 // NAPOMENA: 'revalidate' NIJE dodat namjerno. Ova stranica nema nikakav
 // server-side fetch/podatak koji bi ISR trebalo da osvježava — sav sadržaj
 // (dodjela šaltera, status leta) dolazi klijentski (polling u
