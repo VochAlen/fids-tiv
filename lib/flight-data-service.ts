@@ -647,22 +647,81 @@ const flightData = await buildFlightData(
 //   }
 // }
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
-  const cached = await getFlightDataFromCache();
-  if (cached) return cached;
-
   const client = getRedisClient();
+
+  const cached = await getFlightDataFromCache();
+  if (cached) {
+    return cached;
+  }
+
   const lockKey = 'lock:flights:fetch';
-  const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
+
+  const gotLock = await client.set(
+    lockKey,
+    '1',
+    'EX',
+    30,
+    'NX'
+  );
 
   if (!gotLock) {
-    await new Promise(r => setTimeout(r, 500));
-    const retryCache = await getFlightDataFromCache();
-    if (retryCache) return retryCache;
+
+    console.log('⏳ Flight refresh already running - waiting for cache');
+
+    const maxWaitMs = 15000;
+    const start = Date.now();
+
+    while (Date.now() - start < maxWaitMs) {
+
+      const retryCache = await getFlightDataFromCache();
+
+      if (retryCache) {
+        console.log('✅ Received refreshed flight cache');
+        return retryCache;
+      }
+
+      const lockExists = await client.exists(lockKey);
+
+      if (!lockExists) {
+        break;
+      }
+
+      await new Promise(resolve =>
+        setTimeout(resolve, 250)
+      );
+    }
+
+    const retryLock = await client.set(
+      lockKey,
+      '1',
+      'EX',
+      30,
+      'NX'
+    );
+
+    if (!retryLock) {
+
+      const lastCache = await getFlightDataFromCache();
+
+      if (lastCache) {
+        return lastCache;
+      }
+
+      throw new Error(
+        'Flight refresh locked and no cache available'
+      );
+    }
   }
 
   try {
+
+    console.log('✈️ Performing live airport API fetch');
+
     return await getCurrentFlightData();
+
   } finally {
+
     await client.del(lockKey);
+
   }
 }
