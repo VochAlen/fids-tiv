@@ -3,17 +3,12 @@ import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
 import { createHash } from 'crypto'; // ← DODANO
 
-// export const dynamic = 'force-dynamic';
+//  export const dynamic = 'force-dynamic';
 
 const MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 sati
 const TTL_SECONDS = 21_600;            // 6h
 const ALL_KEY = 'test:gate-status:all';
 
-// ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
-let cachedAll: Record<string, GateEntry> | null = null;
-let cachedAllExpiry = 0;
-let cacheRefreshing = false;
-const CACHE_TTL_MS = 30_000; // ← povećano sa 10s na 30s
 
 type GateEntry = {
   status: 'open' | 'closed' | null;
@@ -36,27 +31,6 @@ async function writeAll(data: Record<string, GateEntry>): Promise<void> {
   await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
 }
 
-async function readAllCached(): Promise<Record<string, GateEntry>> {
-  const now = Date.now();
-
-  if (cachedAll && now < cachedAllExpiry) {
-    return cachedAll;
-  }
-
-  if (cacheRefreshing && cachedAll) {
-    return cachedAll;
-  }
-
-  cacheRefreshing = true;
-  try {
-    const fresh = await readAll();
-    cachedAll = fresh;
-    cachedAllExpiry = now + CACHE_TTL_MS;
-    return fresh;
-  } finally {
-    cacheRefreshing = false;
-  }
-}
 
 export async function GET(request: Request) {
   try {
@@ -64,7 +38,7 @@ export async function GET(request: Request) {
     const gateNumber = searchParams.get('gateNumber');
     const now = Date.now();
 
-const all = await readAllCached();
+const all = await readAll();
 
     // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
@@ -78,10 +52,11 @@ const all = await readAllCached();
       }
     }
     if (changed) {
-      await writeAll(all);
-      cachedAll = all;
-      cachedAllExpiry = now + CACHE_TTL_MS;
-      console.log(`[gate-cleanup] Total cleaned: ${cleanedCount} old gate-status keys`);
+await writeAll(all);
+
+console.log(
+  `[gate-cleanup] Total cleaned: ${cleanedCount} old gate-status keys`
+);
     }
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
@@ -101,20 +76,23 @@ const all = await readAllCached();
         status: 304,
 headers: {
   'ETag': etag,
+// I u 304 grani i u normalnom odgovoru, sve tri header linije:
 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-  'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
-  'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
+'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
 },
       });
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
 const headers: Record<string, string> = {
+// I u 304 grani i u normalnom odgovoru, sve tri header linije:
 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-  'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
-  'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
-  'ETag': etag,
-  'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+'ETag': etag,
+
 };
 
     if (gateNumber) {
@@ -166,8 +144,7 @@ export async function POST(request: Request) {
 
   await writeAll(all);
 
-  cachedAll = all;
-  cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+
 
   const ttl = action === 'clear' ? undefined : TTL_SECONDS;
   return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });

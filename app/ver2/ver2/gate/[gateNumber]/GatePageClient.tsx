@@ -328,7 +328,7 @@ const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ stat
     // ── Bez query parametra — svi gate ekrani dijele ISTI CDN cache
     // ključ (isti princip kao desk-status-override), umjesto da svaki
     // gate broj pravi svoj poseban, rijetko pogođen cache unos. ──────
-    const res = await fetch(`/api/test/gate-status-override`, { headers });
+const res = await fetch(`/api/test/gate-status-override`, { headers });
 
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
