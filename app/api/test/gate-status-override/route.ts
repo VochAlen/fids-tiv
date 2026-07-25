@@ -64,7 +64,7 @@ export async function GET(request: Request) {
     const gateNumber = searchParams.get('gateNumber');
     const now = Date.now();
 
- const all = await readAll();
+const all = await readAllCached();
 
     // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
@@ -99,19 +99,23 @@ export async function GET(request: Request) {
     if (ifNoneMatch && ifNoneMatch === etag) {
       return new NextResponse(null, {
         status: 304,
-        headers: {
-          'ETag': etag,
-         'Cache-Control': 'private, no-cache',   // ← promijenjeno
-        },
+headers: {
+  'ETag': etag,
+'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+  'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
+  'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
+},
       });
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
-    const headers: Record<string, string> = {
-      'Cache-Control': 'private, no-cache',   // ← promijenjeno
-      'ETag': etag,
-      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-    };
+const headers: Record<string, string> = {
+'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+  'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
+  'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=20',
+  'ETag': etag,
+  'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
+};
 
     if (gateNumber) {
       const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };

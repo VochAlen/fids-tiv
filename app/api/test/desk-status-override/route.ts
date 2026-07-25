@@ -2,9 +2,10 @@
 import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
 import { createHash } from 'crypto'; // ← DODANO
+import { revalidatePath } from 'next/cache';
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+
+export const revalidate = 30;
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
 const ALL_KEY = 'test:desk-status:all';
@@ -76,9 +77,12 @@ export async function GET(request: Request) {
       }
     }
     if (changed) {
-      await writeAll(all);
-      cachedAll = all;
-      cachedAllExpiry = now + CACHE_TTL_MS;
+await writeAll(all);
+
+cachedAll = all;
+cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+
+
     }
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
@@ -99,18 +103,31 @@ if (ifNoneMatch && ifNoneMatch === etag) {
     status: 304,
     headers: {
       'ETag': etag,
-      'Cache-Control': 'public, max-age=15, s-maxage=15, stale-while-revalidate=30',
+'Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+'CDN-Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+'Vercel-CDN-Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
     },
   });
 }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
-    const headers: Record<string, string> = {
-      // 'Cache-Control': 'public, max-age=30, s-maxage=40, stale-while-revalidate=60',
-   'Cache-Control': 'public, max-age=15, s-maxage=15, stale-while-revalidate=30',
-      'ETag': etag,
-      'X-Cache': cacheRefreshing ? 'stale' : 'fresh',
-    };
+const headers = {
+'Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+'CDN-Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+'Vercel-CDN-Cache-Control':
+  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+  'ETag': etag,
+};
 
     if (deskNumber) {
       const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
@@ -156,10 +173,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-  await writeAll(all);
+await writeAll(all);
 
-  cachedAll = all;
-  cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+cachedAll = all;
+cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 
-  return NextResponse.json({ success: true });
+revalidatePath('/api/test/desk-status-override');
+
+return NextResponse.json({ success: true });
 }

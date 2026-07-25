@@ -30,7 +30,14 @@ export type SimpleAssignments = {
 
 // NEMA više cachedRaw / cachedRawExpiry / refreshing / CACHE_TTL_MS
 
+let cachedRaw: RawAssignments | null = null;
+let cachedRawExpiry = 0;
+const CACHE_TTL_MS = 8_000; // malo ispod CDN s-maxage=10s na /api/flights/status
+
 export async function getRawAssignments(): Promise<RawAssignments> {
+  const now = Date.now();
+  if (cachedRaw && now < cachedRawExpiry) return cachedRaw;
+
   const [deskRaw, gateRaw] = await Promise.all([
     safeRedisGet(DESK_ALL_KEY),
     safeRedisGet(GATE_ALL_KEY),
@@ -38,15 +45,12 @@ export async function getRawAssignments(): Promise<RawAssignments> {
 
   let desks: Record<string, DeskEntry> = {};
   let gates: Record<string, GateEntry> = {};
+  if (deskRaw) { try { desks = JSON.parse(deskRaw); } catch { desks = {}; } }
+  if (gateRaw) { try { gates = JSON.parse(gateRaw); } catch { gates = {}; } }
 
-  if (deskRaw) {
-    try { desks = JSON.parse(deskRaw); } catch { desks = {}; }
-  }
-  if (gateRaw) {
-    try { gates = JSON.parse(gateRaw); } catch { gates = {}; }
-  }
-
-  return { desks, gates };
+  cachedRaw = { desks, gates };
+  cachedRawExpiry = now + CACHE_TTL_MS;
+  return cachedRaw;
 }
 
 export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {

@@ -29,10 +29,11 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 12_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 6_000; // Svako 15s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
-const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5_000);
+const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
+
 
 
 const BLUR_DATA_URL =
@@ -462,7 +463,13 @@ const fetchDeskData = useCallback(async () => {
     }
 
     // const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
-    const res = await fetch(`/api/test/desk-status-override`, { headers });
+const res = await fetch(
+  `/api/test/desk-status-override`,
+  {
+    headers,
+    cache: 'no-store',
+  }
+);
 
     // ── OBRADI 304 ───────────────────────────────────────────
     if (res.status === 304) {
@@ -512,7 +519,11 @@ const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', cla
     // Novi let – dohvati detalje
     let flightDetails: Record<string, string | string[] | boolean | null> = {};
     try {
-      const flightsRes = await fetch('/api/flights');
+const flightsRes = await fetch('/api/flights', {
+  next: {
+    revalidate: 60
+  }
+});
       const flightsData = await flightsRes.json();
       const allFlights = [
         ...(flightsData.departures || []),
