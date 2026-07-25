@@ -174,11 +174,8 @@ export async function POST(request: Request) {
   }
 
 await writeAll(all);
-
 cachedAll = all;
 cachedAllExpiry = Date.now() + CACHE_TTL_MS;
-
-revalidatePath('/api/test/desk-status-override');
 
 return NextResponse.json({ success: true });
 }
