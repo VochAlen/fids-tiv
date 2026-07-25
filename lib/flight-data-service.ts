@@ -323,19 +323,27 @@ async function fetchWithQuickRetry(
 
 async function performEmergencyFetch(): Promise<Flight[] | null> {
   try {
-    const emergencyResponse = await fetch(FLIGHT_API_URL, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: FETCH_HEADERS,
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!emergencyResponse.ok) return null;
+    const response = await fetchWithQuickRetry(
+      FLIGHT_API_URL,
+      {
+        method: 'GET',
+        cache: 'no-store',
+        headers: FETCH_HEADERS,
+      },
+      1 // samo jedan pokušaj
+    );
 
-    const rawData: RawFlightData[] = await emergencyResponse.json();
-    if (!Array.isArray(rawData) || rawData.length === 0) return null;
+    const payload = await response.json();
+    const rawData = normalizeRawFlightArray(payload);
 
-    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapRawFlight(raw)));
-    return mapped;
+    if (rawData.length === 0) {
+      return null;
+    }
+
+    return Promise.all(
+      rawData.slice(0, 5).map(mapRawFlight)
+    );
+
   } catch {
     return null;
   }
