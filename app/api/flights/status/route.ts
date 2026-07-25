@@ -5,7 +5,7 @@ import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
 import { createHash } from 'crypto';
 import { isNightHours } from '@/lib/night-hours';
 
-export const dynamic = 'force-dynamic';
+// export const dynamic = 'force-dynamic';
 
 const FLIGHT_META_KEY = 'cache:flights:meta';
 

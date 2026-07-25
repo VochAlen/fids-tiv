@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
 import { createHash } from 'crypto'; // ← DODANO
 
-export const dynamic = 'force-dynamic';
+// export const dynamic = 'force-dynamic';
 
 const MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 sati
 const TTL_SECONDS = 21_600;            // 6h
