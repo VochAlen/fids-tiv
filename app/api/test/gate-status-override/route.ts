@@ -166,8 +166,8 @@ export async function POST(request: Request) {
 
   await writeAll(all);
 
-  // cachedAll = all;
-  // cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+  cachedAll = all;
+  cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 
   const ttl = action === 'clear' ? undefined : TTL_SECONDS;
   return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });
