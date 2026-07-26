@@ -53,6 +53,8 @@ export async function getRawAssignments(): Promise<RawAssignments> {
   return cachedRaw;
 }
 
+// lib/assignments-service.ts
+
 export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {
   const deskMap: Record<string, string> = {};
   for (const [deskNumber, val] of Object.entries(raw.desks)) {
@@ -65,7 +67,8 @@ export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {
   const gateMap: Record<string, string> = {};
   for (const [gateNumber, val] of Object.entries(raw.gates)) {
     if (val?.status === 'open' && val.flightNumber) {
-      gateMap[val.flightNumber] = gateNumber;
+      // PROMJENI OVO: umjesto gateMap[val.flightNumber] = gateNumber;
+      gateMap[gateNumber] = val.flightNumber;  // { gateId: flightNumber }
     }
   }
 
