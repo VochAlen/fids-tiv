@@ -93,8 +93,8 @@ function slimFlightData(data: FlightData): FlightData {
 }
 
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-const MAX_RETRIES = 2;
-const RETRY_DELAY = 1000;
+const MAX_RETRIES = 10;
+const RETRY_DELAY = 2000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 // Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
@@ -323,27 +323,19 @@ async function fetchWithQuickRetry(
 
 async function performEmergencyFetch(): Promise<Flight[] | null> {
   try {
-    const response = await fetchWithQuickRetry(
-      FLIGHT_API_URL,
-      {
-        method: 'GET',
-        cache: 'no-store',
-        headers: FETCH_HEADERS,
-      },
-      1 // samo jedan pokušaj
-    );
+    const emergencyResponse = await fetch(FLIGHT_API_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: FETCH_HEADERS,
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!emergencyResponse.ok) return null;
 
-    const payload = await response.json();
-    const rawData = normalizeRawFlightArray(payload);
+    const rawData: RawFlightData[] = await emergencyResponse.json();
+    if (!Array.isArray(rawData) || rawData.length === 0) return null;
 
-    if (rawData.length === 0) {
-      return null;
-    }
-
-    return Promise.all(
-      rawData.slice(0, 5).map(mapRawFlight)
-    );
-
+    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapRawFlight(raw)));
+    return mapped;
   } catch {
     return null;
   }
@@ -655,81 +647,22 @@ const flightData = await buildFlightData(
 //   }
 // }
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
-  const client = getRedisClient();
-
   const cached = await getFlightDataFromCache();
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
+  const client = getRedisClient();
   const lockKey = 'lock:flights:fetch';
-
-  const gotLock = await client.set(
-    lockKey,
-    '1',
-    'EX',
-    30,
-    'NX'
-  );
+  const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
 
   if (!gotLock) {
-
-    console.log('⏳ Flight refresh already running - waiting for cache');
-
-    const maxWaitMs = 15000;
-    const start = Date.now();
-
-    while (Date.now() - start < maxWaitMs) {
-
-      const retryCache = await getFlightDataFromCache();
-
-      if (retryCache) {
-        console.log('✅ Received refreshed flight cache');
-        return retryCache;
-      }
-
-      const lockExists = await client.exists(lockKey);
-
-      if (!lockExists) {
-        break;
-      }
-
-      await new Promise(resolve =>
-        setTimeout(resolve, 250)
-      );
-    }
-
-    const retryLock = await client.set(
-      lockKey,
-      '1',
-      'EX',
-      30,
-      'NX'
-    );
-
-    if (!retryLock) {
-
-      const lastCache = await getFlightDataFromCache();
-
-      if (lastCache) {
-        return lastCache;
-      }
-
-      throw new Error(
-        'Flight refresh locked and no cache available'
-      );
-    }
+    await new Promise(r => setTimeout(r, 500));
+    const retryCache = await getFlightDataFromCache();
+    if (retryCache) return retryCache;
   }
 
   try {
-
-    console.log('✈️ Performing live airport API fetch');
-
     return await getCurrentFlightData();
-
   } finally {
-
     await client.del(lockKey);
-
   }
 }

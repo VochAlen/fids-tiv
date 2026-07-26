@@ -30,7 +30,8 @@ export class FlightBackupService {
   private backupStorage: Map<string, BackupData> = new Map();
   private maxBackups = 50;
   private initializationPromise: Promise<void> | null = null;
-  private isInitialized = false;
+private isInitialized = false;
+  private lastBackupHash: string | null = null;   // ← NOVO
 
   private constructor() {
     this.initialize();
@@ -167,8 +168,19 @@ private async fetchInitialBackupData(): Promise<Flight[]> {
  * Save flight data to backup
  */
 public async saveBackup(flights: Flight[]): Promise<string> {
+  const hash = this.computeHash(flights);
+  if (hash === this.lastBackupHash) {
+    return 'skipped-unchanged';
+  }
+  this.lastBackupHash = hash;
   return this.saveBackupInternal(flights);
 }
+
+private computeHash(flights: Flight[]): string {
+    return Buffer.from(JSON.stringify(
+      flights.map(f => `${f.FlightNumber}|${f.GateNumber}|${f.CheckInDesk}|${f.StatusEN}|${f.EstimatedDepartureTime}`)
+    )).toString('base64');
+  }
 
   /**
    * Save flight data to backup (internal method)
