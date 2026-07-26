@@ -16,8 +16,8 @@ const CACHE_TTL_MS = 10_000;
 // ── CDN cache prozor — usklađen sa tipičnim poll intervalom klijenata (~12-25s).
 // Duži prozor = manje Function Invocations, ali sporija propagacija admin izmjena.
 // 10s je dobar balans: max ~10s dodatnog kašnjenja iznad postojećeg client polla. ──
-const CDN_CACHE_CONTROL = 'public, max-age=6, s-maxage=6, stale-while-revalidate=12';
-
+const CDN_CACHE_CONTROL = 'public, max-age=6, s-maxage=6, stale-while-revalidate=4';
+// umjesto stale-while-revalidate=12 → najgori slučaj sad ~10s, ne ~18s
 export async function GET(request: Request) {
   try {
     const now = Date.now();

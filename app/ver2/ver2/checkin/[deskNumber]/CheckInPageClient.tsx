@@ -876,12 +876,14 @@ useEffect(() => {
             </div>
 
             {/* Portable chargers upozorenje */}
-            <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
-              <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-              <div className="text-[1.36rem] font-bold text-yellow-300 text-center">
-                Portable chargers: CABIN BAGGAGE ONLY! Not in overhead bins. No charging during flight.
-              </div>
-            </div>
+<div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
+  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
+  <div className="text-[0.95rem] font-bold text-yellow-300 text-center leading-snug">
+    Power banks: CABIN BAGGAGE ONLY, max 2 per person, terminals protected.<br />
+    Do not recharge or use to charge devices during flight.<br />
+    Extra spares may require separation or &lt;25% charge. (Valid from 27.03.2026)
+  </div>
+</div>
           </div>
 
           {/* Vremena + gate */}
@@ -1040,12 +1042,14 @@ useEffect(() => {
                 <div className="text-8xl font-bold text-cyan-400">
                   {assignment.destinationCode}
                 </div>
-                <div className="flex items-center gap-2 mt-4 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2">
-                  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-                  <div className="text-lg font-semibold text-yellow-300">
-                    Portable chargers: CABIN BAGGAGE ONLY! Not in overhead bins. No charging during flight.
-                  </div>
-                </div>
+<div className="flex items-center gap-2 mt-4 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2">
+  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
+  <div className="text-sm font-semibold text-yellow-300 leading-snug">
+    Power banks: CABIN BAGGAGE ONLY, max 2 per person, terminals protected.<br />
+    Do not recharge or use to charge devices during flight.<br />
+    Extra spares may require separation or &lt;25% charge. (Valid from 27.03.2026)
+  </div>
+</div>
               </div>
               <MapPin className="w-12 h-12 text-cyan-400" />
             </div>

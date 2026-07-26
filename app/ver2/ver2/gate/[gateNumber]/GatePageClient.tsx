@@ -320,27 +320,10 @@ const etagGateRef = useRef<string | null>(null);
   // ------------------------------------------------------------
 const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
   try {
-    const headers: HeadersInit = {};
-    if (etagGateRef.current) {
-      headers['If-None-Match'] = etagGateRef.current;
-    }
-
-    // ── Bez query parametra — svi gate ekrani dijele ISTI CDN cache
-    // ključ (isti princip kao desk-status-override), umjesto da svaki
-    // gate broj pravi svoj poseban, rijetko pogođen cache unos. ──────
-const res = await fetch(`/api/test/gate-status-override`, { headers });
-
-    if (res.status === 304) {
-      const newEtag = res.headers.get('ETag');
-      if (newEtag) etagGateRef.current = newEtag;
-      return null;
-    }
+    const res = await fetch('/api/test/gate-status-override');
 
     if (!res.ok) return null;
     const allData = await res.json();
-
-    const newEtag = res.headers.get('ETag');
-    if (newEtag) etagGateRef.current = newEtag;
 
     const data = allData[gate];
 
@@ -428,34 +411,13 @@ const loadFlights = useCallback(async () => {
     // ── HASH CHECK — preskoči puni /api/flights fetch ako se ništa
     // nije promijenilo od prošlog poziva (isti princip kao combined/split-board) ──
 let hashChanged = true;
-    let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
-
-// ── Status ruta sa ETag ──────────────────────────────────────
-const headers: HeadersInit = {};
-if (etagStatusRef.current) {
-  headers['If-None-Match'] = etagStatusRef.current;
-}
+let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
 
 try {
-  const statusRes = await fetch('/api/flights/status', { headers });
-  
-  // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
-  if (statusRes.status === 304) {
-    // Sačuvaj novi ETag (ako stigne – server može vratiti i 304 bez ETag, ali obično ga vrati)
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
-    
-    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
-    setLoading(false);
-    return; // preskoči čitav ciklus
-  }
+  const statusRes = await fetch('/api/flights/status');
 
   if (statusRes.ok) {
     const statusData = await statusRes.json();
-    // Sačuvaj novi ETag iz headera
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
 
     if (statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
       hashChanged = false;
@@ -463,7 +425,6 @@ try {
       lastKnownHashRef.current = statusData.hash;
     }
 
-    // ── Gate override stiže u ISTOM odgovoru ──
     const entry = statusData.gateEntries?.[gateNumber];
     gateOverrideFromStatus = entry
       ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
