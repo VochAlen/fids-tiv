@@ -1,11 +1,11 @@
 // app/api/flights/status/route.ts
 import { NextResponse } from 'next/server';
-import { getRedisClient } from '@/lib/redis';
+import { safeRedisGet } from '@/lib/redis';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
 import { createHash } from 'crypto';
 import { isNightHours } from '@/lib/night-hours';
 
-// export const dynamic = 'force-dynamic';
+export const dynamic = 'force-dynamic';
 export const revalidate = 6;
 
 const FLIGHT_META_KEY = 'cache:flights:meta';
@@ -28,11 +28,13 @@ export async function GET(request: Request) {
 
     if (cachedMeta && now < cachedMetaExpiry) {
       meta = cachedMeta;
-    } else {
-      const client = getRedisClient();
-      const raw = await client.get(FLIGHT_META_KEY);
-      meta = raw ? JSON.parse(raw) : {};
-
+} else {
+      const raw = await safeRedisGet(FLIGHT_META_KEY);
+      try {
+        meta = raw ? JSON.parse(raw) : {};
+      } catch {
+        meta = {};
+      }
       cachedMeta = {
         hash: meta.hash,
         count: meta.count || 0,
