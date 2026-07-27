@@ -11,7 +11,7 @@ let redis: Redis | null = null;
 // dok se ne stabilizuje
 let circuitOpen = false;
 let circuitOpenedAt = 0;
-const CIRCUIT_COOLDOWN_MS = 3_000; // 15s pauza nakon pada
+const CIRCUIT_COOLDOWN_MS = 10_000; // 10s pauza nakon pada
 
 export function getRedisClient(): Redis {
   if (!redis) {

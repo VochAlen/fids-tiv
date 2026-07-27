@@ -419,11 +419,12 @@ try {
   if (statusRes.ok) {
     const statusData = await statusRes.json();
 
-    if (statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
+    if (statusData.hash !== null && statusData.hash === lastKnownHashRef.current) {
       hashChanged = false;
-    } else {
+    } else if (statusData.hash !== null) {
       lastKnownHashRef.current = statusData.hash;
     }
+    // ako je statusData.hash === null, ne diraj lastKnownHashRef.current
 
     const entry = statusData.gateEntries?.[gateNumber];
     gateOverrideFromStatus = entry
