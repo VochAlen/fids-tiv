@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { isNightHours } from '@/lib/night-hours';
 
 // export const dynamic = 'force-dynamic';
+export const revalidate = 6;
 
 const FLIGHT_META_KEY = 'cache:flights:meta';
 
