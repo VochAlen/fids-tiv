@@ -93,8 +93,8 @@ function slimFlightData(data: FlightData): FlightData {
 }
 
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-const MAX_RETRIES = 10;
-const RETRY_DELAY = 2000;
+const MAX_RETRIES = 2;
+const RETRY_DELAY = 1000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 // Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
@@ -327,7 +327,7 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
       method: 'GET',
       cache: 'no-store',
       headers: FETCH_HEADERS,
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(6000),
     });
     if (!emergencyResponse.ok) return null;
 
