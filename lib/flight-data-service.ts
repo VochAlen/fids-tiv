@@ -93,8 +93,28 @@ function slimFlightData(data: FlightData): FlightData {
 }
 
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-const MAX_RETRIES = 2;
-const RETRY_DELAY = 1000;
+
+// ── RETRY / TIMEOUT BUDŽETI ─────────────────────────────────────
+// Ovi brojevi su namjerno mali i međusobno usklađeni sa
+// LIVE_FETCH_HARD_DEADLINE_MS ispod. Cilj: cijela live-fetch faza
+// NIKAD ne smije da priđe blizu Vercel maxDuration (postavljen na
+// 30s u route.ts), jer inače ruta puca sa 504 prije nego što bilo
+// koji od fallback-ova (backup/emergency/prazan state) stigne da
+// se izvrši.
+const MAX_RETRIES = 2;             // ukupno pokušaja ka live API-ju
+const RETRY_DELAY = 500;           // pauza između pokušaja (ms)
+const PER_ATTEMPT_TIMEOUT_MS = 3500; // AbortSignal timeout po pokušaju
+
+// Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
+// Ovo je "safety net" iznad per-attempt timeouta: retry logika sama
+// po sebi treba da završi za ~2*3500 + 500 = 7500ms, ali ako
+// fetch/AbortSignal ikad ne poštuje svoj timeout (rijetki edge-case
+// mrežnih grešaka), Promise.race ovdje prisilno prekida čekanje.
+const LIVE_FETCH_HARD_DEADLINE_MS = 8000;
+
+// Emergency fetch (korak 5, "zadnja linija odbrane") mora biti još brži,
+// jer se dešava TEK NAKON što je live fetch već potrošio svoj budžet.
+const EMERGENCY_FETCH_TIMEOUT_MS = 4000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 // Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
@@ -160,105 +180,6 @@ async function saveFlightDataAndMetadata(
   inProcessFlightData = slimmed;
   inProcessFlightExpiry = Date.now() + IN_PROCESS_FLIGHT_TTL_MS;
 }
-//ne radi-stari kod-ne funkcionise vise -POCETAK 12JUL2026
-// async function loadOverridesMap(): Promise<Record<string, Record<string, string>>> {
-//   if (Date.now() < overrideCacheExpiry) {
-//     return overrideCacheData;
-//   }
-
-//   const timeoutPromise = new Promise<null>(resolve =>
-//     setTimeout(() => resolve(null), 3_000)
-//   );
-
-//   const fetchPromise = (async () => {
-//     try {
-//       const client = getRedisClient();
-//       const keys: string[] = [];
-//       let cursor = '0';
-
-//       do {
-//         const scanResult = await client.scan(cursor, 'MATCH', 'override:*', 'COUNT', 100);
-//         cursor = scanResult[0];
-//         keys.push(...scanResult[1]);
-//         if (keys.length > 200) break;
-//       } while (cursor !== '0');
-
-//       if (keys.length === 0) {
-//         overrideCacheData = {};
-//         overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-//         return overrideCacheData;
-//       }
-
-//       const pipeline = client.pipeline();
-//       keys.forEach(key => pipeline.hgetall(key));
-//       const results = await pipeline.exec();
-
-//       const map: Record<string, Record<string, string>> = {};
-//       if (results) {
-//         keys.forEach((key, i) => {
-//           const result = results[i];
-//           if (result && !result[0] && result[1]) {
-//             const flightNumber = key.replace('override:', '');
-//             const data = result[1] as Record<string, string>;
-//             if (Object.keys(data).length > 0) map[flightNumber] = data;
-//           }
-//         });
-//       }
-
-//       overrideCacheData = map;
-//       overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-//       return overrideCacheData;
-//     } catch {
-//       return null;
-//     }
-//   })();
-
-//   const result = await Promise.race([fetchPromise, timeoutPromise]);
-
-//   if (result === null) {
-//     console.warn('[loadOverridesMap] Timeout ili greška — vraćam stari cache');
-//     overrideCacheExpiry = Date.now() + OVERRIDE_CACHE_MS;
-//   }
-
-//   return overrideCacheData;
-// }
-
-// async function applyKvOverrides(flights: Flight[]): Promise<Flight[]> {
-//   try {
-//     const overridesMap = await loadOverridesMap();
-//     if (Object.keys(overridesMap).length === 0) return flights;
-
-//     const resolveField = (overrideVal: string | undefined, apiVal: string | undefined): string => {
-//       if (overrideVal === undefined) return apiVal ?? '';
-//       if (overrideVal === '__EMPTY__') return '';
-//       return overrideVal;
-//     };
-
-//     return flights.map(flight => {
-//       const localOverride = overridesMap[flight.FlightNumber];
-//       if (!localOverride) return flight;
-//       return {
-//         ...flight,
-//         GateNumber:     resolveField(localOverride.GateNumber,     flight.GateNumber),
-//         CheckInDesk:    resolveField(localOverride.CheckInDesk,    flight.CheckInDesk),
-//         BaggageReclaim: resolveField(localOverride.BaggageReclaim, flight.BaggageReclaim),
-//         StatusEN:       resolveField(localOverride.StatusEN,       flight.StatusEN),
-//         Terminal:       resolveField(localOverride.Terminal,       flight.Terminal),
-//       };
-//     });
-//   } catch {
-//     return flights;
-//   }
-// }
-
-// async function applyOverridesToFlightData(data: FlightData): Promise<FlightData> {
-//   const [departures, arrivals] = await Promise.all([
-//     applyKvOverrides(data.departures),
-//     applyKvOverrides(data.arrivals),
-//   ]);
-//   return { ...data, departures, arrivals };
-// }
-// ne radi-stari kod-ne funkcionise vise -POCETAK 12JUL2026
 
 // ── Normalizuje odgovor eksternog API-ja u niz letova, bez obzira na
 // tačan oblik koji PHP keš skripta vrati. cache-flights.php je server-side
@@ -306,7 +227,7 @@ async function fetchWithQuickRetry(
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
       const response = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeoutId);
       if (response.ok) return response;
@@ -327,7 +248,7 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
       method: 'GET',
       cache: 'no-store',
       headers: FETCH_HEADERS,
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(EMERGENCY_FETCH_TIMEOUT_MS),
     });
     if (!emergencyResponse.ok) return null;
 
@@ -450,13 +371,25 @@ if (!canFetchNow) {
   console.log('🌙 Noćni period — probam live fetch (dozvoljeno 1x/h)');
 }
 
-  // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
+  // ── 3. POKUŠAJ LIVE FETCH (sa tvrdim globalnim rokom) ─────
+  // Promise.race garantuje da ova faza NIKAD ne traje duže od
+  // LIVE_FETCH_HARD_DEADLINE_MS, bez obzira šta se dešava unutar
+  // fetchWithQuickRetry (retry logika po sebi treba da završi ranije,
+  // ovo je samo apsolutna gornja granica "za svaki slučaj").
   try {
-    const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: FETCH_HEADERS,
-    });
+    const response = await Promise.race([
+      fetchWithQuickRetry(FLIGHT_API_URL, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: FETCH_HEADERS,
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('Live fetch hard deadline exceeded')),
+          LIVE_FETCH_HARD_DEADLINE_MS
+        )
+      ),
+    ]);
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -624,28 +557,7 @@ const flightData = await buildFlightData(
     warning: 'System will recover when connection is restored.',
   };
 }
-// ── LOCK WRAPPER — sprečava "cache stampede" ka eksternom API-ju ── STARI NACIN-NE RADI
-// export async function getCurrentFlightDataSafe(): Promise<FlightData> {
-//   const cached = await getFlightDataFromCache();
-//   if (cached) return applyOverridesToFlightData(cached);
 
-//   const client = getRedisClient();
-//   const lockKey = 'lock:flights:fetch';
-//   const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
-
-//   if (!gotLock) {
-//     await new Promise(r => setTimeout(r, 500));
-//     const retryCache = await getFlightDataFromCache();
-//     if (retryCache) return applyOverridesToFlightData(retryCache);
-//   }
-
-//   try {
-//     const fresh = await getCurrentFlightData();
-//     return applyOverridesToFlightData(fresh);
-//   } finally {
-//     await client.del(lockKey);
-//   }
-// }
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   const cached = await getFlightDataFromCache();
   if (cached) return cached;

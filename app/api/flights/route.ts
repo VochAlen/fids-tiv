@@ -5,7 +5,16 @@ import type { FlightData } from '@/types/flight';
 import { createHash } from 'crypto';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30; // ili 60
+// export const revalidate = 60;
+
+// ── EKSPLICITAN maxDuration ─────────────────────────────────────
+// Bez ovoga, Vercel Pro koristi DEFAULT od 15s za serverless funkcije,
+// ne 60s. flight-data-service.ts sada garantuje da worst-case
+// (live fetch hard deadline 8s + backup provjera + emergency fetch 4s
+// + Redis pisanje) iznosi ≈15s, što je preblizu default limitu.
+// 30s ovdje daje komotan safety margin bez nepotrebnog produžavanja
+// naplativog vremena izvršavanja u normalnim (brzim) slučajevima.
+export const maxDuration = 30;
 
 export async function GET(request: Request): Promise<NextResponse> {
   try {
