@@ -697,6 +697,37 @@ export default function AssignPanel() {
     setIsDark(shouldBeDark);
     document.documentElement.classList.toggle('dark', shouldBeDark);
   }, []);
+  // ─── Zajednička logout funkcija — briše i cookie i localStorage ──
+const performLogout = useCallback(async () => {
+  await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
+  localStorage.removeItem('adminAuthenticated');
+  localStorage.removeItem('adminLoginTime');
+  document.cookie = 'admin-authenticated=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  router.push('/admin/login');
+}, [router]);
+
+// ─── Auto-logout nakon 240s neaktivnosti ──────────────────────
+useEffect(() => {
+  const IDLE_LOGOUT_MS = 240_000;
+  let idleTimer: ReturnType<typeof setTimeout>;
+
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(performLogout, IDLE_LOGOUT_MS);
+  };
+
+  const activityEvents = ['mousedown', 'touchstart', 'keydown', 'click'];
+  activityEvents.forEach(evt =>
+    window.addEventListener(evt, resetIdleTimer, { passive: true })
+  );
+
+  resetIdleTimer(); // pokreni odmah pri učitavanju stranice
+
+  return () => {
+    clearTimeout(idleTimer);
+    activityEvents.forEach(evt => window.removeEventListener(evt, resetIdleTimer));
+  };
+}, [performLogout]);
 
   const toggleTheme = () => {
     const newDark = !isDark;
@@ -707,7 +738,7 @@ export default function AssignPanel() {
 
   // Učitavanje statistike
   const openStats = useCallback(async () => {
-    setShowStats(true);
+    setShowStats(true);const handleLogout =
     setLoadingStats(true);
     const data = await fetchDailyStats();
     setDailyStats(data);
@@ -1149,10 +1180,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
     }
   }, []);
 
-  const handleLogout = async () => {
-    await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
-    router.push('/admin/login');
-  };
+const handleLogout = performLogout;
 
   const isFlightAssigned = (flightNumber: string, tab: TabType) =>
     tab === 'checkin'

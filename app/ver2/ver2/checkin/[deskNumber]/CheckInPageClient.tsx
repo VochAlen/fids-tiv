@@ -406,6 +406,8 @@ const easyJetPlusImage = useMemo((): string | null => {
     };
   }, []);
 
+  
+
   // ── Hard reset svakih ~6h (sa jitterom da se izbjegne sinhroni
   // reload svih desk ekrana u istoj sekundi) ──────────────────
   useEffect(() => {
@@ -457,6 +459,7 @@ const fetchDeskData = useCallback(async () => {
 if (isNightHours()) {
     setLoading(false);
     return;
+}
   try {
     // ── DODAJ If-None-Match ──────────────────────────────────
     const headers: HeadersInit = {};

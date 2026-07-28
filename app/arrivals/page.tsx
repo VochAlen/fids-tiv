@@ -16,11 +16,13 @@ import {
 import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin } from 'lucide-react';
+// Dodaj import na vrh fajla:
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS = 60_000;
+const REFRESH_INTERVAL_MS = 100_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;
@@ -285,7 +287,11 @@ useEffect(() => {
 
   const load = async () => {
     if (!isMountedRef.current) return;
-
+ if (isNightHours()) {
+    if (isMountedRef.current) setLoading(false);
+    tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    return;
+  }
     try {
       let hashChanged = true;
       const statusHeaders: HeadersInit = { "Cache-Control": "no-cache" };
@@ -294,7 +300,7 @@ useEffect(() => {
       }
 
       try {
-        const statusRes = await fetch("/api/flights/status", { headers: statusHeaders });
+      const statusRes = await fetch("/api/flights/status");
 
         if (statusRes.status === 304) {
           const newEtag = statusRes.headers.get('ETag');
@@ -310,10 +316,11 @@ useEffect(() => {
           if (newEtag) etagRef.current = newEtag;
 
           // ⭐ POPRAVKA: lastKnownHash je ref, koristi .current
-          if (statusData.hash === lastKnownHash.current && lastKnownHash.current !== null) {
-            hashChanged = false;
-          }
-          lastKnownHash.current = statusData.hash;
+if (statusData.hash !== null && statusData.hash === lastKnownHash.current) {
+  hashChanged = false;
+} else if (statusData.hash !== null) {
+  lastKnownHash.current = statusData.hash;
+}
         }
       } catch {
         // ignoriši
@@ -324,10 +331,8 @@ useEffect(() => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
         try {
-          const res = await fetch("/api/flights?type=arrivals", {
-            signal: controller.signal,
-            headers: { "Cache-Control": "no-cache" }
-          });
+ const res = await fetch("/api/flights?type=arrivals", { signal: controller.signal });
+
           clearTimeout(timeoutId);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           data = await res.json();
@@ -344,9 +349,7 @@ useEffect(() => {
         if (c?.arrivals) {
           data = c;
         } else {
-          const res = await fetch("/api/flights?type=arrivals", {
-            headers: { "Cache-Control": "no-cache" }
-          });
+  const res = await fetch("/api/flights?type=arrivals");
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           data = await res.json();
           if (isMountedRef.current) saveToCache(data);

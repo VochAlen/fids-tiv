@@ -84,6 +84,7 @@ export default function AdminDashboard() {
     // Učitaj statistiku odmah - middleware će se pobrinuti za autentifikaciju
     loadFlightStats();
   }, []);
+  
 
   const loadFlightStats = useCallback(async (showLoading: boolean = true) => {
     try {
@@ -209,6 +210,28 @@ const handleLogout = useCallback(async () => {
       window.location.href = '/admin/login';
     }
   }, []);
+  // ─── Auto-logout nakon 180s neaktivnosti ──────────────────────
+useEffect(() => {
+  const IDLE_LOGOUT_MS = 180_000;
+  let idleTimer: ReturnType<typeof setTimeout>;
+
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { handleLogout(); }, IDLE_LOGOUT_MS);
+  };
+
+  const activityEvents = ['mousedown', 'touchstart', 'keydown', 'click'];
+  activityEvents.forEach(evt =>
+    window.addEventListener(evt, resetIdleTimer, { passive: true })
+  );
+
+  resetIdleTimer(); // pokreni odmah pri učitavanju stranice
+
+  return () => {
+    clearTimeout(idleTimer);
+    activityEvents.forEach(evt => window.removeEventListener(evt, resetIdleTimer));
+  };
+}, [handleLogout]);
   
   // Računanje vremena od ažuriranja
   const getTimeSinceUpdate = useCallback(() => {
