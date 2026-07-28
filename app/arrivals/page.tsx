@@ -22,7 +22,7 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS = 100_000;
+const REFRESH_INTERVAL_MS = 150_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;

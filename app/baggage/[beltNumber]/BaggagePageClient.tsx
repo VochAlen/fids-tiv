@@ -12,7 +12,7 @@ import { Plane, Luggage, MapPin, Clock, Users } from "lucide-react"
 // ============================================================
 // KONSTANTE — isti koncept kao CombinedPageClient
 // ============================================================
-const REFRESH_INTERVAL_MS = 100_000
+const REFRESH_INTERVAL_MS = 150_000
 const CACHE_KEY = "baggage_board_cache_v1"
 const CACHE_DURATION = 5 * 60_000
 const EMERGENCY_CACHE_KEY = "baggage_board_emergency_v1"

@@ -24,8 +24,8 @@ import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 100_000   // ↑ 60s→90s: -33% Vercel poziva
-const CACHE_DURATION              = 5 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
+const REFRESH_INTERVAL_MS         = 120_000   // ↑ 60s→90s: -33% Vercel poziva
+const CACHE_DURATION              = 6 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
 const MAX_FLIGHTS_DISPLAY         = 9

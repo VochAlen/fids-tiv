@@ -22,7 +22,7 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
 // ============================================================
-const REFRESH_INTERVAL_MS      = 90_000;   // 90s umjesto 60s → -33% poziva
+const REFRESH_INTERVAL_MS      = 120_000;   // 90s umjesto 60s → -33% poziva
 const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
