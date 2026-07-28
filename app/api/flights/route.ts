@@ -5,7 +5,7 @@ import type { FlightData } from '@/types/flight';
 import { createHash } from 'crypto';
 
 export const dynamic = 'force-dynamic';
-// export const revalidate = 60;
+export const maxDuration = 30; // ili 60
 
 export async function GET(request: Request): Promise<NextResponse> {
   try {
