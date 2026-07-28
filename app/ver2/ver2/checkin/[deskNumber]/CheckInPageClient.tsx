@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
-// import { isNightHours } from '@/lib/night-hours';
+import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 
 // ============================================================
@@ -454,7 +454,9 @@ const easyJetPlusImage = useMemo((): string | null => {
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (!deskNumberParam) return;
-
+if (isNightHours()) {
+    setLoading(false);
+    return;
   try {
     // ── DODAJ If-None-Match ──────────────────────────────────
     const headers: HeadersInit = {};
