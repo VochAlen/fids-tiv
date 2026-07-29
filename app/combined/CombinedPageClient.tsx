@@ -28,6 +28,7 @@ const REFRESH_INTERVAL_MS         = 120_000   // ↑ 60s→90s: -33% Vercel pozi
 const CACHE_DURATION              = 6 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
 const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
 const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
+const SOFT_RELOAD_INTERVAL_MS     = 4 * 60 * 60_000  // periodični "meki" reload svaka 4h — čisti akumuliranu memoriju/GC pritisak u kiosk browserima, ne čeka se samo 03:00
 const MAX_FLIGHTS_DISPLAY         = 9
 const MAX_FLIGHTS_MEMORY          = 60
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60_000
@@ -418,8 +419,7 @@ const LEDIndicator = memo(function LEDIndicator({
   }
   return (
     <div
-      className={`${size} rounded-full ${colorMap[color]}`}
-      style={{ animation: `${phase === "a" ? "ledBlinkA" : "ledBlinkB"} 0.8s ease-in-out infinite alternate` }}
+      className={`${size} rounded-full ${colorMap[color]} ${phase === "a" ? "led-blink-a" : "led-blink-b"}`}
     />
   )
 })
@@ -693,6 +693,19 @@ const [pageIndex, setPageIndex] = useState(0)
   const isInitialLoad = useRef(true)
   const lastHeartbeat = useRef(Date.now())
 
+  // ── Refs koji "prate" najnoviji state za upotrebu unutar polling
+  // petlje (koja se mount-uje samo jednom). Bez ovoga, `load()` bi
+  // zatvarao (closure) nad state-om iz PRVOG rendera i nikad ne bi
+  // vidio ažurirane vrijednosti arrivals/departures/nightMode — što
+  // je kvario "board je trenutno prazan → forsiraj fetch" logiku i
+  // uzrokovao nepotrebne dodatne fetch/parse cikluse tokom sati rada. ──
+  const arrivalsRef   = useRef<Flight[]>([])
+  const departuresRef = useRef<Flight[]>([])
+  const nightModeRef  = useRef(false)
+  useEffect(() => { arrivalsRef.current = arrivals }, [arrivals])
+  useEffect(() => { departuresRef.current = departures }, [departures])
+  useEffect(() => { nightModeRef.current = nightMode }, [nightMode])
+
   // unutar FlightBoard komponente
 const etagStatusRef = useRef<string | null>(null);
 
@@ -707,6 +720,16 @@ const etagStatusRef = useRef<string | null>(null);
     const ms = reset.getTime() - now.getTime()
     const id = setTimeout(() => window.location.reload(), ms)
     return () => clearTimeout(id)
+  }, [])
+
+  // ── Periodični "meki" reload — svaka 4h, dodatno uz 03:00 hard reset.
+  // Kiosk browseri (Chromium na slabijem hardveru, Android WebView i sl.)
+  // vremenom akumuliraju memoriju/GC pritisak i compositing layer-e čak i
+  // kod korektno napisanog React koda — periodični reload je standardna
+  // zaštita za digital-signage aplikacije koje rade non-stop po satima. ──
+  useEffect(() => {
+    const id = setInterval(() => window.location.reload(), SOFT_RELOAD_INTERVAL_MS)
+    return () => clearInterval(id)
   }, [])
 
   // ── Kiosk: prevent context menu, selection ───────────────
@@ -891,7 +914,7 @@ const load = async () => {
   // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
   // blok se preskače i nastavlja se normalan tok — self-healing, isti
   // princip kao "odbaci noćni cache" logika na backendu.
-const wasNightMode = nightMode  // vrijednost PRIJE ovog ciklusa
+const wasNightMode = nightModeRef.current  // vrijednost PRIJE ovog ciklusa (iz refa, uvijek svježa)
 
 if (isNightHours()) {
   if (isMountedRef.current) setNightMode(true)
@@ -908,7 +931,7 @@ if (isMountedRef.current) setNightMode(false)
 const justExitedNightMode = wasNightMode
 
   try {
-    if (isInitialLoad.current && arrivals.length === 0 && departures.length === 0)
+    if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0)
       setLoading(true)
     setErrorMessage(null)
 
@@ -916,7 +939,7 @@ const justExitedNightMode = wasNightMode
     // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moglo je doći
     // do desinhronizacije (stale meta u Redisu, noćni prelaz i sl.).
     // U tom slučaju UVIJEK radi pun fetch, da se ekran sam "izliječi".
-const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0
+const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
 const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
     let hashChanged = true
     let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null
@@ -1011,7 +1034,7 @@ if (!forceRefresh && statusData.hash !== null && statusData.hash === lastKnownHa
     if (!isMountedRef.current || !data) return
 
     const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
-    const currentlyHasData = arrivals.length > 0 || departures.length > 0
+    const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
 
     // ── SIGURNOSNA MREŽA: ne dozvoli da prazan/sumnjiv odgovor obriše već prikazane letove ──
     if (incomingTotal === 0 && currentlyHasData) {
@@ -1249,11 +1272,13 @@ const sortedFlights = useMemo(
         @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
         .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink;will-change:opacity}
         .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast;will-change:opacity}
+        .led-blink-a{animation:ledBlinkA .8s ease-in-out infinite alternate;will-change:opacity}
+        .led-blink-b{animation:ledBlinkB .8s ease-in-out infinite alternate;will-change:opacity}
         .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
         .ticker-move{display:inline-block;white-space:nowrap;will-change:transform;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
         @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
         @media(max-width:639px){.ticker-move{animation-duration:35s}}
-        @media(prefers-reduced-motion:reduce){.animate-pill-blink,.animate-pill-blink-fast,.animate-pulse,.animate-spin,.ticker-move{animation:none!important;opacity:1!important}}
+        @media(prefers-reduced-motion:reduce){.animate-pill-blink,.animate-pill-blink-fast,.led-blink-a,.led-blink-b,.animate-pulse,.animate-spin,.ticker-move{animation:none!important;opacity:1!important}}
         ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
         body,html{overflow:hidden;margin:0;padding:0}
