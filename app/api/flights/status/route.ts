@@ -45,17 +45,31 @@ export async function GET(request: Request) {
     }
 
     const rawAssignments = await getRawAssignments();
-    const { desks, gates } = buildSimpleMaps(rawAssignments);
+    const { desks, gates, fingerprint: assignmentsFingerprint } = buildSimpleMaps(rawAssignments);
 
-    const etagPayload = {
-      hash: meta.hash || '',
-      desks,
-      gates,
-      deskEntries: rawAssignments.desks,
-      gateEntries: rawAssignments.gates,
-    };
+    // ── JEFTIN ETag ─────────────────────────────────────────────
+    // Ranije: JSON.stringify() nad { hash, desks, gates, deskEntries,
+    // gateEntries } (puno ugniježđeno stablo, do ~48 desk/gate unosa
+    // sa po 4 polja) + MD5 nad tim — na SVAKI request, čak i onaj koji
+    // rezultuje 304. To je bilo skupo iz tri razloga:
+    //   1) desks/gates su izvedeni iz deskEntries/gateEntries — hešuju
+    //      se i sirovi podaci i njihov derivat, iako derivat ne nosi
+    //      dodatnu informaciju o promjeni.
+    //   2) JSON.stringify hoda kroz ugniježđeno stablo i escape-uje
+    //      stringove — skuplje od rada sa već-ravnim stringom.
+    //   3) buildSimpleMaps() već računa fingerprint interno (za svoju
+    //      memoization provjeru) — prije se taj rad bacao i računao
+    //      iznova, drugačijim (skupljim) putem.
+    // Sad: samo konkatenacija dva već gotova, jeftina identifikatora
+    // (meta.hash i assignmentsFingerprint), pa MD5 nad kratkim
+    // ravnim stringom umjesto nad serijalizovanim stablom. Isti nivo
+    // korektnosti — svaka promjena u raw assignments mijenja
+    // fingerprint, svaka promjena u flight meta mijenja hash — samo
+    // bez nepotrebnog JSON.stringify i duplog hešovanja izvedenih
+    // podataka.
+    const etagSource = `${meta.hash || 'x'}|${assignmentsFingerprint || 'none'}`;
     const etagHash = createHash('md5')
-      .update(JSON.stringify(etagPayload))
+      .update(etagSource)
       .digest('hex')
       .substring(0, 16);
     const etag = `"${etagHash}"`;

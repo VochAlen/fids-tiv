@@ -29,12 +29,18 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 6_000; // Svako 15s provjerava admin promjene
+const POLL_INTERVAL = 10_000; // Svako 10s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
 const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
 
-
+// ── Koliko dugo se u browser-memoriji (unutar ove kiosk sesije) drži
+// zadnji uspješan /api/flights odgovor za lookup detalja leta. Ako se
+// više promjena dodjele desi u kratkom vremenskom prozoru (npr. talas
+// otvaranja check-in-a za novi val letova), ponovna upotreba istog
+// payloada izbjegava nepotreban network round-trip i JSON.parse nad
+// punom listom departures+arrivals za svaku od tih promjena.
+const FLIGHTS_LOOKUP_CACHE_TTL_MS = 60_000;
 
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
@@ -368,6 +374,14 @@ const isMountedRef = useRef(true);
   // const etagDeskRef = useRef<string | null>(null);
  const etagDeskRef = useRef<string | null>(null);
 
+  // ── Klijentski (in-browser) keš za /api/flights lookup ─────────
+  // Drži zadnji uspješan flights payload + njegov ETag unutar ove
+  // kiosk sesije, da se izbjegne ponovni pun fetch (i JSON.parse nad
+  // cijelom listom departures+arrivals) kad se više promjena dodjele
+  // desi u kratkom vremenskom prozoru.
+  const flightsCacheRef = useRef<{ data: any; expiry: number } | null>(null);
+  const etagFlightsRef = useRef<string | null>(null);
+
   const { adImages } = useAdImages();
   // BA override za ad banner
 const baAdImage = useMemo((): string | null => {
@@ -524,12 +538,36 @@ const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', cla
     // Novi let – dohvati detalje
     let flightDetails: Record<string, string | string[] | boolean | null> = {};
     try {
-const flightsRes = await fetch('/api/flights', {
-  next: {
-    revalidate: 60
-  }
-});
-      const flightsData = await flightsRes.json();
+      const now = Date.now();
+      let flightsData: any;
+
+      if (flightsCacheRef.current && now < flightsCacheRef.current.expiry) {
+        // Keš unutar TTL prozora — bez network poziva
+        flightsData = flightsCacheRef.current.data;
+      } else {
+        const flightsHeaders: HeadersInit = {};
+        if (etagFlightsRef.current) {
+          flightsHeaders['If-None-Match'] = etagFlightsRef.current;
+        }
+
+        const flightsRes = await fetch('/api/flights', {
+          headers: flightsHeaders,
+          cache: 'no-store',
+        });
+
+        const newFlightsEtag = flightsRes.headers.get('ETag');
+        if (newFlightsEtag) etagFlightsRef.current = newFlightsEtag;
+
+        if (flightsRes.status === 304 && flightsCacheRef.current) {
+          // Sadržaj nepromijenjen — produži TTL na postojećim podacima
+          flightsData = flightsCacheRef.current.data;
+          flightsCacheRef.current.expiry = now + FLIGHTS_LOOKUP_CACHE_TTL_MS;
+        } else {
+          flightsData = await flightsRes.json();
+          flightsCacheRef.current = { data: flightsData, expiry: now + FLIGHTS_LOOKUP_CACHE_TTL_MS };
+        }
+      }
+
       const allFlights = [
         ...(flightsData.departures || []),
         ...(flightsData.arrivals || []),

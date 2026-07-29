@@ -26,13 +26,26 @@ export type RawAssignments = {
 export type SimpleAssignments = {
   desks: Record<string, string>;
   gates: Record<string, string>;
+  // Već izračunat fingerprint (isti onaj koji buildSimpleMaps interno
+  // koristi za memoization) — izložen ovdje da ga pozivaoci (npr.
+  // /api/flights/status) mogu iskoristiti za jeftin ETag umjesto da
+  // ponovo JSON.stringify-uju cijelu strukturu. Dodavanje polja ne
+  // kvari postojeće pozivaoce koji destrukturišu samo { desks, gates }.
+  fingerprint: string;
 };
 
-// NEMA više cachedRaw / cachedRawExpiry / refreshing / CACHE_TTL_MS
-
+// ======================================================
+// RAW REDIS CACHE
+// ======================================================
+// NAPOMENA: TTL namjerno ostaje 8s (ne 30s) — usklađen sa
+// s-maxage=10s na /api/flights/status. Desk/gate open/closed je
+// operativni podatak (koristi ga osoblje na aerodromu), pa
+// produženje TTL-a na 30s ne štedi Active CPU (I/O čekanje se ne
+// naplaćuje kod Fluid Compute), a UNOSI rizik da promjena statusa
+// kasni do 30s umjesto do ~10s. Ne diraj bez razloga.
 let cachedRaw: RawAssignments | null = null;
 let cachedRawExpiry = 0;
-const CACHE_TTL_MS = 8_000; // malo ispod CDN s-maxage=10s na /api/flights/status
+const RAW_CACHE_TTL_MS = 8_000;
 
 export async function getRawAssignments(): Promise<RawAssignments> {
   const now = Date.now();
@@ -49,13 +62,47 @@ export async function getRawAssignments(): Promise<RawAssignments> {
   if (gateRaw) { try { gates = JSON.parse(gateRaw); } catch { gates = {}; } }
 
   cachedRaw = { desks, gates };
-  cachedRawExpiry = now + CACHE_TTL_MS;
+  cachedRawExpiry = now + RAW_CACHE_TTL_MS;
   return cachedRaw;
 }
 
-// lib/assignments-service.ts
+// ======================================================
+// SIMPLE MAP CACHE (memoization preko lakog fingerprint-a)
+// ======================================================
+// Realna ušteda samo kad se buildSimpleMaps() pozove više puta sa
+// istim raw objektom unutar RAW_CACHE_TTL_MS prozora (npr. iz više
+// ruta/handlera u istom request ciklusu). Za skup od ~30-40
+// desk/gate unosa je apsolutna ušteda mikroskopska — ne očekuj da
+// se ovo vidi kao stavka na Vercel billing-u, ali nije ni štetno.
+let cachedSimple: SimpleAssignments | null = null;
+let cachedSimpleFingerprint = '';
+
+function createFingerprint(raw: RawAssignments): string {
+  let fingerprint = '';
+
+  // VAŽNO: ključ (broj deska/gate-a) MORA biti u fingerprint-u.
+  // Bez njega, zamjena stanja između dva deska sa istim
+  // setAt/status/flightNumber ne bi bila detektovana kao promjena.
+  for (const [deskNumber, value] of Object.entries(raw.desks)) {
+    fingerprint += `${deskNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}|`;
+  }
+
+  fingerprint += '#';
+
+  for (const [gateNumber, value] of Object.entries(raw.gates)) {
+    fingerprint += `${gateNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}|`;
+  }
+
+  return fingerprint;
+}
 
 export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {
+  const fingerprint = createFingerprint(raw);
+
+  if (cachedSimple && cachedSimpleFingerprint === fingerprint) {
+    return cachedSimple;
+  }
+
   const deskMap: Record<string, string> = {};
   for (const [deskNumber, val] of Object.entries(raw.desks)) {
     if (val?.status === 'open' && val.flightNumber) {
@@ -67,10 +114,12 @@ export function buildSimpleMaps(raw: RawAssignments): SimpleAssignments {
   const gateMap: Record<string, string> = {};
   for (const [gateNumber, val] of Object.entries(raw.gates)) {
     if (val?.status === 'open' && val.flightNumber) {
-      // PROMJENI OVO: umjesto gateMap[val.flightNumber] = gateNumber;
-      gateMap[gateNumber] = val.flightNumber;  // { gateId: flightNumber }
+      gateMap[gateNumber] = val.flightNumber; // { gateId: flightNumber }
     }
   }
 
-  return { desks: deskMap, gates: gateMap };
+  cachedSimple = { desks: deskMap, gates: gateMap, fingerprint };
+  cachedSimpleFingerprint = fingerprint;
+
+  return cachedSimple;
 }

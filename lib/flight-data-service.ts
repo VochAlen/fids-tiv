@@ -30,9 +30,22 @@ let overrideCacheExpiry = 0;
 const OVERRIDE_CACHE_MS = 10_000;
 
 // ── IN-PROCESS FLIGHT DATA CACHE ──────────────────────────────
+// TTL namjerno usklađen sa FLIGHT_CACHE_TTL_SECONDS (240s) ispod, ne
+// proizvoljno kraći. Ranije je ovo bilo 60_000 dok je Redis TTL bio
+// 240s — na toplom instance-u je to tjeralo Redis GET + JSON.parse()
+// (stvaran CPU rad, ne I/O čekanje) na svakih 60s, iako se podatak
+// ispod njega realno ne mijenja brže od 240s (toliko traje Redis TTL
+// prije nego što novi live fetch prepiše vrijednost). Rezultat: 3 od
+// svaka 4 parsiranja su bila potpuno nepotrebna — isti JSON, parsiran
+// iznova. Sad je ovo tik ispod 240s: dovoljno kratko da nikad ne drži
+// podatak nakon što je Redis vrijednost mogla biti osvježena, dovoljno
+// dugo da eliminiše te nepotrebne re-parseve. Noćni TTL (3600s) i
+// jutarnji prelaz i dalje rade nezavisno od ovoga — provjera
+// `cached.isNightMode && !nightNow` se izvršava na SVAKI poziv bez
+// obzira na TTL, pa ovo ne unosi stale-data rizik.
 let inProcessFlightData: FlightData | null = null;
 let inProcessFlightExpiry = 0;
-const IN_PROCESS_FLIGHT_TTL_MS = 60_000;
+const IN_PROCESS_FLIGHT_TTL_MS = 220_000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 let lastRedisCleanup = 0;
@@ -341,7 +354,7 @@ export async function getCurrentFlightData(): Promise<FlightData> {
 const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
 const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
 
-if (isNightHours()) {
+if (nightNow) {   // ← bilo: isNightHours() — nepotreban drugi poziv, nightNow je već izračunat gore
   const client = getRedisClient();
   const nightFetchGateKey = 'night:fetch:gate';
 
