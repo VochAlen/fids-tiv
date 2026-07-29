@@ -949,10 +949,11 @@ if (statusRes.ok) {
     statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
     if (isMountedRef.current) setNightMode(!!statusData.isNightMode);   // ← NOVO
 
-if (!forceRefresh && statusData.hash === lastKnownHash && lastKnownHash !== null) {
+if (!forceRefresh && statusData.hash !== null && statusData.hash === lastKnownHash) {
   hashChanged = false;
+} else if (statusData.hash !== null) {
+  lastKnownHash = statusData.hash;
 }
-lastKnownHash = statusData.hash;
 }
 } catch {
   // ignoriši grešku, nastavi na pun fetch
