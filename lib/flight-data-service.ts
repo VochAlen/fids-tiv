@@ -154,16 +154,23 @@ const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights
 // odgovor — pošto je BACKUP_ENABLED false, to je značilo prazan/
 // emergency prikaz umjesto ispravnih podataka, iako API nije bio
 // zaista nedostupan.
-const MAX_RETRIES = 2;             // ukupno pokušaja ka live API-ju
-const RETRY_DELAY = 500;           // pauza između pokušaja (ms)
-const PER_ATTEMPT_TIMEOUT_MS = 7000; // AbortSignal timeout po pokušaju
+const MAX_RETRIES = 3;               // ukupno pokušaja ka live API-ju — umjereno povećano sa 2
+const RETRY_DELAY_BASE = 600;        // bazna pauza za exponential backoff (ms)
+const PER_ATTEMPT_TIMEOUT_MS = 6000; // AbortSignal timeout po pokušaju — blago smanjeno da ostavi prostor za 3. pokušaj
+
+// Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
+// Matematika: 3 × 6000 + (600 + 1200) backoff + jitter margin ≈ 20.000ms
+// worst-case iz retry logike, pa 22000ms ovdje ostavlja mali safety margin
+// bez da bude prekratak. I dalje je ovo "safety net" iznad per-attempt
+// timeouta, ne primarni mehanizam — retry logika treba sama da završi ranije.
+
 
 // Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
 // Matematika: 2 × 7000 + 1 × 500 = 14500ms worst-case iz retry logike,
 // pa 15000ms ovdje ostavlja mali safety margin bez da bude
 // prekratak. I dalje je ovo "safety net" iznad per-attempt timeouta,
 // ne primarni mehanizam — retry logika treba sama da završi ranije.
-const LIVE_FETCH_HARD_DEADLINE_MS = 15000;
+const LIVE_FETCH_HARD_DEADLINE_MS = 22000;
 
 // Emergency fetch (korak 5, "zadnja linija odbrane") — ranije 4000ms,
 // vraćeno na 6000ms iz istog razloga kao gore: prekratak timeout je
@@ -288,12 +295,34 @@ async function fetchWithQuickRetry(
       const response = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeoutId);
       if (response.ok) return response;
-      console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries}`);
-      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
+
+      // Uhvati tijelo odgovora prije nego što ga baciš — pomaže da se vidi
+      // da li je 500 generička PHP greška, WAF/Cloudflare block stranica,
+      // ili nešto treće.
+      let bodyPreview = '';
+      try {
+        bodyPreview = (await response.clone().text()).substring(0, 300);
+      } catch {
+        bodyPreview = '(tijelo nije moglo biti pročitano)';
+      }
+      console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries} — body: ${bodyPreview}`);
+
+      if (attempt < retries) {
+        // Exponential backoff + jitter: 600ms → ~1200ms → ~2400ms, uz malu
+        // nasumičnu varijaciju da izbjegnemo savršeno pravilan, mašinski
+        // izgledajući obrazac ponavljanja (bitno i zbog WAF-a spomenutog ranije).
+        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
+        const jitter = Math.random() * 200;
+        await new Promise(r => setTimeout(r, backoff + jitter));
+      }
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`❌ Fetch attempt ${attempt}/${retries} failed: ${errMsg}`);
-      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
+      if (attempt < retries) {
+        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
+        const jitter = Math.random() * 200;
+        await new Promise(r => setTimeout(r, backoff + jitter));
+      }
     }
   }
   throw new Error(`Live API fetch failed after ${retries} attempts`);
@@ -343,6 +372,54 @@ function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
       return { ...flight, BaggageReclaim: '2' };
     }
     return flight;
+  });
+}
+
+// ── Računa koliko je minuta prošlo od planiranog/procijenjenog vremena leta,
+// u odnosu na SADAŠNJI trenutak. Koristi EstimatedDepartureTime ako postoji
+// (precizniji, ažuriran podatak), inače pada na ScheduledDepartureTime.
+// Handluje prelaz preko ponoći (npr. let u 00:20 dok je "sad" 23:50 dan ranije,
+// ili obrnuto) — bez toga bi razlika ispala pogrešna za skoro cio dan.
+// Vraća null ako vrijeme nije moguće parsirati (prazan string, loš format).
+function minutesSinceFlightTime(timeStr: string | undefined): number | null {
+  if (!timeStr) return null;
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  if (isNaN(hours) || isNaN(minutes)) return null;
+
+  const now = new Date();
+  const flightDate = new Date(now);
+  flightDate.setHours(hours, minutes, 0, 0);
+
+  let diffMs = now.getTime() - flightDate.getTime();
+  const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+
+  // Ako je razlika veća od 12h u budućnost/prošlost, vjerovatno je riječ
+  // o vremenu koje pripada susjednom kalendarskom danu (prelaz preko ponoći) —
+  // pomjeri datum i preračunaj.
+  if (diffMs > TWELVE_HOURS_MS) {
+    flightDate.setDate(flightDate.getDate() + 1);
+    diffMs = now.getTime() - flightDate.getTime();
+  } else if (diffMs < -TWELVE_HOURS_MS) {
+    flightDate.setDate(flightDate.getDate() - 1);
+    diffMs = now.getTime() - flightDate.getTime();
+  }
+
+  return Math.floor(diffMs / 60_000);
+}
+
+// ── Filtrira letove čije je planirano/procijenjeno vrijeme više od
+// `cutoffMinutes` U PROŠLOSTI — bez obzira šta piše u StatusEN. Ovo je
+// pouzdanije od filtriranja po tekstu statusa jer backup podatak može biti
+// star i njegov status tekst zastario (npr. i dalje piše "Scheduled" iako
+// je let odavno otišao). Koristi se SAMO u BACKUP granama, isto kao
+// filterOutCompletedFlights — live podatak API sam čisti.
+function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: number = 40): T[] {
+  return flights.filter(flight => {
+    const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
+    const minutesSince = minutesSinceFlightTime(timeStr);
+    // null (vrijeme nepoznato/neparsivo) → ne filtriraj, radije prikaži nego sakrij
+    if (minutesSince === null) return true;
+    return minutesSince <= cutoffMinutes;
   });
 }
 // ← Generička po T extends Flight, da očuva konkretan tip ulaza (npr.
@@ -497,19 +574,20 @@ if (!Array.isArray(rawData)) throw new Error('Invalid data format');
 
 const finalFlights = removeDuplicateFlights(expandedFlights);
 
-// ── BACKUP_ENABLED je false, čitanje backupa se nikad ne dešava —
-// pisanje isključeno da se ne troši Redis uzalud (write + storage
-// trošak za podatke koji se nikad ne čitaju). Vrati blok ako se
-// BACKUP_ENABLED ponovo aktivira.
-// if (finalFlights.length > 0) {
-//   try {
-//     await backupService.saveBackup(finalFlights);
-//   } catch (e) {
-//     console.error('⚠️ Backup save failed:', e);
-//   }
-// } else {
-//   console.warn('⚠️ Live vratio 0 letova — preskačem backup save da ne pregazim dobar backup');
-// }
+// ── BACKUP_ENABLED je true — svaki uspješan live fetch osvježava backup,
+// tako da kad live API kasnije padne, backup mode ima najsvježiji mogući
+// podatak (ne stari po nekoliko sati). Namjerno se NE piše backup kad je
+// finalFlights prazan (0 letova) — to bi moglo prepisati dobar, pun backup
+// praznim rezultatom u slučaju da API vrati privremeno prazan niz.
+if (finalFlights.length > 0) {
+  try {
+    await backupService.saveBackup(finalFlights);
+  } catch (e) {
+    console.error('⚠️ Backup save failed:', e);
+  }
+} else {
+  console.warn('⚠️ Live vratio 0 letova — preskačem backup save da ne pregazim dobar backup');
+}
 // isto u lib/flight-data-service.ts — unutar step 3, blok "finalFlights.length === 0":
 
 if (finalFlights.length === 0 && BACKUP_ENABLED) {
@@ -519,7 +597,8 @@ if (finalFlights.length === 0 && BACKUP_ENABLED) {
 
 if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica) {
     // ← NOVO: makni letove koji su već poletjeli/sletjeli prije nego što ih prikažemo
-    const filteredBackupFlights = filterOutCompletedFlights(existingBackup.flights);
+   const filteredBackupFlights = filterOutStaleFlights(filterOutCompletedFlights(existingBackup.flights));
+  //  const filteredBackupFlights = filterOutStaleFlights(filterOutCompletedFlights(existingBackup.flights), 45);
     const bd = await buildFlightData(filteredBackupFlights, 'backup', existingBackup.timestamp, {
       isOfflineMode: true,
       backupTimestamp: existingBackup.timestamp,
@@ -576,7 +655,7 @@ const processor = new FlightAutoProcessor(latestBackup.flights);
     // ← NOVO: filtriraj TEK nakon simulacije — simulacija može ažurirati
     // status leta (npr. "Scheduled" → "Departed") pa filter mora vidjeti
     // najnoviji, simulirani status, ne stari iz sirovog backupa.
-    const filteredSimulatedFlights = filterOutCompletedFlights(simulatedFlights);
+const filteredSimulatedFlights = filterOutStaleFlights(filterOutCompletedFlights(simulatedFlights));
 
     // autoProcessedCount se računa na FILTRIRANOJ listi — brojač treba da
     // odražava koliko auto-processed letova je STVARNO prikazano, ne koliko
