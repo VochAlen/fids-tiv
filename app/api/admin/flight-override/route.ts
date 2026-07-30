@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { resetExpiredCheckInOverrides } from '@/lib/override-utils';
-import { getCurrentFlightData } from '@/lib/flight-data-service';
+import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 
 // ============================================================
 // SIGURNOSNA LISTA: Dozvoljava samo ova polja za upis u Redis
@@ -57,7 +57,7 @@ function shouldAutoResetCheckIn(scheduledTime: string): boolean {
 // koju ta ruta koristi — nema round-trip-a, nema dodatne invokacije.
 async function getFlightScheduleAndStatus(flightNumber: string): Promise<{ scheduledTime: string | null; status: string | null }> {
   try {
-    const data = await getCurrentFlightData();
+    const data = await getCurrentFlightDataSafe();
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
     const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
     return {
@@ -226,7 +226,7 @@ export async function GET(request: Request) {
 
         let allFlights: any[] = [];
         try {
-          const data = await getCurrentFlightData(); // ← direktan poziv, bez fetch-a
+          const data = await getCurrentFlightDataSafe(); // ← direktan poziv, bez fetch-a
           allFlights = [...(data.departures || []), ...(data.arrivals || [])];
         } catch (e) {
           console.error('Could not fetch flights for auto-reset check:', e);

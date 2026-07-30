@@ -12,6 +12,32 @@ import {
 import { cleanupRedisTTLs } from '@/lib/redis-cleanup';
 
 import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
+// ── FETCH LOCK — garantuje da se live fetch dešava max 1x po ciklusu,
+// bez obzira koliko istovremenih poziva stigne iz drugih fajlova/instanci.
+const FETCH_LOCK_KEY = 'lock:flights:fetch';
+// Mora biti veći od worst-case trajanja cijele fetch faze (~22-23s po
+// komentarima gore) — inače lock istekne dok fetch još traje i neko
+// drugi krene paralelno.
+const FETCH_LOCK_TTL_SECONDS = 28;
+const LOCK_WAIT_POLL_MS = 300;
+// Koliko čekamo da TUĐI fetch završi prije nego odustanemo (ne radimo
+// svoj fetch nikad u ovoj grani — to bi narušilo "1 fetch po ciklusu").
+const LOCK_WAIT_MAX_MS = 12000;
+
+function generateLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Atomic "obriši SAMO ako je ovo moj lock" — Lua skripta, da izbjegnemo
+// scenario gdje instanca A obriše lock koji trenutno drži instanca B
+// (npr. A-in lock je istekao pa ga je B zauzeo, a A tek sad stiže do finally).
+const UNLOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
@@ -22,7 +48,7 @@ const FLIGHT_META_KEY = 'cache:flights:meta';
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
 // Promijeni na false da potpuno isključiš korišćenje backup podataka
 // (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
-const BACKUP_ENABLED = false;
+const BACKUP_ENABLED = true;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
@@ -50,15 +76,24 @@ const IN_PROCESS_FLIGHT_TTL_MS = 220_000;
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 let lastRedisCleanup = 0;
 const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
-
+// ── Header-i uhvaćeni direktno iz pravog Chrome desktop browsera (DevTools
+// Network → Copy as fetch, sa isključenom mobile emulacijom) dok učitava
+// https://montenegroairports.com/aerodrom-tivat/ — ne ručno pretpostavljeni.
+// Verzija Chrome-a (150) i sec-ch-ua header-i moraju ostati međusobno
+// konzistentni; ako se ažurira User-Agent verzija, MORA se ažurirati i
+// sec-ch-ua string ispod, inače se vraća isti mismatch problem kao ranije
+// (kad je User-Agent govorio Android/mobile a sec-ch-ua-platform Windows).
 const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/javascript, */*; q=0.01',
   'Accept-Language': 'en-US,en;q=0.9,hr;q=0.8',
   'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://montenegroairports.com/tivat/en/flights/departures',
+  'Referer': 'https://montenegroairports.com/aerodrom-tivat/',
   'Origin': 'https://montenegroairports.com',
   'X-Requested-With': 'XMLHttpRequest',
+  'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
   'Sec-Fetch-Dest': 'empty',
   'Sec-Fetch-Mode': 'cors',
   'Sec-Fetch-Site': 'same-origin',
@@ -67,7 +102,6 @@ const FETCH_HEADERS = {
   'Cache-Control': 'no-cache',
   'Pragma': 'no-cache',
 } as const;
-
 const SLIM_FIELDS = [
   'FlightNumber',
   'FlightType',
@@ -108,26 +142,36 @@ function slimFlightData(data: FlightData): FlightData {
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
 
 // ── RETRY / TIMEOUT BUDŽETI ─────────────────────────────────────
-// Ovi brojevi su namjerno mali i međusobno usklađeni sa
-// LIVE_FETCH_HARD_DEADLINE_MS ispod. Cilj: cijela live-fetch faza
-// NIKAD ne smije da priđe blizu Vercel maxDuration (postavljen na
-// 30s u route.ts), jer inače ruta puca sa 504 prije nego što bilo
-// koji od fallback-ova (backup/emergency/prazan state) stigne da
-// se izvrši.
+// Ovi brojevi su usklađeni sa maxDuration=30 (eksplicitno postavljen
+// u route.ts). Ranija verzija je bila mnogo agresivnija (3500ms po
+// pokušaju) jer je tada maxDuration bio na Vercel default-u (15s) i
+// trebalo je striktno budžetirati. Sad kad imamo dvostruko veći
+// budžet, per-attempt timeout je vraćen bliže originalnoj vrijednosti
+// (10s) — jer se pokazalo da montenegroairports.com API zna legitimno
+// (ne mrtav, samo spor) odgovoriti sporije od 3.5s, naročito tokom
+// perioda kad cache-flights.php interno regeneriše svoj keš. Prekratak
+// timeout je tjerao sistem da odustane PRIJE nego što stigne ispravan
+// odgovor — pošto je BACKUP_ENABLED false, to je značilo prazan/
+// emergency prikaz umjesto ispravnih podataka, iako API nije bio
+// zaista nedostupan.
 const MAX_RETRIES = 2;             // ukupno pokušaja ka live API-ju
 const RETRY_DELAY = 500;           // pauza između pokušaja (ms)
-const PER_ATTEMPT_TIMEOUT_MS = 3500; // AbortSignal timeout po pokušaju
+const PER_ATTEMPT_TIMEOUT_MS = 7000; // AbortSignal timeout po pokušaju
 
 // Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
-// Ovo je "safety net" iznad per-attempt timeouta: retry logika sama
-// po sebi treba da završi za ~2*3500 + 500 = 7500ms, ali ako
-// fetch/AbortSignal ikad ne poštuje svoj timeout (rijetki edge-case
-// mrežnih grešaka), Promise.race ovdje prisilno prekida čekanje.
-const LIVE_FETCH_HARD_DEADLINE_MS = 8000;
+// Matematika: 2 × 7000 + 1 × 500 = 14500ms worst-case iz retry logike,
+// pa 15000ms ovdje ostavlja mali safety margin bez da bude
+// prekratak. I dalje je ovo "safety net" iznad per-attempt timeouta,
+// ne primarni mehanizam — retry logika treba sama da završi ranije.
+const LIVE_FETCH_HARD_DEADLINE_MS = 15000;
 
-// Emergency fetch (korak 5, "zadnja linija odbrane") mora biti još brži,
-// jer se dešava TEK NAKON što je live fetch već potrošio svoj budžet.
-const EMERGENCY_FETCH_TIMEOUT_MS = 4000;
+// Emergency fetch (korak 5, "zadnja linija odbrane") — ranije 4000ms,
+// vraćeno na 6000ms iz istog razloga kao gore: prekratak timeout je
+// tjerao lažne "critical failure" ishode kad je API bio samo spor.
+const EMERGENCY_FETCH_TIMEOUT_MS = 6000;
+
+// Ukupan worst-case sad: ~15s (live) + ~6s (emergency) + ~1-2s (ostalo)
+// ≈ 22-23s, i dalje udobno ispod maxDuration=30 (≈7-8s margin).
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 // Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
@@ -301,6 +345,22 @@ function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
     return flight;
   });
 }
+// ← Generička po T extends Flight, da očuva konkretan tip ulaza (npr.
+// AutoProcessedFlight) na izlazu. Bez generika, TypeScript bi suzio
+// povratnu vrijednost na "obični" Flight[] i izgubio AutoProcessed/
+// OriginalStatus polja koja poziv u koraku 4 (BACKUP MODE) treba
+// kasnije da pročita.
+function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
+  return flights.filter(flight => {
+    const statusLower = (flight.StatusEN || '').toLowerCase();
+    const isDeparted = statusLower.includes('departed') || statusLower.includes('poletio');
+    const isArrived =
+      statusLower.includes('arrived') ||
+      statusLower.includes('sletio') ||
+      statusLower.includes('landed');
+    return !(isDeparted || isArrived);
+  });
+}
 
 async function buildFlightData(
   rawFlights: Flight[],
@@ -327,9 +387,18 @@ async function buildFlightData(
   };
 }
 
+// ── Mali nasumičan jitter na TTL, da fetch ciklusi ne budu savršeno
+// periodični (npr. tačno svakih 240.000ms). Neki WAF/bot-detekcija sistemi
+// prepoznaju besprijekorno pravilne intervale kao mašinski, ne ljudski
+// saobraćaj — par sekundi nasumičnosti to razbija bez ikakvog uticaja
+// na svježinu podataka.
+function jitteredTTL(baseSeconds: number, maxJitterSeconds: number = 8): number {
+  const jitter = Math.floor(Math.random() * maxJitterSeconds);
+  return baseSeconds + jitter;
+}
 // ── GLAVNA FUNKCIJA — pozivaju je i /api/flights ruta i cleanup-overrides cron,
 // direktno, bez HTTP self-fetch-a ──────────────────────────────────────────
-export async function getCurrentFlightData(): Promise<FlightData> {
+async function getCurrentFlightData(): Promise<FlightData> {
  const nightNow = isNightHours();   // ← izračunaj JEDNOM, koristi svuda ispod
   // ── 1. PROVJERI CACHE PRVO (in-process → Redis) ──────────
   const cached = await getFlightDataFromCache();
@@ -448,8 +517,10 @@ if (finalFlights.length === 0 && BACKUP_ENABLED) {
   
   const todayPodgorica = getPodgoricaDateString();
 
-  if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica) {
-    const bd = await buildFlightData(existingBackup.flights, 'backup', existingBackup.timestamp, {
+if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica) {
+    // ← NOVO: makni letove koji su već poletjeli/sletjeli prije nego što ih prikažemo
+    const filteredBackupFlights = filterOutCompletedFlights(existingBackup.flights);
+    const bd = await buildFlightData(filteredBackupFlights, 'backup', existingBackup.timestamp, {
       isOfflineMode: true,
       backupTimestamp: existingBackup.timestamp,
       warning: 'Nema aktivnih letova (noćna pauza ili API pauza). Prikazan zadnji poznati raspored.',
@@ -468,7 +539,7 @@ if (finalFlights.length === 0 && BACKUP_ENABLED) {
 const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow });
     const slimmed = slimFlightData(flightData);
 
- await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
+await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : jitteredTTL(FLIGHT_CACHE_TTL_SECONDS));
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
@@ -498,14 +569,24 @@ try {
   if (latestBackup.flights.length > 0 && latestBackup.date === today) {
     console.log(`🔄 Using backup: ${latestBackup.flights.length} flights from today (${latestBackup.timestamp})`);
 
-    const processor = new FlightAutoProcessor(latestBackup.flights);
+const processor = new FlightAutoProcessor(latestBackup.flights);
     const processedFlights = processor.processFlights();
     const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
-    const autoProcessedCount = simulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
+
+    // ← NOVO: filtriraj TEK nakon simulacije — simulacija može ažurirati
+    // status leta (npr. "Scheduled" → "Departed") pa filter mora vidjeti
+    // najnoviji, simulirani status, ne stari iz sirovog backupa.
+    const filteredSimulatedFlights = filterOutCompletedFlights(simulatedFlights);
+
+    // autoProcessedCount se računa na FILTRIRANOJ listi — brojač treba da
+    // odražava koliko auto-processed letova je STVARNO prikazano, ne koliko
+    // ih je bilo prije filtriranja (inače bi brojka bila veća od broja
+    // letova koje korisnik zapravo vidi na ekranu).
+    const autoProcessedCount = filteredSimulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
     const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
 
 const flightData = await buildFlightData(
-  simulatedFlights,
+  filteredSimulatedFlights,
   source,
   latestBackup.timestamp,
   {
@@ -572,22 +653,48 @@ const flightData = await buildFlightData(
 }
 
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
+  // 1. Keš prvo — najčešći put, bez ikakvog Redis lock overhead-a.
   const cached = await getFlightDataFromCache();
   if (cached) return cached;
 
   const client = getRedisClient();
-  const lockKey = 'lock:flights:fetch';
-  const gotLock = await client.set(lockKey, '1', 'EX', 15, 'NX');
+  const token = generateLockToken();
+  const gotLock = await client.set(FETCH_LOCK_KEY, token, 'EX', FETCH_LOCK_TTL_SECONDS, 'NX');
 
-  if (!gotLock) {
-    await new Promise(r => setTimeout(r, 500));
+  if (gotLock) {
+    // Ja sam nosilac locka ovog ciklusa — JA radim live fetch,
+    // svi ostali istovremeni pozivi (iz drugih fajlova/instanci) idu u granu ispod.
+    try {
+      return await getCurrentFlightData();
+    } finally {
+      try {
+        await client.eval(UNLOCK_SCRIPT, 1, FETCH_LOCK_KEY, token);
+      } catch (e) {
+        console.warn('⚠️ Unlock failed (nekritično, lock će isteći sam za', FETCH_LOCK_TTL_SECONDS, 's):', e);
+      }
+    }
+  }
+
+  // Neko drugi već radi fetch ovog ciklusa — čekamo NJEGOV rezultat u kešu,
+  // ne pokrećemo svoj fetch. Ovo je jedini način da se garantuje tačno
+  // 1 live fetch po intervalu bez obzira na broj istovremenih poziva.
+  const deadline = Date.now() + LOCK_WAIT_MAX_MS;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));
     const retryCache = await getFlightDataFromCache();
     if (retryCache) return retryCache;
   }
 
-  try {
-    return await getCurrentFlightData();
-  } finally {
-    await client.del(lockKey);
-  }
+  // Predugo čekanje — nosilac locka je vjerovatno spor/zaglavljen.
+  // NE radimo fetch ovdje (to bi narušilo garanciju), vraćamo best-effort stanje.
+  console.warn('⚠️ Lock držan predugo od druge instance — vraćam privremeno emergency stanje bez dodatnog fetcha');
+  return {
+    departures: [],
+    arrivals: [],
+    lastUpdated: new Date().toISOString(),
+    source: 'emergency',
+    isOfflineMode: true,
+    totalFlights: 0,
+    warning: 'Podaci se trenutno ažuriraju, pokušajte ponovo za par sekundi.',
+  };
 }

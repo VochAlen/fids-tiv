@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { runAutoReset } from '@/lib/override-utils';
-import { getCurrentFlightData } from '@/lib/flight-data-service';
+import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 
 async function fetchAllFlights(): Promise<any[]> {
   try {
-    const data = await getCurrentFlightData(); // ← direktan poziv, bez HTTP self-fetch-a
+    const data = await getCurrentFlightDataSafe(); // ← direktan poziv, bez HTTP self-fetch-a
     return [...(data.departures || []), ...(data.arrivals || [])];
   } catch (err) {
     console.error('[cleanup] Greška pri dohvatu letova:', err);
