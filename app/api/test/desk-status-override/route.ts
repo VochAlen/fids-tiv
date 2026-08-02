@@ -103,28 +103,18 @@ if (ifNoneMatch && ifNoneMatch === etag) {
     status: 304,
     headers: {
       'ETag': etag,
-'Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-
-'CDN-Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-
-'Vercel-CDN-Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
     },
   });
 }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
 const headers = {
-'Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-
-'CDN-Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-
-'Vercel-CDN-Cache-Control':
-  'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
 
   'ETag': etag,
 };

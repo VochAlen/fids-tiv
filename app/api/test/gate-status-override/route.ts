@@ -77,9 +77,9 @@ console.log(
 headers: {
   'ETag': etag,
 // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
 },
       });
     }
@@ -87,9 +87,9 @@ headers: {
     // ── NORMALAN ODGOVOR ────────────────────────────────────
 const headers: Record<string, string> = {
 // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
+'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
 
 'ETag': etag,
 
