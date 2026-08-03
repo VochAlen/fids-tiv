@@ -342,6 +342,104 @@ dlog(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduledDate.ge
   };
 }
 
+// ── Tip sirovih podataka sa ngrok proxy-ja (/schedule endpoint) ──
+export interface NgrokFlightRaw {
+  AD: 'DEPARTURE' | 'ARRIVAL';
+  acttime: string;
+  airlineCode: string;
+  airlineICAO: string;
+  brlet: string;
+  checkinDesk: string;
+  codeShareFlights: string;
+  comment: string;
+  esttime: string;
+  fromto: string;
+  gate: string;
+  operlong: string;
+  parkingPosition: string;
+  schdate: string;
+  schtime: string;
+  sifFromto: string;
+  sifVia: string;
+  via: string;
+  baggageReclaim?: string;
+}
+
+/**
+ * Mapira sirovi zapis sa ngrok proxy-ja u POSTOJEĆI Flight oblik.
+ * Ponovo koristi iste helpere kao mapRawFlight (cleanFlightNumber,
+ * parseGateNumbers, parseCheckInDesks, getLogoURLWithFallback, formatTime)
+ * da izlazni Flight objekat bude potpuno identičnog oblika, bez obzira
+ * na to koji je izvor podataka.
+ */
+export async function mapNgrokFlightToFlight(raw: NgrokFlightRaw): Promise<Flight> {
+  const flightType: 'departure' | 'arrival' = raw.AD === 'DEPARTURE' ? 'departure' : 'arrival';
+
+  const cleanNumber = cleanFlightNumber(raw.brlet || '', raw.airlineCode || '');
+
+  const codeShareFlights = raw.codeShareFlights
+    ? raw.codeShareFlights.split(',').map(f => f.trim()).filter(Boolean)
+    : [];
+
+  const airlineLogoURL = await getLogoURLWithFallback(raw.airlineICAO);
+
+  const flightId = `${raw.brlet}_${raw.schtime}_${raw.sifFromto}`;
+
+  // ── _sortTime: schtime je već puni ISO string ("2026-07-31T06:40:00"),
+  // pa ga direktno parsiramo — isti princip kao u mapRawFlight (wall-clock
+  // sati se tretiraju dosljedno za sortiranje, bez stvarne TZ konverzije,
+  // jer server (Vercel) radi u UTC pa se brojevi poklapaju).
+  let sortTime: number | undefined = undefined;
+  if (raw.schtime) {
+    try {
+      const parsed = new Date(raw.schtime).getTime();
+      if (!isNaN(parsed)) sortTime = parsed;
+    } catch (err) {
+      console.warn(`⚠️ Failed to parse schtime for ${raw.brlet}:`, err);
+    }
+  }
+
+  dlog(`📝 Mapping ngrok flight: ${raw.brlet} | AD: ${raw.AD} → FlightType: ${flightType} | SortTime: ${sortTime ? new Date(sortTime).toLocaleString() : 'N/A'}`);
+
+  return {
+    id: flightId,
+    FlightNumber: cleanNumber,
+    AirlineCode: raw.airlineCode || '',
+    AirlineICAO: raw.airlineICAO || '',
+    AirlineName: raw.operlong || '',
+    DestinationAirportName: raw.fromto || '',
+    DestinationAirportCode: raw.sifFromto || '',
+    ScheduledDepartureTime: formatTime(raw.schtime || ''),
+    // esttime je ponekad prazan string prije nego let postane "aktivan" —
+    // pada nazad na schtime da EstimatedDepartureTime nikad ne bude '--:--'
+    // dok god postoji planirano vrijeme.
+    EstimatedDepartureTime: formatTime(raw.esttime || raw.schtime || ''),
+    ActualDepartureTime: formatTime(raw.acttime || ''),
+    StatusEN: raw.comment || 'On Time',
+    StatusMN: '',
+    Terminal: '',
+    GateNumber: raw.gate || '',
+    GateNumbers: parseGateNumbers(raw.gate || ''),
+    CheckInDesk: raw.checkinDesk || '',
+    CheckInDesks: parseCheckInDesks(raw.checkinDesk || ''),
+    BaggageReclaim: raw.baggageReclaim || '',
+    CodeShareFlights: codeShareFlights,
+    AirlineLogoURL: airlineLogoURL,
+    FlightType: flightType,
+    DestinationCityName: raw.fromto || '',
+
+    _sortTime: sortTime,
+
+    // MongoDB polja — isto kao u mapRawFlight
+    _id: undefined,
+    manualOverride: undefined,
+    checkInDesks: undefined,
+    adminNotes: undefined,
+    lastModifiedBy: undefined,
+    lastModifiedAt: undefined,
+    modificationCount: 0,
+  };
+}
 export function expandFlightForMultipleGates(flight: Flight): Flight[] {
   const flights: Flight[] = [flight];
   

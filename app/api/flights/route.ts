@@ -5,6 +5,7 @@ import type { FlightData } from '@/types/flight';
 import { createHash } from 'crypto';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 // export const revalidate = 60;
 
 // ── EKSPLICITAN maxDuration ─────────────────────────────────────
