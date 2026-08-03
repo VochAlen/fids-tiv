@@ -13,32 +13,6 @@ import {
 import { cleanupRedisTTLs } from '@/lib/redis-cleanup';
 
 import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
-// ── FETCH LOCK — garantuje da se live fetch dešava max 1x po ciklusu,
-// bez obzira koliko istovremenih poziva stigne iz drugih fajlova/instanci.
-const FETCH_LOCK_KEY = 'lock:flights:fetch';
-// Mora biti veći od worst-case trajanja cijele fetch faze (~22-23s po
-// komentarima gore) — inače lock istekne dok fetch još traje i neko
-// drugi krene paralelno.
-const FETCH_LOCK_TTL_SECONDS = 28;
-const LOCK_WAIT_POLL_MS = 300;
-// Koliko čekamo da TUĐI fetch završi prije nego odustanemo (ne radimo
-// svoj fetch nikad u ovoj grani — to bi narušilo "1 fetch po ciklusu").
-const LOCK_WAIT_MAX_MS = 12000;
-
-function generateLockToken(): string {
-  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-// Atomic "obriši SAMO ako je ovo moj lock" — Lua skripta, da izbjegnemo
-// scenario gdje instanca A obriše lock koji trenutno drži instanca B
-// (npr. A-in lock je istekao pa ga je B zauzeo, a A tek sad stiže do finally).
-const UNLOCK_SCRIPT = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-else
-  return 0
-end
-`;
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
@@ -49,7 +23,7 @@ const FLIGHT_META_KEY = 'cache:flights:meta';
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
 // Promijeni na false da potpuno isključiš korišćenje backup podataka
 // (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
-const BACKUP_ENABLED = true;
+const BACKUP_ENABLED = false;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
@@ -57,24 +31,10 @@ let overrideCacheExpiry = 0;
 const OVERRIDE_CACHE_MS = 10_000;
 
 // ── IN-PROCESS FLIGHT DATA CACHE ──────────────────────────────
-// TTL namjerno usklađen sa FLIGHT_CACHE_TTL_SECONDS (240s) ispod, ne
-// proizvoljno kraći. Ranije je ovo bilo 60_000 dok je Redis TTL bio
-// 240s — na toplom instance-u je to tjeralo Redis GET + JSON.parse()
-// (stvaran CPU rad, ne I/O čekanje) na svakih 60s, iako se podatak
-// ispod njega realno ne mijenja brže od 240s (toliko traje Redis TTL
-// prije nego što novi live fetch prepiše vrijednost). Rezultat: 3 od
-// svaka 4 parsiranja su bila potpuno nepotrebna — isti JSON, parsiran
-// iznova. Sad je ovo tik ispod 240s: dovoljno kratko da nikad ne drži
-// podatak nakon što je Redis vrijednost mogla biti osvježena, dovoljno
-// dugo da eliminiše te nepotrebne re-parseve. Noćni TTL (3600s) i
-// jutarnji prelaz i dalje rade nezavisno od ovoga — provjera
-// `cached.isNightMode && !nightNow` se izvršava na SVAKI poziv bez
-// obzira na TTL, pa ovo ne unosi stale-data rizik.
 let inProcessFlightData: FlightData | null = null;
 let inProcessFlightExpiry = 0;
-const IN_PROCESS_FLIGHT_TTL_MS = 220_000;
+const IN_PROCESS_FLIGHT_TTL_MS = 60_000;
 
-// ── REDIS CLEANUP ──────────────────────────────────────────────
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 let lastRedisCleanup = 0;
 const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -95,6 +55,7 @@ const FETCH_HEADERS = {
   'x-proxy-secret': PROXY_SECRET,
   'ngrok-skip-browser-warning': 'true',
 } as const;
+
 const SLIM_FIELDS = [
   'FlightNumber',
   'FlightType',
@@ -285,33 +246,24 @@ async function fetchWithQuickRetry(
       clearTimeout(timeoutId);
       if (response.ok) return response;
 
-      // Uhvati tijelo odgovora prije nego što ga baciš — pomaže da se vidi
-      // da li je 500 generička PHP greška, WAF/Cloudflare block stranica,
-      // ili nešto treće.
+      // ── PRIVREMENO: uhvati tijelo 400 odgovora da vidimo TAČAN uzrok —
+      // da li je to ngrok-ov error/interstitial page, ili nešto iz
+      // proxy-server.js, ili nešto treće. Bez ovoga pucamo u mrak.
       let bodyPreview = '';
       try {
-        bodyPreview = (await response.clone().text()).substring(0, 300);
+        bodyPreview = (await response.clone().text()).substring(0, 500);
       } catch {
         bodyPreview = '(tijelo nije moglo biti pročitano)';
       }
       console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries} — body: ${bodyPreview}`);
+      console.error(`   → URL: ${url}`);
+      console.error(`   → Headers sent:`, JSON.stringify(options.headers));
 
-      if (attempt < retries) {
-        // Exponential backoff + jitter: 600ms → ~1200ms → ~2400ms, uz malu
-        // nasumičnu varijaciju da izbjegnemo savršeno pravilan, mašinski
-        // izgledajući obrazac ponavljanja (bitno i zbog WAF-a spomenutog ranije).
-        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
-        const jitter = Math.random() * 200;
-        await new Promise(r => setTimeout(r, backoff + jitter));
-      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`❌ Fetch attempt ${attempt}/${retries} failed: ${errMsg}`);
-      if (attempt < retries) {
-        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
-        const jitter = Math.random() * 200;
-        await new Promise(r => setTimeout(r, backoff + jitter));
-      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
     }
   }
   throw new Error(`Live API fetch failed after ${retries} attempts`);
@@ -442,18 +394,9 @@ async function buildFlightData(
   };
 }
 
-// ── Mali nasumičan jitter na TTL, da fetch ciklusi ne budu savršeno
-// periodični (npr. tačno svakih 240.000ms). Neki WAF/bot-detekcija sistemi
-// prepoznaju besprijekorno pravilne intervale kao mašinski, ne ljudski
-// saobraćaj — par sekundi nasumičnosti to razbija bez ikakvog uticaja
-// na svježinu podataka.
-function jitteredTTL(baseSeconds: number, maxJitterSeconds: number = 8): number {
-  const jitter = Math.floor(Math.random() * maxJitterSeconds);
-  return baseSeconds + jitter;
-}
 // ── GLAVNA FUNKCIJA — pozivaju je i /api/flights ruta i cleanup-overrides cron,
 // direktno, bez HTTP self-fetch-a ──────────────────────────────────────────
-async function getCurrentFlightData(): Promise<FlightData> {
+export async function getCurrentFlightData(): Promise<FlightData> {
  const nightNow = isNightHours();   // ← izračunaj JEDNOM, koristi svuda ispod
   // ── 1. PROVJERI CACHE PRVO (in-process → Redis) ──────────
   const cached = await getFlightDataFromCache();
@@ -478,7 +421,7 @@ async function getCurrentFlightData(): Promise<FlightData> {
 const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
 const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
 
-if (nightNow) {   // ← bilo: isNightHours() — nepotreban drugi poziv, nightNow je već izračunat gore
+if (isNightHours()) {
   const client = getRedisClient();
   const nightFetchGateKey = 'night:fetch:gate';
 
@@ -508,25 +451,13 @@ if (!canFetchNow) {
   console.log('🌙 Noćni period — probam live fetch (dozvoljeno 1x/h)');
 }
 
-  // ── 3. POKUŠAJ LIVE FETCH (sa tvrdim globalnim rokom) ─────
-  // Promise.race garantuje da ova faza NIKAD ne traje duže od
-  // LIVE_FETCH_HARD_DEADLINE_MS, bez obzira šta se dešava unutar
-  // fetchWithQuickRetry (retry logika po sebi treba da završi ranije,
-  // ovo je samo apsolutna gornja granica "za svaki slučaj").
+  // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
   try {
-    const response = await Promise.race([
-      fetchWithQuickRetry(FLIGHT_API_URL, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: FETCH_HEADERS,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Live fetch hard deadline exceeded')),
-          LIVE_FETCH_HARD_DEADLINE_MS
-        )
-      ),
-    ]);
+    const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: FETCH_HEADERS,
+    });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -552,10 +483,6 @@ if (!Array.isArray(rawData)) throw new Error('Invalid data format');
 
 const finalFlights = removeDuplicateFlights(expandedFlights);
 
-// ── BACKUP_ENABLED je false, čitanje backupa se nikad ne dešava —
-// pisanje isključeno da se ne troši Redis uzalud (write + storage
-// trošak za podatke koji se nikad ne čitaju). Vrati blok ako se
-// BACKUP_ENABLED ponovo aktivira.
 // ── Svaki uspješan fetch sa ngrok proxy-ja osvježava backup, tako da kad
 // tvoj računar/ngrok kasnije padne, backup ima najsvježiji mogući podatak.
 // Namjerno se NE piše kad je finalFlights prazan (0 letova) — to bi moglo
@@ -597,7 +524,7 @@ if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica)
 const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow });
     const slimmed = slimFlightData(flightData);
 
-await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : jitteredTTL(FLIGHT_CACHE_TTL_SECONDS));
+await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 

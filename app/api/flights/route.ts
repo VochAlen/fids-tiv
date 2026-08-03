@@ -8,15 +8,6 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 // export const revalidate = 60;
 
-// ── EKSPLICITAN maxDuration ─────────────────────────────────────
-// Bez ovoga, Vercel Pro koristi DEFAULT od 15s za serverless funkcije,
-// ne 60s. flight-data-service.ts sada garantuje da worst-case
-// (live fetch hard deadline 8s + backup provjera + emergency fetch 4s
-// + Redis pisanje) iznosi ≈15s, što je preblizu default limitu.
-// 30s ovdje daje komotan safety margin bez nepotrebnog produžavanja
-// naplativog vremena izvršavanja u normalnim (brzim) slučajevima.
-export const maxDuration = 35;
-
 export async function GET(request: Request): Promise<NextResponse> {
   try {
     const { searchParams } = new URL(request.url);
@@ -49,18 +40,18 @@ export async function GET(request: Request): Promise<NextResponse> {
 
     // ── PROVJERI If-None-Match — TEK NAKON što je svježina provjerena ──
     if (ifNoneMatch && ifNoneMatch === etag) {
-return new NextResponse(null, {
-  status: 304,
-  headers: {
-    'ETag': etag,
-    'Cache-Control':
-      'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
-    'CDN-Cache-Control':
-      'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
-    'Vercel-CDN-Cache-Control':
-      'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
-  },
-});
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control':
+            'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
+          'CDN-Cache-Control':
+            'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
+          'Vercel-CDN-Cache-Control':
+            'public, max-age=30, s-maxage=60, stale-while-revalidate=120',
+        },
+      });
     }
 
     // ── Filtriranje po smjeru ────────────────────────────────────
@@ -83,14 +74,14 @@ return new NextResponse(null, {
           ? 'public, max-age=20, s-maxage=40, stale-while-revalidate=80'
           : 'public, max-age=60, s-maxage=180, stale-while-revalidate=300';
 
-const headers: Record<string, string> = {
-  'Cache-Control': cacheControl,
-  'CDN-Cache-Control': cacheControl,           // ← DODANO
-  'Vercel-CDN-Cache-Control': cacheControl,    // ← DODANO
-  'ETag': etag,
-  'X-Data-Source': data.source ?? 'unknown',
-  'X-Total-Flights': data.totalFlights.toString(),
-};
+    const headers: Record<string, string> = {
+      'Cache-Control': cacheControl,
+      'CDN-Cache-Control': cacheControl,           // ← DODANO
+      'Vercel-CDN-Cache-Control': cacheControl,    // ← DODANO
+      'ETag': etag,
+      'X-Data-Source': data.source ?? 'unknown',
+      'X-Total-Flights': data.totalFlights.toString(),
+    };
     if (responseData.departures) headers['X-Departures'] = responseData.departures.length.toString();
     if (responseData.arrivals) headers['X-Arrivals'] = responseData.arrivals.length.toString();
     if (data.isOfflineMode) headers['X-Offline-Mode'] = 'true';
