@@ -74,6 +74,13 @@ console.log(
     if (ifNoneMatch && ifNoneMatch === etag) {
       return new NextResponse(null, {
         status: 304,
+// headers: {
+//   'ETag': etag,
+// // I u 304 grani i u normalnom odgovoru, sve tri header linije:
+// 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+// 'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+// 'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+// },
 headers: {
   'ETag': etag,
 // I u 304 grani i u normalnom odgovoru, sve tri header linije:
@@ -82,9 +89,19 @@ headers: {
 'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
 },
       });
+
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
+// const headers: Record<string, string> = {
+// // I u 304 grani i u normalnom odgovoru, sve tri header linije:
+// 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+// 'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+// 'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+
+// 'ETag': etag,
+
+// };
 const headers: Record<string, string> = {
 // I u 304 grani i u normalnom odgovoru, sve tri header linije:
 'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
