@@ -315,19 +315,32 @@ function getAutoStatus(flight: Flight): string | null {
 
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()
-  if (status && status !== "-") return null
+
+  // ── Auto-status se računa i kad API vrati generički "On time" /
+  // "Scheduled" tekst, ne samo kad je status prazan ili "-" — novi
+  // izvor (tiv.nais.aero) šalje eksplicitan "On time" umjesto praznog
+  // stringa. Operativno značajni statusi (Cancelled, Boarding,
+  // Processing, Diverted i sl.) i dalje prolaze NEIZMIJENJENI ispod.
+  const isGenericStatus =
+    !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status)
+  if (!isGenericStatus) return null
+
   const schStr = flight.ScheduledDepartureTime
   const estStr = flight.EstimatedDepartureTime
   if (!schStr) return null
   if (!estStr || !isValidDisplayTime(estStr) || schStr === estStr) return "Scheduled"
   const sch = parseFlightTimeToDate(schStr); const est = parseFlightTimeToDate(estStr)
   if (!sch || !est) return "Scheduled"
-  const diff = (sch.getTime() - est.getTime()) / 60_000
-  if (diff > 15)  return `Arriving early – expected at ${fmtTime(estStr)}`
-  if (diff < -15) return `Delayed – expected at ${fmtTime(estStr)}`
-  return "On time"
-}
 
+  // Razlika PO PREDZNAKU (ne apsolutna vrijednost):
+  //   diff > 0  → estimated je KASNIJE od scheduled (kašnjenje)
+  //   diff < 0  → estimated je RANIJE od scheduled (dolazak prije plana)
+  const diffMinutes = (est.getTime() - sch.getTime()) / 60_000
+
+  if (diffMinutes > 15)  return `Delayed – expected at ${fmtTime(estStr)}`
+  if (diffMinutes < -15) return `Earlier – expected at ${fmtTime(estStr)}`
+  return `On time – expected at ${fmtTime(estStr)}`
+}
 // ── Status pill ───────────────────────────────────────────────
 type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
 

@@ -468,7 +468,7 @@ const isLoadingRef = useRef(false);
         .fids-w-airline{width:clamp(120px,12vw,200px);flex-shrink:0}
         .fids-w-fn     {width:clamp(110px,9vw,160px);flex-shrink:0}
         .fids-w-city   {flex:1;min-width:0}
-        .fids-w-status {width:clamp(180px,18vw,320px);flex-shrink:0}
+       .fids-w-status {width:clamp(240px,24vw,420px);flex-shrink:0}
 
         .fids-thead{
           display:flex;gap:0;

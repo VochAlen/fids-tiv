@@ -93,27 +93,47 @@ function slimFlightData(data: FlightData): FlightData {
   };
 }
 
-// ── Sopstveni ngrok proxy umjesto direktnog poziva ka montenegroairports.com.
-// Rješava i bot-detekciju (Cloudflare vidi TVOJ proxy kao izvor, ne Vercel)
-// i daje kontrolu nad formatom odgovora.
-const MAX_RETRIES = 5;
-const RETRY_DELAY = 1500;
-// ← Nedostajala u ovoj (vraćenoj) verziji fajla — performEmergencyFetch()
-// je ranije imao hardkodiran 10000 direktno u AbortSignal.timeout() pozivu.
-const EMERGENCY_FETCH_TIMEOUT_MS = 10000;
-// ── FETCH LOCK — garantuje da se poziv ka FLIGHT_PROXY_URL (tvom ngrok
-// proxy-ju) dešava max 1x po ciklusu, bez obzira koliko istovremenih
-// korisnika/instanci pozove getCurrentFlightDataSafe() dok je Redis keš
-// prazan. Bez ovoga, keš-miss trenutak (svaka 240s) može izazvati više
-// paralelnih poziva ka proxy-ju umjesto tačno jednog.
+// ── RETRY / TIMEOUT BUDŽETI ─────────────────────────────────────
+// Usklađeno sa maxDuration=30 u route.ts. Izvor podataka sad ide
+// preko lanca desktop → ngrok tunel → tiv.nais.aero — INHERENTNO
+// manje pouzdano od direktnog poziva starom API-ju (tri karike koje
+// mogu zakazati umjesto jedne: desktop se može ugasiti, ngrok tunel
+// može pući, WiFi može otkazati). Zato je budžet OVDJE namjerno
+// konzervativniji, ne velikodušniji — kad proxy najviše zakaže,
+// funkcija ne smije najduže čekati.
+const MAX_RETRIES = 2;               // bilo 5
+const RETRY_DELAY = 800;             // bilo 1500
+const PER_ATTEMPT_TIMEOUT_MS = 6000; // bilo hardkodirano 8000 unutar fetchWithQuickRetry
+
+// Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
+// Matematika: 2 × 6000 + 1 × 800 = 12.800ms worst-case iz retry logike,
+// 15.000ms ovdje ostavlja mali safety margin. Promise.race garantuje
+// da ova faza NIKAD ne pređe ovaj rok, bez obzira šta se dešava unutar
+// fetchWithQuickRetry (retry logika treba sama da završi ranije, ovo
+// je apsolutna gornja granica "za svaki slučaj").
+const LIVE_FETCH_HARD_DEADLINE_MS = 15000;
+
+// Emergency fetch (korak 5, zadnja linija odbrane) — smanjeno sa
+// 10000 na 6000, jer se dešava TEK NAKON što je live fetch već
+// potrošio svoj budžet.
+const EMERGENCY_FETCH_TIMEOUT_MS = 6000;
+
+// Ukupan worst-case sad: ~15s (live) + ~6s (emergency) + ~1-2s (ostalo)
+// ≈ 22-23s, i dalje udobno ispod maxDuration=30 (≈7-8s margin) — čak
+// i sa manje pouzdanim ngrok/desktop lancem.
+
+// ── FETCH LOCK ────────────────────────────────────────────────
+// NAPOMENA: komentar ispod je bio zastario (referencirao je stare
+// brojeve 10 pokušaja × 10s ≈ 120s koji više ne postoje u kodu).
+// Sad usklađeno sa stvarnim worst-case budžetom iznad (~22s), plus
+// dobra margina. Kraći TTL takođe znači: ako Vercel NASILNO ubije
+// funkciju zbog maxDuration dok drži lock (finally blok se tada možda
+// NE izvrši), lock se sam "izliječi" mnogo brže — 60s umjesto 130s
+// blokiranja ostalih ciklusa.
 const FETCH_LOCK_KEY = 'lock:flights:fetch';
-// Mora biti veći od worst-case trajanja fetchWithQuickRetry (10 pokušaja
-// × (10s timeout + 2s pauza) ≈ 120s worst-case) — inače lock istekne dok
-// fetch još traje i druga instanca krene paralelno.
-const FETCH_LOCK_TTL_SECONDS = 130;
+const FETCH_LOCK_TTL_SECONDS = 60; // bilo 130
 const LOCK_WAIT_POLL_MS = 500;
-// Koliko čekamo da TUĐI fetch završi prije nego odustanemo bez fetcha.
-const LOCK_WAIT_MAX_MS = 30000;
+const LOCK_WAIT_MAX_MS = 25000; // bilo 30000 — usklađeno sa novim, kraćim worst-case
 
 function generateLockToken(): string {
   return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -241,7 +261,7 @@ async function fetchWithQuickRetry(
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const timeoutId = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
       const response = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeoutId);
       if (response.ok) return response;
@@ -453,11 +473,19 @@ if (!canFetchNow) {
 
   // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
   try {
-    const response = await fetchWithQuickRetry(FLIGHT_API_URL, {
+  const response = await Promise.race([
+    fetchWithQuickRetry(FLIGHT_API_URL, {
       method: 'GET',
       cache: 'no-store',
       headers: FETCH_HEADERS,
-    });
+    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error('Live fetch hard deadline exceeded')),
+        LIVE_FETCH_HARD_DEADLINE_MS
+      )
+    ),
+  ]);
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
