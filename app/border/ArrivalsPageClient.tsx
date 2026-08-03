@@ -173,6 +173,8 @@ function computePill(flight: Flight): Pill {
   const isOnTime   = /(on time|na vrijeme|ontime)/i.test(lowerFinal) || /(on time)/i.test(lowerRaw);
 
   // ── 4. Formatiranje display teksta ──
+  // Napomena: "Arrived HH:MM" (bez riječi "at") — kraći tekst da stane
+  // u status kolonu na manjim TV ekranima bez sečenja teksta.
   let displayText = finalStatusText;
   if (isEarly) {
     displayText = "Earlier";
@@ -185,7 +187,7 @@ function computePill(flight: Flight): Pill {
     }
   } else if (isArrived) {
     const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime;
-    displayText = `Arrived at ${t ? fmt(t) : ""}`.trim();
+    displayText = `Arrived ${t ? fmt(t) : ""}`.trim();
   } else if (isOnTime) {
     displayText = "On Time";
   }
@@ -656,6 +658,28 @@ const isLoadingRef = useRef(false);
             flex-direction:column;
             gap:0.2rem;
           }
+        }
+
+        /* ── Manji TV ekrani — status kolona nije imala dovoljno
+           prostora da ispiše "Arrived HH:MM" bez sečenja teksta.
+           Oslobađamo prostor smanjenjem manje bitnih kolona
+           (airline / flight number) i dajemo status koloni veći
+           minimum, uz kompaktniji pill (manji padding/gap/LED-ovi
+           i font koji se dodatno smanjuje na uskim ekranima). ── */
+        @media (max-width: 1000px) {
+          .fids-w-airline{width:clamp(80px,8vw,140px)}
+          .fids-w-fn     {width:clamp(90px,7vw,130px)}
+          .fids-w-sch    {width:clamp(90px,7vw,140px)}
+          .fids-w-est    {width:clamp(90px,7vw,140px)}
+          .fids-w-status {width:clamp(210px,30vw,420px)}
+          .fids-pill{padding:0.22rem 0.4rem;gap:0.28rem;width:98%}
+          .fids-pill-text{font-size:clamp(0.62rem,1.9vw,1rem)}
+          .fids-leds{gap:2px}
+          .fids-leds > div{width:10px;height:10px}
+        }
+        @media (max-width: 700px) {
+          .fids-w-status {width:clamp(180px,34vw,420px)}
+          .fids-pill-text{font-size:clamp(0.56rem,2.1vw,0.9rem)}
         }
 
         @media(prefers-reduced-motion:reduce){
