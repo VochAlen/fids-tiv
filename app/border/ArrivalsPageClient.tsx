@@ -123,6 +123,35 @@ const loadCache = (): any | null => {
   } catch { return null; }
 };
 
+function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
+  const status = (flight.StatusEN ?? "").trim()
+
+  // ── Auto-status se računa i kad API vrati generički "On time" /
+  // "Scheduled" tekst, ne samo kad je status prazan ili "-" — novi
+  // izvor (tiv.nais.aero) šalje eksplicitan "On time" umjesto praznog
+  // stringa. Operativno značajni statusi (Cancelled, Boarding,
+  // Processing, Diverted i sl.) i dalje prolaze NEIZMIJENJENI ispod.
+  const isGenericStatus =
+    !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status)
+  if (!isGenericStatus) return null
+
+  const schStr = flight.ScheduledDepartureTime
+  const estStr = flight.EstimatedDepartureTime
+  if (!schStr) return null
+  if (!estStr || !validTime(estStr) || schStr === estStr) return "Scheduled"
+  const sch = parseTime(schStr); const est = parseTime(estStr)
+  if (!sch || !est) return "Scheduled"
+
+  // Razlika PO PREDZNAKU (ne apsolutna vrijednost):
+  //   diff > 0  → estimated je KASNIJE od scheduled (kašnjenje)
+  //   diff < 0  → estimated je RANIJE od scheduled (dolazak prije plana)
+  const diffMinutes = (est.getTime() - sch.getTime()) / 60_000
+
+  if (diffMinutes > 15)  return `Delayed – expected at ${fmtTime(estStr)}`
+  if (diffMinutes < -15) return `Earlier – expected at ${fmtTime(estStr)}`
+  return `On time – expected at ${fmtTime(estStr)}`
+}
+
 // ============================================================
 // STATUS LOGIKA — POPRAVLJENA
 // ============================================================
@@ -134,6 +163,7 @@ interface Pill {
   blinkClass: string; showLEDs: boolean;
   hasStatusText: boolean; displayText: string;
 }
+
 
 function computePill(flight: Flight): Pill {
   const rawStatus = (flight.StatusEN ?? "").trim();
@@ -147,22 +177,11 @@ function computePill(flight: Flight): Pill {
       showLEDs: true, hasStatusText: true, displayText: "Cancelled",
     };
   }
+  
 
   // ── 2. AUTO-STATUS ako je StatusEN prazan ili "-" ──
-  let finalStatusText = rawStatus;
-  if (!rawStatus || rawStatus === "-") {
-    const sch = parseTime(flight.ScheduledDepartureTime);
-    const est = parseTime(flight.EstimatedDepartureTime);
-    if (sch && est && validTime(flight.EstimatedDepartureTime) &&
-        flight.ScheduledDepartureTime !== flight.EstimatedDepartureTime) {
-      const diff = (est.getTime() - sch.getTime()) / 60_000; // pozitivno = kasni
-      if (diff > 15)       finalStatusText = "Delayed";
-      else if (diff < -15) finalStatusText = "Earlier";
-      else                 finalStatusText = "On Time";
-    } else {
-      finalStatusText = "Scheduled";
-    }
-  }
+ const auto = getAutoArrivalStatus(flight, fmt);
+  const finalStatusText = auto !== null ? auto : rawStatus;
 
   // ── 3. NADJEDI pojedinačne riječi iz finalStatusText ──
   const lowerFinal = finalStatusText.toLowerCase();
@@ -175,21 +194,14 @@ function computePill(flight: Flight): Pill {
   // ── 4. Formatiranje display teksta ──
   // Napomena: "Arrived HH:MM" (bez riječi "at") — kraći tekst da stane
   // u status kolonu na manjim TV ekranima bez sečenja teksta.
+// ── 4. Formatiranje display teksta ──
+  // finalStatusText već sadrži pun tekst (uključujući "expected at
+  // HH:MM") iz getAutoArrivalStatus() ili iz sirovog API statusa —
+  // Earlier/Delayed/On time se više ne rekonstruišu, samo prolaze kroz.
   let displayText = finalStatusText;
-  if (isEarly) {
-    displayText = "Earlier";
-  } else if (isDelayed) {
-    if (displayText.toLowerCase().includes("expected at")) {
-      const match = displayText.match(/expected at\s*(.+)/i);
-      displayText = match ? `Delayed – ${match[1]}` : "Delayed";
-    } else {
-      displayText = "Delayed";
-    }
-  } else if (isArrived) {
+  if (isArrived) {
     const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime;
-    displayText = `Arrived ${t ? fmt(t) : ""}`.trim();
-  } else if (isOnTime) {
-    displayText = "On Time";
+    displayText = `Arrived at ${t ? fmt(t) : ""}`.trim();
   }
 
   // ── 5. BOJE (samo na temelju finalnog statusa) ──
@@ -353,7 +365,7 @@ const FooterMessage = memo(function FooterMessage() {
         <Luggage className="w-5 h-5" />
       </div>
       <div className="fids-footer-text">
-        <span>Welcome to Montenegro. Please prepare your travel documents for border control.</span>
+        <span>Welcome to Montenegro. May your stay be enjoyable and memorable.</span>
         <span className="fids-footer-separator">•</span>
         <span>Keep your personal belongings with you at all times.</span>
                 <span className="fids-footer-separator">•</span>
@@ -551,22 +563,30 @@ const isLoadingRef = useRef(false);
           letter-spacing:-0.01em;
           line-height:1.1;
         }
-
-        .fids-pill{
-          display:flex;align-items:center;justify-content:center;
-          gap:0.4rem;
-          width:96%;
-          padding:0.3rem 0.6rem;
-          border-radius:0.6rem;
-          border-style:solid;
-          font-size:clamp(0.8rem,1.5vw,1.2rem);
-          font-weight:700;
-          text-align:center;
-          position:relative;
-          overflow:hidden;
-        }
+.fids-pill{
+  display:flex;align-items:center;justify-content:center;
+  gap:0.4rem;
+  width:96%;
+  padding:0.3rem 0.6rem;
+  border-radius:0.6rem;
+  border-style:solid;
+  font-size:clamp(0.8rem,1.5vw,1.2rem);
+  font-weight:700;
+  text-align:center;
+  position:relative;
+  overflow:hidden;
+}
         .fids-leds{display:flex;gap:4px;flex-shrink:0}
-        .fids-pill-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+   .fids-pill-text{
+  overflow:hidden;
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  white-space:normal;
+  line-height:1.15;
+  text-align:center;
+  word-break:break-word;
+}
         .fids-scheduled{
           font-size:clamp(0.8rem,1.4vw,1.1rem);
           font-weight:600;
@@ -666,21 +686,24 @@ const isLoadingRef = useRef(false);
            (airline / flight number) i dajemo status koloni veći
            minimum, uz kompaktniji pill (manji padding/gap/LED-ovi
            i font koji se dodatno smanjuje na uskim ekranima). ── */
-        @media (max-width: 1000px) {
-          .fids-w-airline{width:clamp(80px,8vw,140px)}
-          .fids-w-fn     {width:clamp(90px,7vw,130px)}
-          .fids-w-sch    {width:clamp(90px,7vw,140px)}
-          .fids-w-est    {width:clamp(90px,7vw,140px)}
-          .fids-w-status {width:clamp(210px,30vw,420px)}
-          .fids-pill{padding:0.22rem 0.4rem;gap:0.28rem;width:98%}
-          .fids-pill-text{font-size:clamp(0.62rem,1.9vw,1rem)}
-          .fids-leds{gap:2px}
-          .fids-leds > div{width:10px;height:10px}
-        }
-        @media (max-width: 700px) {
-          .fids-w-status {width:clamp(180px,34vw,420px)}
-          .fids-pill-text{font-size:clamp(0.56rem,2.1vw,0.9rem)}
-        }
+      @media (max-width: 1000px) {
+  .fids-row{min-height:clamp(58px,7.5vh,84px)}
+  .fids-w-airline{width:clamp(80px,8vw,140px)}
+  .fids-w-fn     {width:clamp(90px,7vw,130px)}
+  .fids-w-sch    {width:clamp(90px,7vw,140px)}
+  .fids-w-est    {width:clamp(90px,7vw,140px)}
+  .fids-w-status {width:clamp(210px,30vw,420px)}
+  .fids-pill{padding:0.22rem 0.4rem;gap:0.28rem;width:98%}
+  .fids-pill-text{font-size:clamp(0.62rem,1.9vw,1rem)}
+  .fids-leds{gap:2px}
+  .fids-leds > div{width:10px;height:10px}
+}
+@media (max-width: 700px) {
+  .fids-row{min-height:clamp(64px,9vh,90px)}
+  .fids-w-status {width:clamp(180px,34vw,420px)}
+  .fids-pill-text{font-size:clamp(0.56rem,2.1vw,0.9rem)}
+}
+ 
 
         @media(prefers-reduced-motion:reduce){
           .animate-pill-blink,.fids-pulse-dot,.led-base,.fids-spinner{
