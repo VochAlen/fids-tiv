@@ -37,7 +37,8 @@ const ASSIGNMENTS_CACHE_TTL_MS = 15_000;
 // ciljaju Vercel Edge specifično, sprečavajući da obični Cache-Control header
 // (kojeg i browser tumači) zadrži stariji odgovor u browser kešu duže nego
 // namjeravano.
-const CDN_CACHE_CONTROL = 'public, s-maxage=60, stale-while-revalidate=30';
+// const CDN_CACHE_CONTROL = 'public, s-maxage=60, stale-while-revalidate=30';
+const CDN_CACHE_CONTROL = 'public, s-maxage=15, stale-while-revalidate=10';
 const CACHE_TAG = 'flight-status';
 
 export async function GET(request: Request) {
