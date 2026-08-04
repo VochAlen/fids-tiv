@@ -1,7 +1,8 @@
 // app/api/test/gate-status-override/route.ts
 import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
-import { createHash } from 'crypto'; // ← DODANO
+import { createHash } from 'crypto';
+import { revalidateTag } from 'next/cache';
 
 //  export const dynamic = 'force-dynamic';
 
@@ -159,9 +160,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-  await writeAll(all);
+await writeAll(all);
 
-
+  // ── Odmah probij CDN keš na /api/flights/status — isti razlog kao
+  // kod desk-status-override.
+  revalidateTag('flight-status');
 
   const ttl = action === 'clear' ? undefined : TTL_SECONDS;
   return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });

@@ -1,8 +1,8 @@
 // app/api/test/desk-status-override/route.ts
 import { NextResponse } from 'next/server';
 import { safeRedisGet, safeRedisSet } from '@/lib/redis';
-import { createHash } from 'crypto'; // ← DODANO
-import { revalidatePath } from 'next/cache';
+import { createHash } from 'crypto';
+import { revalidateTag } from 'next/cache';
 
 
 export const revalidate = 30;
