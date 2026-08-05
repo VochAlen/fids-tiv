@@ -16,7 +16,8 @@ import {
 } from "react"
 import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
-import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react"
+// IZMJENA: Dodat Building2
+import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
  import { isNightHours } from '@/lib/night-hours';
 
@@ -240,6 +241,27 @@ function formatTimeString(timeStr: string | null | undefined): string {
 
 function isValidDisplayTime(t: string | null | undefined): boolean {
   const f = formatTimeString(t); return f !== "" && f !== "00:00"
+}
+function getTerminalBadge(idStr: string): { label: string; bg: string; text: string } {
+  const num = parseInt(idStr.replace(/\D/g, ''), 10);
+  const isTerminal2 = !isNaN(num) && num >= 21;
+  return isTerminal2
+    ? { label: 'T2', bg: 'bg-yellow-400', text: 'text-black' }
+    : { label: 'T1', bg: 'bg-green-300', text: 'text-black' };
+}
+
+// ── Terminal za CIJEL let — prioritet: Gate, pa Check-In (prvi šalter u listi).
+// Vraća null ako let nema ni gate ni šalter (ništa za prikazati u koloni).
+function getFlightTerminalBadge(flight: Flight): { label: string; bg: string; text: string } | null {
+  if (flight.GateNumber && flight.GateNumber !== '-') {
+    // Uzmi prvi gate ako ih ima više razdvojenih zarezom (npr. "21, 22")
+    return getTerminalBadge(flight.GateNumber.split(',')[0].trim());
+  }
+  if (flight.CheckInDesk && flight.CheckInDesk !== '-') {
+    const firstDesk = flight.CheckInDesk.split(',')[0].trim();
+    if (firstDesk) return getTerminalBadge(firstDesk);
+  }
+  return null;
 }
 
 // ── Cache helpers ─────────────────────────────────────────────
@@ -593,19 +615,45 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
                   {flight.DestinationCityName || flight.DestinationAirportName}
                 </div>
               </div>
-              <div className="flex items-center justify-center" style={{ width: "320px" }}>
-                {flight.CheckInDesk && flight.CheckInDesk !== "-"
-                  ? <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">{flight.CheckInDesk}</div>
+                     {/* Check-In */}
+              <div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: "320px" }}>
+                {flight.CheckInDesk && flight.CheckInDesk !== '-'
+                  ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
+                      <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
+                        {d}
+                      </div>
+                    ))
                   : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
               </div>
+
+              {/* Gate */}
               <div className="flex items-center justify-center" style={{ width: "180px" }}>
-                {flight.GateNumber && flight.GateNumber !== "-"
-                  ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
-                      {flight.GateNumber}
-                    </div>
+                {flight.GateNumber && flight.GateNumber !== '-'
+                  ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
+                      ${isGateChanged
+                        ? 'text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast'
+                        : 'text-white bg-black/40 border-white/20'}`}>
+                        {flight.GateNumber}
+                      </div>
                   : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
               </div>
-              <div className="flex items-center justify-center" style={{ width: "500px" }}>
+
+              {/* Terminal */}
+              <div className="flex items-center justify-center" style={{ width: "140px" }}>
+                {(() => {
+                  const badge = getFlightTerminalBadge(flight);
+                  return badge ? (
+                    <span className={`text-[1.6rem] font-black rounded-full px-3 py-1.5 leading-none ${badge.bg} ${badge.text}`}>
+                      {badge.label}
+                    </span>
+                  ) : (
+                    <div className="text-[2.5rem] font-black text-transparent">-</div>
+                  );
+                })()}
+              </div>
+
+              {/* Status */}
+              <div className="flex items-center justify-center" style={{ width: "420px" }}>
                 {pill.hasStatusText ? (
                   <div className={`${pillCls} overflow-hidden text-[1.8rem]`}>
                     {pill.showLEDs && (
@@ -654,7 +702,7 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           <div className="text-[1.25rem] font-black text-white truncate leading-tight">
             {flight.DestinationCityName || flight.DestinationAirportName}
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+           <div className="flex items-center gap-2 flex-wrap">
             {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
                 <Users className="w-3 h-3 opacity-70" />{flight.CheckInDesk}
@@ -665,6 +713,17 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
                 <DoorOpen className="w-3 h-3 opacity-70" />{flight.GateNumber}
               </span>
             )}
+            
+            {/* ── NOVO: Terminal Badge za mobilni ── */}
+            {!showArrivals && (() => {
+              const badge = getFlightTerminalBadge(flight);
+              return badge ? (
+                <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-full ${badge.bg} ${badge.text}`}>
+                  <Building2 className="w-3 h-3 opacity-70" />{badge.label}
+                </span>
+              ) : null;
+            })()}
+
             {pill.hasStatusText ? (
               <div className={mobilePillCls}>
                 {pill.showLEDs && (<><LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" /><LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" /></>)}
@@ -1132,6 +1191,8 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} }
 
   const tableHeaders = useMemo(() => {
     const t = lang.tableHeaders
+    
+    // Arrivals - bez promjene
     if (showArrivals) return [
       { label: t.scheduled,   width: "180px", icon: Clock        },
       { label: t.estimated,   width: "180px", icon: Clock        },
@@ -1139,14 +1200,17 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} }
       { label: t.from,        width: "580px", icon: MapPin       },
       { label: t.status,      width: "720px", icon: Info         },
     ]
+
+    // Departures - sa novom Terminal kolonom
     return [
       { label: t.scheduled,   width: "180px", icon: Clock        },
       { label: t.estimated,   width: "180px", icon: Clock        },
       { label: t.flight,      width: "280px", icon: DepartureIcon},
       { label: t.destination, width: "380px", icon: MapPin       },
-      { label: t.checkIn,     width: "340px", icon: Users        },
-      { label: t.gate,        width: "220px", icon: DoorOpen     },
-      { label: t.status,      width: "500px", icon: Info         },
+      { label: t.checkIn,     width: "320px", icon: Users        }, // ⬅️ 340 → 320
+      { label: t.gate,        width: "170px", icon: DoorOpen     }, // ⬅️ 220 → 180
+      { label: "Terminal",    width: "160px", icon: Building2    }, // ⬅️ NOVO
+      { label: t.status,      width: "410px", icon: Info         }, // ⬅️ 500 → 420
     ]
   }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
