@@ -348,6 +348,16 @@ const TableHeaders = memo(function TableHeaders({
 });
 
 // ============================================================
+// TERMINAL BADGE — T1/T2 na osnovu broja šaltera/gate-a
+// ============================================================
+function getTerminalBadge(idStr: string): { label: string; bg: string; text: string } {
+  const num = parseInt(idStr.replace(/\D/g, ''), 10);
+  const isTerminal2 = !isNaN(num) && num >= 21;
+  return isTerminal2
+    ? { label: 'T2', bg: 'bg-yellow-400', text: 'text-black' }
+    : { label: 'T1', bg: 'bg-green-300', text: 'text-black' };
+}
+// ============================================================
 // STATUS PILL LOGIKA
 // ============================================================
 function computeStatusPill(flight: Flight) {
@@ -485,29 +495,49 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
             </div>
           </div>
 
-          {/* Check-In */}
 {/* Check-In */}
 <div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: '320px' }}>
   {flight.CheckInDesk && flight.CheckInDesk !== '-'
-    ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
-        <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
-          {d}
-        </div>
-      ))
+    ? (() => {
+        const desks = flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean);
+        const badge = getTerminalBadge(desks[0]);
+        return (
+          <>
+            <span className={`text-[1.5rem] font-black rounded-full px-2.5 py-1 leading-none flex-shrink-0 ${badge.bg} ${badge.text}`}>
+              {badge.label}
+            </span>
+            {desks.map(d => (
+              <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
+                {d}
+              </div>
+            ))}
+          </>
+        );
+      })()
     : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
 </div>
 
-          {/* Gate */}
-          <div className="flex items-center justify-center" style={{ width: '180px' }}>
-            {flight.GateNumber && flight.GateNumber !== '-'
-              ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
-                  ${isGateChanged
-                    ? 'text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast'
-                    : 'text-white bg-black/40 border-white/20'}`}>
-                  {flight.GateNumber}
-                </div>
-              : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
-          </div>
+{/* Gate */}
+<div className="flex items-center justify-center gap-1.5" style={{ width: '180px' }}>
+  {flight.GateNumber && flight.GateNumber !== '-'
+    ? (() => {
+        const badge = getTerminalBadge(flight.GateNumber);
+        return (
+          <>
+            <span className={`text-[1.5rem] font-black rounded-full px-2.5 py-1 leading-none flex-shrink-0 ${badge.bg} ${badge.text}`}>
+              {badge.label}
+            </span>
+            <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
+              ${isGateChanged
+                ? 'text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast'
+                : 'text-white bg-black/40 border-white/20'}`}>
+              {flight.GateNumber}
+            </div>
+          </>
+        );
+      })()
+    : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+</div>
 
           {/* Status */}
           <div className="flex items-center justify-center" style={{ width: '420px' }}>
@@ -564,22 +594,34 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           </div>
           {/* Red 3: Check-in + Gate + Status */}
           <div className="flex items-center gap-2 flex-wrap">
-            {flight.CheckInDesk && flight.CheckInDesk !== '-' && (
-              <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
-                <Users className="w-3 h-3 opacity-70" />
-                {flight.CheckInDesk}
-              </span>
-            )}
-            {flight.GateNumber && flight.GateNumber !== '-' && (
-              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${
-                isGateChanged
-                  ? 'text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast'
-                  : 'text-white bg-black/40 border-white/20'
-              }`}>
-                <DoorOpen className="w-3 h-3 opacity-70" />
-                {flight.GateNumber}
-              </span>
-            )}
+{flight.CheckInDesk && flight.CheckInDesk !== '-' && (() => {
+  const badge = getTerminalBadge(flight.CheckInDesk.split(',')[0].trim());
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
+      <span className={`text-[0.65rem] font-black rounded-full px-1.5 py-0.5 leading-none ${badge.bg} ${badge.text}`}>
+        {badge.label}
+      </span>
+      <Users className="w-3 h-3 opacity-70" />
+      {flight.CheckInDesk}
+    </span>
+  );
+})()}
+{flight.GateNumber && flight.GateNumber !== '-' && (() => {
+  const badge = getTerminalBadge(flight.GateNumber);
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${
+      isGateChanged
+        ? 'text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast'
+        : 'text-white bg-black/40 border-white/20'
+    }`}>
+      <span className={`text-[0.65rem] font-black rounded-full px-1.5 py-0.5 leading-none ${badge.bg} ${badge.text}`}>
+        {badge.label}
+      </span>
+      <DoorOpen className="w-3 h-3 opacity-70" />
+      {flight.GateNumber}
+    </span>
+  );
+})()}
             {pill.hasStatusText ? (
               <div className={mobilePillCls}>
                 {pill.showLEDs && (

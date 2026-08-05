@@ -345,6 +345,26 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
 type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
 
 function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: string) => string) {
+  // ── GATE CHANGED — najviši prioritet za departures, prikazuje se
+  // 15s nakon detektovane promjene gate-a (isti prozor koji već koristi
+  // crveni highlight na Gate ćeliji — _gateChangedAt postavlja
+  // prepareData/applyAssignmentsOnly kad se effectiveGate promijeni u
+  // odnosu na prethodno poznatu vrijednost za taj let). f.GateNumber već
+  // sadrži sve dodijeljene gate-ove zarezom razdvojene (npr. "21, 22")
+  // ako ih ima više — ništa dodatno ne treba spajati.
+  const gateChangedAt = (flight as any)._gateChangedAt;
+  const isRecentGateChange = !isArrival && gateChangedAt && (Date.now() - gateChangedAt < 15_000);
+
+  if (isRecentGateChange) {
+    return {
+      bg: "bg-red-600/30", border: "border-red-500/70", text: "text-red-100",
+      led1: "red" as LEDColor, led2: "orange" as LEDColor,
+      blinkClass: "animate-pill-blink-fast",
+      showLEDs: true, hasStatusText: true,
+      displayText: `Gate changed to ${flight.GateNumber}`,
+    };
+  }
+
   const auto           = isArrival ? getAutoArrivalStatus(flight, fmtTime) : getAutoStatus(flight)
   const effectiveStatus = auto !== null ? auto : (flight.StatusEN ?? "")
   const s = effectiveStatus
@@ -982,7 +1002,19 @@ if (statusRes.ok) {
     const newEtag = statusRes.headers.get('ETag');
     if (newEtag) etagStatusRef.current = newEtag;
 
-    statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+  // Server šalje gateEntries ključane po broju gate-a (isto što GatePageClient
+// koristi) — ovdje ih okrećemo lokalno u flightNumber -> gate(ovi) smjer,
+// koji prepareData/applyAssignmentsOnly očekuju. Bez potrebe za izmjenom
+// servera — sirovi podaci već postoje u statusData.gateEntries.
+const gatesByFlight: Record<string, string> = {};
+for (const [gateNum, entry] of Object.entries(statusData.gateEntries ?? {})) {
+  const e = entry as { status?: string | null; flightNumber?: string | null };
+  if (e?.status === 'open' && e.flightNumber) {
+    const fn = e.flightNumber;
+    gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum;
+  }
+}
+statusAssignments = { desks: statusData.desks ?? {}, gates: gatesByFlight };
     if (isMountedRef.current) setNightMode(!!statusData.isNightMode);   // ← NOVO
 
 if (!forceRefresh && statusData.hash !== null && statusData.hash === lastKnownHash) {
