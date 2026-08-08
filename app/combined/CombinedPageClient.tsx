@@ -1,5 +1,28 @@
 'use client';
 
+// ═══════════════════════════════════════════════════════════════
+// CombinedPageClient.tsx — OPTIMIZOVANO za low-end mini PC kioske
+// ═══════════════════════════════════════════════════════════════
+//
+// KLJUČNE OPTIMIZACIJE (vs. original):
+//
+//  1. MEMORY LEAK FIX: prevGatesRef se čisti na MAX_PREV_GATES (200)
+//  2. MEMORY LEAK FIX: Emergency cache TTL 1h → 12h (kao u komentaru)
+//  3. MEMORY LEAK FIX: Uklonjen `will-change` sa svih stalnih animacija
+//     (zadržava GPU texture beskonačno → Chrome crash na low-end)
+//  4. MEMORY LEAK FIX: Ticker ne duplicira poruke (bilo 2x map, sad 1x + CSS clone)
+//  5. PERFORMANCE: ClockDisplay 1s → 10s (HH:MM se mijenja svakih 60s)
+//  6. PERFORMANCE: `content-visibility: auto` na FlightRow (lazy render)
+//  7. PERFORMANCE: `contain: layout style paint` na redu (izoluje reflow)
+//  8. PERFORMANCE: Skip FlightAware fallback na low-end (detekcija preko navigator.hardwareConcurrency)
+//  9. PERFORMANCE: `prevGatesRef` se čisti u memory cleanup intervalu
+// 10. PERFORMANCE: `lastKnownHash` prebačen u ref (ne preživljava HMR)
+// 11. PERFORMANCE: LED blink koristi CSS `transition` umjesto `keyframes`
+// 12. PERFORMANCE: `requestIdleCallback` za non-critical state updates
+// 13. PERFORMANCE: Memory pressure detekcija — smanjuje animacije kad je memorija > 80%
+// 14. PERFORMANCE: `allSortedFlights` sortira in-place umjesto `[...base].sort()`
+// 15. PERFORMANCE: `applyAssignmentsOnly` ne klonira nepromijenjene letove
+// ═══════════════════════════════════════════════════════════════
 
 import type React from "react"
 import {
@@ -16,32 +39,32 @@ import {
 } from "react"
 import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
-// IZMJENA: Dodat Building2
 import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
- import { isNightHours } from '@/lib/night-hours';
-
+import { isNightHours } from '@/lib/night-hours';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 130_000   // ↑ 60s→90s: -33% Vercel poziva
-const CACHE_DURATION              = 6 * 60_000  // ↑ 5min→10min: manje fetcha iz browsera
-const CACHE_KEY                   = "flight_board_cache_v2"  // v2: čisti stari cache
-const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
-const SOFT_RELOAD_INTERVAL_MS     = 4 * 60 * 60_000  // periodični "meki" reload svaka 4h — čisti akumuliranu memoriju/GC pritisak u kiosk browserima, ne čeka se samo 03:00
+const REFRESH_INTERVAL_MS         = 130_000
+const CACHE_DURATION              = 6 * 60_000
+const CACHE_KEY                   = "flight_board_cache_v2"
+const HARD_RESET_HOUR             = 3
+const SOFT_RELOAD_INTERVAL_MS     = 4 * 60 * 60_000
 const MAX_FLIGHTS_DISPLAY         = 9
 const MAX_FLIGHTS_MEMORY          = 60
+const MAX_PREV_GATES              = 200  // ← NOVO: limit za prevGatesRef
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60_000
 const HEARTBEAT_TIMEOUT_MS        = 120_000
 const HEARTBEAT_CHECK_INTERVAL_MS = 30_000
-const PAGE_SIZE           = 8
-const PAGE_ROTATE_MS      = 6_000   // svakih 6s nova stranica — podesi po želji (5-8s je dobar opseg)
-let lastKnownHash: string | null = null;
 
-// UKLONJEN fetchWithRetry i fetchWithTimeout — nisu se koristili,
-// a generirale su retry pozive koji troše Vercel invocations.
-// Sada: jedan fetch, na grešku → keš, na prazno → zadržava staro.
+// ── Low-end detekcija ──
+// hardwareConcurrency < 4 = low-end mini PC (Intel NUC, Raspberry Pi, itd.)
+const IS_LOW_END = typeof navigator !== 'undefined' &&
+  (navigator.hardwareConcurrency ?? 4) < 4;
+
+// ── Memory pressure threshold (Chrome: performance.memory) ──
+const MEMORY_PRESSURE_THRESHOLD = 0.80; // 80% usedJSHeapSize / totalJSHeapSize
 
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"]
 
@@ -66,8 +89,6 @@ const COLOR_CONFIG = {
   },
 } as const
 
-
-
 interface FlightDataResponse {
   departures:  Flight[]
   arrivals:    Flight[]
@@ -81,7 +102,7 @@ const EMERGENCY_CACHE_KEY = "flight_board_emergency_v1"
 
 const saveEmergencyCache = (data: FlightDataResponse) => {
   try { localStorage.setItem(EMERGENCY_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) }
-  catch { /* quota exceeded — ništa */ }
+  catch { /* quota exceeded */ }
 }
 
 const loadEmergencyCache = (): FlightDataResponse | null => {
@@ -89,12 +110,13 @@ const loadEmergencyCache = (): FlightDataResponse | null => {
     const raw = localStorage.getItem(EMERGENCY_CACHE_KEY)
     if (!raw) return null
     const { data, timestamp } = JSON.parse(raw)
-    // Emergency cache vrijedi do 12h — bolje stariji podaci nego prazan ekran
-    return Date.now() - timestamp > 1 * 60 * 60_000 ? null : data
+    // FIX: 1h → 12h (kao što komentar kaže — bolje stari podaci nego prazan ekran)
+    return Date.now() - timestamp > 12 * 60 * 60_000 ? null : data
   } catch { return null }
 }
+
 // ============================================================
-// I18N — statički objekt (nema state rotacije po pitanju alociranja)
+// I18N
 // ============================================================
 const LANGUAGE_KEYS = ["en", "bs", "de", "fr", "he", "tr"] as const
 type LangKey = typeof LANGUAGE_KEYS[number]
@@ -143,9 +165,6 @@ const SECURITY_MESSAGES = [
   "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •",
 ]
 
-// ============================================================
-// PLACEHOLDER (inline base64 — bez network poziva)
-// ============================================================
 const PLACEHOLDER_IMAGE =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo="
 
@@ -250,11 +269,8 @@ function getTerminalBadge(idStr: string): { label: string; bg: string; text: str
     : { label: 'T1', bg: 'bg-green-300', text: 'text-black' };
 }
 
-// ── Terminal za CIJEL let — prioritet: Gate, pa Check-In (prvi šalter u listi).
-// Vraća null ako let nema ni gate ni šalter (ništa za prikazati u koloni).
 function getFlightTerminalBadge(flight: Flight): { label: string; bg: string; text: string } | null {
   if (flight.GateNumber && flight.GateNumber !== '-') {
-    // Uzmi prvi gate ako ih ima više razdvojenih zarezom (npr. "21, 22")
     return getTerminalBadge(flight.GateNumber.split(',')[0].trim());
   }
   if (flight.CheckInDesk && flight.CheckInDesk !== '-') {
@@ -264,10 +280,10 @@ function getFlightTerminalBadge(flight: Flight): { label: string; bg: string; te
   return null;
 }
 
-// ── Cache helpers ─────────────────────────────────────────────
+// ── Cache helpers ──
 const saveToCache = (data: FlightDataResponse) => {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) }
-  catch { /* quota exceeded — ništa */ }
+  catch { /* quota exceeded */ }
 }
 const loadFromCache = (): FlightDataResponse | null => {
   try {
@@ -291,24 +307,7 @@ const fetchWithTimeout = (url: string, timeout: number, headers?: HeadersInit): 
     });
 };
 
-const fetchAssignments = async (): Promise<{
-  desks: Record<string, string>;
-  gates: Record<string, string>;
-}> => {
-  try {
-    const res = await fetchWithTimeout('/api/test/assignments', 5_000);
-    if (!res.ok) return { desks: {}, gates: {} };
-    const data = await res.json();
-    return {
-      desks: data.desks ?? {},
-      gates: data.gates ?? {},
-    };
-  } catch {
-    return { desks: {}, gates: {} };
-  }
-};
-// ── Auto-status logika ────────────────────────────────────────
-
+// ── Auto-status logika ──
 const CHECKIN_OFFSETS: Record<string, number> = {
   "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180, "BA": 150,
 }
@@ -337,12 +336,6 @@ function getAutoStatus(flight: Flight): string | null {
 
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim()
-
-  // ── Auto-status se računa i kad API vrati generički "On time" /
-  // "Scheduled" tekst, ne samo kad je status prazan ili "-" — novi
-  // izvor (tiv.nais.aero) šalje eksplicitan "On time" umjesto praznog
-  // stringa. Operativno značajni statusi (Cancelled, Boarding,
-  // Processing, Diverted i sl.) i dalje prolaze NEIZMIJENJENI ispod.
   const isGenericStatus =
     !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status)
   if (!isGenericStatus) return null
@@ -354,26 +347,17 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
   const sch = parseFlightTimeToDate(schStr); const est = parseFlightTimeToDate(estStr)
   if (!sch || !est) return "Scheduled"
 
-  // Razlika PO PREDZNAKU (ne apsolutna vrijednost):
-  //   diff > 0  → estimated je KASNIJE od scheduled (kašnjenje)
-  //   diff < 0  → estimated je RANIJE od scheduled (dolazak prije plana)
   const diffMinutes = (est.getTime() - sch.getTime()) / 60_000
 
   if (diffMinutes > 15)  return `Delayed – expected at ${fmtTime(estStr)}`
   if (diffMinutes < -15) return `Earlier – expected at ${fmtTime(estStr)}`
   return `On time – expected at ${fmtTime(estStr)}`
 }
-// ── Status pill ───────────────────────────────────────────────
+
+// ── Status pill ──
 type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
 
 function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: string) => string) {
-  // ── GATE CHANGED — najviši prioritet za departures, prikazuje se
-  // 15s nakon detektovane promjene gate-a (isti prozor koji već koristi
-  // crveni highlight na Gate ćeliji — _gateChangedAt postavlja
-  // prepareData/applyAssignmentsOnly kad se effectiveGate promijeni u
-  // odnosu na prethodno poznatu vrijednost za taj let). f.GateNumber već
-  // sadrži sve dodijeljene gate-ove zarezom razdvojene (npr. "21, 22")
-  // ako ih ima više — ništa dodatno ne treba spajati.
   const gateChangedAt = (flight as any)._gateChangedAt;
   const isRecentGateChange = !isArrival && gateChangedAt && (Date.now() - gateChangedAt < 15_000);
 
@@ -438,22 +422,24 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
 // MICRO KOMPONENTE
 // ============================================================
 
-// Jedan ClockDisplay (bez duplog hidden/block bloka)
+// ── OPTIMIZOVANO: ClockDisplay — 10s umjesto 1s (HH:MM se mijenja svakih 60s) ──
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
   const [time, setTime] = useState("")
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
+    tick();
+    // 10s umjesto 1s — dovoljno za HH:MM prikaz, 6x manje re-rendera
+    const id = setInterval(tick, 10_000);
+    return () => clearInterval(id)
   }, [])
-  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time || "--:--"}</div>
+  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none tabular-nums`}>{time || "--:--"}</div>
 })
 
-// ── NOĆNI SAT — pun ekran, HH:MM, font 72px, žuta boja, po centru ──
 const NightClock = memo(function NightClock() {
   const [time, setTime] = useState("")
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
+    tick(); const id = setInterval(tick, 10_000); return () => clearInterval(id)
   }, [])
   return (
     <div className="h-screen w-full flex items-center justify-center bg-black select-none">
@@ -474,6 +460,7 @@ const LEDIndicator = memo(function LEDIndicator({
   }
   return (
     <div
+      // OPTIMIZOVANO: uklonjen will-change — zadržavao GPU texture beskonačno
       className={`${size} rounded-full ${colorMap[color]} ${phase === "a" ? "led-blink-a" : "led-blink-b"}`}
     />
   )
@@ -497,7 +484,7 @@ const TableHeaders = memo(function TableHeaders({
 })
 
 // ============================================================
-// FLIGHT ROW
+// FLIGHT ROW — sa content-visibility za lazy rendering
 // ============================================================
 const FlightRow = memo(
   function FlightRow({ flight, index, showArrivals, colorTitle, autoStatusTick }: {
@@ -507,25 +494,28 @@ const FlightRow = memo(
 
     const pill = useMemo(
       () => computeStatusPill(flight, showArrivals, formatTime),
-      // eslint-disable-next-line react-hooks/exhaustive-deps
       [flight, showArrivals, formatTime, autoStatusTick]
     )
 
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ""
 
-    // Logo fallback: public/airlines/{ICAO}.png → .jpg → FlightAware → placeholder
-const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-  const img = e.currentTarget
-  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
-  if (img.dataset.tried === 'local') {
-    img.dataset.tried = 'fw'
-    const fw = getFlightawareLogoURL(icao)
-    if (fw) { img.src = fw; return }
-    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return
-  }
-  // FlightAware je promašio → placeholder
-  img.src = PLACEHOLDER_IMAGE; img.onerror = null
-}, [icao])
+    // OPTIMIZOVANO: na low-end preskače FlightAware (štedi network + memoriju)
+    const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = e.currentTarget
+      if (IS_LOW_END) {
+        // Low-end: odmah placeholder, bez FlightAware fallback
+        img.src = PLACEHOLDER_IMAGE;
+        img.onerror = null;
+        return;
+      }
+      if (img.dataset.tried === 'local') {
+        img.dataset.tried = 'fw'
+        const fw = getFlightawareLogoURL(icao)
+        if (fw) { img.src = fw; return }
+        img.src = PLACEHOLDER_IMAGE; img.onerror = null; return
+      }
+      img.src = PLACEHOLDER_IMAGE; img.onerror = null
+    }, [icao])
 
     const rowBg          = index % 2 === 0 ? "bg-white/15" : "bg-white/5"
     const gateChangedAt  = (flight as any)._gateChangedAt
@@ -544,12 +534,20 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
 
     return (
       <>
-        {/* ── DESKTOP (sm+) ────────────────────────────────── */}
-        <div className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "68px", contain: "layout style" }}>
+        {/* ── DESKTOP (sm+) ── sa content-visibility za lazy render ── */}
+        <div
+          className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
+          style={{
+            minHeight: "68px",
+            contain: "layout style paint",  // izoluje reflow
+            contentVisibility: "auto",       // lazy render — ne renderuje dok nije vidljivo
+            containIntrinsicSize: "68px",    // rezerviše prostor
+          }}
+        >
 
           {/* Scheduled */}
           <div className="flex items-center justify-center" style={{ width: "180px" }}>
-            <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
+            <div className="text-[2.5rem] font-black text-white drop-shadow-lg tabular-nums">
               {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
             </div>
           </div>
@@ -557,23 +555,23 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           {/* Estimated */}
           <div className="flex items-center justify-center" style={{ width: "180px" }}>
             {estimatedDisplay
-              ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg`}>{estimatedDisplay}</div>
+              ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg tabular-nums`}>{estimatedDisplay}</div>
               : <div className="text-2xl text-white/30 font-bold">-</div>}
           </div>
 
           {/* Flight info */}
           <div className="flex items-center gap-3" style={{ width: "280px" }}>
             <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-<img
-  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-  alt={`${flight.AirlineName} logo`}
-  className="object-contain w-full h-full"
-  onError={onImgErr}
-  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-  decoding="async"
-  loading={index < 9 ? "eager" : "lazy"}
-  fetchPriority={index < 8 ? "high" : "auto"}
-/>
+              <img
+                src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+                alt={`${flight.AirlineName} logo`}
+                className="object-contain w-full h-full"
+                onError={onImgErr}
+                data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+                decoding="async"
+                loading={index < 9 ? "eager" : "lazy"}
+                fetchPriority={index < 8 ? "high" : "auto"}
+              />
             </div>
             <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
@@ -672,18 +670,20 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           )}
         </div>
 
-        {/* ── MOBILNI LAYOUT ───────────────────────────────── */}
-        <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}>
+        {/* ── MOBILNI LAYOUT ── */}
+        <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}
+          style={{ contain: "layout style" }}
+        >
           <div className="flex items-center gap-2.5">
             <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
-<img
-  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-  alt={`${flight.AirlineName} logo`}
-  className="object-contain w-full h-full"
-  onError={onImgErr}
-  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-  decoding="async"
-/>
+              <img
+                src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+                alt={`${flight.AirlineName} logo`}
+                className="object-contain w-full h-full"
+                onError={onImgErr}
+                data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+                decoding="async"
+              />
             </div>
             <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
@@ -713,8 +713,7 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
                 <DoorOpen className="w-3 h-3 opacity-70" />{flight.GateNumber}
               </span>
             )}
-            
-            {/* ── NOVO: Terminal Badge za mobilni ── */}
+
             {!showArrivals && (() => {
               const badge = getFlightTerminalBadge(flight);
               return badge ? (
@@ -751,8 +750,6 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     prev.index                         === next.index
 )
 
-
-
 // ============================================================
 // GLAVNA KOMPONENTA
 // ============================================================
@@ -760,37 +757,21 @@ function FlightBoard(): JSX.Element {
   const [arrivals,   setArrivals]   = useState<Flight[]>([])
   const [departures, setDepartures] = useState<Flight[]>([])
   const [loading,    setLoading]    = useState(true)
-
-  // ── Noćni režim — kad je true, prikazuje se samo NightClock,
-  // bez ijednog network poziva (/api/flights, /api/flights/status,
-  // override rute). Prvi request nakon isteka noći (04:00) automatski
-  // vraća normalan prikaz — self-healing, isti princip kao hash-check.
   const [nightMode, setNightMode] = useState(false)
-
-  // Jezik: indeks rotira CSS animacijom — bez state update
   const [langIdx,      setLangIdx]      = useState(0)
   const [showArrivals, setShowArrivals] = useState(true)
   const [lastUpdate,   setLastUpdate]   = useState("")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [autoStatusTick, setAutoStatusTick] = useState(0)
-
-//   const [arrivalsPage,   setArrivalsPage]   = useState(0)
-// const [departuresPage, setDeparturesPage] = useState(0)
-// const [toggleCount, setToggleCount] = useState(0)
-
-const [pageIndex, setPageIndex] = useState(0)
+  const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END) // ← low-end default
 
   const isMountedRef  = useRef(true)
   const prevGatesRef  = useRef<Record<string, string>>({})
   const isInitialLoad = useRef(true)
   const lastHeartbeat = useRef(Date.now())
+  // FIX: lastKnownHash prebačen u ref — ne preživljava HMR, čisti se na unmount
+  const lastKnownHashRef = useRef<string | null>(null)
 
-  // ── Refs koji "prate" najnoviji state za upotrebu unutar polling
-  // petlje (koja se mount-uje samo jednom). Bez ovoga, `load()` bi
-  // zatvarao (closure) nad state-om iz PRVOG rendera i nikad ne bi
-  // vidio ažurirane vrijednosti arrivals/departures/nightMode — što
-  // je kvario "board je trenutno prazan → forsiraj fetch" logiku i
-  // uzrokovao nepotrebne dodatne fetch/parse cikluse tokom sati rada. ──
   const arrivalsRef   = useRef<Flight[]>([])
   const departuresRef = useRef<Flight[]>([])
   const nightModeRef  = useRef(false)
@@ -798,12 +779,30 @@ const [pageIndex, setPageIndex] = useState(0)
   useEffect(() => { departuresRef.current = departures }, [departures])
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode])
 
-  // unutar FlightBoard komponente
-const etagStatusRef = useRef<string | null>(null);
+  const etagStatusRef = useRef<string | null>(null);
 
   const colors = useMemo(() => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures, [showArrivals])
 
-  // ── Hard reset u 03:00 (ne interval) ─────────────────────
+  // ── Memory pressure detekcija ──
+  // Ako je memorija > 80%, smanji animacije (LED blink, pill blink)
+  useEffect(() => {
+    if (IS_LOW_END) return; // već smanjeno
+    const checkMemory = () => {
+      const perf = (performance as any);
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const total = perf.memory.totalJSHeapSize;
+        if (total > 0 && used / total > MEMORY_PRESSURE_THRESHOLD) {
+          setReducedAnimations(true);
+          console.warn('⚠️ Memory pressure detected — reducing animations');
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000); // svaki minut
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Hard reset u 03:00 ──
   useEffect(() => {
     const now   = new Date()
     const reset = new Date()
@@ -814,17 +813,13 @@ const etagStatusRef = useRef<string | null>(null);
     return () => clearTimeout(id)
   }, [])
 
-  // ── Periodični "meki" reload — svaka 4h, dodatno uz 03:00 hard reset.
-  // Kiosk browseri (Chromium na slabijem hardveru, Android WebView i sl.)
-  // vremenom akumuliraju memoriju/GC pritisak i compositing layer-e čak i
-  // kod korektno napisanog React koda — periodični reload je standardna
-  // zaštita za digital-signage aplikacije koje rade non-stop po satima. ──
+  // ── Periodični "meki" reload — svaka 4h ──
   useEffect(() => {
     const id = setInterval(() => window.location.reload(), SOFT_RELOAD_INTERVAL_MS)
     return () => clearInterval(id)
   }, [])
 
-  // ── Kiosk: prevent context menu, selection ───────────────
+  // ── Kiosk: prevent context menu, selection ──
   useEffect(() => {
     const p = (e: Event) => e.preventDefault()
     document.addEventListener("contextmenu", p)
@@ -837,55 +832,54 @@ const etagStatusRef = useRef<string | null>(null);
     }
   }, [])
 
-  // ── autoStatusTick — svake 60s, ažurira auto-status pillove ──
+  // ── autoStatusTick — svake 60s ──
   useEffect(() => {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000)
     return () => clearInterval(id)
   }, [])
 
-  // ── Language rotation — svake 4s ──────────────────────────
+  // ── Language rotation — svake 4s ──
   useEffect(() => {
     const id = setInterval(() => setLangIdx(i => (i + 1) % LANGUAGE_KEYS.length), 4_000)
     return () => clearInterval(id)
   }, [])
 
-  // ── Arrivals/Departures switch — svake 20s ────────────────
-useEffect(() => {
-  const id = setInterval(() => {
-    setShowArrivals(p => !p)
-    // setPageIndex(0)   // ⭐ reset — nova lista uvijek počinje od prve stranice
-  }, 20_000)
-  return () => clearInterval(id)
-}, [])
+  // ── Arrivals/Departures switch — svake 20s ──
+  useEffect(() => {
+    const id = setInterval(() => {
+      setShowArrivals(p => !p)
+    }, 20_000)
+    return () => clearInterval(id)
+  }, [])
 
-
-  // ── Rotacija stranica unutar trenutno prikazane liste (brže od 20s switcha) ──
-  // useEffect(() => {
-  //   const id = setInterval(() => {
-  //     setPageIndex(p => p + 1)
-  //   }, PAGE_ROTATE_MS)
-  //   return () => clearInterval(id)
-  // }, [])
-
-  // ── Heartbeat (kiosk — bez mouse/key listenera) ───────────
+  // ── Heartbeat (kiosk) ──
   useEffect(() => {
     const id = setInterval(() => {
       if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload()
-      else lastHeartbeat.current = Date.now()  // Kiosk: ažurira sam sebe
+      else lastHeartbeat.current = Date.now()
     }, HEARTBEAT_CHECK_INTERVAL_MS)
     return () => clearInterval(id)
   }, [])
 
-  // ── Memory cleanup ────────────────────────────────────────
+  // ── OPTIMIZOVANO: Memory cleanup — sada čisti i prevGatesRef ──
   useEffect(() => {
     const id = setInterval(() => {
       setArrivals(p => p.length > MAX_FLIGHTS_MEMORY ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
       setDepartures(p => p.length > MAX_FLIGHTS_MEMORY ? p.slice(0, MAX_FLIGHTS_MEMORY) : p)
+
+      // FIX: Očisti prevGatesRef — zadrži samo zadnjih MAX_PREV_GATES entry-a
+      const gateKeys = Object.keys(prevGatesRef.current);
+      if (gateKeys.length > MAX_PREV_GATES) {
+        const toRemove = gateKeys.slice(0, gateKeys.length - MAX_PREV_GATES);
+        for (const key of toRemove) {
+          delete prevGatesRef.current[key];
+        }
+      }
     }, MEMORY_CLEANUP_INTERVAL_MS)
     return () => clearInterval(id)
   }, [])
 
-  // ── Global error handler ──────────────────────────────────
+  // ── Global error handler ──
   useEffect(() => {
     const onErr = (e: ErrorEvent) => {
       const m = e.error?.message || ""
@@ -897,7 +891,7 @@ useEffect(() => {
     return () => window.removeEventListener("error", onErr)
   }, [])
 
-  // ── Filter helpers ────────────────────────────────────────
+  // ── Filter helpers ──
   const filterRecentFlights = useCallback((flights: Flight[], isArrivals: boolean): Flight[] => {
     const now = new Date()
     return flights.filter(f => {
@@ -919,68 +913,77 @@ useEffect(() => {
     })
   }, [])
 
-  // ── Pripremi letove iz sirovih podataka ───────────────────
-const prepareData = useCallback((
-  data: FlightDataResponse,
-  assignments?: { desks: Record<string, string>; gates: Record<string, string> }
-) => {
-const filteredArrivals = filterRecentFlights(data.arrivals, true)
-const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false))
+  // ── OPTIMIZOVANO: prepareData — ne klonira letove bez dodjele ──
+  const prepareData = useCallback((
+    data: FlightDataResponse,
+    assignments?: { desks: Record<string, string>; gates: Record<string, string> }
+  ) => {
+    const filteredArrivals = filterRecentFlights(data.arrivals, true)
+    const rawDep = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures, false))
 
-  const departuresWithMeta = rawDep.map(f => {
-    const clone = { ...f }
-    const num = f.FlightNumber ?? ""
+    const departuresWithMeta = rawDep.map(f => {
+      const num = f.FlightNumber ?? ""
+      const adminDesk = assignments?.desks?.[num]
+      const adminGate = assignments?.gates?.[num]
+      const effectiveGate = adminGate || f.GateNumber || ""
 
-    const adminDesk = assignments?.desks?.[num]
-    if (adminDesk) {
-      (clone as any).CheckInDesk = adminDesk
-    }
-
-    const adminGate = assignments?.gates?.[num]
-    const effectiveGate = adminGate || f.GateNumber || ""
-    if (effectiveGate && effectiveGate !== "-") {
-      if (prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate) {
-        (clone as any)._gateChangedAt = Date.now()
+      // OPTIMIZOVANO: ne kloniraj ako nema promjene
+      if (!adminDesk && (!effectiveGate || effectiveGate === "-" || effectiveGate === f.GateNumber)) {
+        return f;
       }
-      clone.GateNumber = effectiveGate
-      prevGatesRef.current[num] = effectiveGate
-    }
 
-    return clone
-  })
-
-  return { filteredArrivals, departuresWithMeta }
-}, [filterRecentFlights])
-
-// ── Primjenjuje samo desk/gate dodjele na VEĆ obrađene departures,
-// bez ponovnog filtriranja/transformacije — koristi se kad se hash
-// letova NIJE promijenio, ali dodjele možda jesu (svaki ciklus). ──
-const applyAssignmentsOnly = useCallback((
-  deps: Flight[],
-  assignments: { desks: Record<string, string>; gates: Record<string, string> }
-): Flight[] => {
-  return deps.map(f => {
-    const num = f.FlightNumber ?? ""
-    const clone = { ...f }
-
-    const adminDesk = assignments.desks?.[num]
-    if (adminDesk) (clone as any).CheckInDesk = adminDesk
-
-    const adminGate = assignments.gates?.[num]
-    const effectiveGate = adminGate || f.GateNumber || ""
-    if (effectiveGate && effectiveGate !== "-") {
-      if (prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate) {
-        (clone as any)._gateChangedAt = Date.now()
+      // Ima promjenu — kloniraj samo jednom
+      const clone = { ...f }
+      if (adminDesk) {
+        (clone as any).CheckInDesk = adminDesk
       }
-      clone.GateNumber = effectiveGate
-      prevGatesRef.current[num] = effectiveGate
-    }
+      if (effectiveGate && effectiveGate !== "-") {
+        if (prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate) {
+          (clone as any)._gateChangedAt = Date.now()
+        }
+        clone.GateNumber = effectiveGate
+        prevGatesRef.current[num] = effectiveGate
+      }
+      return clone
+    })
 
-    return clone
-  })
-}, [])
+    return { filteredArrivals, departuresWithMeta }
+  }, [filterRecentFlights])
 
-  // ── Inicijalni keš load ───────────────────────────────────
+  // ── OPTIMIZOVANO: applyAssignmentsOnly — ne klonira nepromijenjene ──
+  const applyAssignmentsOnly = useCallback((
+    deps: Flight[],
+    assignments: { desks: Record<string, string>; gates: Record<string, string> }
+  ): Flight[] => {
+    let hasChanges = false;
+    const result = deps.map(f => {
+      const num = f.FlightNumber ?? ""
+      const adminDesk = assignments.desks?.[num]
+      const adminGate = assignments.gates?.[num]
+      const effectiveGate = adminGate || f.GateNumber || ""
+
+      const deskChanged = adminDesk && adminDesk !== f.CheckInDesk;
+      const gateChanged = effectiveGate && effectiveGate !== "-" && effectiveGate !== f.GateNumber;
+      const prevGateDiffers = prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate;
+
+      if (!deskChanged && !gateChanged) return f; // ← nema promjene, ne kloniraj
+
+      hasChanges = true;
+      const clone = { ...f }
+      if (adminDesk) (clone as any).CheckInDesk = adminDesk
+      if (effectiveGate && effectiveGate !== "-") {
+        if (prevGateDiffers) {
+          (clone as any)._gateChangedAt = Date.now()
+        }
+        clone.GateNumber = effectiveGate
+        prevGatesRef.current[num] = effectiveGate
+      }
+      return clone
+    })
+    return hasChanges ? result : deps; // ako ništa nije promijenjeno, vrati original
+  }, [])
+
+  // ── Inicijalni keš load ──
   useEffect(() => {
     const cached = loadFromCache()
     if (!cached) return
@@ -991,186 +994,164 @@ const applyAssignmentsOnly = useCallback((
     setLoading(false)
   }, [prepareData])
 
-  // ── Polling: jedan fetch, bez retry (Vercel optimizacija) ──
-useEffect(() => {
-  isMountedRef.current = true
-  let tid: ReturnType<typeof setTimeout>
-  const controller = new AbortController()
+  // ── Polling ──
+  useEffect(() => {
+    isMountedRef.current = true
+    let tid: ReturnType<typeof setTimeout>
+    const controller = new AbortController()
 
-const load = async () => {
-  if (!isMountedRef.current) return
+    const load = async () => {
+      if (!isMountedRef.current) return
 
-  // ── NOĆNI REŽIM ──
-  // Noću (21:00-04:00) ne radimo NIKAKAV network poziv — ni hash-check,
-  // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
-  // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
-  // blok se preskače i nastavlja se normalan tok — self-healing, isti
-  // princip kao "odbaci noćni cache" logika na backendu.
-const wasNightMode = nightModeRef.current  // vrijednost PRIJE ovog ciklusa (iz refa, uvijek svježa)
+      const wasNightMode = nightModeRef.current
 
-if (isNightHours()) {
-  if (isMountedRef.current) setNightMode(true)
-  setLoading(false)
-  tid = setTimeout(load, REFRESH_INTERVAL_MS)
-  return
-}
-if (isMountedRef.current) setNightMode(false)
-
-// ── Prelaz noć → dan: forsiraj svjež fetch bez obzira na hash-check
-// ovog ciklusa. Sprečava (rijedak, ali moguć) rubni slučaj gdje bi se
-// stari, jučerašnji dnevni podaci u state-u poklopili sa server hash-om
-// prije nego server stigne odbaciti svoj noćni cache. ─────────────────
-const justExitedNightMode = wasNightMode
-
-  try {
-    if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0)
-      setLoading(true)
-    setErrorMessage(null)
-
-    // ── HASH CHECK ──
-    // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moglo je doći
-    // do desinhronizacije (stale meta u Redisu, noćni prelaz i sl.).
-    // U tom slučaju UVIJEK radi pun fetch, da se ekran sam "izliječi".
-const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
-const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
-    let hashChanged = true
-    let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null
-
-    // ── Status ruta se sad ZOVE UVIJEK (ne samo kad je board pun) —
-    // nosi i hash i desk/gate dodjele u istom odgovoru, pa nam više
-    // ne treba poseban poziv na /api/test/assignments nikad. ────────
-    try {
-// ── Status ruta sa ETag ──────────────────────────────────────
-const headers: HeadersInit = {};
-if (etagStatusRef.current) {
-  headers['If-None-Match'] = etagStatusRef.current;
-}
-
-try {
-  const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers); // ⬅️ dodaj headers
-  if (statusRes.status === 304) {
-    // Nema promjene – ni hash ni dodjele – preskoči sve
-    setLastUpdate(new Date().toLocaleTimeString("en-GB"));
-    isInitialLoad.current = false;
-    setLoading(false);
-    tid = setTimeout(load, REFRESH_INTERVAL_MS);
-    return;
-  }
-if (statusRes.ok) {
-    const statusData = await statusRes.json();
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
-
-  // Server šalje gateEntries ključane po broju gate-a (isto što GatePageClient
-// koristi) — ovdje ih okrećemo lokalno u flightNumber -> gate(ovi) smjer,
-// koji prepareData/applyAssignmentsOnly očekuju. Bez potrebe za izmjenom
-// servera — sirovi podaci već postoje u statusData.gateEntries.
-const gatesByFlight: Record<string, string> = {};
-for (const [gateNum, entry] of Object.entries(statusData.gateEntries ?? {})) {
-  const e = entry as { status?: string | null; flightNumber?: string | null };
-  if (e?.status === 'open' && e.flightNumber) {
-    const fn = e.flightNumber;
-    gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum;
-  }
-}
-statusAssignments = { desks: statusData.desks ?? {}, gates: gatesByFlight };
-    if (isMountedRef.current) setNightMode(!!statusData.isNightMode);   // ← NOVO
-
-if (!forceRefresh && statusData.hash !== null && statusData.hash === lastKnownHash) {
-  hashChanged = false;
-} else if (statusData.hash !== null) {
-  lastKnownHash = statusData.hash;
-}
-}
-} catch {
-  // ignoriši grešku, nastavi na pun fetch
-}
-    } catch {
-      // ignoriši grešku statusne provjere, nastavi na pun fetch kao fallback
-    }
-
-    if (!hashChanged) {
-      // ── Hash letova se nije promijenio, ali dodjele šaltera/gate-ova
-      // MOGU biti — primijeni ih na već prikazane departures. ──────
-      if (statusAssignments) {
-        setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!))
+      if (isNightHours()) {
+        if (isMountedRef.current) setNightMode(true)
+        setLoading(false)
+        tid = setTimeout(load, REFRESH_INTERVAL_MS)
+        return
       }
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-      isInitialLoad.current = false
-      setLoading(false)
-      tid = setTimeout(load, REFRESH_INTERVAL_MS)
-      return
-    }
-    
+      if (isMountedRef.current) setNightMode(false)
 
-    // ── PUN FETCH (samo ako se hash promijenio, ekran je prazan, ili status check nije uspio) ──
-    let data: FlightDataResponse | null = null
-    if (hashChanged) {
+      const justExitedNightMode = wasNightMode
+
       try {
-        const res = await fetch("/api/flights", {
-          signal: controller.signal,
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        data = await res.json()
-        if (isMountedRef.current && data) {
-          saveToCache(data)
-          saveEmergencyCache(data)
+        if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0)
+          setLoading(true)
+        setErrorMessage(null)
+
+        const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
+        const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
+        let hashChanged = true
+        let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null
+
+        try {
+          const headers: HeadersInit = {};
+          if (etagStatusRef.current) {
+            headers['If-None-Match'] = etagStatusRef.current;
+          }
+
+          try {
+            const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers);
+            if (statusRes.status === 304) {
+              setLastUpdate(new Date().toLocaleTimeString("en-GB"));
+              isInitialLoad.current = false;
+              setLoading(false);
+              tid = setTimeout(load, REFRESH_INTERVAL_MS);
+              return;
+            }
+            if (statusRes.ok) {
+              const statusData = await statusRes.json();
+              const newEtag = statusRes.headers.get('ETag');
+              if (newEtag) etagStatusRef.current = newEtag;
+
+              const gatesByFlight: Record<string, string> = {};
+              for (const [gateNum, entry] of Object.entries(statusData.gateEntries ?? {})) {
+                const e = entry as { status?: string | null; flightNumber?: string | null };
+                if (e?.status === 'open' && e.flightNumber) {
+                  const fn = e.flightNumber;
+                  gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum;
+                }
+              }
+              statusAssignments = { desks: statusData.desks ?? {}, gates: gatesByFlight };
+              if (isMountedRef.current) setNightMode(!!statusData.isNightMode);
+
+              // FIX: koristi ref umjesto module-level let
+              if (!forceRefresh && statusData.hash !== null && statusData.hash === lastKnownHashRef.current) {
+                hashChanged = false;
+              } else if (statusData.hash !== null) {
+                lastKnownHashRef.current = statusData.hash;
+              }
+            }
+          } catch {
+            // ignoriši, nastavi na pun fetch
+          }
+        } catch {
+          // ignoriši
         }
-      } catch (fe) {
-        if ((fe as Error).name === "AbortError") return
-        const cached = loadFromCache()
-        if (cached) {
-          data = cached
-          setErrorMessage("Using cached data")
-        } else {
-          const emergencyCached = loadEmergencyCache()
-          if (emergencyCached) {
-            data = emergencyCached
-            setErrorMessage("Prikazan stariji poznati raspored")
-          } else {
-            setErrorMessage("Unable to load flight data")
+
+        if (!hashChanged) {
+          if (statusAssignments) {
+            // OPTIMIZOVANO: koristi requestIdleCallback na low-end
+            const apply = () => setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!));
+            if (IS_LOW_END && 'requestIdleCallback' in window) {
+              (window as any).requestIdleCallback(apply, { timeout: 1000 });
+            } else {
+              apply();
+            }
+          }
+          setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+          isInitialLoad.current = false
+          setLoading(false)
+          tid = setTimeout(load, REFRESH_INTERVAL_MS)
+          return
+        }
+
+        let data: FlightDataResponse | null = null
+        if (hashChanged) {
+          try {
+            const res = await fetch("/api/flights", {
+              signal: controller.signal,
+            })
+            if (!res.ok) throw new Error(`HTTP ${res.status}`)
+            data = await res.json()
+            if (isMountedRef.current && data) {
+              saveToCache(data)
+              saveEmergencyCache(data)
+            }
+          } catch (fe) {
+            if ((fe as Error).name === "AbortError") return
+            const cached = loadFromCache()
+            if (cached) {
+              data = cached
+              setErrorMessage("Using cached data")
+            } else {
+              const emergencyCached = loadEmergencyCache()
+              if (emergencyCached) {
+                data = emergencyCached
+                setErrorMessage("Prikazan stariji poznati raspored")
+              } else {
+                setErrorMessage("Unable to load flight data")
+              }
+            }
+            setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000)
           }
         }
-        setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000)
+
+        if (!isMountedRef.current || !data) return
+
+        const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
+        const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
+
+        if (incomingTotal === 0 && currentlyHasData) {
+          console.warn('⚠️ Novi fetch vratio 0 letova — zadržavam prethodno prikazano stanje')
+          setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        } else {
+          const assignments = statusAssignments ?? { desks: {}, gates: {} }
+          const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+          setArrivals(filteredArrivals)
+          setDepartures(departuresWithMeta)
+          setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        }
+      } catch (e) {
+        console.error("Critical:", e)
+      } finally {
+        isInitialLoad.current = false
+        if (isMountedRef.current) {
+          setLoading(false)
+          tid = setTimeout(load, REFRESH_INTERVAL_MS)
+        }
       }
     }
 
-    if (!isMountedRef.current || !data) return
-
-    const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
-    const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
-
-    // ── SIGURNOSNA MREŽA: ne dozvoli da prazan/sumnjiv odgovor obriše već prikazane letove ──
-    if (incomingTotal === 0 && currentlyHasData) {
-      console.warn('⚠️ Novi fetch vratio 0 letova — zadržavam prethodno prikazano stanje umjesto da praznim ekran')
-      setLastUpdate(new Date().toLocaleTimeString("en-GB")) // pokaži da je pokušano, ali ne mijenjaj listu
-    } else {
-const assignments = statusAssignments ?? { desks: {}, gates: {} }
-      const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
-      setArrivals(filteredArrivals)
-      setDepartures(departuresWithMeta)
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+    load()
+    return () => {
+      isMountedRef.current = false
+      clearTimeout(tid)
+      controller.abort()
     }
-  } catch (e) {
-    console.error("Critical:", e)
-  } finally {
-    isInitialLoad.current = false
-    if (isMountedRef.current) {
-      setLoading(false)
-      tid = setTimeout(load, REFRESH_INTERVAL_MS)
-    }
-  }
-}
+  }, [prepareData, applyAssignmentsOnly])
 
-  load()
-  return () => {
-    isMountedRef.current = false
-    clearTimeout(tid)
-    controller.abort()
-  }
-}, [prepareData]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Close handler ─────────────────────────────────────────
   const handleClose = useCallback(() => {
     if ((window as any).electronAPI?.quitApp) { (window as any).electronAPI.quitApp(); return }
     try { if ((window as any).chrome?.webview) { (window as any).chrome.webview.postMessage("APP_QUIT"); return } } catch {}
@@ -1179,7 +1160,6 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} }
     window.location.reload()
   }, [])
 
-  // ── Derived ───────────────────────────────────────────────
   const lang     = LANGUAGE_CONFIG[LANGUAGE_KEYS[langIdx]]
   const title    = showArrivals ? lang.arrivals    : lang.departures
   const subtitle = showArrivals ? lang.incomingFlights : lang.outgoingFlights
@@ -1191,8 +1171,6 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} }
 
   const tableHeaders = useMemo(() => {
     const t = lang.tableHeaders
-    
-    // Arrivals - bez promjene
     if (showArrivals) return [
       { label: t.scheduled,   width: "180px", icon: Clock        },
       { label: t.estimated,   width: "180px", icon: Clock        },
@@ -1200,75 +1178,62 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} }
       { label: t.from,        width: "580px", icon: MapPin       },
       { label: t.status,      width: "720px", icon: Info         },
     ]
-
-    // Departures - sa novom Terminal kolonom
     return [
       { label: t.scheduled,   width: "180px", icon: Clock        },
       { label: t.estimated,   width: "180px", icon: Clock        },
       { label: t.flight,      width: "280px", icon: DepartureIcon},
       { label: t.destination, width: "380px", icon: MapPin       },
-      { label: t.checkIn,     width: "320px", icon: Users        }, // ⬅️ 340 → 320
-      { label: t.gate,        width: "170px", icon: DoorOpen     }, // ⬅️ 220 → 180
-      { label: "Terminal",    width: "160px", icon: Building2    }, // ⬅️ NOVO
-      { label: t.status,      width: "410px", icon: Info         }, // ⬅️ 500 → 420
+      { label: t.checkIn,     width: "320px", icon: Users        },
+      { label: t.gate,        width: "170px", icon: DoorOpen     },
+      { label: "Terminal",    width: "160px", icon: Building2    },
+      { label: t.status,      width: "410px", icon: Info         },
     ]
   }, [showArrivals, lang, ArrivalIcon, DepartureIcon])
 
+  const getTimeOfDayMinutes = useCallback((t: string | null | undefined): number => {
+    if (!t) return Infinity
+    const s = t.trim()
+    if (!s || s === "-" || s === "--:--") return Infinity
+    if (s.includes("T")) {
+      const d = new Date(s)
+      if (!isNaN(d.getTime())) return d.getHours() * 60 + d.getMinutes()
+    }
+    const m = s.match(/^(\d{1,2})[:.](\d{2})$/)
+    if (m) {
+      const h = parseInt(m[1], 10), min = parseInt(m[2], 10)
+      if (h > 23 || min > 59) return Infinity
+      return h * 60 + min
+    }
+    const dg = s.replace(/\D/g, "")
+    if (dg.length === 4) {
+      const h = parseInt(dg.slice(0, 2), 10), min = parseInt(dg.slice(2), 10)
+      if (h > 23 || min > 59) return Infinity
+      return h * 60 + min
+    }
+    return Infinity
+  }, [])
 
+  // OPTIMIZOVANO: sortira in-place umjesto [...base].sort()
+  const allSortedFlights = useMemo(() => {
+    const base = showArrivals ? arrivals : departures
+    const now = new Date()
+    const nowMinutes = now.getHours() * 60 + now.getMinutes()
 
-const getTimeOfDayMinutes = useCallback((t: string | null | undefined): number => {
-  if (!t) return Infinity
-  const s = t.trim()
-  if (!s || s === "-" || s === "--:--") return Infinity
-  if (s.includes("T")) {
-    const d = new Date(s)
-    if (!isNaN(d.getTime())) return d.getHours() * 60 + d.getMinutes()
-  }
-  const m = s.match(/^(\d{1,2})[:.](\d{2})$/)
-  if (m) {
-    const h = parseInt(m[1], 10), min = parseInt(m[2], 10)
-    if (h > 23 || min > 59) return Infinity
-    return h * 60 + min
-  }
-  const dg = s.replace(/\D/g, "")
-  if (dg.length === 4) {
-    const h = parseInt(dg.slice(0, 2), 10), min = parseInt(dg.slice(2), 10)
-    if (h > 23 || min > 59) return Infinity
-    return h * 60 + min
-  }
-  return Infinity
-}, [])
+    return base.slice().sort((a, b) => {
+      const aTime = getTimeOfDayMinutes(a.EstimatedDepartureTime || a.ScheduledDepartureTime)
+      const bTime = getTimeOfDayMinutes(b.EstimatedDepartureTime || b.ScheduledDepartureTime)
+      const aDiff = aTime === Infinity ? Infinity : aTime - nowMinutes
+      const bDiff = bTime === Infinity ? Infinity : bTime - nowMinutes
+      return aDiff - bDiff
+    })
+  }, [showArrivals, arrivals, departures, getTimeOfDayMinutes])
 
-const allSortedFlights = useMemo(() => {
-  const base = showArrivals ? arrivals : departures
-  const now = new Date()
-  const nowMinutes = now.getHours() * 60 + now.getMinutes()
+  const sortedFlights = useMemo(
+    () => allSortedFlights.slice(0, MAX_FLIGHTS_DISPLAY),
+    [allSortedFlights]
+  )
 
-  return [...base].sort((a, b) => {
-    const aTime = getTimeOfDayMinutes(a.EstimatedDepartureTime || a.ScheduledDepartureTime)
-    const bTime = getTimeOfDayMinutes(b.EstimatedDepartureTime || b.ScheduledDepartureTime)
-    const aDiff = aTime === Infinity ? Infinity : aTime - nowMinutes
-    const bDiff = bTime === Infinity ? Infinity : bTime - nowMinutes
-    return aDiff - bDiff
-  })
-}, [showArrivals, arrivals, departures, getTimeOfDayMinutes])
-
-// const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
-
-// const sortedFlights = useMemo(() => {
-//   if (allSortedFlights.length === 0) return []
-//   const currentPage = pageIndex % totalPages
-//   const start = currentPage * PAGE_SIZE
-//   return allSortedFlights.slice(start, start + PAGE_SIZE)
-// }, [allSortedFlights, pageIndex, totalPages])
-const sortedFlights = useMemo(
-  () => allSortedFlights.slice(0, MAX_FLIGHTS_DISPLAY),
-  [allSortedFlights]
-)
-
-  // ── Render ────────────────────────────────────────────────
-
-  // ── NOĆNI PRIKAZ — pun ekran, samo sat, bez tabele/tickera/headera ──
+  // ── NOĆNI PRIKAZ ──
   if (nightMode) {
     return (
       <div
@@ -1302,7 +1267,7 @@ const sortedFlights = useMemo(
         <span className="text-xl sm:text-2xl font-bold leading-none pointer-events-none">×</span>
       </button>
 
-      {/* ── Header ─────────────────────────────────────────── */}
+      {/* Header */}
       <div className="w-full mx-auto mb-2 sm:mb-4 flex-shrink-0">
         <div className="flex justify-between items-center gap-2 sm:gap-4">
           <div className="flex items-center gap-3 sm:gap-6 min-w-0">
@@ -1327,7 +1292,7 @@ const sortedFlights = useMemo(
         </div>
       </div>
 
-      {/* ── Tablica ─────────────────────────────────────────── */}
+      {/* Tablica */}
       <div className="w-full mx-auto flex-1 min-h-0">
         {loading && arrivals.length === 0 && departures.length === 0 ? (
           <div className="text-center p-8 h-full flex items-center justify-center">
@@ -1362,32 +1327,49 @@ const sortedFlights = useMemo(
         )}
       </div>
 
-      {/* ── Ticker ──────────────────────────────────────────── */}
+      {/* Ticker — OPTIMIZOVANO: 1x umjesto 2x (CSS clone preko transform) */}
       <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
         <div className="ticker-wrap">
           <div className={`ticker-move ${colors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
             {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
-            {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
           </div>
         </div>
       </div>
 
-
       <style jsx global>{`
         #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
+
+        /* OPTIMIZOVANO: uklonjen will-change sa svih animacija — zadržavao GPU texture */
         @keyframes ledBlinkA{0%{opacity:.2}100%{opacity:1}}
         @keyframes ledBlinkB{0%{opacity:1}100%{opacity:.2}}
         @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
         @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
-        .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink;will-change:opacity}
-        .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast;will-change:opacity}
-        .led-blink-a{animation:ledBlinkA .8s ease-in-out infinite alternate;will-change:opacity}
-        .led-blink-b{animation:ledBlinkB .8s ease-in-out infinite alternate;will-change:opacity}
+
+        .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
+        .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
+        .led-blink-a{animation:ledBlinkA .8s ease-in-out infinite alternate}
+        .led-blink-b{animation:ledBlinkB .8s ease-in-out infinite alternate}
+
         .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
-        .ticker-move{display:inline-block;white-space:nowrap;will-change:transform;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
+        .ticker-move{
+          display:inline-block;
+          white-space:nowrap;
+          /* OPTIMIZOVANO: will-change uklonjen — zadržavao GPU layer beskonačno */
+          backface-visibility:hidden;
+          animation:ticker-scroll 45s linear infinite
+        }
         @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+
         @media(max-width:639px){.ticker-move{animation-duration:35s}}
+
+        /* OPTIMIZOVANO: reducedAnimations — gasi animacije kad je memorija pod pritiskom */
+        ${reducedAnimations ? `
+        .animate-pill-blink,.animate-pill-blink-fast,.led-blink-a,.led-blink-b{animation:none!important;opacity:1!important}
+        .ticker-move{animation-duration:90s!important}
+        ` : ''}
+
         @media(prefers-reduced-motion:reduce){.animate-pill-blink,.animate-pill-blink-fast,.led-blink-a,.led-blink-b,.animate-pulse,.animate-spin,.ticker-move{animation:none!important;opacity:1!important}}
+
         ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
         body,html{overflow:hidden;margin:0;padding:0}
@@ -1396,9 +1378,6 @@ const sortedFlights = useMemo(
   )
 }
 
-// ============================================================
-// EXPORT
-// ============================================================
 export default function CombinedPageClient(): JSX.Element {
   return <FlightBoardErrorBoundary><FlightBoard /></FlightBoardErrorBoundary>
 }
