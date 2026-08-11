@@ -388,7 +388,7 @@ function getTerminalBadge(idStr: string): { label: string; bg: string; text: str
 
 function getFlightTerminalBadge(flight: Flight): { label: string; bg: string; text: string } | null {
   if (flight.GateNumber && flight.GateNumber !== '-') {
-    return getTerminalBadge(flight.GateNumber);
+    return getTerminalBadge(flight.GateNumber.split(',')[0].trim());   // ← dodaj split/trim
   }
   if (flight.CheckInDesk && flight.CheckInDesk !== '-') {
     const firstDesk = flight.CheckInDesk.split(',')[0].trim();
@@ -1140,6 +1140,7 @@ function DeparturesBoard(): JSX.Element {
         <div className="ticker-wrap">
           <div className={`ticker-move ${COLOR_CONFIG.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
             {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
+            {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg.text}</span>)}
           </div>
         </div>
       </div>

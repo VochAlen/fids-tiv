@@ -470,7 +470,7 @@ const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
 }: { headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]; headerBg: string }) {
   return (
-    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
+    <div className={`gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
       {headers.map(h => {
         const Icon = h.icon
         return (
@@ -486,9 +486,13 @@ const TableHeaders = memo(function TableHeaders({
 // ============================================================
 // FLIGHT ROW — sa content-visibility za lazy rendering
 // ============================================================
+// ============================================================
+// FLIGHT ROW — sa content-visibility za lazy rendering
+// ============================================================
 const FlightRow = memo(
-  function FlightRow({ flight, index, showArrivals, colorTitle, autoStatusTick }: {
+  function FlightRow({ flight, index, showArrivals, colorTitle, autoStatusTick, isDesktopLayout }: {
     flight: Flight; index: number; showArrivals: boolean; colorTitle: string; autoStatusTick: number
+    isDesktopLayout: boolean
   }) {
     const formatTime = useCallback((t: string) => formatTimeString(t), [])
 
@@ -532,19 +536,13 @@ const FlightRow = memo(
       return estFmt
     }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime])
 
-    return (
-      <>
-        {/* ── DESKTOP (sm+) ── sa content-visibility za lazy render ── */}
+    // ── DESKTOP (sm+) ── sa content-visibility za lazy render ──
+    if (isDesktopLayout) {
+      return (
         <div
-          className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
-          style={{
-            minHeight: "68px",
-            contain: "layout style paint",  // izoluje reflow
-            contentVisibility: "auto",       // lazy render — ne renderuje dok nije vidljivo
-            containIntrinsicSize: "68px",    // rezerviše prostor
-          }}
+          className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
+          style={{ minHeight: "68px", contain: "layout style paint", contentVisibility: "auto", containIntrinsicSize: "68px" }}
         >
-
           {/* Scheduled */}
           <div className="flex items-center justify-center" style={{ width: "180px" }}>
             <div className="text-[2.5rem] font-black text-white drop-shadow-lg tabular-nums">
@@ -613,7 +611,7 @@ const FlightRow = memo(
                   {flight.DestinationCityName || flight.DestinationAirportName}
                 </div>
               </div>
-                     {/* Check-In */}
+              {/* Check-In */}
               <div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: "320px" }}>
                 {flight.CheckInDesk && flight.CheckInDesk !== '-'
                   ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
@@ -669,74 +667,77 @@ const FlightRow = memo(
             </>
           )}
         </div>
+      );
+    }
 
-        {/* ── MOBILNI LAYOUT ── */}
-        <div className={`flex sm:hidden flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}
-          style={{ contain: "layout style" }}
-        >
-          <div className="flex items-center gap-2.5">
-            <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
-              <img
-                src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-                alt={`${flight.AirlineName} logo`}
-                className="object-contain w-full h-full"
-                onError={onImgErr}
-                data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-                decoding="async"
-              />
-            </div>
-            <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
-            {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-              <span className="text-xs text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>
-            )}
-            <div className="ml-auto flex items-center gap-1.5">
-              <span className="text-lg font-black text-white tabular-nums">
-                {formatTimeString(flight.ScheduledDepartureTime) || "--:--"}
-              </span>
-              {estimatedDisplay && (
-                <><span className="text-white/30 text-xs">›</span>
-                  <span className={`text-lg font-black ${colorTitle} tabular-nums`}>{estimatedDisplay}</span></>
-              )}
-            </div>
+    // ── MOBILE (ispod sm) ──
+    return (
+      <div className={`flex flex-col gap-2 px-3 py-2.5 border-b border-white/10 ${rowBg}`}
+        style={{ contain: "layout style" }}
+      >
+        <div className="flex items-center gap-2.5">
+          <div className="relative w-10 h-7 bg-white rounded-lg p-0.5 shadow-md flex-shrink-0">
+            <img
+              src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+              alt={`${flight.AirlineName} logo`}
+              className="object-contain w-full h-full"
+              onError={onImgErr}
+              data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+              decoding="async"
+            />
           </div>
-          <div className="text-[1.25rem] font-black text-white truncate leading-tight">
-            {flight.DestinationCityName || flight.DestinationAirportName}
-          </div>
-           <div className="flex items-center gap-2 flex-wrap">
-            {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
-              <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
-                <Users className="w-3 h-3 opacity-70" />{flight.CheckInDesk}
-              </span>
-            )}
-            {!showArrivals && flight.GateNumber && flight.GateNumber !== "-" && (
-              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
-                <DoorOpen className="w-3 h-3 opacity-70" />{flight.GateNumber}
-              </span>
-            )}
-
-            {!showArrivals && (() => {
-              const badge = getFlightTerminalBadge(flight);
-              return badge ? (
-                <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-full ${badge.bg} ${badge.text}`}>
-                  <Building2 className="w-3 h-3 opacity-70" />{badge.label}
-                </span>
-              ) : null;
-            })()}
-
-            {pill.hasStatusText ? (
-              <div className={mobilePillCls}>
-                {pill.showLEDs && (<><LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" /><LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" /></>)}
-                <span className="truncate max-w-[200px]">{pill.displayText}</span>
-              </div>
-            ) : (
-              <span className="text-xs text-white/40 font-semibold">Scheduled</span>
+          <span className="text-base font-black text-white tracking-wide">{flight.FlightNumber}</span>
+          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+            <span className="text-xs text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="text-lg font-black text-white tabular-nums">
+              {formatTimeString(flight.ScheduledDepartureTime) || "--:--"}
+            </span>
+            {estimatedDisplay && (
+              <><span className="text-white/30 text-xs">›</span>
+                <span className={`text-lg font-black ${colorTitle} tabular-nums`}>{estimatedDisplay}</span></>
             )}
           </div>
         </div>
-      </>
-    )
+        <div className="text-[1.25rem] font-black text-white truncate leading-tight">
+          {flight.DestinationCityName || flight.DestinationAirportName}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
+            <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
+              <Users className="w-3 h-3 opacity-70" />{flight.CheckInDesk}
+            </span>
+          )}
+          {!showArrivals && flight.GateNumber && flight.GateNumber !== "-" && (
+            <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
+              <DoorOpen className="w-3 h-3 opacity-70" />{flight.GateNumber}
+            </span>
+          )}
+
+          {!showArrivals && (() => {
+            const badge = getFlightTerminalBadge(flight);
+            return badge ? (
+              <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-full ${badge.bg} ${badge.text}`}>
+                <Building2 className="w-3 h-3 opacity-70" />{badge.label}
+              </span>
+            ) : null;
+          })()}
+
+          {pill.hasStatusText ? (
+            <div className={mobilePillCls}>
+              {pill.showLEDs && (<><LEDIndicator color={pill.led1} phase="a" size="w-2 h-2" /><LEDIndicator color={pill.led2} phase="b" size="w-2 h-2" /></>)}
+              <span className="truncate max-w-[200px]">{pill.displayText}</span>
+            </div>
+          ) : (
+            <span className="text-xs text-white/40 font-semibold">Scheduled</span>
+          )}
+        </div>
+      </div>
+    );
   },
-  (prev, next) =>
+(prev, next) =>
+    prev.isDesktopLayout               === next.isDesktopLayout               &&
     prev.autoStatusTick                === next.autoStatusTick                &&
     prev.flight.FlightNumber           === next.flight.FlightNumber           &&
     prev.flight.StatusEN               === next.flight.StatusEN               &&
@@ -775,6 +776,20 @@ function FlightBoard(): JSX.Element {
   const arrivalsRef   = useRef<Flight[]>([])
   const departuresRef = useRef<Flight[]>([])
   const nightModeRef  = useRef(false)
+  const [isDesktopLayout, setIsDesktopLayout] = useState(true)
+useEffect(() => {
+  if (typeof window === 'undefined' || !window.matchMedia) return
+  const mql = window.matchMedia('(min-width: 640px)')
+  setIsDesktopLayout(mql.matches)
+  const handler = (e: MediaQueryListEvent) => setIsDesktopLayout(e.matches)
+  if (mql.addEventListener) {
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  } else {
+    (mql as any).addListener(handler)
+    return () => (mql as any).removeListener(handler)
+  }
+}, [])
   useEffect(() => { arrivalsRef.current = arrivals }, [arrivals])
   useEffect(() => { departuresRef.current = departures }, [departures])
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode])
@@ -1303,7 +1318,7 @@ function FlightBoard(): JSX.Element {
           </div>
         ) : (
           <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
-            <TableHeaders headers={tableHeaders} headerBg={colors.header} />
+          {isDesktopLayout && <TableHeaders headers={tableHeaders} headerBg={colors.header} />}
             <div className="flex-1 overflow-y-auto">
               {sortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
@@ -1312,13 +1327,14 @@ function FlightBoard(): JSX.Element {
                 </div>
               ) : (
                 sortedFlights.map((flight, index) => (
-                  <FlightRow
+              <FlightRow
                     key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
                     flight={flight}
                     index={index}
                     showArrivals={showArrivals}
                     colorTitle={colors.title}
                     autoStatusTick={autoStatusTick}
+                    isDesktopLayout={isDesktopLayout}
                   />
                 ))
               )}
@@ -1332,6 +1348,7 @@ function FlightBoard(): JSX.Element {
         <div className="ticker-wrap">
           <div className={`ticker-move ${colors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
             {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
+            {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
           </div>
         </div>
       </div>
