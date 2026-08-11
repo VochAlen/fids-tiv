@@ -470,7 +470,7 @@ const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
 }: { headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]; headerBg: string }) {
   return (
-    <div className={`gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
+    <div className={`flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
       {headers.map(h => {
         const Icon = h.icon
         return (

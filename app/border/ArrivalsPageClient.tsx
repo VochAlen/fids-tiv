@@ -22,7 +22,7 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
 // ============================================================
-const REFRESH_INTERVAL_MS      = 150_000;   // 90s umjesto 60s → -33% poziva
+const REFRESH_INTERVAL_MS      = 180_000;   // 90s umjesto 60s → -33% poziva
 const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
@@ -30,7 +30,14 @@ const MAX_FLIGHTS_DISPLAY      = 12;
 const ARRIVED_SHOW_MINUTES     = 60;        // ← prikaži 45 min nakon dolaska
 const CANCELLED_SHOW_MINUTES   = 15;        // ← prikaži cancelled letove 15 minuta
 const HIDDEN_PATTERNS          = ["ZZZ", "G00", "PVT", "TST"];
+
 // let lastKnownHash: string | null = null;
+// ── Low-end detekcija ──
+const IS_LOW_END = typeof navigator !== 'undefined' &&
+  (navigator.hardwareConcurrency ?? 4) < 4;
+
+// ── Memory pressure threshold ──
+const MEMORY_PRESSURE_THRESHOLD = 0.80;
 
 const PLACEHOLDER =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHZpZXdCb3g9IjAgMCA0MCAyNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMjMzMjQ0Ii8+PHRleHQgeD0iMjAiIHk9IjE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNDc2MDdBIiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+";
@@ -252,14 +259,17 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
 
 const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const img = e.currentTarget;
-  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
+  if (IS_LOW_END) {
+    img.src = PLACEHOLDER;
+    img.onerror = null;
+    return;
+  }
   if (img.dataset.t === 'local') {
     img.dataset.t = 'fa';
     const fw = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`;
     if (icao) { img.src = fw; return; }
     img.src = PLACEHOLDER; img.onerror = null; return;
   }
-  // FlightAware je promašio → placeholder
   img.src = PLACEHOLDER; img.onerror = null;
 }, [icao]);
 
@@ -276,10 +286,10 @@ const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     : icao;
 
   return (
-    <div
-      className={`fids-row flex gap-0 p-0 border-b border-white/10 ${rowBg}`}
-      style={{ contain: "layout style" }}
-    >
+<div
+  className={`fids-row flex gap-0 p-0 border-b border-white/10 ${rowBg}`}
+  style={{ contain: "layout style paint", contentVisibility: "auto", containIntrinsicSize: "auto 68px" }}
+>
       <div className="fids-cell fids-w-sch flex items-center justify-center">
         <span className="fids-time">{fmt(flight.ScheduledDepartureTime) || <span className="text-white/30">--:--</span>}</span>
       </div>
@@ -349,7 +359,9 @@ const ClockDisplay = memo(function ClockDisplay() {
   const [t, setT] = useState("");
   useEffect(() => {
     const tick = () => setT(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
+    tick();
+    const id = setInterval(tick, 10_000); // ← bilo 1_000
+    return () => clearInterval(id);
   }, []);
   return <span className="fids-clock">{t || "--:--"}</span>;
 });
@@ -391,19 +403,45 @@ function ArrivalsBoard(): JSX.Element {
   const [flights, setFlights]   = useState<Flight[]>([]);
   const [loading, setLoading]   = useState(true);
   const [tick, setTick]         = useState(0);
+   const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END); // ← novo
   const mounted                 = useRef(true);
+  const lastHeartbeat = useRef(Date.now());
+useEffect(() => {
+  const id = setInterval(() => {
+    if (Date.now() - lastHeartbeat.current > 120_000) window.location.reload();
+    // ← NEMA više 'else' grane ovdje — samo provjerava, ne ažurira
+  }, 30_000);
+  return () => clearInterval(id);
+}, []);
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
 const etagRef = useRef<string | null>(null);
 const tidRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 const isLoadingRef = useRef(false);
+ useEffect(() => {
+    if (IS_LOW_END) return;
+    const checkMemory = () => {
+      const perf = (performance as any);
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const total = perf.memory.totalJSHeapSize;
+        if (total > 0 && used / total > MEMORY_PRESSURE_THRESHOLD) {
+          setReducedAnimations(true);
+          console.warn('⚠️ Memory pressure detected — reducing animations');
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
 
 
   // Inject CSS on client
-  useEffect(() => {
-    if (document.getElementById('arr-styles')) return;
-    const el = document.createElement('style');
-    el.id = 'arr-styles';
+ useEffect(() => {
+  const existing = document.getElementById('arr-styles');
+  if (existing) existing.remove(); // ← ukloni stari da može da se update-uje
+  const el = document.createElement('style');
+  el.id = 'arr-styles';
     el.textContent = `
         html,body,#__next{height:100vh;margin:0;padding:0;overflow:hidden}
         *{box-sizing:border-box;-webkit-font-smoothing:antialiased}
@@ -593,7 +631,7 @@ const isLoadingRef = useRef(false);
           color:rgba(255,255,255,0.45);
         }
 
-        .led-base{will-change:opacity,box-shadow;animation:1s ease-in-out infinite alternate led-pulse-generic}
+      .led-base{animation:1s ease-in-out infinite alternate led-pulse-generic}
         .led-phase-b{animation-delay:.55s}
         @keyframes led-pulse-generic{0%{opacity:.2}100%{opacity:1}}
         .led-blue  {background:#60a5fa;box-shadow:0 0 6px #60a5fa80}
@@ -606,7 +644,7 @@ const isLoadingRef = useRef(false);
         .led-lime  {background:#a3e635;box-shadow:0 0 6px #a3e63580}
 
         @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.7}}
-        .animate-pill-blink{animation:.9s ease-in-out infinite pill-blink;will-change:opacity}
+     .animate-pill-blink{animation:.9s ease-in-out infinite pill-blink}
 
         .fids-loading{
           flex:1;display:flex;flex-direction:column;
@@ -710,10 +748,13 @@ const isLoadingRef = useRef(false);
             animation:none!important;opacity:1!important;
           }
         }
+          ${reducedAnimations ? `
+.animate-pill-blink,.led-base{animation:none!important;opacity:1!important}
+` : ''}
       `;
-    document.head.appendChild(el);
-    return () => { document.getElementById('arr-styles')?.remove(); };
-  }, []);
+ document.head.appendChild(el);
+  return () => { document.getElementById('arr-styles')?.remove(); };
+}, [reducedAnimations]); // ← dodaj zavisnost
 
   // Auto-status tick svake 60s
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
@@ -809,21 +850,23 @@ const load = useCallback(async () => {
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagRef.current = newEtag;
 
-    if (mounted.current) {
-      saveCache(data);
-      if (data?.arrivals) {
-        setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-        setLoading(false);
-      }
-    }
-  } catch (err) {
-    console.error("Border load error:", err);
-    const c = loadCache();
-    if (c?.arrivals && mounted.current) {
-      setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-      setLoading(false);
-    }
-  } finally {
+if (mounted.current) {
+  saveCache(data);
+  if (data?.arrivals) {
+    setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+    setLoading(false);
+    lastHeartbeat.current = Date.now(); // ← DODAJ OVDJE
+  }
+}
+} catch (err) {
+  console.error("Border load error:", err);
+  const c = loadCache();
+  if (c?.arrivals && mounted.current) {
+    setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+    setLoading(false);
+    lastHeartbeat.current = Date.now(); // ← i ovdje, opciono
+  }
+} finally {
     isLoadingRef.current = false;
     if (mounted.current) {
       clearTimeout(tidRef.current!);
