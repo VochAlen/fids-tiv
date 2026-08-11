@@ -1171,52 +1171,60 @@ function DeparturesBoard(): JSX.Element {
         )}
       </div>
 
-      <style jsx global>{`
-        #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
+<style jsx global>{`
+  #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
 
-        /* OPTIMIZOVANO: will-change uklonjen sa svih animacija */
-        .led-base{animation:1s ease-in-out infinite alternate led-pulse}
-        .led-phase-b{animation-delay:.5s}
-        .led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}
-        .led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}
-        .led-purple{background:#4a1d96}.led-lime{background:#365314}
-        @keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}
-        @keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}
-        @keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}
-        @keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}
-        @keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}
-        @keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}
-        @keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}
-        @keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}
-        @keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}
-        .led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}
-        .led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}
-        .led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}
-        .led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}
-        .led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}
-        .led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}
-        .led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}
-        .led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}
-        @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
-        @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
-        .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
-        .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
-        .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
-        .ticker-move{display:inline-block;white-space:nowrap;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
-        @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
-        @media(max-width:639px){.ticker-move{animation-duration:35s}}
+  /* LED animacije - OSTAJA AKTIVNE na svim uređajima */
+  .led-base{animation:1s ease-in-out infinite alternate led-pulse}
+  .led-phase-b{animation-delay:.5s}
+  .led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}
+  .led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}
+  .led-purple{background:#4a1d96}.led-lime{background:#365314}
+  @keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}
+  @keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}
+  @keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}
+  @keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}
+  @keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}
+  @keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}
+  @keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}
+  @keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}
+  @keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}
+  .led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}
+  .led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}
+  .led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}
+  .led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}
+  .led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}
+  .led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}
+  .led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}
+  .led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}
 
-        /* OPTIMIZOVANO: reducedAnimations — gasi animacije pod memorijskim pritiskom */
-        ${reducedAnimations ? `
-        .animate-pill-blink,.animate-pill-blink-fast,.led-base{animation:none!important;opacity:1!important}
-        .ticker-move{animation-duration:90s!important}
-        ` : ''}
+  /* Pill blink - OSTAJA AKTIVAN na svim uređajima */
+  @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
+  @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
+  .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
+  .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
 
-        @media(prefers-reduced-motion:reduce){.animate-blink,.animate-pill-blink,.animate-pill-blink-fast,.animate-pulse,.animate-spin,.led-base,.ticker-move{animation:none!important;opacity:1!important}}
-        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
-        ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
-        body,html{overflow:hidden;margin:0;padding:0}
-      `}</style>
+  /* Ticker - OSTAJE AKTIVAN na svim uređajima */
+  .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
+  .ticker-move{display:inline-block;white-space:nowrap;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
+  @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+  @media(max-width:639px){.ticker-move{animation-duration:35s}}
+
+  /* reducedAnimations - gasi SAMO dekorativne animacije (pulse, spin), NE LED i ticker */
+  ${reducedAnimations ? `
+    .animate-pulse{animation:none!important;opacity:1!important}
+    .animate-spin{animation:none!important;opacity:1!important}
+  ` : ''}
+
+  /* Poštovanje system preference - ali NE gasi LED i ticker (funkcionalni su) */
+  @media(prefers-reduced-motion:reduce){
+    .animate-pulse,.animate-spin{animation:none!important;opacity:1!important}
+  }
+
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
+  body,html{overflow:hidden;margin:0;padding:0}
+`}</style>
     </div>
   );
 }

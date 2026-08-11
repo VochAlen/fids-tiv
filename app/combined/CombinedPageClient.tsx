@@ -1353,44 +1353,48 @@ useEffect(() => {
         </div>
       </div>
 
-      <style jsx global>{`
-        #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
+<style jsx global>{`
+  #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
 
-        /* OPTIMIZOVANO: uklonjen will-change sa svih animacija — zadržavao GPU texture */
-        @keyframes ledBlinkA{0%{opacity:.2}100%{opacity:1}}
-        @keyframes ledBlinkB{0%{opacity:1}100%{opacity:.2}}
-        @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
-        @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
+  /* LED animacije - OSTAJU AKTIVNE na svim uređajima */
+  @keyframes ledBlinkA{0%{opacity:.2}100%{opacity:1}}
+  @keyframes ledBlinkB{0%{opacity:1}100%{opacity:.2}}
+  @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
+  @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
 
-        .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
-        .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
-        .led-blink-a{animation:ledBlinkA .8s ease-in-out infinite alternate}
-        .led-blink-b{animation:ledBlinkB .8s ease-in-out infinite alternate}
+  .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
+  .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
+  .led-blink-a{animation:ledBlinkA .8s ease-in-out infinite alternate}
+  .led-blink-b{animation:ledBlinkB .8s ease-in-out infinite alternate}
 
-        .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
-        .ticker-move{
-          display:inline-block;
-          white-space:nowrap;
-          /* OPTIMIZOVANO: will-change uklonjen — zadržavao GPU layer beskonačno */
-          backface-visibility:hidden;
-          animation:ticker-scroll 45s linear infinite
-        }
-        @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+  /* Ticker - OSTAJE AKTIVAN na svim uređajima */
+  .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
+  .ticker-move{
+    display:inline-block;
+    white-space:nowrap;
+    backface-visibility:hidden;
+    animation:ticker-scroll 45s linear infinite
+  }
+  @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
 
-        @media(max-width:639px){.ticker-move{animation-duration:35s}}
+  @media(max-width:639px){.ticker-move{animation-duration:35s}}
 
-        /* OPTIMIZOVANO: reducedAnimations — gasi animacije kad je memorija pod pritiskom */
-        ${reducedAnimations ? `
-        .animate-pill-blink,.animate-pill-blink-fast,.led-blink-a,.led-blink-b{animation:none!important;opacity:1!important}
-        .ticker-move{animation-duration:90s!important}
-        ` : ''}
+  /* reducedAnimations - gasi SAMO dekorativne animacije */
+  ${reducedAnimations ? `
+    .animate-pulse{animation:none!important;opacity:1!important}
+    .animate-spin{animation:none!important;opacity:1!important}
+  ` : ''}
 
-        @media(prefers-reduced-motion:reduce){.animate-pill-blink,.animate-pill-blink-fast,.led-blink-a,.led-blink-b,.animate-pulse,.animate-spin,.ticker-move{animation:none!important;opacity:1!important}}
+  /* Poštovanje system preference - ali NE gasi LED i ticker */
+  @media(prefers-reduced-motion:reduce){
+    .animate-pulse,.animate-spin{animation:none!important;opacity:1!important}
+    /* LED i ticker OSTAJU aktivni - oni su funkcionalni, ne dekorativni */
+  }
 
-        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
-        ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
-        body,html{overflow:hidden;margin:0;padding:0}
-      `}</style>
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
+  body,html{overflow:hidden;margin:0;padding:0}
+`}</style>
     </div>
   )
 }

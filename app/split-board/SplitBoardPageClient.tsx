@@ -23,20 +23,23 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 120_000;
+const REFRESH_INTERVAL_MS          = 150_000;
 const FETCH_TIMEOUT_MS             = 15_000;
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
 const CACHE_KEY                    = "flight_board_cache";
 const CACHE_DURATION               = 5 * 60 * 1_000;
-const HEARTBEAT_TIMEOUT_MS         = 120_000;
+const HEARTBEAT_TIMEOUT_MS         = 150_000;
 const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY          = 18;
 const MAX_FLIGHTS_MEMORY           = 15;
 const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
-let lastKnownHash: string | null = null;
+// let lastKnownHash: string | null = null; komentarisano 11.08.2026-nakon low end optimizacije
+const IS_LOW_END = typeof navigator !== 'undefined' &&
+  (navigator.hardwareConcurrency ?? 4) < 4;
+const MEMORY_PRESSURE_THRESHOLD = 0.80;
 
 // ============================================================
 // ERROR BOUNDARY
@@ -285,7 +288,7 @@ const ClockDisplay = memo(function ClockDisplay() {
   useEffect(() => {
     setMounted(true);
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 1000); return () => clearInterval(id);
+    tick(); const id = setInterval(tick, 10_000); return () => clearInterval(id);
   }, []);
   if (!mounted) return <div className="text-5xl font-black text-white leading-none">--:--</div>;
   return <div className="text-5xl font-black text-white drop-shadow-2xl leading-none">{time}</div>;
@@ -296,7 +299,7 @@ const NightClock = memo(function NightClock() {
   const [time, setTime] = useState("");
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
+    tick(); const id = setInterval(tick, 10_000); return () => clearInterval(id);
   }, []);
   return (
     <div className="h-screen w-full flex items-center justify-center bg-black select-none">
@@ -352,9 +355,10 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
 // FlightRow - prilagođena za 1rem font
 // ----------------------------------------------
 const FlightRow = memo(function FlightRow({
-  flight, index, isArrival, titleColor, autoStatusTick,
+  flight, index, isArrival, titleColor, autoStatusTick, isDesktopLayout,
 }: {
   flight: Flight; index: number; isArrival: boolean; titleColor: string; autoStatusTick: number;
+  isDesktopLayout: boolean;
 }) {
   const formatTime = useCallback((t: string) => formatTimeString(t), []);
   const pill = useMemo(
@@ -364,6 +368,11 @@ const FlightRow = memo(function FlightRow({
   const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const img = e.currentTarget;
+  if (IS_LOW_END) {
+    img.src = PLACEHOLDER_IMAGE;
+    img.onerror = null;
+    return;
+  }
   if (img.dataset.tried === 'local') {
     img.dataset.tried = 'fw';
     const fw = getFlightawareLogoURL(icao);
@@ -389,124 +398,128 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const pillCls = `w-[95%] flex items-center justify-center gap-2 text-base font-extrabold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
   const mobilePillCls = `flex items-center gap-1 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
 
+if (isDesktopLayout) {
   return (
-    <>
-      {/* Desktop (min-width 1024px) - SVI FONTOVI 1rem */}
-      <div className={`hidden lg:flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "48px", contain: "layout style" }}>
-        {/* Scheduled */}
-        <div className="flex items-center justify-center w-[140px]">
-          <div className="text-base font-black text-white drop-shadow-lg">
-            {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
-          </div>
+    <div
+      className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
+      style={{ minHeight: "48px", contain: "layout style paint", contentVisibility: "auto", containIntrinsicSize: "auto 48px" }}
+    >
+      {/* Scheduled */}
+      <div className="flex items-center justify-center w-[140px]">
+        <div className="text-base font-black text-white drop-shadow-lg">
+          {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
         </div>
-        {/* Estimated */}
-        <div className="flex items-center justify-center w-[140px]">
-          {estimatedDisplay
-            ? <div className={`text-base font-black ${titleColor} drop-shadow-lg`}>{estimatedDisplay}</div>
-            : <div className="text-base text-white/30 font-bold">-</div>
-          }
+      </div>
+      {/* Estimated */}
+      <div className="flex items-center justify-center w-[140px]">
+        {estimatedDisplay
+          ? <div className={`text-base font-black ${titleColor} drop-shadow-lg`}>{estimatedDisplay}</div>
+          : <div className="text-base text-white/30 font-bold">-</div>
+        }
+      </div>
+      {/* Flight + Logo */}
+      <div className="flex items-center gap-2 w-[240px]">
+        <div className="relative w-[50px] h-8 bg-white rounded-lg p-0.5 shadow-xl flex-shrink-0">
+          <img
+            src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+            alt={`${flight.AirlineName} logo`}
+            className="object-contain w-full h-full"
+            onError={onImgErr}
+            data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+            decoding="async"
+            loading={index < 9 ? "eager" : "lazy"}
+            fetchPriority={index < 8 ? "high" : "auto"}
+          />
         </div>
-        {/* Flight + Logo */}
-        <div className="flex items-center gap-2 w-[240px]">
-          <div className="relative w-[50px] h-8 bg-white rounded-lg p-0.5 shadow-xl flex-shrink-0">
-<img
-  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-  alt={`${flight.AirlineName} logo`}
-  className="object-contain w-full h-full"
-  onError={onImgErr}
-  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-  decoding="async"
-  loading={index < 9 ? "eager" : "lazy"}
-  fetchPriority={index < 8 ? "high" : "auto"}
-/>
-          </div>
-          <div className="text-xl font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
-          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-            <div className="text-xs text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
-          )}
-        </div>
-        {isArrival ? (
-          <div className="flex items-center w-[500px]">
-            <div className="text-2xl font-black text-white truncate drop-shadow-lg">
-              {flight.DestinationCityName || flight.DestinationAirportName}
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center w-[320px]">
-            <div className="text-2xl font-black text-white truncate drop-shadow-lg">
-              {flight.DestinationCityName || flight.DestinationAirportName}
-            </div>
-          </div>
+        <div className="text-xl font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+        {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+          <div className="text-xs text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
         )}
-        {isArrival ? (
-          <div className="flex items-center justify-center w-[600px]">
+      </div>
+      {isArrival ? (
+        <div className="flex items-center w-[500px]">
+          <div className="text-2xl font-black text-white truncate drop-shadow-lg">
+            {flight.DestinationCityName || flight.DestinationAirportName}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center w-[320px]">
+          <div className="text-2xl font-black text-white truncate drop-shadow-lg">
+            {flight.DestinationCityName || flight.DestinationAirportName}
+          </div>
+        </div>
+      )}
+      {isArrival ? (
+        <div className="flex items-center justify-center w-[600px]">
+          {pill.hasStatusText ? (
+            <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "1.8rem" : "0.75rem", paddingRight: "0.75rem", width: "95%" }}>
+              {pill.showLEDs && <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
+              <div className="overflow-hidden text-center whitespace-nowrap text-base" style={{ marginLeft: pill.showLEDs ? "1.2rem" : "0", width: "100%" }}>{pill.displayText}</div>
+            </div>
+          ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-center w-[280px]">
+            {flight.CheckInDesk && flight.CheckInDesk !== "-"
+              ? <div className="text-base font-black text-white bg-black/40 py-1 px-2 rounded-lg border border-white/20 shadow-xl">{flight.CheckInDesk}</div>
+              : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
+          </div>
+          <div className="flex items-center justify-center w-[180px]">
+            {flight.GateNumber && flight.GateNumber !== "-"
+              ? <div className={`text-base font-black py-1 px-2 rounded-lg border shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>{flight.GateNumber}</div>
+              : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
+          </div>
+          <div className="flex items-center justify-center w-[420px]">
             {pill.hasStatusText ? (
-              <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "1.8rem" : "0.75rem", paddingRight: "0.75rem", width: "95%" }}>
-                {pill.showLEDs && <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
-                <div className="overflow-hidden text-center whitespace-nowrap text-base" style={{ marginLeft: pill.showLEDs ? "1.2rem" : "0", width: "100%" }}>{pill.displayText}</div>
+              <div className={`${pillCls} overflow-hidden text-base`}>
+                {pill.showLEDs && <div className="flex items-center gap-1 flex-shrink-0"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
+                <span className="truncate whitespace-nowrap font-extrabold tracking-wide text-base">{pill.displayText}</span>
               </div>
             ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
           </div>
-        ) : (
-          <>
-            <div className="flex items-center justify-center w-[280px]">
-              {flight.CheckInDesk && flight.CheckInDesk !== "-"
-                ? <div className="text-base font-black text-white bg-black/40 py-1 px-2 rounded-lg border border-white/20 shadow-xl">{flight.CheckInDesk}</div>
-                : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
-            </div>
-            <div className="flex items-center justify-center w-[180px]">
-              {flight.GateNumber && flight.GateNumber !== "-"
-                ? <div className={`text-base font-black py-1 px-2 rounded-lg border shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>{flight.GateNumber}</div>
-                : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
-            </div>
-            <div className="flex items-center justify-center w-[420px]">
-              {pill.hasStatusText ? (
-                <div className={`${pillCls} overflow-hidden text-base`}>
-                  {pill.showLEDs && <div className="flex items-center gap-1 flex-shrink-0"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
-                  <span className="truncate whitespace-nowrap font-extrabold tracking-wide text-base">{pill.displayText}</span>
-                </div>
-              ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Mobilni prikaz (ispod 1024px) */}
-      <div className={`flex lg:hidden flex-col gap-1.5 px-3 py-2 border-b border-white/10 ${rowBg}`}>
-        <div className="flex items-center gap-2">
-    <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
-  <img
-    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-    alt="logo"
-    className="object-contain w-full h-full"
-    onError={onImgErr}
-    data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-    decoding="async"
-  />
-</div>
-          <span className="text-lg font-black text-white tracking-wide">{flight.FlightNumber}</span>
-          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && <span className="text-[10px] text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>}
-          <div className="ml-auto flex items-center gap-1">
-            <span className="text-sm font-black text-white tabular-nums">{formatTimeString(flight.ScheduledDepartureTime) || "--:--"}</span>
-            {estimatedDisplay && <><span className="text-white/30 text-[10px]">›</span><span className={`text-sm font-black ${titleColor} tabular-nums`}>{estimatedDisplay}</span></>}
-          </div>
-        </div>
-        <div className="text-sm font-black text-white truncate leading-tight">{flight.DestinationCityName || flight.DestinationAirportName}</div>
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {!isArrival && flight.CheckInDesk && flight.CheckInDesk !== "-" && <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded-md border border-white/20"><Users className="w-2.5 h-2.5 opacity-70" />{flight.CheckInDesk}</span>}
-          {!isArrival && flight.GateNumber && flight.GateNumber !== "-" && <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}><DoorOpen className="w-2.5 h-2.5 opacity-70" />{flight.GateNumber}</span>}
-          {pill.hasStatusText ? (
-            <div className={mobilePillCls}>
-              {pill.showLEDs && <><LEDIndicator color={pill.led1} phase="a" size="w-1.5 h-1.5" /><LEDIndicator color={pill.led2} phase="b" size="w-1.5 h-1.5" /></>}
-              <span className="truncate max-w-[180px] text-[10px]">{pill.displayText}</span>
-            </div>
-          ) : <span className="text-[10px] text-white/40 font-semibold">Scheduled</span>}
-        </div>
-      </div>
-    </>
+        </>
+      )}
+    </div>
   );
+}
+
+return (
+  <div className={`flex flex-col gap-1.5 px-3 py-2 border-b border-white/10 ${rowBg}`}>
+    <div className="flex items-center gap-2">
+      <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
+        <img
+          src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+          alt="logo"
+          className="object-contain w-full h-full"
+          onError={onImgErr}
+          data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+          decoding="async"
+        />
+      </div>
+      <span className="text-lg font-black text-white tracking-wide">{flight.FlightNumber}</span>
+      {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && <span className="text-[10px] text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>}
+      <div className="ml-auto flex items-center gap-1">
+        <span className="text-sm font-black text-white tabular-nums">{formatTimeString(flight.ScheduledDepartureTime) || "--:--"}</span>
+        {estimatedDisplay && <><span className="text-white/30 text-[10px]">›</span><span className={`text-sm font-black ${titleColor} tabular-nums`}>{estimatedDisplay}</span></>}
+      </div>
+    </div>
+    <div className="text-sm font-black text-white truncate leading-tight">{flight.DestinationCityName || flight.DestinationAirportName}</div>
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {!isArrival && flight.CheckInDesk && flight.CheckInDesk !== "-" && <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded-md border border-white/20"><Users className="w-2.5 h-2.5 opacity-70" />{flight.CheckInDesk}</span>}
+      {!isArrival && flight.GateNumber && flight.GateNumber !== "-" && <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}><DoorOpen className="w-2.5 h-2.5 opacity-70" />{flight.GateNumber}</span>}
+      {pill.hasStatusText ? (
+        <div className={mobilePillCls}>
+          {pill.showLEDs && <><LEDIndicator color={pill.led1} phase="a" size="w-1.5 h-1.5" /><LEDIndicator color={pill.led2} phase="b" size="w-1.5 h-1.5" /></>}
+          <span className="truncate max-w-[180px] text-[10px]">{pill.displayText}</span>
+        </div>
+      ) : <span className="text-[10px] text-white/40 font-semibold">Scheduled</span>}
+    </div>
+  </div>
+);
 }, (prev, next) =>
   prev.autoStatusTick === next.autoStatusTick &&
+  prev.isDesktopLayout === next.isDesktopLayout &&
   prev.flight.FlightNumber === next.flight.FlightNumber &&
   prev.flight.StatusEN === next.flight.StatusEN &&
   (prev.flight as any)._gateChangedAt === (next.flight as any)._gateChangedAt &&
@@ -539,11 +552,43 @@ function SplitBoard(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autoStatusTick, setAutoStatusTick] = useState(0);
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
+  const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END);
+
+useEffect(() => {
+  if (IS_LOW_END) return;
+  const checkMemory = () => {
+    const perf = (performance as any);
+    if (perf?.memory) {
+      const used = perf.memory.usedJSHeapSize;
+      const total = perf.memory.totalJSHeapSize;
+      if (total > 0 && used / total > MEMORY_PRESSURE_THRESHOLD) {
+        setReducedAnimations(true);
+        console.warn('⚠️ Memory pressure detected — reducing animations');
+      }
+    }
+  };
+  const id = setInterval(checkMemory, 60_000);
+  return () => clearInterval(id);
+}, []);
 
   // ── Noćni režim — kad je true, prikazuje se samo NightClock,
   // bez ijednog network poziva. Prvi ciklus poslije 04:00 automatski
   // vraća normalan prikaz — self-healing, isti princip kao hash-check.
   const [nightMode, setNightMode] = useState(false);
+  const [isDesktopLayout, setIsDesktopLayout] = useState(true)
+useEffect(() => {
+  if (typeof window === 'undefined' || !window.matchMedia) return
+  const mql = window.matchMedia('(min-width: 1024px)') // pazi: ovdje je lg: = 1024px, ne 640px kao u drugim fajlovima
+  setIsDesktopLayout(mql.matches)
+  const handler = (e: MediaQueryListEvent) => setIsDesktopLayout(e.matches)
+  if (mql.addEventListener) {
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  } else {
+    (mql as any).addListener(handler)
+    return () => (mql as any).removeListener(handler)
+  }
+}, [])
 
   const isMountedRef = useRef(true);
   const lastHeartbeat = useRef(Date.now());
@@ -552,6 +597,7 @@ function SplitBoard(): JSX.Element {
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
 const etagStatusRef = useRef<string | null>(null);
+const lastKnownHashRef = useRef<string | null>(null);
 
   const applyAssignmentsOnly = useCallback((
   deps: Flight[],
@@ -591,16 +637,12 @@ const etagStatusRef = useRef<string | null>(null);
   }, []);
 
   // Heartbeat
-  useEffect(() => {
-    const update = () => { lastHeartbeat.current = Date.now(); };
-    const check = setInterval(() => {
-      if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
-    }, HEARTBEAT_CHECK_INTERVAL_MS);
-    window.addEventListener("mousemove", update, { passive: true });
-    window.addEventListener("keypress", update, { passive: true });
-    window.addEventListener("touchstart", update, { passive: true });
-    return () => { clearInterval(check); window.removeEventListener("mousemove", update); window.removeEventListener("keypress", update); window.removeEventListener("touchstart", update); };
-  }, []);
+useEffect(() => {
+  const check = setInterval(() => {
+    if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
+  }, HEARTBEAT_CHECK_INTERVAL_MS);
+  return () => clearInterval(check);
+}, []);
 
   // Memory cleanup
   useEffect(() => {
@@ -633,6 +675,7 @@ const loadData = useCallback(async () => {
   if (isNightHours()) {
     if (isMountedRef.current) setNightMode(true);
     setLoading(false);
+     lastHeartbeat.current = Date.now(); // ← dodato
     return;
   }
   if (isMountedRef.current) setNightMode(false);
@@ -666,16 +709,15 @@ try {
   const statusRes = await fetch('/api/flights/status', { headers });
   
   // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
-  if (statusRes.status === 304) {
-    // Sačuvaj novi ETag (ako stigne)
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
-    
-    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-    isInitialLoad.current = false;
-    setLoading(false);
-    return; // preskoči čitav ciklus
-  }
+if (statusRes.status === 304) {
+  const newEtag = statusRes.headers.get('ETag');
+  if (newEtag) etagStatusRef.current = newEtag;
+  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+  isInitialLoad.current = false;
+  setLoading(false);
+  lastHeartbeat.current = Date.now(); // ← dodaj
+  return;
+}
 
   if (statusRes.ok) {
     const statusData = await statusRes.json();
@@ -685,25 +727,26 @@ try {
 
     statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
 
-if (!forceRefresh && statusData.hash === lastKnownHash && lastKnownHash !== null) {
-      hashChanged = false;
-    } else {
-      lastKnownHash = statusData.hash;
-    }
+if (!forceRefresh && statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
+  hashChanged = false;
+} else {
+  lastKnownHashRef.current = statusData.hash;
+}
   }
 } catch {
   // ignoriši grešku, nastavi na pun fetch kao fallback
 }
 
-    if (!hashChanged) {
-      if (statusAssignments) {
-        setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!));
-      }
-      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-      isInitialLoad.current = false;
-      setLoading(false);
-      return;
-    }
+if (!hashChanged) {
+  if (statusAssignments) {
+    setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!));
+  }
+  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+  isInitialLoad.current = false;
+  setLoading(false);
+  lastHeartbeat.current = Date.now(); // ← dodaj
+  return;
+}
 
     // ── PUN FETCH ──
     let data: any = null;
@@ -756,6 +799,7 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
     setArrivals(rawArrivals);
     setDepartures(departuresWithMeta);
     setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    lastHeartbeat.current = Date.now(); // ← dodato
     if (!usedCache) setErrorMessage(null);
     else setTimeout(() => setErrorMessage(null), 5_000);
   } catch (err) {
@@ -848,16 +892,17 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
                 <div className="text-lg">No arrivals scheduled</div>
               </div>
             ) : (
-              sortedArrivals.map((flight, idx) => (
-                <FlightRow
-                  key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
-                  flight={flight}
-                  index={idx}
-                  isArrival={true}
-                  titleColor="text-orange-400"
-                  autoStatusTick={autoStatusTick}
-                />
-              ))
+     sortedArrivals.map((flight, idx) => (
+  <FlightRow
+    key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
+    flight={flight}
+    index={idx}
+    isArrival={true}
+    titleColor="text-orange-400"
+    autoStatusTick={autoStatusTick}
+    isDesktopLayout={isDesktopLayout} // ← dodaj
+  />
+))
             )}
           </div>
         </div>
@@ -875,16 +920,17 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
                 <div className="text-lg">No departures scheduled</div>
               </div>
             ) : (
-              sortedDepartures.map((flight, idx) => (
-                <FlightRow
-                  key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
-                  flight={flight}
-                  index={idx}
-                  isArrival={false}
-                  titleColor="text-sky-400"
-                  autoStatusTick={autoStatusTick}
-                />
-              ))
+      sortedDepartures.map((flight, idx) => (
+  <FlightRow
+    key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
+    flight={flight}
+    index={idx}
+    isArrival={false}
+    titleColor="text-sky-400"
+    autoStatusTick={autoStatusTick}
+    isDesktopLayout={isDesktopLayout}
+  />
+))
             )}
           </div>
         </div>
@@ -901,14 +947,18 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
         @keyframes ledBlinkB { 0% { opacity: 1; } 100% { opacity: 0.2; } }
         @keyframes pill-blink { 0%,50%{opacity:1} 51%,100%{opacity:.75} }
         @keyframes pill-blink-fast { 0%,40%{opacity:1} 41%,100%{opacity:.55} }
-        .animate-pill-blink { animation: .8s ease-in-out infinite pill-blink; will-change: opacity; }
-        .animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; will-change: opacity; }
+   .animate-pill-blink { animation: .8s ease-in-out infinite pill-blink; }
+.animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; }
+.ticker-move { display: inline-block; white-space: nowrap; backface-visibility: hidden; animation: ticker-scroll 45s linear infinite; }
         .ticker-wrap { width: 100%; overflow: hidden; position: absolute; top: 0; left: 0; height: 100%; }
-        .ticker-move { display: inline-block; white-space: nowrap; will-change: transform; backface-visibility: hidden; animation: ticker-scroll 45s linear infinite; }
-        @keyframes ticker-scroll { 0% { transform: translate3d(0,0,0); } 100% { transform: translate3d(-50%,0,0); } }
+     
         @media (max-width: 639px) { .ticker-move { animation-duration: 35s; } }
         @media (prefers-reduced-motion: reduce) { .animate-pill-blink, .animate-pill-blink-fast, .ticker-move { animation: none !important; opacity: 1 !important; } }
-      `}</style>
+      
+      ${reducedAnimations ? `
+.animate-pill-blink, .animate-pill-blink-fast, .ticker-move { animation: none !important; opacity: 1 !important; }
+` : ''}
+`}</style>
     </div>
   );
 }

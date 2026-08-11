@@ -743,13 +743,16 @@ const isLoadingRef = useRef(false);
 }
  
 
-        @media(prefers-reduced-motion:reduce){
-          .animate-pill-blink,.fids-pulse-dot,.led-base,.fids-spinner{
-            animation:none!important;opacity:1!important;
-          }
-        }
-          ${reducedAnimations ? `
-.animate-pill-blink,.led-base{animation:none!important;opacity:1!important}
+     @media(prefers-reduced-motion:reduce){
+  /* Gasimo SAMO dekorativne animacije, NE LED i pill-blink (funkcionalni su) */
+  .fids-pulse-dot{animation:none!important;opacity:1!important}
+  .fids-spinner{animation:none!important;opacity:1!important}
+  /* LED i pill-blink OSTAJU aktivni */
+}
+${reducedAnimations ? `
+.animate-pulse{animation:none!important;opacity:1!important}
+.fids-spinner{animation:none!important;opacity:1!important}
+/* LED i pill-blink OSTAJU aktivni */
 ` : ''}
       `;
  document.head.appendChild(el);
