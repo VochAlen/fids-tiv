@@ -68,6 +68,19 @@ const isEasyJetFlight = (flightNumber: string, airlineName?: string): boolean =>
 };
 
 const EASYJET_PLUS_IMAGE = '/easyjet/easyjet_plus.avif';
+// ── NOVO: Lufthansa Group (Lufthansa + Austrian) — ista logika kao BA/easyJet,
+// samo bez classType uslova: SVAKI LH/OS let dobija fiksnu grupnu sliku ──
+const LUFTHANSA_GROUP_PREFIXES = ['LH', 'OS'];
+
+const isLufthansaGroupFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/\s+/g, '');
+  if (name.includes('lufthansa') || name.includes('austrian')) return true;
+
+  const fn = flightNumber.toUpperCase();
+  return LUFTHANSA_GROUP_PREFIXES.some(prefix => fn.startsWith(prefix));
+};
+
+const LUFTHANSA_GROUP_IMAGE = '/lufthansa/LH_group.avif';
 
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
@@ -248,14 +261,16 @@ const AdBanner = memo(function AdBanner({
   nextIndex,
   isTransitioning,
   baImageSrc,
-  overrideImageSrc,   // ← NOVO — generički override (BA ili easyJet ili bilo šta ubuduće)
+  overrideImageSrc,
+  lufthansaImageSrc,   // ← NOVO
 }: {
   adImages: string[];
   currentIndex: number;
   nextIndex: number;
   isTransitioning: boolean;
   baImageSrc: string | null;
-  overrideImageSrc?: string | null;   // ← NOVO
+  overrideImageSrc?: string | null;
+  lufthansaImageSrc?: string | null;   // ← NOVO
 }) {
   // BA let — prikaži statičnu sliku umjesto ads
   if (baImageSrc) {
@@ -302,6 +317,30 @@ const AdBanner = memo(function AdBanner({
       </div>
     );
   }
+  // ── NOVO: Lufthansa Group (LH/OS) override ──
+  if (lufthansaImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={lufthansaImageSrc}
+            alt="Lufthansa Group"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (!adImages.length) return null;
 
   if (!adImages.length) return null;
 
@@ -396,6 +435,12 @@ const easyJetPlusImage = useMemo((): string | null => {
   if (assignment.classType === 'EASYJET_PLUS') return EASYJET_PLUS_IMAGE;
   return null;
 }, [assignment.flightNumber, assignment.airlineName, assignment.classType]);
+
+// ── NOVO: Lufthansa Group — bez classType uslova, svaki LH/OS let ──
+const lufthansaGroupImage = useMemo((): string | null => {
+  if (!isLufthansaGroupFlight(assignment.flightNumber, assignment.airlineName)) return null;
+  return LUFTHANSA_GROUP_IMAGE;
+}, [assignment.flightNumber, assignment.airlineName]);
 
   // ── CSS injection ──────────────────────────────────────────
   useEffect(() => {
@@ -980,6 +1025,7 @@ useEffect(() => {
   isTransitioning={isAdTransitioning}
   baImageSrc={baAdImage}
   overrideImageSrc={easyJetPlusImage}
+  lufthansaImageSrc={lufthansaGroupImage}
 />
 
           {/* Footer */}

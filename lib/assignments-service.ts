@@ -24,6 +24,7 @@ export type RawAssignments = {
 };
 
 export type SimpleAssignments = {
+  [x: string]: any;
   desks: Record<string, string>;
   gates: Record<string, string>;
   // Već izračunat fingerprint (isti onaj koji buildSimpleMaps interno
