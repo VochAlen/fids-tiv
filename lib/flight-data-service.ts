@@ -23,7 +23,7 @@ const FLIGHT_META_KEY = 'cache:flights:meta';
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
 // Promijeni na false da potpuno isključiš korišćenje backup podataka
 // (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
-const BACKUP_ENABLED = false;
+const BACKUP_ENABLED = true;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};

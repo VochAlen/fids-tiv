@@ -23,18 +23,18 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 150_000;
+const REFRESH_INTERVAL_MS          = 180_000;
 const FETCH_TIMEOUT_MS             = 15_000;
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
 const CACHE_KEY                    = "flight_board_cache";
 const CACHE_DURATION               = 5 * 60 * 1_000;
-const HEARTBEAT_TIMEOUT_MS         = 150_000;
+const HEARTBEAT_TIMEOUT_MS         = 180_000;
 const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY          = 18;
 const MAX_FLIGHTS_MEMORY           = 15;
-const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
+const HARD_RESET_INTERVAL_MS       = 7 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
 // let lastKnownHash: string | null = null; komentarisano 11.08.2026-nakon low end optimizacije
 const IS_LOW_END = typeof navigator !== 'undefined' &&
