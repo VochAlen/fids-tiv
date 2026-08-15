@@ -593,6 +593,10 @@ useEffect(() => {
   const isMountedRef = useRef(true);
   const lastHeartbeat = useRef(Date.now());
   const prevGatesRef = useRef<Record<string, string>>({});
+  const arrivalsRef = useRef<Flight[]>([]);
+const departuresRef = useRef<Flight[]>([]);
+useEffect(() => { arrivalsRef.current = arrivals }, [arrivals]);
+useEffect(() => { departuresRef.current = departures }, [departures]);
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
@@ -694,7 +698,7 @@ const loadData = useCallback(async () => {
     // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moguća
     // desinhronizacija (stale meta, noćni prelaz i sl.). U tom slučaju
     // UVIJEK radi pun fetch, da se ekran sam "izliječi".
-const boardIsCurrentlyEmpty = arrivals.length === 0 && departures.length === 0;
+const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0;
 const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
     let hashChanged = true;
     let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
@@ -809,7 +813,7 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
     isInitialLoad.current = false;
     if (isMountedRef.current) setLoading(false);
   }
-}, [arrivals.length, departures.length]);
+}, []);
 
   useEffect(() => {
     isMountedRef.current = true;
