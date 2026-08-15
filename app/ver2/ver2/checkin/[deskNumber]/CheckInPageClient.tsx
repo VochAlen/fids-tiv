@@ -29,7 +29,7 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 10_000; // Svako 10s provjerava admin promjene
+const POLL_INTERVAL = 12_000; // Svako 10s provjerava admin promjene
 const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
 const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);

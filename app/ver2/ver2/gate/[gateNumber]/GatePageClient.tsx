@@ -19,7 +19,7 @@ import Image from 'next/image';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 8_000;
+const REFRESH_INTERVAL_MS    = 12_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
