@@ -16,7 +16,7 @@ const REFRESH_INTERVAL_MS = 150_000
 const CACHE_KEY = "baggage_board_cache_v1"
 const CACHE_DURATION = 5 * 60_000
 const EMERGENCY_CACHE_KEY = "baggage_board_emergency_v1"
-let lastKnownHash: string | null = null
+
 
 interface FlightDataResponse {
   departures: Flight[]
@@ -93,6 +93,10 @@ export default function BaggagePageClient() {
   const [nightMode, setNightMode] = useState(false)
 
   const etagRef = useRef<string | null>(null)
+  // unutar BaggagePageClient komponente, sa ostalim refs:
+const lastKnownHashRef = useRef<string | null>(null)
+
+// i onda svuda gdje se koristi lastKnownHash, koristi lastKnownHashRef.current
   const isMountedRef = useRef(true)
 
   // ── Inicijalni keš load — brz prvi prikaz, bez čekanja mreže ──
@@ -136,8 +140,12 @@ export default function BaggagePageClient() {
             const data = await statusRes.json()
             const newEtag = statusRes.headers.get('ETag')
             if (newEtag) etagRef.current = newEtag
-            if (data.hash === lastKnownHash && lastKnownHash !== null) hashChanged = false
-            lastKnownHash = data.hash
+           if (data.hash !== null && data.hash === lastKnownHashRef.current) {
+  hashChanged = false
+} else if (data.hash !== null) {
+  lastKnownHashRef.current = data.hash
+}
+// ako je data.hash === null, ne diraj lastKnownHash — zadrži zadnju poznatu vrijednost
           }
         } catch { /* nastavi na pun fetch */ }
 

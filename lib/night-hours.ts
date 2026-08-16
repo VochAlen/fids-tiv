@@ -1,12 +1,4 @@
 // lib/night-hours.ts
-// Aerodrom nema letove između 21:00 i 04:00 — u tom periodu
-// preskačemo polling u potpunosti, bez ikakvog HTTP zahtjeva.
-// export function isNightHours(): boolean {
-//   const h = new Date().getHours();
-//   return h >= 21 || h < 4;
-// }
-
-/// lib/night-hours.ts
 // Aerodrom nema letove u određenom noćnom periodu — u tom periodu
 // preskačemo polling u potpunosti, bez ikakvog HTTP zahtjeva.
 //
@@ -172,4 +164,52 @@ export function isNightHours(date: Date = new Date()): boolean {
   const window = getWindowCached(p);
 
   return isWithinWindow(nowMinutes, window.start, window.end);
+}
+
+// ── Koliko sekundi preostaje do kraja TRENUTNOG noćnog prozora, počevši
+// od "date" (podrazumijevano: sada). Vraća null ako trenutno NIJE noć.
+//
+// Zašto ovo postoji: CDN keš (Cache-Control: s-maxage=N) ne zna ništa o
+// aerodromskom rasporedu — samo broji sekunde od trenutka keširanja. Ako
+// mu damo fiksni dugi TTL noću (npr. 3600s), CDN može servirati STARI
+// noćni odgovor kioscima i do 1h NAKON što stvarno počne dan, jer Redis
+// nivo zaštite od tog scenarija (getCurrentFlightData provjerava
+// `cached.isNightMode && !nightNow`) se izvršava UNUTAR funkcije — a CDN
+// cache hit nikad ne stigne do funkcije.
+//
+// Sa ovom funkcijom, ruta može postaviti s-maxage TAČNO na broj sekundi
+// preostalih do kraja noći (ograničeno gornjim/donjim limitom radi
+// sigurnosti) — CDN sam prirodno istekne baš kad dan počne, umjesto da
+// čeka fiksni interval koji možda daleko premašuje stvarnu granicu.
+export function secondsUntilNightEnds(date: Date = new Date()): number | null {
+  const p = getMontenegroParts(date);
+  const nowMinutes = toMinutes(p.hour, p.minute);
+  const window = getWindowCached(p);
+
+  if (!isWithinWindow(nowMinutes, window.start, window.end)) return null;
+
+  // Sekunde unutar tekućeg minuta — ne dolaze iz Intl formattera (nema
+  // preciznost sekundi), ali su vremenski-zonski neutralne: Europe/Podgorica
+  // ima cjelobrojni offset u satima (UTC+1/+2), pa se sekundna komponenta
+  // NE mijenja između UTC i lokalnog vremena. Sigurno je koristiti direktno.
+  const nowSecondsInMinute = date.getUTCSeconds();
+
+  let minutesRemaining: number;
+  if (window.start > window.end) {
+    // Prozor prelazi preko ponoći (npr. 21:00–04:00 ili 16:00–05:15)
+    if (nowMinutes >= window.start) {
+      // Prije ponoći — kraj prozora je "sjutra"
+      minutesRemaining = (1440 - nowMinutes) + window.end;
+    } else {
+      // Poslije ponoći, prije kraja prozora
+      minutesRemaining = window.end - nowMinutes;
+    }
+  } else {
+    // Prozor ne prelazi preko ponoći (teorijski slučaj, trenutno se ne
+    // koristi ni u jednom NIGHT_WINDOWS unosu, ali podržano radi ispravnosti)
+    minutesRemaining = window.end - nowMinutes;
+  }
+
+  const secondsRemaining = minutesRemaining * 60 - nowSecondsInMinute;
+  return Math.max(0, secondsRemaining);
 }

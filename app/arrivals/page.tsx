@@ -24,10 +24,10 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 const REFRESH_INTERVAL_MS = 150_000;
 const FETCH_TIMEOUT_MS = 15_000;
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1_000;
+const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 2_000;
 const CACHE_KEY = "arrivals_board_cache";
-const CACHE_DURATION = 5 * 60 * 1_000;
+const CACHE_DURATION = 8 * 60 * 1_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const MAX_FLIGHTS_DISPLAY = 12;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
@@ -255,7 +255,7 @@ function ArrivalsBoard(): JSX.Element {
   const etagRef = useRef<string | null>(null);
   const lastKnownHash = useRef<string | null>(null);
 
-  useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id); }, []);
+  useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 20_000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS); return () => clearTimeout(id); }, []);
 
@@ -299,8 +299,8 @@ useEffect(() => {
         statusHeaders["If-None-Match"] = etagRef.current;
       }
 
-      try {
-      const statusRes = await fetch("/api/flights/status");
+  try {
+  const statusRes = await fetch("/api/flights/status", { headers: statusHeaders });
 
         if (statusRes.status === 304) {
           const newEtag = statusRes.headers.get('ETag');
