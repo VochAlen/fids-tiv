@@ -158,7 +158,7 @@ const lastKnownHashRef = useRef<string | null>(null)
 
         // ── PUN FETCH — samo ako se hash promijenio ──
         try {
-          const data = await fetchFlightData()
+          const data = await fetchFlightData(true)
           if (isMountedRef.current) {
             setAllArrivals(data.arrivals || [])
             setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
