@@ -19,7 +19,7 @@ import Image from 'next/image';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 12_000;
+const REFRESH_INTERVAL_MS    = 13_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
@@ -437,7 +437,8 @@ try {
 
     let data: { departures: Flight[]; arrivals: Flight[] };
 if (hashChanged || !lastFlightsDataRef.current) {
-  data = await fetchFlightData(true); // force=true — preskače interni re-check, već znamo da se promijenilo
+ // data = await fetchFlightData(true); // force=true — preskače interni re-check, već znamo da se promijenilo
+ data = await fetchFlightData(false); 
   lastFlightsDataRef.current = data;
 }else {
       data = lastFlightsDataRef.current;

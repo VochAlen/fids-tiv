@@ -526,14 +526,13 @@ if (isNightHours()) {
       headers['If-None-Match'] = etagDeskRef.current;
     }
 
-    // const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
 const res = await fetch(
-  `/api/test/desk-status-override`,
-  {
-    headers,
-    cache: 'no-store',
-  }
-);
+      `/api/test/desk-status-override?deskNumber=${deskNumberParam}`,
+      {
+        headers,
+        cache: 'no-store',
+      }
+    );
 
     // ── OBRADI 304 ───────────────────────────────────────────
     if (res.status === 304) {
@@ -549,9 +548,8 @@ const res = await fetch(
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagDeskRef.current = newEtag;
 
-    // const myData = await res.json();
-    const allData = await res.json();
-const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+    // ── Route sa ?deskNumber= vraća direktno entry objekat, ne cijelu mapu ──
+    const myData = await res.json();
 
     if (!isMountedRef.current) return;
 
