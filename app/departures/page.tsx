@@ -922,91 +922,66 @@ function DeparturesBoard(): JSX.Element {
         if (isInitialLoad.current) setLoading(true);
         setErrorMessage(null);
 
-        const boardIsCurrentlyEmpty = flightsRef.current.length === 0;
-        const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
-        let hashChanged = true;
-        let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
+const boardIsCurrentlyEmpty = flightsRef.current.length === 0;
+const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
 
-        const headers: HeadersInit = {};
-        if (etagStatusRef.current) {
-          headers['If-None-Match'] = etagStatusRef.current;
-        }
+const headers: HeadersInit = {};
+if (!forceRefresh && etagStatusRef.current) {
+  headers['If-None-Match'] = etagStatusRef.current;
+}
 
-        try {
-          const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers);
+ try {
+  const statusRes = await fetchWithTimeout('/api/flights', 5_000, headers);
 
-          if (statusRes.status === 304) {
-            setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-            isInitialLoad.current = false;
-            setLoading(false);
-            tid = setTimeout(load, REFRESH_INTERVAL_MS);
-            return;
-          }
+  if (statusRes.status === 304) {
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    isInitialLoad.current = false;
+    setLoading(false);
+    tid = setTimeout(load, REFRESH_INTERVAL_MS);
+    return;
+  }
 
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            const newEtag = statusRes.headers.get('ETag');
-            if (newEtag) etagStatusRef.current = newEtag;
+  if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
 
-            statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+  const statusData = await statusRes.json();
+  const newEtag = statusRes.headers.get('ETag');
+  if (newEtag) etagStatusRef.current = newEtag;
 
-            if (!forceRefresh && statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
-              hashChanged = false;
-            }
-            lastKnownHashRef.current = statusData.hash;
-          }
-        } catch {
-          // ignoriši, nastavi na pun fetch
-        }
+  const statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
 
-        if (!hashChanged) {
-          if (statusAssignments) {
-            // OPTIMIZOVANO: requestIdleCallback na low-end
-            const apply = () => setFlights(prev => applyAssignmentsOnly(prev, statusAssignments!));
-            if (IS_LOW_END && 'requestIdleCallback' in window) {
-              (window as any).requestIdleCallback(apply, { timeout: 1000 });
-            } else {
-              apply();
-            }
-          }
-          setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-          isInitialLoad.current = false;
-          setLoading(false);
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
-          return;
-        }
+  // ── Nema više posebnog hashChanged/forceRefresh grananja — 304 već
+  // hendla "ništa se nije promijenilo" slučaj gore. Ako smo stigli
+  // dovde, imamo 200 sa svježim podacima, direktno ih koristimo. ──
+  data = statusData; // već sadrži .departures, .arrivals
 
-        // PUN FETCH
-        try {
-          data = await fetchWithRetry('/api/flights?type=departures');
-          if (data && isMountedRef.current) {
-            saveToCache({ departures: data.departures });
-            saveEmergencyCache({ departures: data.departures });
-          }
-        } catch (fe) {
-          setErrorMessage('Network error. Using cached data.');
-          const c = loadFromCache();
-          if (c) { data = c; usedCache = true; }
-          else {
-            const emergency = loadEmergencyCache();
-            if (emergency) { data = emergency; usedCache = true; setErrorMessage('Prikazan stariji poznati raspored'); }
-            else throw fe;
-          }
-        }
+  if (data && isMountedRef.current) {
+    saveToCache({ departures: data.departures });
+    saveEmergencyCache({ departures: data.departures });
+  }
+} catch (fe) {
+  setErrorMessage('Network error. Using cached data.');
+  const c = loadFromCache();
+  if (c) { data = c; usedCache = true; }
+  else {
+    const emergency = loadEmergencyCache();
+    if (emergency) { data = emergency; usedCache = true; setErrorMessage('Prikazan stariji poznati raspored'); }
+    else throw fe;
+  }
+}
 
-        if (!isMountedRef.current || !data) return;
+if (!isMountedRef.current || !data) return;
 
-        const rawDepartures = getUniqueDeparturesWithDeparted(
-          filterRecentDepartures(data.departures)
-        );
+const rawDepartures = getUniqueDeparturesWithDeparted(
+  filterRecentDepartures(data.departures)
+);
 
-        const assignments = statusAssignments ?? { desks: {}, gates: {} };
-        const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
+const assignments = { desks: data.desks ?? {}, gates: data.gates ?? {} };
+const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
 
-        setFlights(departuresWithMeta);
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        if (!usedCache) setErrorMessage(null);
-        else setTimeout(() => setErrorMessage(null), 5_000);
+setFlights(departuresWithMeta);
+setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+if (!usedCache) setErrorMessage(null);
+else setTimeout(() => setErrorMessage(null), 5_000);
 
       } catch (e) {
         console.error('Critical:', e);

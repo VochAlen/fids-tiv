@@ -19,7 +19,7 @@ import Image from 'next/image';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
-const REFRESH_INTERVAL_MS    = 13_000;
+const REFRESH_INTERVAL_MS    = 14_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
@@ -309,6 +309,7 @@ const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 const etagStatusRef = useRef<string | null>(null);
+const lastGateOverrideRef = useRef<{ status: string | null; flightNumber: string | null; classType: string | null } | null>(null);
 
 // ── NOVO: hash-check da se izbjegne nepotreban /api/flights fetch ──
 const lastKnownHashRef  = useRef<string | null>(null);
@@ -410,39 +411,51 @@ const loadFlights = useCallback(async () => {
   try {
     // ── HASH CHECK — preskoči puni /api/flights fetch ako se ništa
     // nije promijenilo od prošlog poziva (isti princip kao combined/split-board) ──
-let hashChanged = true;
 let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
+let data: { departures: Flight[]; arrivals: Flight[] } | null = null;
 
 try {
-  const statusRes = await fetch('/api/flights/status');
+  const headers: HeadersInit = {};
+  if (etagStatusRef.current) {
+    headers['If-None-Match'] = etagStatusRef.current;
+  }
 
-  if (statusRes.ok) {
-    const statusData = await statusRes.json();
+  const statusRes = await fetch('/api/flights', { headers });
 
-    if (statusData.hash !== null && statusData.hash === lastKnownHashRef.current) {
-      hashChanged = false;
-    } else if (statusData.hash !== null) {
-      lastKnownHashRef.current = statusData.hash;
+  if (statusRes.status === 304) {
+    // Ništa se nije promijenilo — koristi zadnje poznate podatke
+    data = lastFlightsDataRef.current;
+    if (lastGateOverrideRef.current) {
+      gateOverrideFromStatus = lastGateOverrideRef.current;
     }
-    // ako je statusData.hash === null, ne diraj lastKnownHashRef.current
+  } else if (statusRes.ok) {
+    const statusData = await statusRes.json();
+    const newEtag = statusRes.headers.get('ETag');
+    if (newEtag) etagStatusRef.current = newEtag;
+
+    data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
+    lastFlightsDataRef.current = data;
 
     const entry = statusData.gateEntries?.[gateNumber];
     gateOverrideFromStatus = entry
       ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
       : { status: null, flightNumber: null, classType: null };
+    lastGateOverrideRef.current = gateOverrideFromStatus;
   }
-} catch {
-  // ignoriši grešku, nastavi na pun fetch kao fallback
+} catch (err) {
+  console.error('Status fetch error:', err);
 }
 
-    let data: { departures: Flight[]; arrivals: Flight[] };
-if (hashChanged || !lastFlightsDataRef.current) {
- // data = await fetchFlightData(true); // force=true — preskače interni re-check, već znamo da se promijenilo
- data = await fetchFlightData(false); 
-  lastFlightsDataRef.current = data;
-}else {
-      data = lastFlightsDataRef.current;
-    }
+// Fallback ako ni 304 ni 200 nisu dali podatke (npr. prvi load, network greška)
+if (!data) {
+  if (lastFlightsDataRef.current) {
+    data = lastFlightsDataRef.current;
+  } else {
+    console.error('[gate:' + gateNumber + '] Nema podataka ni iz mreže ni iz keša — prazan prikaz ovog ciklusa');
+    if (isMountedRef.current) setLoading(false);
+    return;
+  }
+}
 
  // 1. Override za ovaj gate — stigao je već u statusData iznad.
     // Fallback na stari poziv SAMO ako status ruta nije uspjela (npr. mrežni prekid).

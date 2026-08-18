@@ -1,6 +1,7 @@
 'use client';
 
 import type React from "react"
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import {
   type JSX,
   useEffect,
@@ -171,15 +172,19 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
   const pill = useMemo(() => computeStatusPill(flight, formatTime), [flight, formatTime, autoStatusTick]);
 
   const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
-  const logoURL = useMemo(() => getFlightawareLogoURL(icao), [icao]);
+
   const rowBg = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
 
-  const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.dataset.fallback === 'png') { img.src = PLACEHOLDER_IMAGE; img.onerror = null; return; }
-    if (img.dataset.fallback === 'jpg') { img.dataset.fallback = 'png'; img.src = `/airlines/${icao}.png`; return; }
-    if (icao) { img.dataset.fallback = 'jpg'; img.src = `/airlines/${icao}.jpg`; } else { img.src = PLACEHOLDER_IMAGE; img.onerror = null; }
-  }, [icao]);
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw';
+    const fw = getFlightawareLogoURL(icao);
+    if (fw) { img.src = fw; return; }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return;
+  }
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null;
+}, [icao]);
 
   const estimatedDisplay = useMemo(() => {
     const est = flight.EstimatedDepartureTime, sch = flight.ScheduledDepartureTime;
@@ -201,9 +206,17 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
         {estimatedDisplay ? <div className="text-[2.5rem] font-black text-cyan-300 drop-shadow-lg">{estimatedDisplay}</div> : <div className="text-2xl text-white/30 font-bold">-</div>}
       </div>
       <div className="flex items-center gap-3" style={{ width: "280px" }}>
-        <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-          <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`} className="object-contain w-full h-full" onError={onImgErr} decoding="async" loading="eager" />
-        </div>
+    <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
+  <img
+    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+    alt={`${flight.AirlineName} logo`}
+    className="object-contain w-full h-full"
+    onError={onImgErr}
+    data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+    decoding="async"
+    loading="eager"
+  />
+</div>
         <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
       </div>
       <div className="flex items-center" style={{ width: "580px" }}>
@@ -278,6 +291,7 @@ function ArrivalsBoard(): JSX.Element {
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
+  const controller = new AbortController(); // ← NOVO
 
   const cached = loadFromCache();
   if (cached?.arrivals) {
@@ -287,80 +301,41 @@ useEffect(() => {
 
   const load = async () => {
     if (!isMountedRef.current) return;
- if (isNightHours()) {
-    if (isMountedRef.current) setLoading(false);
-    tid = setTimeout(load, REFRESH_INTERVAL_MS);
-    return;
-  }
+    if (isNightHours()) {
+      if (isMountedRef.current) setLoading(false);
+      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      return;
+    }
+
     try {
-      let hashChanged = true;
-      const statusHeaders: HeadersInit = { "Cache-Control": "no-cache" };
+      const headers: HeadersInit = { "Cache-Control": "no-cache" };
       if (etagRef.current) {
-        statusHeaders["If-None-Match"] = etagRef.current;
+        headers["If-None-Match"] = etagRef.current;
       }
 
-      try {
-      const statusRes = await fetch("/api/flights/status");
+      const res = await fetch("/api/flights", { headers, signal: controller.signal }); // ← DODANO
 
-        if (statusRes.status === 304) {
-          const newEtag = statusRes.headers.get('ETag');
-          if (newEtag) etagRef.current = newEtag;
-          setLoading(false);
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
-          return;
-        }
-
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          const newEtag = statusRes.headers.get('ETag');
-          if (newEtag) etagRef.current = newEtag;
-
-          // ⭐ POPRAVKA: lastKnownHash je ref, koristi .current
-if (statusData.hash !== null && statusData.hash === lastKnownHash.current) {
-  hashChanged = false;
-} else if (statusData.hash !== null) {
-  lastKnownHash.current = statusData.hash;
-}
-        }
-      } catch {
-        // ignoriši
+      if (res.status === 304) {
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagRef.current = newEtag;
+        setLoading(false);
+        tid = setTimeout(load, REFRESH_INTERVAL_MS);
+        return;
       }
 
-      let data: any = null;
-      if (hashChanged) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-        try {
- const res = await fetch("/api/flights?type=arrivals", { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-          clearTimeout(timeoutId);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          data = await res.json();
-          if (isMountedRef.current) saveToCache(data);
-        } catch (err) {
-          if ((err as Error).name === "AbortError") {
-            // timeout – pokušaj sa kešom
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        const c = loadFromCache();
-        if (c?.arrivals) {
-          data = c;
-        } else {
-  const res = await fetch("/api/flights?type=arrivals");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          data = await res.json();
-          if (isMountedRef.current) saveToCache(data);
-        }
-      }
+      const data = await res.json();
+      const newEtag = res.headers.get('ETag');
+      if (newEtag) etagRef.current = newEtag;
 
       if (data?.arrivals && isMountedRef.current) {
+        saveToCache(data);
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
       }
     } catch (err) {
+      if ((err as Error).name === 'AbortError') return; // ← DODANO, tiho ignoriši prekinut fetch
       console.error("Arrivals load error:", err);
       const c = loadFromCache();
       if (c?.arrivals && isMountedRef.current) {
@@ -380,6 +355,7 @@ if (statusData.hash !== null && statusData.hash === lastKnownHash.current) {
   return () => {
     isMountedRef.current = false;
     clearTimeout(tid);
+    controller.abort(); // ← NOVO — prekida pending fetch pri cleanup-u
   };
 }, [filterRecentFlights]);
 
