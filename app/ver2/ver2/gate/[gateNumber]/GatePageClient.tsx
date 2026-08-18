@@ -22,6 +22,11 @@ import Image from 'next/image';
 const REFRESH_INTERVAL_MS    = 14_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+const BASE_INTERVAL_MS       = 14_000;
+const MAX_OPEN_INTERVAL_MS   = 90_000; // gornja granica dok je gate stabilno "open"
+const BACKOFF_STEP_MS        = 8_000;  // koliko se produžava po ciklusu bez promjene
+const getJitterMs            = () => Math.floor(Math.random() * 4_000);
+
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
 
 
@@ -315,6 +320,15 @@ const lastGateOverrideRef = useRef<{ status: string | null; flightNumber: string
 const lastKnownHashRef  = useRef<string | null>(null);
 const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
 const etagGateRef = useRef<string | null>(null);
+const noChangeStreakRef = useRef(0);
+
+const getNextInterval = useCallback((): number => {
+  if (manualGateStatusRef.current === 'open') {
+    const backoff = BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS;
+    return Math.min(backoff, MAX_OPEN_INTERVAL_MS) + getJitterMs();
+  }
+  return BASE_INTERVAL_MS + getJitterMs();
+}, []);
 
   // ------------------------------------------------------------
   // Dohvatanje gate status override-a
@@ -497,7 +511,7 @@ if (!data) {
         classType,
       });
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-      setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+     // setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
       setLoading(false);
       return;
     }
@@ -587,26 +601,38 @@ if (!overriddenFlight) {
     if (!isMountedRef.current) return;
 
     // 9. Ažuriranje state-a
-    if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
-      currentFlightRef.current = current;
-      currentStatusRef.current = current?.checkInStatus ?? null;
-      setDisplay({
-        flight: current,
-        checkInStatus: current?.checkInStatus ?? null,
-        nextFlight,
-        gateChangedAt,
-        manualGateStatus: overrideStatus,
-        overrideFlightNumber,
-        classType,
-      });
-      updateCountdown(current);
-    } else {
-      setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
-    }
+const hasChanged = flightChanged(current, currentFlightRef.current) || !!gateChangedAt;
 
-    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
-    setLoading(false);
+if (hasChanged) {
+  currentFlightRef.current = current;
+  currentStatusRef.current = current?.checkInStatus ?? null;
+  setDisplay({
+    flight: current,
+    checkInStatus: current?.checkInStatus ?? null,
+    nextFlight,
+    gateChangedAt,
+    manualGateStatus: overrideStatus,
+    overrideFlightNumber,
+    classType,
+  });
+  updateCountdown(current);
+} else {
+  setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+}
+
+// ── NOVO: adaptivni backoff — produžuj interval SAMO dok je gate
+// stabilno "open" i ništa se ne mijenja. Bilo kakva promjena ILI
+// status različit od "open" (closed/no-flight) odmah resetuje
+// na brzi bazni interval. ──
+if (hasChanged || overrideStatus !== 'open') {
+  noChangeStreakRef.current = 0;
+} else {
+  noChangeStreakRef.current += 1;
+}
+
+setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+//setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+setLoading(false);
   } catch (err) {
     console.error('Gate load error:', err);
     if (isMountedRef.current) setLoading(false);
@@ -622,7 +648,9 @@ useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
   
-  const schedule = () => {
+ const schedule = () => {
+   const interval = getNextInterval();
+   setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
     tid = setTimeout(async () => {
       if (isMountedRef.current) {
         if (!isNightHours()) {
@@ -630,7 +658,8 @@ useEffect(() => {
         }
         schedule();
       }
-    }, getIntervalWithJitter());
+
+  }, interval);
   };
   
   if (!isNightHours()) {
@@ -641,7 +670,7 @@ useEffect(() => {
   }
   
   return () => { isMountedRef.current = false; clearTimeout(tid); };
-}, [loadFlights]);
+}, [loadFlights, getNextInterval]);
 
 // ------------------------------------------------------------
 // BRZI POLL — otkriva promjenu dodjele na gate-u unutar ~3-4.5s,
