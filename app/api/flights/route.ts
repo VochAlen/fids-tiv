@@ -103,13 +103,24 @@ export async function GET(request: Request): Promise<NextResponse> {
       .substring(0, 16);
     const etag = `"${hash}"`;
 
+// ============================================================
+// PATCH za app/api/flights/route.ts
+// Zamijeni ovaj blok (unutar GET funkcije, prije provjere ETag-a):
+// ============================================================
+ 
     const responseHeadersBase: Record<string, string> = {
       'Cache-Control': CDN_CACHE_CONTROL,
       'CDN-Cache-Control': CDN_CACHE_CONTROL,
       'Vercel-CDN-Cache-Control': CDN_CACHE_CONTROL,
       'Cache-Tag': CACHE_TAG,
+      // ← NOVO: ovo je ime header-a koje Vercel CDN stvarno prepoznaje
+      // za tag-based invalidaciju (revalidateTag / invalidateByTag).
+      // Stari 'Cache-Tag' ostaje radi kompatibilnosti, ali sam po sebi
+      // ne pokreće purge na Vercel-ovom CDN sloju.
+      'Vercel-Cache-Tag': CACHE_TAG,
       'ETag': etag,
     };
+ 
 
     // ── 5. PROVJERI If-None-Match — TEK NAKON što je svježina provjerena ──
     if (ifNoneMatch && ifNoneMatch === etag) {

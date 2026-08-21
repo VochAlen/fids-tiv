@@ -91,13 +91,40 @@ function isValidDisplayTime(timeStr: string | null | undefined): boolean {
 }
 
 // ─── Cache ────────────────────────────────────────────────────
-const saveToCache = (data: any) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) } catch {} };
-const loadFromCache = (): any | null => { try { const raw = localStorage.getItem(CACHE_KEY); if (!raw) return null; const { data, timestamp } = JSON.parse(raw); return Date.now() - timestamp > CACHE_DURATION ? null : data; } catch { return null; } };
+// ─── Cache ────────────────────────────────────────────────────
+const saveToCache = (data: { arrivals: Flight[] }) => {
+  try { 
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ 
+      data, 
+      timestamp: Date.now() 
+    })); 
+  } catch { /* quota exceeded */ }
+};
 
+const loadFromCache = (): { arrivals: Flight[] } | null => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const { data, timestamp } = JSON.parse(raw);
+    if (Date.now() - timestamp > CACHE_DURATION) return null;
+    return { arrivals: data.arrivals || [] };
+  } catch { return null; }
+};
 // ─── Fetch ────────────────────────────────────────────────────
-const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
-  const ctrl = new AbortController(); const id = setTimeout(() => ctrl.abort(), ms);
-  try { const r = await fetch(url, { signal: ctrl.signal, headers: { "Cache-Control": "no-cache" } }); clearTimeout(id); return r; } catch (e) { clearTimeout(id); throw e; }
+const fetchWithTimeout = async (url: string, ms: number, options?: RequestInit): Promise<Response> => {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { 
+      ...options, 
+      signal: ctrl.signal 
+    });
+    clearTimeout(id);
+    return r;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
 };
 const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_DELAY_MS): Promise<any> => {
   let last: Error | null = null;
@@ -291,8 +318,9 @@ function ArrivalsBoard(): JSX.Element {
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
-  const controller = new AbortController(); // ← NOVO
+  const controller = new AbortController();
 
+  // Učitaj cache prije nego kreneš
   const cached = loadFromCache();
   if (cached?.arrivals) {
     setFlights(filterRecentFlights(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
@@ -300,6 +328,7 @@ useEffect(() => {
   }
 
   const load = async () => {
+      console.log('🔄 load() called at', new Date().toISOString()); // ← DODAJ OVO
     if (!isMountedRef.current) return;
     if (isNightHours()) {
       if (isMountedRef.current) setLoading(false);
@@ -308,13 +337,19 @@ useEffect(() => {
     }
 
     try {
-      const headers: HeadersInit = { "Cache-Control": "no-cache" };
+      const headers: HeadersInit = {};
       if (etagRef.current) {
         headers["If-None-Match"] = etagRef.current;
       }
 
-      const res = await fetch("/api/flights", { headers, signal: controller.signal }); // ← DODANO
+      // ✅ KORISTI fetchWithTimeout
+      const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
+        headers,
+        signal: controller.signal,
+        cache: 'force-cache',  // ✅ Vercel edge cache
+      });
 
+      // ✅ 304 - ništa se nije promijenilo
       if (res.status === 304) {
         const newEtag = res.headers.get('ETag');
         if (newEtag) etagRef.current = newEtag;
@@ -330,13 +365,16 @@ useEffect(() => {
       if (newEtag) etagRef.current = newEtag;
 
       if (data?.arrivals && isMountedRef.current) {
-        saveToCache(data);
+        // ✅ Samo arrivals (bez desks i gates)
+        saveToCache({ arrivals: data.arrivals });
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
       }
     } catch (err) {
-      if ((err as Error).name === 'AbortError') return; // ← DODANO, tiho ignoriši prekinut fetch
+      if ((err as Error).name === 'AbortError') return;
       console.error("Arrivals load error:", err);
+      
+      // ✅ Koristi cache
       const c = loadFromCache();
       if (c?.arrivals && isMountedRef.current) {
         setFlights(filterRecentFlights(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
@@ -355,7 +393,7 @@ useEffect(() => {
   return () => {
     isMountedRef.current = false;
     clearTimeout(tid);
-    controller.abort(); // ← NOVO — prekida pending fetch pri cleanup-u
+    controller.abort();
   };
 }, [filterRecentFlights]);
 

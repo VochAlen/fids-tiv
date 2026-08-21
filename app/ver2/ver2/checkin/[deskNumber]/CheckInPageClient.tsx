@@ -29,10 +29,13 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 12_000; // Svako 10s provjerava admin promjene
+const BASE_INTERVAL_MS     = 12_000;
+const MAX_OPEN_INTERVAL_MS = 60_000;
+const BACKOFF_STEP_MS      = 6_000;
+const getJitterMs          = () => Math.floor(Math.random() * 3_000);
 const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
-const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
+//const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
 
 // ── Koliko dugo se u browser-memoriji (unutar ove kiosk sesije) drži
 // zadnji uspješan /api/flights odgovor za lookup detalja leta. Ako se
@@ -412,6 +415,9 @@ const isMountedRef = useRef(true);
   const logoCacheRef = useRef<Map<string, string>>(new Map());
   // const etagDeskRef = useRef<string | null>(null);
  const etagDeskRef = useRef<string | null>(null);
+const noChangeStreakRef  = useRef(0);
+const lastKnownStatusRef = useRef<'open' | 'closed' | null>(null);
+const lastClassTypeRef   = useRef<string | null>(null);
 
   // ── Klijentski (in-browser) keš za /api/flights lookup ─────────
   // Drži zadnji uspješan flights payload + njegov ETag unutar ove
@@ -511,11 +517,24 @@ const lufthansaGroupImage = useMemo((): string | null => {
     return () => clearInterval(id);
   }, [adImages, currentAdIndex]);
 
+  const getNextInterval = useCallback((): number => {
+  if (lastKnownStatusRef.current === 'open') {
+    const backoff = BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS;
+    return Math.min(backoff, MAX_OPEN_INTERVAL_MS) + getJitterMs();
+  }
+  return BASE_INTERVAL_MS + getJitterMs();
+}, []);
+
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (!deskNumberParam) return;
 if (isNightHours()) {
+     // Resetuj backoff state pri ulasku u noćni mod — bez ovoga bi streak
+   // ostao "zamrznut" na vrijednosti iz trenutka kad je noćni mod počeo,
+  // pa bi ujutru prvi ciklus krenuo sa pogrešno visokim intervalom
+   // umjesto sa čistog, brzog stanja.
+   noChangeStreakRef.current = 0;
     setLoading(false);
     return;
 }
@@ -538,7 +557,10 @@ const res = await fetch(
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagDeskRef.current = newEtag;
-      // Nema promjene – ne ažuriramo assignment
+     // Nema promjene – backoff napreduje samo dok je šalter stabilno otvoren
+    if (lastKnownStatusRef.current === 'open') {
+      noChangeStreakRef.current += 1;
+    }
       return;
     }
 
@@ -559,6 +581,9 @@ const res = await fetch(
     // Nema dodjele → instant reset
     if (!myData || !myData.flightNumber || myData.status === null) {
       lastFlightNumberRef.current = '';
+      lastKnownStatusRef.current = null;
+     lastClassTypeRef.current = null;
+     noChangeStreakRef.current = 0;
       setAssignment(EMPTY_ASSIGNMENT);
       return;
     }
@@ -567,6 +592,15 @@ const res = await fetch(
 
     // Isti let – samo status/klasa
     if (myData.flightNumber === lastFlightNumberRef.current) {
+          const statusChanged = myData.status !== lastKnownStatusRef.current;
+    const classChanged  = classType !== lastClassTypeRef.current;
+     if (statusChanged || classChanged || myData.status !== 'open') {
+       noChangeStreakRef.current = 0;
+     } else {
+       noChangeStreakRef.current += 1;
+     }
+     lastKnownStatusRef.current = myData.status as 'open' | 'closed';
+     lastClassTypeRef.current = classType;
       setAssignment((prev) => ({
         ...prev,
         status: myData.status as 'open' | 'closed',
@@ -667,6 +701,9 @@ const res = await fetch(
       codeshareFlights: (flightDetails.CodeShareFlights as string[]) || [],
       setAt: myData.setAt || null,
     });
+      lastKnownStatusRef.current = myData.status as 'open' | 'closed';
+   lastClassTypeRef.current = classType;
+   noChangeStreakRef.current = 0; // novi let — uvijek brzi interval
   } catch (err) {
     console.error('fetchDeskData error:', err);
     if (isMountedRef.current) {
@@ -688,7 +725,7 @@ useEffect(() => {
         await fetchDeskData();
         schedule();
       }
-    }, getIntervalWithJitter());
+ }, getNextInterval());
   };
 
   // Mali nasumičan delay na prvi poziv (0-3s) da se izbjegne
@@ -705,7 +742,7 @@ useEffect(() => {
     clearTimeout(tid);
     clearTimeout(initialTid);
   };
-}, [fetchDeskData]);
+ }, [fetchDeskData, getNextInterval]);
 
   // ── Stanje za render ───────────────────────────────────────
   const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;

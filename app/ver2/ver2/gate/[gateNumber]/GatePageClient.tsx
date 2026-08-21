@@ -19,15 +19,46 @@ import Image from 'next/image';
 // ------------------------------------------------------------
 // Konstante
 // ------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════
+// FIX (ADAPTIVNI POLLING): prije je BASE_INTERVAL_MS = 14_000
+// važio ZAUVIJEK dok god gate NIJE "open" (zatvoren, bez
+// override-a, let još daleko) — a to je >95% dana. Rezultat:
+// /api/flights se zvao na svakih 14s NON-STOP po svakom gate
+// ekranu → ogroman broj edge poziva na Vercel-u.
+//
+// Sad:
+//   • dok je gate "open" (boarding u toku)  → ISTA logika kao
+//     prije: kreće od BASE_INTERVAL_MS (14s) i penje se do
+//     MAX_OPEN_INTERVAL_MS (90s) dok se ništa ne mijenja
+//     (BACKOFF_STEP_MS po ciklusu). Ovo je tačno traženo
+//     ponašanje: "kad se let otvori, refresh se povećava do
+//     90 sekundi".
+//   • dok gate NIJE "open" (idle/closed/no override)
+//     → koristi se IDLE_INTERVAL_MS (45s) umjesto fiksnih 14s.
+//     Nema razloga za near-realtime osvježavanje kad se ništa
+//     ne dešava; ovo samo drastično smanjuje broj poziva u
+//     najvećem dijelu dana, bez gubitka odzivnosti kad staff
+//     stvarno otvori gate (sljedeći poll će to uhvatiti unutar
+//     IDLE_INTERVAL_MS, tj. najviše ~45-53s).
+// ═══════════════════════════════════════════════════════════
 const REFRESH_INTERVAL_MS    = 14_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-const BASE_INTERVAL_MS       = 14_000;
-const MAX_OPEN_INTERVAL_MS   = 90_000; // gornja granica dok je gate stabilno "open"
-const BACKOFF_STEP_MS        = 8_000;  // koliko se produžava po ciklusu bez promjene
+const BASE_INTERVAL_MS       = 14_000;   // starting/ near-realtime interval dok je gate "open"
+const MAX_OPEN_INTERVAL_MS   = 60_000;   // gornja granica dok je gate stabilno "open"
+const BACKOFF_STEP_MS        = 8_000;    // koliko se produžava po ciklusu bez promjene (samo za "open")
+
+const IDLE_INTERVAL_MS       = 20_000;   // ← NOVO: default kad gate NIJE "open" (bilo fiksnih 14s)
+const IDLE_JITTER_MS         = 6_000;    // ← NOVO: jitter za idle stanje, da se ekrani ne sinhronizuju
+
 const getJitterMs            = () => Math.floor(Math.random() * 4_000);
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
+
+ 
+const FAST_POLL_BASE_MS   = 2_000;  // usklađeno sa GATE_STATUS_CACHE_CONTROL max-age=2 na serveru (v2)
+const FAST_POLL_JITTER_MS = 2_000;  // + do 2s nasumično, da se ekrani ne sinhronizuju
+const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
 
 
 // ── BRZI POLL — prati SAMO promjenu dodjele na ovom gate-u, odvojeno
@@ -128,31 +159,6 @@ const AirlineLogo = memo(function AirlineLogo(
   const code = icao || flightNumber?.substring(0, 2).toUpperCase() || '';
   const [src, setSrc] = useState('');
   const [errored, setErrored] = useState(false);
-
-  // useEffect(() => {
-  //   if (!code) return;
-  //   let cancelled = false;
-  //   const checkImg = (url: string): Promise<boolean> =>
-  //     new Promise(resolve => {
-  //       const img = new window.Image();
-  //       img.onload  = () => resolve(true);
-  //       img.onerror = () => resolve(false);
-  //       setTimeout(() => resolve(false), 1500);
-  //       img.src = url;
-  //     });
-  //   (async () => {
-  //     const [hasJpg, hasPng] = await Promise.all([
-  //       checkImg(`/airlines/${code}.jpg`),
-  //       checkImg(`/airlines/${code}.png`),
-  //     ]);
-  //     if (cancelled) return;
-  //     if (hasJpg)      setSrc(`/airlines/${code}.jpg`);
-  //     else if (hasPng) setSrc(`/airlines/${code}.png`);
-  //     else             setSrc(`https://www.flightaware.com/images/airline_logos/180px/${code}.png`);
-  //   })();
-  //   return () => { cancelled = true; };
-  // }, [code]);
-
 
   useEffect(() => {
   if (!code) return;
@@ -321,13 +327,49 @@ const lastKnownHashRef  = useRef<string | null>(null);
 const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
 const etagGateRef = useRef<string | null>(null);
 const noChangeStreakRef = useRef(0);
+const loadFlightsRef = useRef(false);
+// ── 1) Dodaj ova dva ref-a uz ostale ref-ove (pored abortControllerRef) ──
+ 
+// Omogućavaju brzom pollu da restartuje glavni raspored nakon što
+// sam izazove vanredni loadFlights() — bez ovoga bi glavni tid i
+// dalje otkucao po starom (sad zastarjelom) rasporedu ubrzo nakon.
+const mainTidRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+const scheduleMainRef = useRef<(() => void) | null>(null);
+
+// Prati zadnji poznati override iz BRZOG poll-a (odvojeno od
+// lastGateOverrideRef koji puni glavni /api/flights poziv), da bi se
+// promjena mogla detektovati poredjenjem vrijednosti, bez oslanjanja
+// na ETag/304 semantiku na klijentu.
+const lastFastOverrideRef = useRef<string | null>(null);
+
+// ── FIX: AbortController za /api/flights poziv unutar loadFlights.
+// Kreira se jednom po lifecycle-u glavnog polling efekta i abort-uje
+// se u njegovom cleanup-u — sprječava da fetch koji je "u letu" pri
+// unmountu (ili promjeni gateNumber-a) i dalje završi i pozove
+// setState na već odjavljenoj komponenti.
+const abortControllerRef = useRef<AbortController | null>(null);
 
 const getNextInterval = useCallback((): number => {
+  // ── "open" (boarding u toku) — ISTA logika kao prije: kreni od
+  // BASE_INTERVAL_MS (14s) i penji se do MAX_OPEN_INTERVAL_MS (90s)
+  // dok se ništa ne mijenja. Ovo je traženo ponašanje: "kad se let
+  // otvori, refresh se povećava do 90 sekundi".
   if (manualGateStatusRef.current === 'open') {
-    const backoff = BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS;
-    return Math.min(backoff, MAX_OPEN_INTERVAL_MS) + getJitterMs();
+    const base = Math.min(BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS, MAX_OPEN_INTERVAL_MS);
+    // 🟢 Veći jitter za "open" status (manje poziva)
+    const jitter = Math.floor(Math.random() * 6000);  // do 6s
+    return base + jitter;
   }
-  return BASE_INTERVAL_MS + getJitterMs();
+
+  // ── FIX: idle/closed/no-override (>95% dana) — prije je ovdje
+  // bio BASE_INTERVAL_MS (14s) FIKSNO, bez ikakvog backoff-a, što je
+  // generisalo ogroman broj /api/flights poziva po svakom gate
+  // ekranu, non-stop, cijeli dan. Sad koristimo IDLE_INTERVAL_MS
+  // (45s) — dovoljno rijetko za stanje kad se ništa ne dešava, a i
+  // dalje dovoljno često da se let/boarding uhvati unutar ~53s od
+  // trenutka kad ga osoblje otvori/dodijeli.
+  const jitter = Math.floor(Math.random() * IDLE_JITTER_MS); // do 8s
+  return IDLE_INTERVAL_MS + jitter;
 }, []);
 
   // ------------------------------------------------------------
@@ -416,87 +458,92 @@ const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ stat
   // ------------------------------------------------------------
   // Glavna funkcija za učitavanje podataka
   // ------------------------------------------------------------
+// ------------------------------------------------------------
+// Glavna funkcija za učitavanje podataka
+// ------------------------------------------------------------
 const loadFlights = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (isNightHours()) {
     setLoading(false);
     return;
   }
-  try {
-    // ── HASH CHECK — preskoči puni /api/flights fetch ako se ništa
-    // nije promijenilo od prošlog poziva (isti princip kao combined/split-board) ──
-let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
-let data: { departures: Flight[]; arrivals: Flight[] } | null = null;
 
-try {
-  const headers: HeadersInit = {};
-  if (etagStatusRef.current) {
-    headers['If-None-Match'] = etagStatusRef.current;
-  }
-
-  const statusRes = await fetch('/api/flights', { headers });
-
-  if (statusRes.status === 304) {
-    // Ništa se nije promijenilo — koristi zadnje poznate podatke
-    data = lastFlightsDataRef.current;
-    if (lastGateOverrideRef.current) {
-      gateOverrideFromStatus = lastGateOverrideRef.current;
-    }
-  } else if (statusRes.ok) {
-    const statusData = await statusRes.json();
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
-
-    data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
-    lastFlightsDataRef.current = data;
-
-    const entry = statusData.gateEntries?.[gateNumber];
-    gateOverrideFromStatus = entry
-      ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
-      : { status: null, flightNumber: null, classType: null };
-    lastGateOverrideRef.current = gateOverrideFromStatus;
-  }
-} catch (err) {
-  console.error('Status fetch error:', err);
-}
-
-// Fallback ako ni 304 ni 200 nisu dali podatke (npr. prvi load, network greška)
-if (!data) {
-  if (lastFlightsDataRef.current) {
-    data = lastFlightsDataRef.current;
-  } else {
-    console.error('[gate:' + gateNumber + '] Nema podataka ni iz mreže ni iz keša — prazan prikaz ovog ciklusa');
-    if (isMountedRef.current) setLoading(false);
+  // ⚠️ ZAŠTITA OD KONKURENTNIH POZIVA
+  if (loadFlightsRef.current) {
+    console.log('[gate] loadFlights već u toku, preskačem');
     return;
   }
-}
+  loadFlightsRef.current = true;
 
- // 1. Override za ovaj gate — stigao je već u statusData iznad.
-    // Fallback na stari poziv SAMO ako status ruta nije uspjela (npr. mrežni prekid).
-    let overrideStatus: string | null = null;
-    let overrideFlightNumber: string | null = null;
-    let classType: string | null = null;
+  try {
+    // 1. JEDAN POZIV PREMA /api/flights
+    let data: { departures: Flight[]; arrivals: Flight[] } | null = null;
+    let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
 
-    if (gateOverrideFromStatus) {
-      overrideStatus = gateOverrideFromStatus.status;
-      overrideFlightNumber = gateOverrideFromStatus.flightNumber;
-      classType = gateOverrideFromStatus.classType;
-    } else {
-      try {
-        const override = await fetchGateStatusOverride(gateNumber);
-        if (override) {
-          overrideStatus = override.status;
-          overrideFlightNumber = override.flightNumber;
-          classType = override.classType;
-        }
-      } catch (err) {
-        console.error('Override fetch error:', err);
-      }
+    const headers: HeadersInit = {};
+    if (etagStatusRef.current) {
+      headers['If-None-Match'] = etagStatusRef.current;
     }
+
+    // FIX: fetch sada koristi eksterni AbortSignal (iz efekta koji
+    // pokreće polling) + interni timeout, po istom principu kao na
+    // ostalim stranicama (departures/arrivals/combined). Ovo
+    // osigurava da fetch koji je u toku bude stvarno prekinut pri
+    // unmountu/promjeni gate-a, a ne samo da mu se rezultat ignoriše.
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 10_000);
+    const externalSignal = abortControllerRef.current?.signal;
+    if (externalSignal) {
+      if (externalSignal.aborted) timeoutController.abort();
+      else externalSignal.addEventListener('abort', () => timeoutController.abort(), { once: true });
+    }
+
+    let statusRes: Response;
+    try {
+      statusRes = await fetch('/api/flights', { headers, signal: timeoutController.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (statusRes.status === 304) {
+      data = lastFlightsDataRef.current;
+      gateOverrideFromStatus = lastGateOverrideRef.current;
+    } else if (statusRes.ok) {
+      const statusData = await statusRes.json();
+      const newEtag = statusRes.headers.get('ETag');
+      if (newEtag) etagStatusRef.current = newEtag;
+
+      data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
+      lastFlightsDataRef.current = data;
+
+      const entry = statusData.gateEntries?.[gateNumber];
+      gateOverrideFromStatus = entry
+        ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
+        : { status: null, flightNumber: null, classType: null };
+      lastGateOverrideRef.current = gateOverrideFromStatus;
+// ← NOVO: sinhronizuj i brzi-poll referencu
+      lastFastOverrideRef.current = JSON.stringify({
+        status: gateOverrideFromStatus?.status ?? null,
+        flightNumber: gateOverrideFromStatus?.flightNumber ?? null,
+        classType: gateOverrideFromStatus?.classType ?? null,
+      });
+    }
+
+    // 2. Ako nema podataka - izađi
+    if (!data) {
+      console.error('[gate] Nema podataka');
+      setLoading(false);
+      return;
+    }
+
+    // 3. Override - KORISTI PODATKE IZ ISTOG POZIVA
+    let overrideStatus: string | null = gateOverrideFromStatus?.status ?? null;
+    let overrideFlightNumber: string | null = gateOverrideFromStatus?.flightNumber ?? null;
+    let classType: string | null = gateOverrideFromStatus?.classType ?? null;
 
     manualGateStatusRef.current = overrideStatus;
 
-    // 2. Ako je ručno zatvoren -> prazan ekran
+    // 4. Ako je ručno zatvoren -> prazan ekran
     if (overrideStatus === 'closed') {
       if (!isMountedRef.current) return;
       currentFlightRef.current = null;
@@ -511,45 +558,39 @@ if (!data) {
         classType,
       });
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-     // setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
       setLoading(false);
       return;
     }
 
+    // 5. Kandidati za prikaz
+    let candidates: Flight[] = [];
 
-// 3. Kandidati za prikaz — ISKLJUČIVO let koji je osoblje ručno
-    // dodijelilo ovom gate-u (Redis override). Auto-match na osnovu
-    // GateNumber polja iz API-ja je namjerno uklonjen — ekran više
-    // NIKAD ne prikazuje let koji nije eksplicitno dodijeljen. ────────
-let candidates: Flight[] = [];
-if (overrideStatus === 'open' && overrideFlightNumber) {
-  let overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-
-  // Override je aktivan, ali let nije u trenutno keširanoj listi.
-  // Ne odustaj odmah — prisilno povuci svježe podatke prije nego
-  // što zaključimo da leta nema.
-if (!overriddenFlight) {
-  console.warn(`[gate:${gateNumber}] Override za let ${overrideFlightNumber} aktivan, ali nije nađen — prisilno osvježavam.`);
-  try {
-    const freshData = await fetchFlightData(true);   // ← force=true, sad zaista zaobilazi throttle
-    lastFlightsDataRef.current = freshData;
-    data = freshData;
-    overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-  } catch (e) {
-    console.error('Prisilno osvježavanje letova nije uspjelo:', e);
+    if (overrideStatus === 'open' && overrideFlightNumber) {
+      // 🔥 SLUČAJ A: Override je aktivan - prikaži SAMO taj let
+      const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+      
+      if (!overriddenFlight) {
+        console.warn(`[gate] Let ${overrideFlightNumber} nije pronađen u keširanim podacima`);
+        setDisplay({
+          flight: null,
+          checkInStatus: null,
+          nextFlight: null,
+          gateChangedAt: undefined,
+          manualGateStatus: 'open',
+          overrideFlightNumber,
+          classType,
+        });
+        setLoading(false);
+        return;
+      }
+      
+      candidates = [overriddenFlight];
+    } else {
+      // 🔥 SLUČAJ B: Nema override-a - prikaži sve letove s ovog gate-a
+      candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
     }
-    if (!overriddenFlight) {
-      console.error(
-        `[gate:${gateNumber}] Let "${overrideFlightNumber}" i dalje nije pronađen. ` +
-        `Dostupni brojevi leta:`, data.departures.map(f => f.FlightNumber)
-      );
-    }
-  }
 
-  if (overriddenFlight) candidates = [overriddenFlight];
-}
-
-    // 4. Check-in status za svakog kandidata
+    // 6. Check-in status za kandidate
     const withStatus = await Promise.all(
       candidates.map(async (f) => ({
         ...f,
@@ -557,7 +598,7 @@ if (!overriddenFlight) {
       }))
     );
 
-    // 5. Sortiranje
+    // 7. Sortiranje
     const sorted = [...withStatus].sort((a, b) => {
       if (overrideStatus === 'open') {
         const ta = parseDepartureTime(a.ScheduledDepartureTime || '')?.getTime() ?? Infinity;
@@ -567,16 +608,17 @@ if (!overriddenFlight) {
       return getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b);
     });
 
-    // 6. Odaberi current let
-    let current: (typeof sorted)[number] | null = null;
+    // 8. Odaberi current let
+    let current: typeof sorted[0] | null = null;
+    
     if (overrideStatus === 'open') {
       current = sorted[0] ?? null;
     } else {
       current = sorted.find(f => shouldDisplayFlight(f)) ?? null;
     }
 
-    // 7. Next flight
-    let nextFlight: (typeof sorted)[number] | null = null;
+    // 9. Next flight
+    let nextFlight: typeof sorted[0] | null = null;
     const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
     if (idx >= 0) {
       for (let i = idx + 1; i < sorted.length; i++) {
@@ -587,7 +629,7 @@ if (!overriddenFlight) {
       }
     }
 
-    // 8. Detekcija promjene gate-a
+    // 10. Detekcija promjene gate-a
     let gateChangedAt: number | undefined;
     if (
       overrideStatus !== 'open' &&
@@ -600,77 +642,168 @@ if (!overriddenFlight) {
 
     if (!isMountedRef.current) return;
 
-    // 9. Ažuriranje state-a
-const hasChanged = flightChanged(current, currentFlightRef.current) || !!gateChangedAt;
+    // 11. Ažuriranje state-a
+    const hasChanged = flightChanged(current, currentFlightRef.current) || !!gateChangedAt;
 
-if (hasChanged) {
-  currentFlightRef.current = current;
-  currentStatusRef.current = current?.checkInStatus ?? null;
-  setDisplay({
-    flight: current,
-    checkInStatus: current?.checkInStatus ?? null,
-    nextFlight,
-    gateChangedAt,
-    manualGateStatus: overrideStatus,
-    overrideFlightNumber,
-    classType,
-  });
-  updateCountdown(current);
-} else {
-  setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
-}
+    if (hasChanged) {
+      currentFlightRef.current = current;
+      currentStatusRef.current = current?.checkInStatus ?? null;
+      setDisplay({
+        flight: current,
+        checkInStatus: current?.checkInStatus ?? null,
+        nextFlight,
+        gateChangedAt,
+        manualGateStatus: overrideStatus,
+        overrideFlightNumber,
+        classType,
+      });
+      updateCountdown(current);
+    } else {
+      setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+    }
 
-// ── NOVO: adaptivni backoff — produžuj interval SAMO dok je gate
-// stabilno "open" i ništa se ne mijenja. Bilo kakva promjena ILI
-// status različit od "open" (closed/no-flight) odmah resetuje
-// na brzi bazni interval. ──
-if (hasChanged || overrideStatus !== 'open') {
-  noChangeStreakRef.current = 0;
-} else {
-  noChangeStreakRef.current += 1;
-}
+    // 12. Adaptivni backoff
+    if (hasChanged || overrideStatus !== 'open') {
+      noChangeStreakRef.current = 0;
+    } else {
+      noChangeStreakRef.current += 1;
+    }
 
-setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-//setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
-setLoading(false);
+    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setLoading(false);
+
   } catch (err) {
+    // FIX: ako je greška zbog abort-a pri unmountu/gašenju komponente,
+    // ne loguj kao "critical" i ne diraj state — komponenta se gasi.
+    if ((err as Error)?.name === 'AbortError') {
+      return;
+    }
     console.error('Gate load error:', err);
     if (isMountedRef.current) setLoading(false);
+  } finally {
+    loadFlightsRef.current = false;
   }
-}, [gateNumber, fetchGateStatusOverride, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
- // ------------------------------------------------------------
-  // Polling interval (glavni)
-  // ------------------------------------------------------------
-// ------------------------------------------------------------
-// Polling interval (glavni)
-// ------------------------------------------------------------
+}, [gateNumber, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
+
+
+// ── 2) Zamijeni cijeli "Polling interval (glavni)" useEffect ovim
+//      (jedina promjena: tid → mainTidRef.current, i schedule se
+//      upisuje u scheduleMainRef da bude dostupan izvan efekta) ──
+ 
 useEffect(() => {
   isMountedRef.current = true;
-  let tid: ReturnType<typeof setTimeout>;
-  
- const schedule = () => {
-   const interval = getNextInterval();
-   setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
-    tid = setTimeout(async () => {
+  abortControllerRef.current = new AbortController();
+ 
+  const schedule = () => {
+    const interval = getNextInterval();
+    setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
+    mainTidRef.current = setTimeout(async () => {
       if (isMountedRef.current) {
         if (!isNightHours()) {
           await loadFlights();
         }
         schedule();
       }
-
-  }, interval);
+    }, interval);
   };
-  
+  scheduleMainRef.current = schedule;
+ 
   if (!isNightHours()) {
     loadFlights().then(schedule);
   } else {
     setLoading(false);
     schedule();
   }
-  
-  return () => { isMountedRef.current = false; clearTimeout(tid); };
+ 
+  return () => {
+    isMountedRef.current = false;
+    if (mainTidRef.current) clearTimeout(mainTidRef.current);
+    scheduleMainRef.current = null;
+    abortControllerRef.current?.abort();
+  };
 }, [loadFlights, getNextInterval]);
+
+
+ 
+// ------------------------------------------------------------
+// BRZI POLL — nezavisan, laki poll na POSTOJEĆI, već CDN-keširan
+// /api/test/gate-status-override?gateNumber=X endpoint (Redis +
+// ETag + Cache-Control: max-age=2, s-maxage=2, stale-while-revalidate=3
+// — vidi patch za taj route.ts). Prati SAMO promjenu override-a na
+// ovom gate-u na svakih ~2-4s, odvojeno od skupljeg glavnog
+// /api/flights ciklusa (25-90s adaptivno). Dok se override ne
+// mijenja, CDN servira keširan odgovor bez pozivanja serverless
+// funkcije. Čim detektuje promjenu, odmah pokreće puni loadFlights()
+// umjesto da se čeka do sledećeg glavnog ciklusa.
+// ------------------------------------------------------------
+useEffect(() => {
+  if (!gateNumber) return;
+ 
+  let tid: ReturnType<typeof setTimeout>;
+  let cancelled = false;
+  const controller = new AbortController();
+ 
+  const poll = async () => {
+    if (cancelled) return;
+ 
+    if (isNightHours()) {
+      tid = setTimeout(poll, getFastPollInterval());
+      return;
+    }
+ 
+    try {
+   // BEZ ?gateNumber=X — svih 12 gate ekrana sad gađa ISTI URL,
+      // pa dijele JEDAN CDN cache ključ (isti princip kao /api/flights).
+      const res = await fetch(
+        `/api/test/gate-status-override`,
+        { signal: controller.signal }
+      );
+      if (res.ok) {
+        // Oblik odgovora BEZ gateNumber-a: { [gateNumber]: entry, ... }
+        // za SVE gate-ove — uzmi samo naš.
+        const allEntries = await res.json();
+        const entry = allEntries[gateNumber] ?? { status: null, flightNumber: null, classType: null };
+        const key = JSON.stringify({
+          status: entry.status ?? null,
+          flightNumber: entry.flightNumber ?? null,
+          classType: entry.classType ?? null,
+          // setAt namjerno izostavljen — mijenja se i kad admin
+          // ponovo potvrdi ISTU dodjelu, što ne treba da triggera
+          // nepotreban reload.
+        });
+ 
+if (lastFastOverrideRef.current !== null && lastFastOverrideRef.current !== key) {
+          console.log('[gate] Brzi poll: override promijenjen, pokrećem loadFlights()');
+          loadFlights().then(() => {
+            // ← NOVO: restartuj glavni raspored da ne dođe do
+            // suvišnog /api/flights poziva ubrzo nakon ovog
+            // vanrednog osvježavanja — glavni ciklus kreće ponovo
+            // od "nula" sa svježe izračunatim intervalom.
+            if (mainTidRef.current) clearTimeout(mainTidRef.current);
+            scheduleMainRef.current?.();
+          });
+        }
+        lastFastOverrideRef.current = key;
+      }
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        console.warn('[gate] fast poll error:', err);
+      }
+    } finally {
+      if (!cancelled) tid = setTimeout(poll, getFastPollInterval());
+    }
+  };
+ 
+  poll();
+ 
+  return () => {
+    cancelled = true;
+    clearTimeout(tid);
+    controller.abort();
+  };
+}, [gateNumber, loadFlights]);
+ 
+ 
 
 // ------------------------------------------------------------
 // BRZI POLL — otkriva promjenu dodjele na gate-u unutar ~3-4.5s,

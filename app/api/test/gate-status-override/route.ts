@@ -9,6 +9,25 @@ import { revalidateTag } from 'next/cache';
 const MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 sati
 const TTL_SECONDS = 21_600;            // 6h
 const ALL_KEY = 'test:gate-status:all';
+let cachedAll: Record<string, GateEntry> | null = null;
+let cachedAllExpiry = 0;
+let cacheRefreshing = false;
+const CACHE_TTL_MS = 2_000; // ← kraće od desk-ovih 30s, usklađeno sa GATE_STATUS_CACHE_CONTROL max-age=2
+ 
+
+// ── FIX v2: skraćeno sa 4/4/5 na 2/2/3 ──
+// Ranije (v1): max-age=4, s-maxage=4, stale-while-revalidate=5
+//   → worst-case ~9-10s (4s CDN prozor + jedan ciklus brzog poll-a
+//     na klijentu od 4-6s).
+// Sad (v2): max-age=2, s-maxage=2, stale-while-revalidate=3
+//   → worst-case ~4-5s (2s CDN prozor + jedan ciklus brzog poll-a
+//     na klijentu od ~2-4s, vidi FAST_POLL_BASE_MS u GatePageClient).
+// Trade-off: nešto veći broj poziva ovoj funkciji (CDN keš vrijedi
+// upola kraće), ali i dalje daleko manje nego direktan poll bez CDN-a
+// — i sad praktično neprimjetna latencija za slučaj "osoblje odmah
+// ispravi pogrešnu dodjelu".
+const GATE_STATUS_CACHE_CONTROL =
+  'public, max-age=2, s-maxage=2, stale-while-revalidate=3';
 
 
 type GateEntry = {
@@ -28,6 +47,30 @@ async function readAll(): Promise<Record<string, GateEntry>> {
   }
 }
 
+// ── 2) Dodaj ODMAH ISPOD postojeće readAll() funkcije ──
+ 
+async function readAllCached(): Promise<Record<string, GateEntry>> {
+  const now = Date.now();
+ 
+  if (cachedAll && now < cachedAllExpiry) {
+    return cachedAll;
+  }
+  if (cacheRefreshing && cachedAll) {
+    return cachedAll;
+  }
+ 
+  cacheRefreshing = true;
+  try {
+    const fresh = await readAll();
+    cachedAll = fresh;
+    cachedAllExpiry = now + CACHE_TTL_MS;
+    return fresh;
+  } finally {
+    cacheRefreshing = false;
+  }
+}
+ 
+
 async function writeAll(data: Record<string, GateEntry>): Promise<void> {
   await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
 }
@@ -39,7 +82,7 @@ export async function GET(request: Request) {
     const gateNumber = searchParams.get('gateNumber');
     const now = Date.now();
 
-const all = await readAll();
+const all = await readAllCached();
 
     // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
     let changed = false;
@@ -75,43 +118,25 @@ console.log(
     if (ifNoneMatch && ifNoneMatch === etag) {
       return new NextResponse(null, {
         status: 304,
-// headers: {
-//   'ETag': etag,
-// // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-// 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-// 'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-// 'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-// },
-headers: {
-  'ETag': etag,
-// I u 304 grani i u normalnom odgovoru, sve tri header linije:
-'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-},
+        headers: {
+          'ETag': etag,
+          // I u 304 grani i u normalnom odgovoru, sve tri header linije:
+          'Cache-Control': GATE_STATUS_CACHE_CONTROL,
+          'CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
+          'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
+        },
       });
-
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
-// const headers: Record<string, string> = {
-// // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-// 'Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-// 'CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
-// 'Vercel-CDN-Cache-Control': 'public, max-age=6, s-maxage=6, stale-while-revalidate=12',
+    const headers: Record<string, string> = {
+      // I u 304 grani i u normalnom odgovoru, sve tri header linije:
+      'Cache-Control': GATE_STATUS_CACHE_CONTROL,
+      'CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
+      'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
 
-// 'ETag': etag,
-
-// };
-const headers: Record<string, string> = {
-// I u 304 grani i u normalnom odgovoru, sve tri header linije:
-'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-
-'ETag': etag,
-
-};
+      'ETag': etag,
+    };
 
     if (gateNumber) {
       const entry = all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null };
@@ -164,6 +189,17 @@ await writeAll(all);
 
   // ── Odmah probij CDN keš na /api/flights/status — isti razlog kao
   // kod desk-status-override.
+  //
+  // NAPOMENA: ovo NE utiče na CDN keš OVOG GET handlera (onaj koristi
+  // sirova HTTP Cache-Control zaglavlja / Vercel Edge keš, ne Next-ov
+  // Data Cache sistem tagova koji revalidateTag() cilja). To znači da
+  // nakon admin akcije, /api/test/gate-status-override i dalje može
+  // servirati keširan odgovor do isteka gornjeg GATE_STATUS_CACHE_CONTROL
+  // prozora (sad ~4s) — to je namjerno i očekivano, ne bug. Ako ikad
+  // zatreba INSTANT propagacija bez ikakvog čekanja, trebalo bi ili
+  // dodatno pozvati Vercel-ov CDN purge API za ovu specifičnu putanju,
+  // ili prebaciti ovaj GET na Next-ov tag-based cache (unstable_cache +
+  // revalidateTag) umjesto sirovih headera — veća promjena, po potrebi.
   revalidateTag('flight-status');
 
   const ttl = action === 'clear' ? undefined : TTL_SECONDS;

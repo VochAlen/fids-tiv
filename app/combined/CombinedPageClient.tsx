@@ -46,7 +46,17 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 130_000
+//const REFRESH_INTERVAL_MS         = 130_000
+// ── Adaptivni interval — zasnovan na "gustoći" rasporeda letova ──
+ // ≤90 min do sljedećeg leta: brzo (130s). 90min-3h: srednje (200s).
+ // >3h: sporo (300s). Čim se uđe u 90-min prozor prije STD sljedećeg
+ // leta, interval se odmah vraća na bazni (brzi), bez obzira koliko
+ // je bio spor prije toga.
+ const BASE_INTERVAL_MS       = 130_000
+ const MEDIUM_INTERVAL_MS     = 200_000
+ const SLOW_INTERVAL_MS       = 300_000
+ const FAST_THRESHOLD_MIN     = 90
+ const MEDIUM_THRESHOLD_MIN   = 180 // 3h
 const CACHE_DURATION              = 6 * 60_000
 const CACHE_KEY                   = "flight_board_cache_v2"
 const HARD_RESET_HOUR             = 3
@@ -211,6 +221,35 @@ class FlightBoardErrorBoundary extends Component<{ children: ReactNode; fallback
 const getFlightawareLogoURL = (icao: string): string =>
   icao ? `https://www.flightaware.com/images/airline_logos/180px/${icao}.png` : ""
 
+function getEffectiveFlightTime(f: Flight): Date | null {
+  return parseFlightTimeToDate(f.EstimatedDepartureTime || f.ScheduledDepartureTime)
+}
+
+// Vraća minute do najbližeg NADOLAZEĆEG leta (arrival ili departure).
+// NAPOMENA: namjerno NE filtriramo diffMin > 0 — let koji je već "u toku"
+// (kasni, prošao STD, ali nije departed/arrived) mora ostati u razmatranju
+// jer negativna vrijednost prirodno padne u FAST prag (≤ 90) ispod. Da smo
+// ga isključili, tabla dominirana jednim kasnim letom (sledeći za 3h+) bi
+// pogrešno prešla u SLOW baš kad treba najbrže pratiti taj let.
+function getMinutesUntilNextFlight(flights: Flight[]): number {
+  const now = Date.now()
+  let min = Infinity
+  for (const f of flights) {
+    const t = getEffectiveFlightTime(f)
+    if (!t) continue
+    const diffMin = (t.getTime() - now) / 60_000
+    if (diffMin < min) min = diffMin
+  }
+  return min
+}
+
+function getAdaptiveInterval(arrivals: Flight[], departures: Flight[]): number {
+  const gapMin = getMinutesUntilNextFlight([...arrivals, ...departures])
+  if (gapMin <= FAST_THRESHOLD_MIN) return BASE_INTERVAL_MS
+  if (gapMin <= MEDIUM_THRESHOLD_MIN) return MEDIUM_INTERVAL_MS
+  return SLOW_INTERVAL_MS
+}
+
 function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null {
   if (!timeStr) return null
   const s = timeStr.trim()
@@ -303,9 +342,21 @@ const loadFromCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
-const fetchWithTimeout = (url: string, timeout: number, headers?: HeadersInit): Promise<Response> => {
+const fetchWithTimeout = (
+  url: string,
+  timeout: number,
+  headers?: HeadersInit,
+  externalSignal?: AbortSignal
+): Promise<Response> => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
+ 
+  // Ako se vanjski signal (unmount) okine, prekini i ovaj fetch.
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+ 
   return fetch(url, { signal: controller.signal, headers })
     .finally(() => clearTimeout(timeoutId))
     .catch(err => {
@@ -780,7 +831,9 @@ function FlightBoard(): JSX.Element {
   const isInitialLoad = useRef(true)
   const lastHeartbeat = useRef(Date.now())
   // FIX: lastKnownHash prebačen u ref — ne preživljava HMR, čisti se na unmount
-  const lastKnownHashRef = useRef<string | null>(null)
+const lastKnownHashRef = useRef<string | null>(null)
+  // FIX C: sprječava preklapanje dva istovremena load() poziva (vidi Polling useEffect)
+  const isFetchingRef = useRef(false)
 
   const arrivalsRef   = useRef<Flight[]>([])
   const departuresRef = useRef<Flight[]>([])
@@ -1018,139 +1071,147 @@ useEffect(() => {
     setLoading(false)
   }, [prepareData])
 
-  // ── Polling ──
-  useEffect(() => {
-    isMountedRef.current = true
-    let tid: ReturnType<typeof setTimeout>
-    const controller = new AbortController()
 
+
+// ── Polling ──
+useEffect(() => {
+  isMountedRef.current = true
+  let tid: ReturnType<typeof setTimeout>
+  const controller = new AbortController()
+ 
   const load = async () => {
-  if (!isMountedRef.current) return
-
-  const wasNightMode = nightModeRef.current
-
-  if (isNightHours()) {
-    if (isMountedRef.current) setNightMode(true)
-    setLoading(false)
-    tid = setTimeout(load, REFRESH_INTERVAL_MS)
-    return
-  }
-  if (isMountedRef.current) setNightMode(false)
-
-  const justExitedNightMode = wasNightMode
-
-  try {
-    if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0)
-      setLoading(true)
-    setErrorMessage(null)
-
-    const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
-    const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
-
-    // ── JEDAN poziv po ciklusu, sa ETag-om ──────────────────────
-    const headers: HeadersInit = {}
-    if (!forceRefresh && etagStatusRef.current) {
-      headers['If-None-Match'] = etagStatusRef.current
+    if (!isMountedRef.current) return
+ 
+    // FIX C: guard protiv preklapanja — ako je fetch već u toku, ne pokreći novi
+    if (isFetchingRef.current) return
+    isFetchingRef.current = true
+ 
+    const wasNightMode = nightModeRef.current
+ 
+    if (isNightHours()) {
+      if (isMountedRef.current) setNightMode(true)
+      setLoading(false)
+      isFetchingRef.current = false // FIX C: nije bilo pravog fetch-a, oslobodi guard
+      tid = setTimeout(load, BASE_INTERVAL_MS)
+      return
     }
-
-    let res: Response
+    if (isMountedRef.current) setNightMode(false)
+ 
+    const justExitedNightMode = wasNightMode
+ 
+    // Jedina promjenljiva koja odlučuje kada se sledeći load() dešava.
+    // Sve grane ispod je SAMO postavljaju — finally zove setTimeout.
+    let nextInterval: number = BASE_INTERVAL_MS
+ 
     try {
-      res = await fetchWithTimeout('/api/flights', 5_000, headers)
-    } catch (fe) {
-      // network greška — fallback na keš (isti kod kao ranije, vidi ispod)
-      const cached = loadFromCache()
-      if (cached) {
-        const assignments = { desks: cached.desks ?? {}, gates: {} } // prilagodi po potrebi
-        const { filteredArrivals, departuresWithMeta } = prepareData(cached)
-        setArrivals(filteredArrivals)
-        setDepartures(departuresWithMeta)
-        setErrorMessage("Using cached data")
-      } else {
-        const emergencyCached = loadEmergencyCache()
-        if (emergencyCached) {
-          const { filteredArrivals, departuresWithMeta } = prepareData(emergencyCached)
+      if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0)
+        setLoading(true)
+      setErrorMessage(null)
+ 
+      const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
+      const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
+ 
+      // ── JEDAN poziv po ciklusu, sa ETag-om ──────────────────────
+      const headers: HeadersInit = {}
+      if (!forceRefresh && etagStatusRef.current) {
+        headers['If-None-Match'] = etagStatusRef.current
+      }
+ 
+      let res: Response
+      try {
+        res = await fetchWithTimeout('/api/flights', 5_000, headers, controller.signal)
+      } catch (fe) {
+        // network greška — fallback na keš
+        const cached = loadFromCache()
+        if (cached) {
+          const { filteredArrivals, departuresWithMeta } = prepareData(cached)
           setArrivals(filteredArrivals)
           setDepartures(departuresWithMeta)
-          setErrorMessage("Prikazan stariji poznati raspored")
+          setErrorMessage("Using cached data")
+          nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
         } else {
-          setErrorMessage("Unable to load flight data")
+          const emergencyCached = loadEmergencyCache()
+          if (emergencyCached) {
+            const { filteredArrivals, departuresWithMeta } = prepareData(emergencyCached)
+            setArrivals(filteredArrivals)
+            setDepartures(departuresWithMeta)
+            setErrorMessage("Prikazan stariji poznati raspored")
+            nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
+          } else {
+            setErrorMessage("Unable to load flight data")
+            nextInterval = BASE_INTERVAL_MS
+          }
+        }
+        setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000)
+        return // ← finally postavlja tid, koristi nextInterval iznad
+      }
+ 
+      // ── 304: ništa se nije promijenilo, samo ažuriraj timestamp ──
+      if (res.status === 304) {
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
+        return // ← finally postavlja tid
+      }
+ 
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+ 
+      const newEtag = res.headers.get('ETag')
+      if (newEtag) etagStatusRef.current = newEtag
+ 
+      const data: FlightDataResponse = await res.json()
+ 
+      if (isMountedRef.current) {
+        saveToCache(data)
+        saveEmergencyCache(data)
+      }
+ 
+      if (!isMountedRef.current) return
+ 
+      const gatesByFlight: Record<string, string> = {}
+      for (const [gateNum, entry] of Object.entries(data.gateEntries ?? {})) {
+        if (entry?.status === 'open' && entry.flightNumber) {
+          const fn = entry.flightNumber
+          gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum
         }
       }
-      setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000)
+      const assignments = { desks: data.desks ?? {}, gates: gatesByFlight }
+      if (isMountedRef.current) setNightMode(!!data.isNightMode)
+ 
+      const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
+      const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
+ 
+      if (incomingTotal === 0 && currentlyHasData) {
+        console.warn('⚠️ Novi fetch vratio 0 letova — zadržavam prethodno prikazano stanje')
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
+      } else {
+        const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+        setArrivals(filteredArrivals)
+        setDepartures(departuresWithMeta)
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
+      }
+    } catch (e) {
+      console.error("Critical:", e)
+      nextInterval = BASE_INTERVAL_MS
+    } finally {
       isInitialLoad.current = false
+      isFetchingRef.current = false // FIX C: fetch ciklus gotov, otvori guard
       if (isMountedRef.current) {
         setLoading(false)
-        tid = setTimeout(load, REFRESH_INTERVAL_MS)
+        // ── JEDINO mjesto koje zove setTimeout za sledeći ciklus ──
+        tid = setTimeout(load, nextInterval)
       }
-      return
-    }
-
-    // ── 304: ništa se nije promijenilo, samo primijeni desk/gate meta ──
-    if (res.status === 304) {
-      // ETag se nije promijenio → server garantuje da se ni letovi ni
-      // desk/gate dodjela nisu promijenili otkad smo zadnji put dobili 200.
-      // Nema šta primijeniti — samo ažuriraj timestamp.
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-      isInitialLoad.current = false
-      setLoading(false)
-      tid = setTimeout(load, REFRESH_INTERVAL_MS)
-      return
-    }
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
-    const newEtag = res.headers.get('ETag')
-    if (newEtag) etagStatusRef.current = newEtag
-
-    const data: FlightDataResponse = await res.json()
-
-    if (isMountedRef.current) {
-      saveToCache(data)
-      saveEmergencyCache(data)
-    }
-
-    if (!isMountedRef.current) return
-
-const gatesByFlight: Record<string, string> = {}
-for (const [gateNum, entry] of Object.entries(data.gateEntries ?? {})) {
-  if (entry?.status === 'open' && entry.flightNumber) {
-    const fn = entry.flightNumber
-    gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum
-  }
-}
-const assignments = { desks: data.desks ?? {}, gates: gatesByFlight }
-if (isMountedRef.current) setNightMode(!!data.isNightMode)
-
-    const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
-    const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
-
-    if (incomingTotal === 0 && currentlyHasData) {
-      console.warn('⚠️ Novi fetch vratio 0 letova — zadržavam prethodno prikazano stanje')
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-    } else {
-      const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
-      setArrivals(filteredArrivals)
-      setDepartures(departuresWithMeta)
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-    }
-  } catch (e) {
-    console.error("Critical:", e)
-  } finally {
-    isInitialLoad.current = false
-    if (isMountedRef.current) {
-      setLoading(false)
-      tid = setTimeout(load, REFRESH_INTERVAL_MS)
     }
   }
-}
-
-    load()
-    return () => {
-      isMountedRef.current = false
-      clearTimeout(tid)
-      controller.abort()
-    }
-  }, [prepareData, applyAssignmentsOnly])
+ 
+  load()
+  return () => {
+    isMountedRef.current = false
+    clearTimeout(tid)
+    controller.abort() // FIX B: sada stvarno prekida fetch koji je u toku
+  }
+}, [prepareData, applyAssignmentsOnly])
 
   const handleClose = useCallback(() => {
     if ((window as any).electronAPI?.quitApp) { (window as any).electronAPI.quitApp(); return }
