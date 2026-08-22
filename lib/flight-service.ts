@@ -438,8 +438,25 @@ export function getUniqueDeparturesWithDeparted(flights: Flight[]): Flight[] {
   const now = new Date();
   const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
 
-  const isDeparted = (status: string) =>
-    status.toLowerCase().includes('departed') || status.toLowerCase().includes('poletio');
+  // FIX: bio je uzrok "Unable to load flight data" na departures/combined
+  // stranicama. status.toLowerCase() se ranije zvao DIREKTNO na
+  // flight.StatusEN bez provjere null/undefined — za razliku od SVIH
+  // ostalih sličnih helper funkcija u ovom fajlu (shouldDisplayFlight,
+  // isFlightCompleted, shouldDisplayOnCheckIn), koje sve imaju
+  // "if (!flight.StatusEN) return false" prije .toLowerCase(). Ako je
+  // ijedan let u nizu imao StatusEN kao null/undefined u praksi (TS tip
+  // tvrdi "string", ali to se ne provjerava na runtime-u protiv stvarnih
+  // podataka iz baze/upstream izvora), ovo je bacalo TypeError unutar
+  // .filter() callback-a na liniji 454 ispod — što se propagira do
+  // outer catch-a u departures/page.tsx i CombinedPageClient.tsx
+  // (jedine dvije stranice koje zovu getUniqueDeparturesWithDeparted)
+  // i prikazuje se kao "Unable to load flight data", iako je /api/flights
+  // vratio 200 OK. border/arrivals stranice ovu funkciju uopšte ne
+  // pozivaju, zato tamo nije bilo simptoma.
+  const isDeparted = (status: string | null | undefined) => {
+    const s = (status ?? '').toLowerCase();
+    return s.includes('departed') || s.includes('poletio');
+  };
 
   const getTime = (flight: Flight): Date | null => {
     const s = flight.ActualDepartureTime || flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;

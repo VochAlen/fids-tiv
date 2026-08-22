@@ -971,8 +971,16 @@ function DeparturesBoard(): JSX.Element {
             });
           }
         } catch (fe) {
-          // Ako je greška zbog abort-a pri unmountu, ne radi ništa dalje —
-          // komponenta se gasi, nema smisla ažurirati state ili keš.
+          // ── FIX: provjeri OVAJ controller, ne isMountedRef.
+          // isMountedRef je DIJELJEN između StrictMode dvostrukih
+          // effect-invokacija u dev modu — može se vratiti na `true`
+          // od strane DRUGOG (novog) efekta prije nego stigne catch
+          // ovog (starog, već abortovanog) poziva. controller.signal.aborted
+          // je vezan striktno za OVAJ closure i pouzdano kaže da li je
+          // BAŠ OVAJ fetch namjerno prekinut (unmount / effect remount).
+          if (controller.signal.aborted) {
+            return; // efekat je cleanup-ovan — ignoriši, ne diraj cache/UI
+          }
           if (!isMountedRef.current) return;
 
           setErrorMessage('Network error. Using cached data.');
@@ -990,7 +998,7 @@ function DeparturesBoard(): JSX.Element {
           }
         }
 
-        if (!isMountedRef.current || !data) return;
+             if (!isMountedRef.current || !data) return;
 
         // 🔥 Koristi desks i gates iz data (bilo iz API-ja ili cache-a)
         const assignments = {
@@ -998,39 +1006,46 @@ function DeparturesBoard(): JSX.Element {
           gates: data.gates || {}
         };
 
-        const rawDepartures = getUniqueDeparturesWithDeparted(
-          filterRecentDepartures(data.departures)
-        );
-
-        const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
-
-        setFlights(departuresWithMeta);
-        setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-        if (!usedCache) setErrorMessage(null);
-        else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
+        // ── NOVO: odvojen try/catch za processing, da se razlikuje
+        // od network grešaka i da se vidi TAČNO gdje puca ──
+        try {
+          const rawDepartures = getUniqueDeparturesWithDeparted(
+            filterRecentDepartures(data.departures || [])   // ← fallback na [] ako je undefined
+          );
+          const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
+          setFlights(departuresWithMeta);
+          setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+          if (!usedCache) setErrorMessage(null);
+          else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
+        } catch (processingError) {
+          console.error('Processing error (data was fetched OK):', processingError, data);
+          setErrorMessage('Data processing error — check console.');
+        }
 
       } catch (e) {
         if (isMountedRef.current) {
           console.error('Critical:', e);
           setErrorMessage('Unable to load flight data. Check connection.');
         }
-      } finally {
-        isInitialLoad.current = false;
-        isFetchingRef.current = false; // FIX C: fetch ciklus gotov, otvori guard
-        if (isMountedRef.current) {
-          setLoading(false);
-          // ── JEDINO mjesto (osim ranih 304/night-hours return-ova iznad)
-          // koje zove setTimeout za sledeći ciklus ──
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
-        }
+  } finally {
+      isInitialLoad.current = false;
+      isFetchingRef.current = false;
+      if (isMountedRef.current && !controller.signal.aborted) {
+        setLoading(false);
+        tid = setTimeout(load, REFRESH_INTERVAL_MS);   // ← umjesto nextInterval
       }
+    }
     };
 
     load();
     return () => {
-      isMountedRef.current = false;
-      clearTimeout(tid);
-      controller.abort(); // FIX B: stvarno prekida fetch koji je u toku
+    isMountedRef.current = false
+    clearTimeout(tid)
+    controller.abort()
+    isFetchingRef.current = false   // ← NOVO: odmah oslobodi lock, da load() 
+                                     // iz SLJEDEĆEG (StrictMode remount) effect-a 
+                                     // ne bude blokiran dok se stari (abortovani) 
+                                     // fetch asinhrono ne završi
     };
   }, [filterRecentDepartures, prepareDepartures]);
 

@@ -1,5 +1,5 @@
 // app/lib/backup/flight-backup-service.ts
-import type { Flight } from '@/types/flight';
+import type { Flight, RawFlightData } from '@/types/flight';
 import { getRedisClient } from '@/lib/redis';
 import { getPodgoricaDateString } from '@/lib/night-hours';
 
@@ -29,28 +29,36 @@ export class FlightBackupService {
   private static instance: FlightBackupService;
   private backupStorage: Map<string, BackupData> = new Map();
   private maxBackups = 50;
-  private isInitialized = true;
-  private lastBackupHash: string | null = null;
+  private initializationPromise: Promise<void> | null = null;
+  private isInitialized = false;
 
+  // ── NAPOMENA: konstruktor VIŠE ne pokreće eager fetch ka
+  // eksternom API-ju (vidi initialize()/fetchInitialBackupData() ispod
+  // — ostavljeni su definisani za slučaj da ih neko ubuduće želi
+  // ručno pozvati, ali se više ne pozivaju automatski).
+  //
+  // Razlog: ovaj servis se instancira (getInstance()) iz
+  // flight-data-service.ts na svaki cold start, i konstruktor je
+  // ranije odmah radio SVOJ zaseban fetch ka
+  // montenegroairports.com/aerodromixs/cache-flights.php — potpuno
+  // nezavisno od, i bez ikakve retry/timeout koordinacije sa, glavnim
+  // live-fetch mehanizmom u flight-data-service.ts. To je značilo:
+  //   1) Dupliran network poziv ka istom (povremeno nestabilnom)
+  //      eksternom API-ju na svaki cold start, bez ikakve koristi —
+  //      dok je BACKUP_ENABLED=false, getLatestBackup() se nikad ne
+  //      čita, pa je ovaj fetch garantovano bačen posao.
+  //   2) Zbunjujuće/zastrašujuće log greške (HTTP 500 i sl.) koje
+  //      izgledaju kao kvar sistema, a nemaju NIKAKAV funkcionalni
+  //      efekat (isInitialized se postavlja na true bez obzira na
+  //      ishod, getLatestBackup() ionako ide pravo na Redis).
+  //
+  // Backup podaci se i dalje organski pune preko saveBackup() poziva
+  // iz flight-data-service.ts (emergency fetch grana, koja ostaje
+  // aktivna za slučaj da se BACKUP_ENABLED ikad vrati na true) — nema
+  // potrebe da ovaj servis SAM OD SEBE gađa eksterni API čim se
+  // instancira.
   private constructor() {
-    // ── UKLONJENO: ranije je ovdje pozivan this.initialize(), koji je na
-    // SVAKI cold start gađao STARI, napušteni
-    // montenegroairports.com/aerodromixs/cache-flights.php endpoint i
-    // bezuslovno prepisivao backup:flights:latest u Redisu — potpuno
-    // mimo NAIS proxy toka i bez ikakve provere svežine/kvaliteta u
-    // odnosu na postojeći backup (saveBackupInternal se pozivala
-    // direktno, zaobilazeći dedup/provere u saveBackup()).
-    //
-    // Posljedica: u zavisnosti od toga kad je taj stari PHP keš skript
-    // zadnji put interno osvježen na montenegroairports.com strani,
-    // dobar (svjež, NAIS-based) backup bi znao biti prepisan zastarelim
-    // podatkom (npr. jutarnjim) — tačno simptom koji se javljao kad
-    // NAIS proxy padne i sistem posegne za getLatestBackup().
-    //
-    // Backup se sad isključivo puni iz getCurrentFlightData() u
-    // flight-data-service.ts, preko saveBackup() poziva nakon uspješnog
-    // live fetch-a sa NAIS proxy-ja — to je jedini pouzdan izvor i jedino
-    // mjesto koje smije pisati u backup:flights:latest.
+    this.isInitialized = true;
   }
 
   public static getInstance(): FlightBackupService {
@@ -61,8 +69,111 @@ export class FlightBackupService {
   }
 
   /**
+   * Initialize backup system with real data from API.
+   * NIJE VIŠE automatski pozvano iz konstruktora — dostupno za ručni
+   * poziv ako se ikad ponovo poželi eager backfill (npr. ako se
+   * BACKUP_ENABLED vrati na true i želi se odmah popuniti keš na
+   * deploy).
+   */
+  private async initialize(): Promise<void> {
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+
+    this.initializationPromise = (async (): Promise<void> => {
+      try {
+        console.log('🚀 Initializing backup system...');
+
+        const initialFlights = await this.fetchInitialBackupData();
+
+        if (initialFlights.length > 0) {
+          const backupId = this.saveBackupInternal(initialFlights);
+          console.log(`✅ Initial backup created from API: ${backupId} (${initialFlights.length} flights)`);
+        } else {
+          console.log('⚠️ Initial API fetch returned no flights');
+        }
+
+        this.isInitialized = true;
+        console.log('✅ Backup system initialized successfully');
+      } catch (error) {
+        console.error('❌ Backup system initialization failed:', error);
+        this.isInitialized = true;
+      }
+    })();
+
+    return this.initializationPromise;
+  }
+
+  /**
+   * Fetch real data from API for initial backup.
+   * Dostupno, ali se više ne poziva automatski (vidi initialize()).
+   */
+  private async fetchInitialBackupData(): Promise<Flight[]> {
+    try {
+      const API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
+
+      console.log('📡 Fetching initial backup data from API...');
+
+      const response = await fetch(API_URL, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://montenegroairports.com/',
+          'Origin': 'https://montenegroairports.com',
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const rawData: RawFlightData[] = await response.json();
+
+      if (!Array.isArray(rawData)) {
+        throw new Error('Invalid data format received');
+      }
+
+      console.log(`📦 Fetched ${rawData.length} flights for initial backup`);
+
+      const flights: Flight[] = rawData.map((raw): Flight => ({
+        // Deterministički ID: kombinacija koja garantuje isti ID za isti let
+        // Kompanija + BrojLeta + Planirano vreme + Destinacija
+        id: `${raw.Kompanija}${raw.BrojLeta}_${raw.Planirano}_${raw.IATA}`,
+        FlightNumber: `${raw.Kompanija}${raw.BrojLeta}`,
+        AirlineCode: raw.Kompanija,
+        AirlineICAO: raw.KompanijaICAO,
+        AirlineName: raw.KompanijaNaziv,
+        DestinationAirportName: raw.Aerodrom,
+        DestinationAirportCode: raw.IATA,
+        ScheduledDepartureTime: this.formatTime(raw.Planirano),
+        EstimatedDepartureTime: this.formatTime(raw.Predvidjeno),
+        ActualDepartureTime: this.formatTime(raw.Aktuelno),
+        StatusEN: raw.StatusEN || '',
+        StatusMN: raw.StatusMN || '',
+        Terminal: raw.Terminal || '',
+        GateNumber: raw.Gate || '',
+        CheckInDesk: raw.CheckIn || '',
+        BaggageReclaim: raw.Karusel || '',
+        CodeShareFlights: raw.CodeShare ? raw.CodeShare.split(',').map(f => f.trim()).filter(Boolean) : [],
+        AirlineLogoURL: `/airlines/${raw.KompanijaICAO}.png`,
+        FlightType: raw.TipLeta === 'O' ? 'departure' : 'arrival',
+        DestinationCityName: raw.Grad,
+        IsBackupData: true,
+        BackupTimestamp: new Date().toISOString()
+      }));
+
+      return flights;
+    } catch (error) {
+      console.error('❌ Failed to fetch initial backup data:', error);
+      return [];
+    }
+  }
+
+  /**
    * Format time string from HHMM to HH:MM
-   * (zadržano jer se koristi eventualno drugdje / za kompatibilnost tipova)
    */
   private formatTime(time: string): string {
     if (!time || time.length !== 4) return '';
@@ -70,22 +181,19 @@ export class FlightBackupService {
   }
 
   /**
-   * Save flight data to backup — jedina ulazna tačka koju treba koristiti
-   * iz flight-data-service.ts (NAIS proxy tok).
+   * Wait for initialization if needed
    */
-  public async saveBackup(flights: Flight[]): Promise<string> {
-    const hash = this.computeHash(flights);
-    if (hash === this.lastBackupHash) {
-      return 'skipped-unchanged';
+  private async ensureInitialized(): Promise<void> {
+    if (!this.isInitialized && this.initializationPromise) {
+      await this.initializationPromise;
     }
-    this.lastBackupHash = hash;
-    return this.saveBackupInternal(flights);
   }
 
-  private computeHash(flights: Flight[]): string {
-    return Buffer.from(JSON.stringify(
-      flights.map(f => `${f.FlightNumber}|${f.GateNumber}|${f.CheckInDesk}|${f.StatusEN}|${f.EstimatedDepartureTime}`)
-    )).toString('base64');
+  /**
+   * Save flight data to backup
+   */
+  public async saveBackup(flights: Flight[]): Promise<string> {
+    return this.saveBackupInternal(flights);
   }
 
   /**
@@ -99,6 +207,7 @@ export class FlightBackupService {
     const backupData: BackupData = {
       id: backupId,
       flights: flights.map(f => ({ ...f, IsBackupData: true, BackupTimestamp: timestamp })),
+      // date: now.toISOString().split('T')[0],
       date: getPodgoricaDateString(now),
       timestamp,
       metadata: {
@@ -142,6 +251,10 @@ export class FlightBackupService {
    */
   public getAllBackups(): BackupData[] {
     try {
+      void this.ensureInitialized().catch(() => {
+        console.warn('Initialization check failed during getAllBackups');
+      });
+
       const allBackups: BackupData[] = [];
       this.backupStorage.forEach((backup) => {
         allBackups.push(backup);
@@ -271,6 +384,10 @@ export class FlightBackupService {
    */
   public getBackupStats(): BackupStats {
     try {
+      void this.ensureInitialized().catch(() => {
+        console.warn('Initialization check failed during stats');
+      });
+
       const today = new Date().toISOString().split('T')[0];
       let todayCount = 0;
       let latestTime = new Date().toISOString();
@@ -324,7 +441,6 @@ export class FlightBackupService {
   public async clearAllBackups(): Promise<number> {
     const backupCount = this.backupStorage.size;
     this.backupStorage.clear();
-    this.lastBackupHash = null;
 
     try {
       const client = getRedisClient();
@@ -332,6 +448,11 @@ export class FlightBackupService {
     } catch (e) {
       console.error('Failed to clear Redis backup key:', e);
     }
+
+    // NAPOMENA: ranije je ovdje bio poziv this.initialize() koji je
+    // odmah radio novi eager fetch ka eksternom API-ju nakon brisanja.
+    // Uklonjen iz istog razloga kao gore — backup se organski ponovo
+    // puni kroz saveBackup() kad se sljedeći put desi emergency fetch.
 
     return backupCount;
   }

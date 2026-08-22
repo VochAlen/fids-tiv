@@ -45,31 +45,30 @@ const REFRESH_INTERVAL_MS    = 14_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const BASE_INTERVAL_MS       = 14_000;   // starting/ near-realtime interval dok je gate "open"
-const MAX_OPEN_INTERVAL_MS   = 60_000;   // gornja granica dok je gate stabilno "open"
+const MAX_OPEN_INTERVAL_MS   = 90_000;   // gornja granica dok je gate stabilno "open"
 const BACKOFF_STEP_MS        = 8_000;    // koliko se produžava po ciklusu bez promjene (samo za "open")
 
-const IDLE_INTERVAL_MS       = 20_000;   // ← NOVO: default kad gate NIJE "open" (bilo fiksnih 14s)
-const IDLE_JITTER_MS         = 6_000;    // ← NOVO: jitter za idle stanje, da se ekrani ne sinhronizuju
+// ── UŠTEDA #2: IDLE_INTERVAL_MS podignut sa 20s na 45s. Gate NIJE
+// "open" >95% dana (zatvoren/bez override-a/let još daleko) — u tom
+// stanju nema razloga za near-realtime osvježavanje. Kombinovano sa
+// uklanjanjem fast-poll-a (vidi ispod), ovo je glavni ekran sad
+// gađa /api/flights u prosjeku svakih ~45-53s dok je idle, umjesto
+// svakih ~14s + dodatnih ~2-4s od fast-polla ranije. ──
+const IDLE_INTERVAL_MS       = 45_000;
+const IDLE_JITTER_MS         = 8_000;    // jitter za idle stanje, da se ekrani ne sinhronizuju
 
 const getJitterMs            = () => Math.floor(Math.random() * 4_000);
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
 
- 
-const FAST_POLL_BASE_MS   = 2_000;  // usklađeno sa GATE_STATUS_CACHE_CONTROL max-age=2 na serveru (v2)
-const FAST_POLL_JITTER_MS = 2_000;  // + do 2s nasumično, da se ekrani ne sinhronizuju
+// ── BRZI POLL — vraćen na zahtjev osoblja: gate treba da se otvori/
+// zatvori ekranu vidljivo u roku od ~15s od trenutka dodjele. 10s baza
+// + do 2s jitter = worst-case ~12s, sigurno ispod granice, uz ~4-5x
+// manje requesta nego originalnih 2-4s. Usklađeno sa
+// GATE_STATUS_CACHE_CONTROL (max-age=10) na serveru.
+const FAST_POLL_BASE_MS   = 12_000;
+const FAST_POLL_JITTER_MS = 2_000;
 const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
-
-
-// ── BRZI POLL — prati SAMO promjenu dodjele na ovom gate-u, odvojeno
-// od glavnog (skupljeg) ciklusa koji povlači cijelu listu letova.
-// Cilj: kad osoblje dodijeli let, on se pojavi na ekranu za ≤5s,
-// bez da se glavni REFRESH_INTERVAL_MS smanjuje (što bi poskupilo
-// CIJEL ciklus 4-5x). Ovaj poll pogađa mali, već ETag-ovan i CDN-
-// keširan endpoint (/api/test/gate-status-override?gateNumber=X) —
-// dok se ništa ne mijenja, CDN sam vraća 304 bez pozivanja funkcije.
-// const FAST_POLL_BASE_MS = 10_000;
-// const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * 3_000);
 
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
@@ -373,31 +372,9 @@ const getNextInterval = useCallback((): number => {
 }, []);
 
   // ------------------------------------------------------------
-  // Dohvatanje gate status override-a
-  // ------------------------------------------------------------
-const fetchGateStatusOverride = useCallback(async (gate: string): Promise<{ status: string | null; flightNumber: string | null; classType: string | null } | null> => {
-  try {
-    const res = await fetch('/api/test/gate-status-override');
-
-    if (!res.ok) return null;
-    const allData = await res.json();
-
-    const data = allData[gate];
-
-    if (!data || data.status === undefined) {
-      return { status: null, flightNumber: null, classType: null };
-    }
-    return {
-      status: data.status,
-      flightNumber: data.flightNumber || null,
-      classType: data.classType ?? null
-    };
-  } catch (err) {
-    console.error('fetchGateStatusOverride error:', err);
-    return null;
-  }
-}, []);
-
+  // (fetchGateStatusOverride uklonjen — bio je mrtav kod, nikad
+  // pozvan. Gate override podatak dolazi iz gateEntries polja u
+  // odgovoru glavnog /api/flights poziva unutar loadFlights().)
   // ------------------------------------------------------------
   // Provjera da li let odgovara gate-u
   // ------------------------------------------------------------
@@ -471,6 +448,11 @@ const loadFlights = useCallback(async () => {
   // ⚠️ ZAŠTITA OD KONKURENTNIH POZIVA
   if (loadFlightsRef.current) {
     console.log('[gate] loadFlights već u toku, preskačem');
+    if (isMountedRef.current) setLoading(false);   // ← DODATO: ne ostavljaj UI na spinneru
+                                                     // dok se u pozadini već izvršava
+                                                     // legitiman fetch — kad taj drugi
+                                                     // poziv završi, on će ionako
+                                                     // ažurirati display state
     return;
   }
   loadFlightsRef.current = true;
@@ -521,7 +503,9 @@ const loadFlights = useCallback(async () => {
         ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
         : { status: null, flightNumber: null, classType: null };
       lastGateOverrideRef.current = gateOverrideFromStatus;
-// ← NOVO: sinhronizuj i brzi-poll referencu
+      // Sinhronizuj i brzi-poll referencu, da fast-poll ne detektuje
+      // lažnu "promjenu" odmah nakon što je glavni ciklus već svježe
+      // učitao isti podatak.
       lastFastOverrideRef.current = JSON.stringify({
         status: gateOverrideFromStatus?.status ?? null,
         flightNumber: gateOverrideFromStatus?.flightNumber ?? null,
@@ -726,59 +710,66 @@ useEffect(() => {
 
  
 // ------------------------------------------------------------
-// BRZI POLL — nezavisan, laki poll na POSTOJEĆI, već CDN-keširan
-// /api/test/gate-status-override?gateNumber=X endpoint (Redis +
-// ETag + Cache-Control: max-age=2, s-maxage=2, stale-while-revalidate=3
-// — vidi patch za taj route.ts). Prati SAMO promjenu override-a na
-// ovom gate-u na svakih ~2-4s, odvojeno od skupljeg glavnog
-// /api/flights ciklusa (25-90s adaptivno). Dok se override ne
-// mijenja, CDN servira keširan odgovor bez pozivanja serverless
-// funkcije. Čim detektuje promjenu, odmah pokreće puni loadFlights()
-// umjesto da se čeka do sledećeg glavnog ciklusa.
+// BRZI POLL — vraćen na zahtjev osoblja (potrebna reakcija ≤15s
+// kad se gate otvori/zatvori odmah nakon dodjele leta), ali na
+// MNOGO sporijem tempu nego ranije: 10s baza + do 2s jitter =
+// worst-case ~12s, umjesto ranijih 2-4s. To je ~4-5x manje requesta
+// od originalne verzije, uz i dalje siguran margin ispod tražene
+// granice od 15s. Usklađeno sa GATE_STATUS_CACHE_CONTROL na serveru
+// (app/api/test/gate-status-override/route.ts) koji je isto podignut
+// na max-age=10/s-maxage=10.
+//
+// Napomena o daljem smanjenju: pošto svih N gate ekrana dijeli JEDAN
+// CDN cache ključ (URL bez ?gateNumber=), CPU trošak po requestu je
+// već minimalan (CDN hit, ne invocation) — preostali trošak je čisto
+// BROJ requesta. Uz tvrdo ograničenje od ≤15s worst-case, 10s+jitter
+// je praktično donja granica za čisti polling pristup. Sledeći nivo
+// uštede (bez žrtvovanja brzine) bio bi prelazak sa pollinga na
+// push mehanizam (npr. Server-Sent Events ili Redis pub/sub preko
+// Edge rute) koji bi gate ekranu javio PROMJENU čim se desi, umjesto
+// da ekran svakih 10-12s pita "je l' bilo nešto novo?". To je veća
+// arhitekturna promjena (zahtijeva testiranje trajanja veze na
+// Vercel-u) i nije implementirana u ovom prolazu — vidi napomenu u
+// odgovoru asistenta za detalje ako poželiš da se to istraži.
 // ------------------------------------------------------------
+
 useEffect(() => {
   if (!gateNumber) return;
- 
+
   let tid: ReturnType<typeof setTimeout>;
   let cancelled = false;
   const controller = new AbortController();
- 
+
   const poll = async () => {
     if (cancelled) return;
- 
+
     if (isNightHours()) {
       tid = setTimeout(poll, getFastPollInterval());
       return;
     }
- 
+
     try {
-   // BEZ ?gateNumber=X — svih 12 gate ekrana sad gađa ISTI URL,
+      // BEZ ?gateNumber=X — svih N gate ekrana gađa ISTI URL,
       // pa dijele JEDAN CDN cache ključ (isti princip kao /api/flights).
       const res = await fetch(
         `/api/test/gate-status-override`,
         { signal: controller.signal }
       );
       if (res.ok) {
-        // Oblik odgovora BEZ gateNumber-a: { [gateNumber]: entry, ... }
-        // za SVE gate-ove — uzmi samo naš.
         const allEntries = await res.json();
         const entry = allEntries[gateNumber] ?? { status: null, flightNumber: null, classType: null };
         const key = JSON.stringify({
           status: entry.status ?? null,
           flightNumber: entry.flightNumber ?? null,
           classType: entry.classType ?? null,
-          // setAt namjerno izostavljen — mijenja se i kad admin
-          // ponovo potvrdi ISTU dodjelu, što ne treba da triggera
-          // nepotreban reload.
         });
- 
-if (lastFastOverrideRef.current !== null && lastFastOverrideRef.current !== key) {
+
+        if (lastFastOverrideRef.current !== null && lastFastOverrideRef.current !== key) {
           console.log('[gate] Brzi poll: override promijenjen, pokrećem loadFlights()');
           loadFlights().then(() => {
-            // ← NOVO: restartuj glavni raspored da ne dođe do
-            // suvišnog /api/flights poziva ubrzo nakon ovog
-            // vanrednog osvježavanja — glavni ciklus kreće ponovo
-            // od "nula" sa svježe izračunatim intervalom.
+            // Restartuj glavni raspored da ne dođe do suvišnog
+            // /api/flights poziva ubrzo nakon ovog vanrednog
+            // osvježavanja.
             if (mainTidRef.current) clearTimeout(mainTidRef.current);
             scheduleMainRef.current?.();
           });
@@ -793,24 +784,15 @@ if (lastFastOverrideRef.current !== null && lastFastOverrideRef.current !== key)
       if (!cancelled) tid = setTimeout(poll, getFastPollInterval());
     }
   };
- 
+
   poll();
- 
+
   return () => {
     cancelled = true;
     clearTimeout(tid);
     controller.abort();
   };
 }, [gateNumber, loadFlights]);
- 
- 
-
-// ------------------------------------------------------------
-// BRZI POLL — otkriva promjenu dodjele na gate-u unutar ~3-4.5s,
-// nezavisno od glavnog 20-25s ciklusa. Kad detektuje promjenu
-// (server vrati 200 umjesto 304, znači ETag se promijenio jer je
-// osoblje dodijelilo/uklonilo let), odmah pokreće puni loadFlights().
-// ------------------------------------------------------------
 
   // ------------------------------------------------------------
   // Timer za automatsko prebacivanje na STD-1min
@@ -916,31 +898,94 @@ useEffect(() => {
     </div>
   );
 
-  // ------------------------------------------------------------
-  // RENDER: Nema leta
-  // ------------------------------------------------------------
-  if (!display.flight) {
-    const closed = display.manualGateStatus === 'closed';
-    return (
-      <div style={styles.splash} className="fids-splash">
-        <div style={{ ...styles.gateLabel, fontSize: 'clamp(5rem,18vw,14rem)', lineHeight: 1 }}>
-          {gateNumber}
-        </div>
-        <div style={{
-          fontSize: '2rem', fontWeight: 600, letterSpacing: '.08em',
-          color: closed ? '#ef4444' : '#475569', marginTop: '1rem',
-        }}>
-          {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
-        </div>
-        <div style={styles.metaRow}>
-          <span>Updated {lastUpdate}</span>
-          <span style={{ opacity: .4 }}>•</span>
-          <span>Next {nextUpdate}</span>
-        </div>
-      </div>
-    );
-  }
+// ------------------------------------------------------------
+// RENDER: Nema leta
+// ------------------------------------------------------------
+if (!display.flight) {
+  const closed = display.manualGateStatus === 'closed';
+  return (
+    <div style={styles.splash} className="fids-splash">
 
+      {/* ── Ikona aviona ── */}
+      <div style={{ width: '60px', height: '60px', marginBottom: '0.5rem' }}>
+        <svg viewBox="0 0 24 24" fill="none" style={{ width: '100%', height: '100%' }}>
+          <path
+            d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2.5 1.5V22l4-1 4 1v-1.5L13 19v-5.5l8 2.5z"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+            fill={closed ? '#ef4444' : '#e6a817'}
+            fillOpacity={closed ? 0.10 : 0.06}
+            stroke={closed ? '#ef4444' : '#e6a817'}
+            strokeOpacity={0.5}
+          />
+        </svg>
+      </div>
+
+      {/* ── Label "GATE" (iznad broja) ── */}
+      <div style={{
+        fontSize: 'clamp(1.2rem, 3vw, 2.5rem)',
+        fontWeight: 600,
+        letterSpacing: '0.2em',
+        color: '#94a3b8',
+        textTransform: 'uppercase',
+        marginBottom: '0.2rem',
+      }}>
+        GATE
+      </div>
+
+      {/* ── Broj gate ── */}
+      <div style={{
+        ...styles.gateLabel,
+        fontSize: 'clamp(6rem, 20vw, 28rem)',
+        lineHeight: 1,
+        marginTop: '-0.2rem',
+      }}>
+        {gateNumber}
+      </div>
+
+      {/* ── Status pill ── */}
+      <div style={{
+        fontSize: '1.2rem',
+        fontWeight: 600,
+        letterSpacing: '.08em',
+        color: closed ? '#ef4444' : '#94a3b8',
+        marginTop: '0.5rem',
+        background: closed ? 'rgba(239,68,68,0.10)' : 'rgba(230,168,23,0.06)',
+        padding: '0.4rem 1.2rem',
+        borderRadius: '999px',
+        border: `1px solid ${closed ? 'rgba(239,68,68,0.25)' : 'rgba(230,168,23,0.15)'}`,
+      }}>
+        {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
+      </div>
+
+      {/* ── REKLAMNI TEKST (english, bez "tranzitne zone") ── */}
+      <div style={{
+        fontSize: 'clamp(0.9rem, 1.4vw, 1.3rem)',
+        fontWeight: 500,
+        color: '#cbd5e1',
+        textAlign: 'center',
+        maxWidth: '600px',
+        marginTop: '1rem',
+        padding: '0.5rem 1rem',
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        letterSpacing: '0.02em',
+        lineHeight: 1.5,
+      }}>
+        ✈️ While you wait for your flight to be assigned to a specific gate,<br />
+        visit our <strong style={{ color: '#e6a817' }}>DUTY FREE SHOP</strong>!
+      </div>
+
+      {/* ── Donja metrika ── */}
+      <div style={styles.metaRow}>
+        <span>Updated {lastUpdate}</span>
+        <span style={{ opacity: .4 }}>•</span>
+        <span>Next {nextUpdate}</span>
+      </div>
+
+    </div>
+  );
+}
   // ------------------------------------------------------------
   // RENDER: Aktivan let
   // ------------------------------------------------------------

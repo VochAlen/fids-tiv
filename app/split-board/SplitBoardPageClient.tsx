@@ -23,18 +23,18 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 180_000;
+const REFRESH_INTERVAL_MS          = 150_000;
 const FETCH_TIMEOUT_MS             = 15_000;
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
 const CACHE_KEY                    = "flight_board_cache";
 const CACHE_DURATION               = 5 * 60 * 1_000;
-const HEARTBEAT_TIMEOUT_MS         = 180_000;
+const HEARTBEAT_TIMEOUT_MS         = 150_000;
 const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY          = 18;
 const MAX_FLIGHTS_MEMORY           = 15;
-const HARD_RESET_INTERVAL_MS       = 7 * 60 * 60 * 1000;
+const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
 // let lastKnownHash: string | null = null; komentarisano 11.08.2026-nakon low end optimizacije
 const IS_LOW_END = typeof navigator !== 'undefined' &&
@@ -163,11 +163,15 @@ const loadFromCache = (): { arrivals: Flight[]; departures: Flight[]; lastUpdate
   } catch { return null; }
 };
 
-const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
+const fetchWithTimeout = async (url: string, ms: number, headers?: HeadersInit, externalSignal?: AbortSignal): Promise<Response> => {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
+    const r = await fetch(url, { signal: ctrl.signal, headers });
     clearTimeout(id); return r;
   } catch (e) { clearTimeout(id); throw e; }
 };
@@ -591,6 +595,14 @@ useEffect(() => {
 }, [])
 
   const isMountedRef = useRef(true);
+  // FIX: sprječava konkurentno izvršavanje loadData() — bez ovoga bi
+  // setInterval mogao pokrenuti novi poziv dok prethodni još nije
+  // završen (npr. na sporoj mreži), udvostručujući requeste.
+  const isFetchingRef = useRef(false);
+  // FIX: drži trenutni AbortSignal iz polling efekta, da bi fetchWithTimeout
+  // pozivi unutar loadData() mogli biti stvarno prekinuti pri unmountu
+  // (ne samo da se spriječi sledeći zakazani poziv).
+  const loadDataAbortSignalRef = useRef<AbortSignal | null>(null);
   const lastHeartbeat = useRef(Date.now());
   const prevGatesRef = useRef<Record<string, string>>({});
   const arrivalsRef = useRef<Flight[]>([]);
@@ -668,6 +680,9 @@ useEffect(() => {
   // Učitavanje podataka
 const loadData = useCallback(async () => {
   if (!isMountedRef.current) return;
+  // FIX: sprječi konkurentno izvršavanje (vidi napomenu kod deklaracije)
+  if (isFetchingRef.current) return;
+  isFetchingRef.current = true;
 
   // ── NOĆNI REŽIM ──
   // Noću (21:00-04:00) ne radimo NIKAKAV network poziv — ni hash-check,
@@ -680,6 +695,7 @@ const loadData = useCallback(async () => {
     if (isMountedRef.current) setNightMode(true);
     setLoading(false);
      lastHeartbeat.current = Date.now(); // ← dodato
+    isFetchingRef.current = false;
     return;
   }
   if (isMountedRef.current) setNightMode(false);
@@ -710,7 +726,7 @@ try {
     headers['If-None-Match'] = etagStatusRef.current;
   }
 
-  const statusRes = await fetch('/api/flights', { headers });
+  const statusRes = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, headers, loadDataAbortSignalRef.current ?? undefined);
   
   // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
 if (statusRes.status === 304) {
@@ -756,7 +772,7 @@ if (!hashChanged) {
     let data: any = null;
     let usedCache = false;
     try {
-      const res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS);
+      const res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, undefined, loadDataAbortSignalRef.current ?? undefined);
       if (!res.ok) throw new Error('Network error');
       data = await res.json();
       if (isMountedRef.current) {
@@ -811,12 +827,15 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
     setErrorMessage('Unable to load flight data. Check connection.');
   } finally {
     isInitialLoad.current = false;
+    isFetchingRef.current = false;
     if (isMountedRef.current) setLoading(false);
   }
 }, []);
 
   useEffect(() => {
     isMountedRef.current = true;
+    const controller = new AbortController();
+    loadDataAbortSignalRef.current = controller.signal;
     let intervalId: ReturnType<typeof setInterval>;
     loadData().then(() => {
       intervalId = setInterval(loadData, REFRESH_INTERVAL_MS);
@@ -824,6 +843,7 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
     return () => {
       isMountedRef.current = false;
       if (intervalId) clearInterval(intervalId);
+      controller.abort();
     };
   }, [loadData]);
 

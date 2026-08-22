@@ -5,9 +5,10 @@ import type React from "react"
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams } from "next/navigation"
 import type { Flight } from "@/types/flight"
-import { fetchFlightData, getFlightsByBaggage } from "@/lib/flight-service"
+import { getFlightsByBaggage } from "@/lib/flight-service"
 import { isNightHours } from '@/lib/night-hours'
 import { Plane, Luggage, MapPin, Clock, Users } from "lucide-react"
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo'
 
 // ============================================================
 // KONSTANTE — isti koncept kao CombinedPageClient
@@ -16,7 +17,7 @@ const REFRESH_INTERVAL_MS = 150_000
 const CACHE_KEY = "baggage_board_cache_v1"
 const CACHE_DURATION = 5 * 60_000
 const EMERGENCY_CACHE_KEY = "baggage_board_emergency_v1"
-
+let lastKnownHash: string | null = null
 
 interface FlightDataResponse {
   departures: Flight[]
@@ -93,10 +94,6 @@ export default function BaggagePageClient() {
   const [nightMode, setNightMode] = useState(false)
 
   const etagRef = useRef<string | null>(null)
-  // unutar BaggagePageClient komponente, sa ostalim refs:
-const lastKnownHashRef = useRef<string | null>(null)
-
-// i onda svuda gdje se koristi lastKnownHash, koristi lastKnownHashRef.current
   const isMountedRef = useRef(true)
 
   // ── Inicijalni keš load — brz prvi prikaz, bez čekanja mreže ──
@@ -112,76 +109,56 @@ const lastKnownHashRef = useRef<string | null>(null)
     isMountedRef.current = true
     let tid: ReturnType<typeof setTimeout>
 
-    const loadFlights = async () => {
-      if (!isMountedRef.current) return
+const loadFlights = async () => {
+  if (!isMountedRef.current) return
 
-      // ── NOĆNI REŽIM — nikakav network poziv dok aerodrom ne radi ──
-      if (isNightHours()) {
-        if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
-        tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-        return
-      }
-      if (isMountedRef.current) setNightMode(false)
+  if (isNightHours()) {
+    if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
+    tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
+    return
+  }
+  if (isMountedRef.current) setNightMode(false)
 
-      try {
-        let hashChanged = true
-        const headers: HeadersInit = {}
-        if (etagRef.current) headers["If-None-Match"] = etagRef.current
+  try {
+    const headers: HeadersInit = {}
+    if (etagRef.current) headers["If-None-Match"] = etagRef.current
 
-        try {
-          const statusRes = await fetchWithTimeout("/api/flights/status", 5_000, headers)
-          if (statusRes.status === 304) {
-            setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-            tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-            setIsLoading(false)
-            return
-          }
-          if (statusRes.ok) {
-            const data = await statusRes.json()
-            const newEtag = statusRes.headers.get('ETag')
-            if (newEtag) etagRef.current = newEtag
-           if (data.hash !== null && data.hash === lastKnownHashRef.current) {
-  hashChanged = false
-} else if (data.hash !== null) {
-  lastKnownHashRef.current = data.hash
-}
-// ako je data.hash === null, ne diraj lastKnownHash — zadrži zadnju poznatu vrijednost
-          }
-        } catch { /* nastavi na pun fetch */ }
+    const statusRes = await fetchWithTimeout("/api/flights", 5_000, headers)
 
-        if (!hashChanged) {
-          setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-          tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-          setIsLoading(false)
-          return
-        }
-
-        // ── PUN FETCH — samo ako se hash promijenio ──
-        try {
-          const data = await fetchFlightData(true)
-          if (isMountedRef.current) {
-            setAllArrivals(data.arrivals || [])
-            setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
-            saveToCache(data)
-            saveEmergencyCache(data)
-          }
-        } catch (error) {
-          console.error("Failed to load arrivals:", error)
-          // ── Fallback lanac: obični keš → emergency keš → zadrži staro ──
-          const cached = loadFromCache()
-          if (cached) {
-            setAllArrivals(cached.arrivals || [])
-          } else {
-            const emergency = loadEmergencyCache()
-            if (emergency) setAllArrivals(emergency.arrivals || [])
-            // ako ni to ne postoji, ostaje trenutno stanje (ne prazni ekran)
-          }
-        }
-      } finally {
-        if (isMountedRef.current) setIsLoading(false)
-        tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-      }
+    if (statusRes.status === 304) {
+      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+      tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
+      setIsLoading(false)
+      return
     }
+
+    if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`)
+
+    const data = await statusRes.json()
+    const newEtag = statusRes.headers.get('ETag')
+    if (newEtag) etagRef.current = newEtag
+    lastKnownHash = data.hash
+
+    if (isMountedRef.current) {
+      setAllArrivals(data.arrivals || [])
+      setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+      saveToCache(data)
+      saveEmergencyCache(data)
+    }
+  } catch (error) {
+    console.error("Failed to load arrivals:", error)
+    const cached = loadFromCache()
+    if (cached) {
+      setAllArrivals(cached.arrivals || [])
+    } else {
+      const emergency = loadEmergencyCache()
+      if (emergency) setAllArrivals(emergency.arrivals || [])
+    }
+  } finally {
+    if (isMountedRef.current) setIsLoading(false)
+    tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
+  }
+}
 
     loadFlights()
     return () => { isMountedRef.current = false; clearTimeout(tid) }
@@ -231,10 +208,17 @@ const lastKnownHashRef = useRef<string | null>(null)
     const s = flight.StatusEN?.toLowerCase() || ""
     return s.includes("cancelled") || s.includes("otkazan")
   }
-
-  const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    e.currentTarget.src = "https://via.placeholder.com/180x120?text=No+Logo"
+const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget
+  const icao = img.dataset.icao || ''
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw'
+    const fw = icao ? `https://www.flightaware.com/images/airline_logos/180px/${icao}.png` : ''
+    if (fw) { img.src = fw; return }
   }
+  img.src = "https://via.placeholder.com/180x120?text=No+Logo"
+  img.onerror = null
+}
 
   // ── Noćni mod: jednostavan prikaz umjesto pune table (dizajn ostaje minimalan) ──
   if (nightMode) {
@@ -333,12 +317,17 @@ const lastKnownHashRef = useRef<string | null>(null)
                   >
                     <div className="col-span-2">
                       <div className="flex items-center gap-3">
-                        <img
-                          src={flight.AirlineLogoURL || "/placeholder.svg"}
-                          alt={flight.AirlineName}
-                          className="w-16 h-16 object-contain bg-white rounded-xl p-2 shadow-lg"
-                          onError={handleImageError}
-                        />
+           <img
+  src={getInitialAirlineLogoSrc(
+    flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '',
+    "/placeholder.svg"
+  )}
+  alt={flight.AirlineName}
+  className="w-16 h-16 object-contain bg-white rounded-xl p-2 shadow-lg"
+  onError={handleImageError}
+  data-icao={flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ''}
+  data-tried={isKnownLocalLogo(flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '') ? 'local' : 'fw'}
+/>
                         <div>
                           <div className="text-5xl font-black text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.5)]">{flight.FlightNumber}</div>
                           <div className="text-xl text-purple-300 font-semibold">{flight.AirlineName}</div>

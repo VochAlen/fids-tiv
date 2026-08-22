@@ -29,11 +29,38 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const BASE_INTERVAL_MS     = 12_000;
-const MAX_OPEN_INTERVAL_MS = 60_000;
-const BACKOFF_STEP_MS      = 6_000;
+const BASE_INTERVAL_MS     = 12_000;   // near-realtime interval dok je šalter "open"
+const MAX_OPEN_INTERVAL_MS = 60_000;   // gornja granica dok je šalter stabilno "open"
+const BACKOFF_STEP_MS      = 6_000;    // koliko se produžava po ciklusu bez promjene (samo za "open")
+
+// ── FIX (isti pattern kao GatePageClient.tsx): ranije je
+// getNextInterval() van "open" stanja vraćao FIKSNIH
+// BASE_INTERVAL_MS (12-15s), zauvijek, dok god šalter nije
+// ručno otvoren — a to je >95% dana za svaki od 20-40 check-in
+// šaltera na aerodromu. Rezultat: /api/test/desk-status-override
+// se zvao na svakih 12-15s NON-STOP po svakom šalteru. Sad se
+// idle/closed/no-override stanje osvježava tek na IDLE_INTERVAL_MS,
+// isto kao na Gate ekranima. ──
+const IDLE_INTERVAL_MS     = 30_000;
+const IDLE_JITTER_MS       = 6_000;
+
 const getJitterMs          = () => Math.floor(Math.random() * 3_000);
 const AD_SWITCH_INTERVAL = 15_000;
+
+// ── BRZI POLL — inteligentno rješenje: /api/test/desk-status-override
+// (BEZ ?deskNumber=X) već vraća SVE šaltere u jednom pozivu i već ima
+// server-side CDN keš od max-age=10/s-maxage=10 (vidi
+// app/api/test/desk-status-override/route.ts — ta infrastruktura je
+// postojala, ali je nijedan klijent nije koristio). Svi šalteri sad
+// dijele JEDAN CDN cache ključ za ovaj mali "je l' otvoreno?" upit —
+// isti princip kao FAST_POLL u GatePageClient.tsx. Teži poziv
+// (?deskNumber=X, puni flight/check-in podaci) ostaje na sporijem
+// glavnom ciklusu (getNextInterval — IDLE_INTERVAL_MS/BASE_INTERVAL_MS
+// gore), a ovaj brzi poll samo javlja KADA treba pokrenuti taj teži
+// poziv ranije nego što bi inače došao na red.
+const FAST_POLL_BASE_MS   = 10_000;
+const FAST_POLL_JITTER_MS = 2_000;
+const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
 //const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
 
@@ -419,6 +446,17 @@ const noChangeStreakRef  = useRef(0);
 const lastKnownStatusRef = useRef<'open' | 'closed' | null>(null);
 const lastClassTypeRef   = useRef<string | null>(null);
 
+// ── NOVO: omogućavaju brzom pollu (ispod) da resetuje glavni ciklus
+// nakon vanrednog osvježavanja, i da prati zadnje poznato stanje sa
+// DIJELJENOG (svi šalteri, jedan CDN cache ključ) endpointa.
+const mainTidRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
+const scheduleMainRef   = useRef<(() => void) | null>(null);
+const lastFastStatusRef = useRef<string | null>(null);
+// FIX: sprječava da fetchDeskData() radi konkurentno kad ga skoro
+// istovremeno pozovu i glavna petlja (schedule) i fast-poll
+// (change-trigger) — bez ovoga bi oba mogla poslati fetch istovremeno.
+const isFetchingDeskRef = useRef(false);
+
   // ── Klijentski (in-browser) keš za /api/flights lookup ─────────
   // Drži zadnji uspješan flights payload + njegov ETag unutar ove
   // kiosk sesije, da se izbjegne ponovni pun fetch (i JSON.parse nad
@@ -518,17 +556,25 @@ const lufthansaGroupImage = useMemo((): string | null => {
   }, [adImages, currentAdIndex]);
 
   const getNextInterval = useCallback((): number => {
+  // "open" (check-in u toku) — kreni od BASE_INTERVAL_MS (12s) i
+  // penji se do MAX_OPEN_INTERVAL_MS (60s) dok se ništa ne mijenja.
   if (lastKnownStatusRef.current === 'open') {
     const backoff = BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS;
     return Math.min(backoff, MAX_OPEN_INTERVAL_MS) + getJitterMs();
   }
-  return BASE_INTERVAL_MS + getJitterMs();
+  // FIX: idle/closed/no-override (>95% dana) — prije BASE_INTERVAL_MS
+  // (12s) fiksno; sad IDLE_INTERVAL_MS (30s), dovoljno rijetko za
+  // stanje kad se ništa ne dešava.
+  return IDLE_INTERVAL_MS + Math.floor(Math.random() * IDLE_JITTER_MS);
 }, []);
 
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (!deskNumberParam) return;
+  // FIX: spriječi konkurentno izvršavanje (vidi napomenu kod deklaracije)
+  if (isFetchingDeskRef.current) return;
+  isFetchingDeskRef.current = true;
 if (isNightHours()) {
      // Resetuj backoff state pri ulasku u noćni mod — bez ovoga bi streak
    // ostao "zamrznut" na vrijednosti iz trenutka kad je noćni mod počeo,
@@ -536,6 +582,7 @@ if (isNightHours()) {
    // umjesto sa čistog, brzog stanja.
    noChangeStreakRef.current = 0;
     setLoading(false);
+    isFetchingDeskRef.current = false;
     return;
 }
   try {
@@ -585,6 +632,7 @@ const res = await fetch(
      lastClassTypeRef.current = null;
      noChangeStreakRef.current = 0;
       setAssignment(EMPTY_ASSIGNMENT);
+      lastFastStatusRef.current = JSON.stringify({ status: null, flightNumber: '', classType: null });
       return;
     }
 
@@ -601,6 +649,11 @@ const res = await fetch(
      }
      lastKnownStatusRef.current = myData.status as 'open' | 'closed';
      lastClassTypeRef.current = classType;
+     lastFastStatusRef.current = JSON.stringify({
+       status: myData.status ?? null,
+       flightNumber: myData.flightNumber ?? '',
+       classType: classType ?? null,
+     });
       setAssignment((prev) => ({
         ...prev,
         status: myData.status as 'open' | 'closed',
@@ -704,29 +757,40 @@ const res = await fetch(
       lastKnownStatusRef.current = myData.status as 'open' | 'closed';
    lastClassTypeRef.current = classType;
    noChangeStreakRef.current = 0; // novi let — uvijek brzi interval
+   // Sinhronizuj i brzi-poll referencu
+   lastFastStatusRef.current = JSON.stringify({
+     status: myData.status ?? null,
+     flightNumber: myData.flightNumber ?? '',
+     classType: classType ?? null,
+   });
   } catch (err) {
     console.error('fetchDeskData error:', err);
     if (isMountedRef.current) {
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setLoading(false);
     }
+  } finally {
+    // FIX: garantovano oslobađa guard bez obzira na tačku izlaska iz
+    // try bloka (304 early-return, "nema dodjele" early-return, uspjeh,
+    // ili greška) — finally se uvijek izvršava.
+    isFetchingDeskRef.current = false;
   }
 }, [deskNumberParam]);
 
   // ── Polling ────────────────────────────────────────────────
 useEffect(() => {
   isMountedRef.current = true;
-  let tid: ReturnType<typeof setTimeout>;
   let initialTid: ReturnType<typeof setTimeout>;
 
   const schedule = () => {
-    tid = setTimeout(async () => {
+    mainTidRef.current = setTimeout(async () => {
       if (isMountedRef.current) {
         await fetchDeskData();
         schedule();
       }
  }, getNextInterval());
   };
+  scheduleMainRef.current = schedule;
 
   // Mali nasumičan delay na prvi poziv (0-3s) da se izbjegne
   // sinhroni fetch ako se više ekrana upali u istom trenutku
@@ -739,10 +803,69 @@ useEffect(() => {
 
   return () => {
     isMountedRef.current = false;
-    clearTimeout(tid);
+    if (mainTidRef.current) clearTimeout(mainTidRef.current);
+    scheduleMainRef.current = null;
     clearTimeout(initialTid);
   };
  }, [fetchDeskData, getNextInterval]);
+
+// ------------------------------------------------------------
+// BRZI POLL — gađa /api/test/desk-status-override BEZ ?deskNumber=X,
+// pa svih N šaltera dijeli JEDAN CDN cache ključ (server već ima
+// max-age=10/s-maxage=10 keš na ovu rutu). 10s baza + do 2s jitter =
+// worst-case ~12s reakcija na promjenu — u skladu sa zahtjevom
+// osoblja (≤15s od dodjele leta do vidljivog "open" na ekranu).
+// Kad detektuje promjenu (status/flightNumber/classType za NAŠ
+// šalter), odmah pokreće puni fetchDeskData() i restartuje glavni
+// ciklus, umjesto da se čeka do sledećeg IDLE_INTERVAL_MS (30s+).
+// ------------------------------------------------------------
+useEffect(() => {
+  if (!deskNumberParam) return;
+
+  let tid: ReturnType<typeof setTimeout>;
+  let cancelled = false;
+  const controller = new AbortController();
+
+  const poll = async () => {
+    if (cancelled) return;
+
+    try {
+      const res = await fetch('/api/test/desk-status-override', { signal: controller.signal });
+      if (res.ok) {
+        const all = await res.json();
+        const entry = all[deskNumberParam] ?? { status: null, flightNumber: '', classType: null };
+        const key = JSON.stringify({
+          status: entry.status ?? null,
+          flightNumber: entry.flightNumber ?? '',
+          classType: entry.classType ?? null,
+        });
+
+        if (lastFastStatusRef.current !== null && lastFastStatusRef.current !== key) {
+          console.log('[checkin] Brzi poll: override promijenjen, pokrećem fetchDeskData()');
+          fetchDeskData().then(() => {
+            if (mainTidRef.current) clearTimeout(mainTidRef.current);
+            scheduleMainRef.current?.();
+          });
+        }
+        lastFastStatusRef.current = key;
+      }
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        console.warn('[checkin] fast poll error:', err);
+      }
+    } finally {
+      if (!cancelled) tid = setTimeout(poll, getFastPollInterval());
+    }
+  };
+
+  poll();
+
+  return () => {
+    cancelled = true;
+    clearTimeout(tid);
+    controller.abort();
+  };
+}, [deskNumberParam, fetchDeskData]);
 
   // ── Stanje za render ───────────────────────────────────────
   const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;

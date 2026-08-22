@@ -60,7 +60,7 @@ import { isNightHours } from '@/lib/night-hours';
 const CACHE_DURATION              = 6 * 60_000
 const CACHE_KEY                   = "flight_board_cache_v2"
 const HARD_RESET_HOUR             = 3
-const SOFT_RELOAD_INTERVAL_MS = 6 * 60 * 60_000 + Math.floor(Math.random() * 30 * 60_000) // +0 do 30 min
+const SOFT_RELOAD_INTERVAL_MS     = 4 * 60 * 60_000
 const MAX_FLIGHTS_DISPLAY         = 9
 const MAX_FLIGHTS_MEMORY          = 60
 const MAX_PREV_GATES              = 200  // ← NOVO: limit za prevGatesRef
@@ -1120,7 +1120,15 @@ useEffect(() => {
       let res: Response
       try {
         res = await fetchWithTimeout('/api/flights', 5_000, headers, controller.signal)
-      } catch (fe) {
+       } catch (fe) {
+        // ── FIX: StrictMode dev double-invoke abortuje "stari" fetch —
+        // to NIJE prava network greška, samo je efekat cleanup-ovan.
+        // Bez ove provjere kod tiho prikaže STARI keš umjesto da sačeka
+        // DRUGI (novi) load() poziv koji će uspjeti.
+        if (controller.signal.aborted) {
+          return
+        }
+
         // network greška — fallback na keš
         const cached = loadFromCache()
         if (cached) {
@@ -1194,12 +1202,11 @@ useEffect(() => {
     } catch (e) {
       console.error("Critical:", e)
       nextInterval = BASE_INTERVAL_MS
-    } finally {
+       } finally {
       isInitialLoad.current = false
-      isFetchingRef.current = false // FIX C: fetch ciklus gotov, otvori guard
-      if (isMountedRef.current) {
+      isFetchingRef.current = false
+      if (isMountedRef.current && !controller.signal.aborted) {   // ← dodato: !controller.signal.aborted
         setLoading(false)
-        // ── JEDINO mjesto koje zove setTimeout za sledeći ciklus ──
         tid = setTimeout(load, nextInterval)
       }
     }
@@ -1209,7 +1216,11 @@ useEffect(() => {
   return () => {
     isMountedRef.current = false
     clearTimeout(tid)
-    controller.abort() // FIX B: sada stvarno prekida fetch koji je u toku
+    controller.abort()
+    isFetchingRef.current = false   // ← NOVO: odmah oslobodi lock, da load() 
+                                     // iz SLJEDEĆEG (StrictMode remount) effect-a 
+                                     // ne bude blokiran dok se stari (abortovani) 
+                                     // fetch asinhrono ne završi
   }
 }, [prepareData, applyAssignmentsOnly])
 

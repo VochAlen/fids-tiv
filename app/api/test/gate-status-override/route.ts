@@ -12,22 +12,21 @@ const ALL_KEY = 'test:gate-status:all';
 let cachedAll: Record<string, GateEntry> | null = null;
 let cachedAllExpiry = 0;
 let cacheRefreshing = false;
-const CACHE_TTL_MS = 2_000; // ← kraće od desk-ovih 30s, usklađeno sa GATE_STATUS_CACHE_CONTROL max-age=2
- 
+const CACHE_TTL_MS = 10_000;
 
-// ── FIX v2: skraćeno sa 4/4/5 na 2/2/3 ──
-// Ranije (v1): max-age=4, s-maxage=4, stale-while-revalidate=5
-//   → worst-case ~9-10s (4s CDN prozor + jedan ciklus brzog poll-a
-//     na klijentu od 4-6s).
-// Sad (v2): max-age=2, s-maxage=2, stale-while-revalidate=3
-//   → worst-case ~4-5s (2s CDN prozor + jedan ciklus brzog poll-a
-//     na klijentu od ~2-4s, vidi FAST_POLL_BASE_MS u GatePageClient).
-// Trade-off: nešto veći broj poziva ovoj funkciji (CDN keš vrijedi
-// upola kraće), ali i dalje daleko manje nego direktan poll bez CDN-a
-// — i sad praktično neprimjetna latencija za slučaj "osoblje odmah
-// ispravi pogrešnu dodjelu".
+// ── AŽURIRANO (optimizacija Edge Requests): klijentski "brzi poll"
+// koji je gađao ovu rutu na svakih 2-4s je UKLONJEN iz
+// GatePageClient.tsx (vidi komentar "UKLONJENO" u tom fajlu) — gate
+// override podatak sad stiže isključivo kroz gateEntries polje u
+// odgovoru glavnog /api/flights poziva. Ova GET ruta trenutno nema
+// aktivnog klijenta (provjereno grep-om kroz cijeli repo), ali je
+// ostavljena netaknuta funkcionalno (samo je keš prozor produžen sa
+// 2s na 10s) za slučaj da se u budućnosti ponovo poveže neki
+// dashboard/admin prikaz na nju. Ako se to desi, GATE_STATUS_CACHE_
+// CONTROL treba uskladiti sa stvarnim interval-om tog novog klijenta,
+// isto kao što je ranije bilo usklađeno sa FAST_POLL_BASE_MS.
 const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=2, stale-while-revalidate=3';
+  'public, max-age=10, s-maxage=10, stale-while-revalidate=15';
 
 
 type GateEntry = {
