@@ -62,51 +62,73 @@ function getCachedData(): FlightData {
     isOfflineMode: true,
   };
 }
-async function checkForChanges(): Promise<boolean> {
-  // Ne provjeravaj prečesto
+// ── Jedan fetch koji radi i hash-check i vraća pune podatke ─────
+// Umjesto da checkForChanges() i fetchFlightData() rade odvojene
+// pozive na istu rutu, ovdje se podaci iz statusnog poziva PONOVNO
+// KORISTE ako je hash pokazao promjenu — nema drugog fetch-a.
+async function checkForChangesAndFetch(): Promise<{ changed: boolean; data: any | null }> {
   if (Date.now() - lastHashCheckTime < HASH_CHECK_INTERVAL) {
-    return false;
+    return { changed: false, data: null };
   }
   lastHashCheckTime = Date.now();
-  
+
   try {
-    const statusRes = await fetch('/api/flights/status', {
+    const statusRes = await fetch(FLIGHT_API_URL, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
     });
-    if (!statusRes.ok) return false;
-    
-    const status = await statusRes.json();
-    
-    // Ako se hash nije promijenio, nema novih podataka
-    if (lastKnownHash === status.hash && lastKnownHash !== null) {
+    if (!statusRes.ok) return { changed: false, data: null };
+
+    const raw = await statusRes.json();
+
+    if (lastKnownHash === raw.hash && lastKnownHash !== null) {
       console.log('🔄 No changes detected (hash match)');
-      return false;
+      return { changed: false, data: null };
     }
-    
-    // Hash se promijenio ili je prvi put
-    lastKnownHash = status.hash;
-    console.log(`🔄 Changes detected! New hash: ${status.hash?.substring(0, 8)}...`);
-    return true;
+
+    lastKnownHash = raw.hash;
+    console.log(`🔄 Changes detected! New hash: ${raw.hash?.substring(0, 8)}...`);
+    return { changed: true, data: raw }; // ← raw već sadrži departures/arrivals, ne treba drugi fetch
   } catch (err) {
-    console.warn('⚠️ Failed to check /api/flights/status:', err);
-    return true; // U slučaju greške, dohvati podatke (safe fallback)
+    console.warn('⚠️ Failed to check /api/flights:', err);
+    return { changed: true, data: null }; // signal za fallback ispod
   }
 }
 
-
-// ── IZMIJENJENA fetchFlightData FUNKCIJA ────────────────────
-
 export async function fetchFlightData(force = false): Promise<FlightData> {
-  // Force zaobilazi i hash-check throttle i min-fetch-interval throttle —
-  // koristi se kad pozivalac EKSPLICITNO zna da mu trebaju svježi podaci
-  // (npr. GatePageClient kad override postoji ali let nije nađen u kešu).
   if (!force) {
-    const hasChanges = await checkForChanges();
+    const { changed, data: statusData } = await checkForChangesAndFetch();
 
-    if (!hasChanges && lastKnownData) {
+    if (!changed && lastKnownData) {
       console.log('📦 Returning cached flight data (no changes)');
       return { ...lastKnownData, source: 'cached' };
+    }
+
+    // ── Ako je promjena detektovana I statusData već ima pune podatke,
+    // iskoristi ih direktno — bez drugog fetch-a. ──
+    if (changed && statusData && (Array.isArray(statusData.departures) || Array.isArray(statusData.arrivals))) {
+      const departures = Array.isArray(statusData.departures) ? statusData.departures : [];
+      const arrivals   = Array.isArray(statusData.arrivals)   ? statusData.arrivals   : [];
+
+      const flightData: FlightData = {
+        departures,
+        arrivals,
+        totalFlights:      departures.length + arrivals.length,
+        lastUpdated:       statusData.lastUpdated       || new Date().toISOString(),
+        source:            statusData.source            || 'live',
+        isOfflineMode:     statusData.isOfflineMode     || false,
+        error:             statusData.error,
+        warning:           statusData.warning,
+        backupTimestamp:   statusData.backupTimestamp,
+        autoProcessedCount: statusData.autoProcessedCount,
+      };
+
+      lastFetchTime = Date.now();
+      cacheData(flightData);
+      lastKnownData = flightData;
+
+      console.log(`✅ Flight data reused from status check: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
+      return flightData;
     }
 
     const now = Date.now();
@@ -118,6 +140,9 @@ export async function fetchFlightData(force = false): Promise<FlightData> {
     console.log('⚡ Force refresh requested — bypassing hash-check and throttle');
   }
 
+  // ── Fallback: force=true, ili checkForChangesAndFetch nije dao data
+  // (npr. network greška u statusnom pozivu) — jedini preostali put
+  // koji stvarno radi svjež fetch. ──
   try {
     console.log('🛫 Fetching flight data from API...');
 
@@ -153,10 +178,9 @@ export async function fetchFlightData(force = false): Promise<FlightData> {
         autoProcessedCount: data.autoProcessedCount,
       };
 
-      // Sačuvaj u memorijski cache
       cacheData(flightData);
       lastKnownData = flightData;
-      
+
       console.log(`✅ Flight data fetched: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
       return flightData;
     } else {
@@ -186,7 +210,6 @@ export async function fetchFlightData(force = false): Promise<FlightData> {
     };
   }
 }
-
 // ─────────────────────────────────────────────────────────────
 // Helper funkcije za filtriranje letova
 // ─────────────────────────────────────────────────────────────

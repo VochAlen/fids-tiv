@@ -23,6 +23,7 @@ import { isNightHours } from '@/lib/night-hours';
 // KONSTANTE — Vercel Free Tier optimizacija
 // ============================================================
 const REFRESH_INTERVAL_MS      = 180_000;   // 90s umjesto 60s → -33% poziva
+const FETCH_TIMEOUT_MS         = 10_000;
 const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
@@ -119,14 +120,41 @@ function validTime(t: string | null | undefined): boolean {
   const f = fmt(t); return f !== "" && f !== "00:00";
 }
 
+
+// ── Fetch s timeoutom ────────────────────────────────────────
+const fetchWithTimeout = async (url: string, ms: number, options?: RequestInit): Promise<Response> => {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { 
+      ...options, 
+      signal: ctrl.signal 
+    });
+    clearTimeout(id);
+    return r;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
+};
+// ============================================================
 // ── Cache ─────────────────────────────────────────────────────
-const saveCache = (d: any) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ d, ts: Date.now() })); } catch {} };
-const loadCache = (): any | null => {
+const saveCache = (data: { arrivals: Flight[] }) => {
+  try { 
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ 
+      data, 
+      ts: Date.now() 
+    })); 
+  } catch { /* quota exceeded */ }
+};
+
+const loadCache = (): { arrivals: Flight[] } | null => {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
-    const { d, ts } = JSON.parse(raw);
-    return Date.now() - ts > CACHE_DURATION ? null : d;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_DURATION) return null;
+    return { arrivals: data.arrivals || [] };
   } catch { return null; }
 };
 
@@ -808,6 +836,7 @@ ${reducedAnimations ? `
     });
   }, []);
   // ── Load funkcija (definisana prije useEffect) ──────────────
+// ── Load funkcija ─────────────────────────────────────────────
 const load = useCallback(async () => {
   // Spriječi istovremene pozive
   if (isLoadingRef.current) {
@@ -831,52 +860,67 @@ const load = useCallback(async () => {
   }
 
   try {
-    // ── DIREKTAN FETCH SA ETag ──────────────────────────────
-    const headers: HeadersInit = { "Cache-Control": "no-cache" };
+    const headers: HeadersInit = {};
     if (etagRef.current) {
       headers["If-None-Match"] = etagRef.current;
     }
 
-    const res = await fetch("/api/flights", { headers });
+    // ✅ KORISTI fetchWithTimeout S cache opcijom
+const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
+  headers,
+  cache: 'force-cache',  // ← Vercel edge cache
+});
 
+    // ✅ 304 - ništa se nije promijenilo
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagRef.current = newEtag;
       setLoading(false);
+      lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat
       clearTimeout(tidRef.current!);
       tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS);
       return;
     }
 
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
     const data = await res.json();
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagRef.current = newEtag;
 
-if (mounted.current) {
-  saveCache(data);
-  if (data?.arrivals) {
-    setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-    setLoading(false);
-    lastHeartbeat.current = Date.now(); // ← DODAJ OVDJE
-  }
-}
-} catch (err) {
-  console.error("Border load error:", err);
-  const c = loadCache();
-  if (c?.arrivals && mounted.current) {
-    setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
-    setLoading(false);
-    lastHeartbeat.current = Date.now(); // ← i ovdje, opciono
-  }
-} finally {
+    if (mounted.current) {
+      // ✅ Spremi SAMO arrivals u cache
+      saveCache({ arrivals: data.arrivals || [] });
+      
+      if (data?.arrivals) {
+        setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+        setLoading(false);
+        lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat
+      }
+    }
+  } catch (err) {
+    // ✅ Ako je AbortError, samo izađi (timeout)
+    if ((err as Error).name === 'AbortError') {
+      console.log('⏱️ Fetch timeout, using cache if available');
+    } else {
+      console.error("Arrivals load error:", err);
+    }
+
+    // ✅ Koristi cache na bilo kojem erroru
+    const c = loadCache();
+    if (c?.arrivals && mounted.current) {
+      setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
+      setLoading(false);
+      lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat i na erroru
+    }
+  } finally {
     isLoadingRef.current = false;
     if (mounted.current) {
       clearTimeout(tidRef.current!);
       tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS);
     }
   }
-}, [filter, etagRef, tidRef, isLoadingRef, mounted]); // Dodaj zavisnosti
+}, [filter, etagRef, tidRef, isLoadingRef, mounted]);
 
   // Load
 // Load
@@ -884,24 +928,20 @@ if (mounted.current) {
 // ── Inicijalni load i polling ──────────────────────────────
 useEffect(() => {
   mounted.current = true;
-
-  // Prvi poziv (ako nema keša)
   const cached = loadCache();
   if (cached?.arrivals) {
     setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
     setLoading(false);
+    tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS); // ← pokreni petlju i iz keš-grane
   } else {
-    // Ako nema keša, pozovi load odmah
     load();
   }
-
-  // Čišćenje timeouta na unmount
   return () => {
     mounted.current = false;
     clearTimeout(tidRef.current!);
     tidRef.current = null;
   };
-}, [filter, load]); // Dodaj load u zavisnosti
+}, [filter, load]);
 
   const sorted = useMemo(() =>
     [...flights].sort((a, b) =>

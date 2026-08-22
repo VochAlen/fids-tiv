@@ -21,6 +21,13 @@
 // 11. PERFORMANCE: Memory pressure detekcija — smanjuje animacije > 80%
 // 12. PERFORMANCE: requestIdleCallback za non-critical state updates
 // 13. PERFORMANCE: Heartbeat bez mouse/keypress listenera (kiosk mode)
+// 14. FIX C (NOVO): isFetchingRef guard — sprječava preklapanje dva
+//     istovremena load() poziva (StrictMode dev double-invoke, HMR,
+//     remount edge-case). Bez ovoga bi dva paralelna polling lanca
+//     mogla nezavisno zvati /api/flights.
+// 15. FIX B (NOVO): fetchWithTimeout sada prima eksterni AbortSignal
+//     (iz AbortController-a na nivou efekta) — cleanup pri unmountu
+//     stvarno prekida fetch koji je "u letu", ne samo sljedeći poziv.
 // ═══════════════════════════════════════════════════════════════
 
 import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component, type ErrorInfo, type ReactNode } from 'react';
@@ -197,36 +204,69 @@ function isValidDisplayTime(timeStr: string | null | undefined): boolean {
 }
 
 // ── Cache helpers ──
-const saveToCache = (data: { departures: Flight[] }) => {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })); }
-  catch { /* quota exceeded */ }
+const saveToCache = (data: { departures: Flight[]; desks?: Record<string, string>; gates?: Record<string, string> }) => {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      data,
+      timestamp: Date.now()
+    }));
+  } catch { /* quota exceeded */ }
 };
-const loadFromCache = (): { departures: Flight[] } | null => {
+
+const loadFromCache = (): { departures: Flight[]; desks: Record<string, string>; gates: Record<string, string> } | null => {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const { data, timestamp } = JSON.parse(raw);
-    return Date.now() - timestamp > CACHE_DURATION ? null : data;
+    if (Date.now() - timestamp > CACHE_DURATION) return null;
+    return {
+      departures: data.departures || [],
+      desks: data.desks || {},
+      gates: data.gates || {}
+    };
   } catch { return null; }
 };
 
-// ── OPTIMIZOVANO: Emergency cache (12h TTL) ──
-const saveEmergencyCache = (data: { departures: Flight[] }) => {
-  try { localStorage.setItem(EMERGENCY_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) }
-  catch { /* quota exceeded */ }
-}
-const loadEmergencyCache = (): { departures: Flight[] } | null => {
+const saveEmergencyCache = (data: { departures: Flight[]; desks?: Record<string, string>; gates?: Record<string, string> }) => {
   try {
-    const raw = localStorage.getItem(EMERGENCY_CACHE_KEY)
-    if (!raw) return null
-    const { data, timestamp } = JSON.parse(raw)
-    return Date.now() - timestamp > 12 * 60 * 60_000 ? null : data
-  } catch { return null }
-}
+    localStorage.setItem(EMERGENCY_CACHE_KEY, JSON.stringify({
+      data,
+      timestamp: Date.now()
+    }));
+  } catch { /* quota exceeded */ }
+};
 
-const fetchWithTimeout = async (url: string, ms: number, headers?: HeadersInit): Promise<Response> => {
+const loadEmergencyCache = (): { departures: Flight[]; desks: Record<string, string>; gates: Record<string, string> } | null => {
+  try {
+    const raw = localStorage.getItem(EMERGENCY_CACHE_KEY);
+    if (!raw) return null;
+    const { data, timestamp } = JSON.parse(raw);
+    if (Date.now() - timestamp > 12 * 60 * 60_000) return null;
+    return {
+      departures: data.departures || [],
+      desks: data.desks || {},
+      gates: data.gates || {}
+    };
+  } catch { return null; }
+};
+
+// FIX B: fetchWithTimeout sada prima opcioni externalSignal.
+// Ako se on okine (npr. unmount / effect cleanup), fetch se odmah prekida —
+// ne čeka se interni timeout, i stari fetch nikad ne dovrši setState.
+const fetchWithTimeout = async (
+  url: string,
+  ms: number,
+  headers?: HeadersInit,
+  externalSignal?: AbortSignal
+): Promise<Response> => {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
+
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+
   try {
     const r = await fetch(url, { signal: ctrl.signal, headers });
     clearTimeout(id);
@@ -235,21 +275,6 @@ const fetchWithTimeout = async (url: string, ms: number, headers?: HeadersInit):
     clearTimeout(id);
     throw e;
   }
-};
-
-const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_DELAY_MS): Promise<any> => {
-  let last: Error | null = null;
-  for (let i = 0; i < retries; i++) {
-    try {
-      const r = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
-    } catch (e) {
-      last = e instanceof Error ? e : new Error(String(e));
-      if (i < retries - 1) await new Promise(r => setTimeout(r, delay * Math.pow(2, i)));
-    }
-  }
-  throw last || new Error('All retries failed');
 };
 
 const checkStatus = {
@@ -388,7 +413,7 @@ function getTerminalBadge(idStr: string): { label: string; bg: string; text: str
 
 function getFlightTerminalBadge(flight: Flight): { label: string; bg: string; text: string } | null {
   if (flight.GateNumber && flight.GateNumber !== '-') {
-    return getTerminalBadge(flight.GateNumber.split(',')[0].trim());   // ← dodaj split/trim
+    return getTerminalBadge(flight.GateNumber.split(',')[0].trim());
   }
   if (flight.CheckInDesk && flight.CheckInDesk !== '-') {
     const firstDesk = flight.CheckInDesk.split(',')[0].trim();
@@ -717,7 +742,7 @@ function DeparturesBoard(): JSX.Element {
       mql.addEventListener('change', handler)
       return () => mql.removeEventListener('change', handler)
     } else {
-      
+
       (mql as any).addListener(handler)
       return () => (mql as any).removeListener(handler)
     }
@@ -732,6 +757,11 @@ function DeparturesBoard(): JSX.Element {
   const lastKnownHashRef = useRef<string | null>(null);
   const flightsRef = useRef<Flight[]>([]);
   const nightModeRef = useRef(false);
+  // FIX C: sprječava preklapanje dva istovremena load() poziva
+  // (npr. StrictMode dev double-invoke effekta, Fast Refresh/HMR, ili
+  // bilo koji edge-case koji bi mogao pokrenuti drugi polling lanac
+  // dok je prvi još u toku).
+  const isFetchingRef = useRef(false);
   useEffect(() => { flightsRef.current = flights }, [flights]);
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
 
@@ -833,39 +863,6 @@ function DeparturesBoard(): JSX.Element {
     });
   }, []);
 
-  // ── OPTIMIZOVANO: applyAssignmentsOnly — ne klonira nepromijenjene ──
-  const applyAssignmentsOnly = useCallback((
-    deps: Flight[],
-    assignments: { desks: Record<string, string>; gates: Record<string, string> }
-  ): Flight[] => {
-    let hasChanges = false;
-    const result = deps.map(f => {
-      const num = f.FlightNumber ?? '';
-      const adminDesk = assignments.desks[num];
-      const adminGate = assignments.gates[num];
-      const effectiveGate = adminGate || f.GateNumber || '';
-
-      const deskChanged = adminDesk && adminDesk !== f.CheckInDesk;
-      const gateChanged = effectiveGate && effectiveGate !== '-' && effectiveGate !== f.GateNumber;
-      const prevGateDiffers = prevGatesRef.current[num] && prevGatesRef.current[num] !== effectiveGate;
-
-      if (!deskChanged && !gateChanged) return f;
-
-      hasChanges = true;
-      const clone = { ...f };
-      if (adminDesk) (clone as any).CheckInDesk = adminDesk;
-      if (effectiveGate && effectiveGate !== '-') {
-        if (prevGateDiffers) {
-          (clone as any)._gateChangedAt = Date.now();
-        }
-        (clone as any).GateNumber = effectiveGate;
-        prevGatesRef.current[num] = effectiveGate;
-      }
-      return clone;
-    });
-    return hasChanges ? result : deps;
-  }, []);
-
   // ── OPTIMIZOVANO: prepareDepartures — ne klonira nepromijenjene ──
   const prepareDepartures = useCallback((
     rawDepartures: Flight[],
@@ -900,15 +897,24 @@ function DeparturesBoard(): JSX.Element {
   useEffect(() => {
     isMountedRef.current = true;
     let tid: ReturnType<typeof setTimeout>;
+    // FIX B: jedan AbortController po lifecycle-u efekta. Kad se efekat
+    // cleanup-uje (unmount/deps promjena), controller.abort() prekida
+    // BILO KOJI fetch koji je trenutno u toku — ne samo sprječava sljedeći.
+    const controller = new AbortController();
 
     const load = async () => {
       if (!isMountedRef.current) return;
+
+      // FIX C: guard protiv preklapanja — ako je fetch već u toku, ne pokreći novi
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
 
       const wasNightMode = nightModeRef.current;
 
       if (isNightHours()) {
         if (isMountedRef.current) setNightMode(true);
         setLoading(false);
+        isFetchingRef.current = false; // nije bilo pravog fetch-a, oslobodi guard
         tid = setTimeout(load, REFRESH_INTERVAL_MS);
         return;
       }
@@ -924,105 +930,109 @@ function DeparturesBoard(): JSX.Element {
 
         const boardIsCurrentlyEmpty = flightsRef.current.length === 0;
         const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
-        let hashChanged = true;
-        let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
 
         const headers: HeadersInit = {};
-        if (etagStatusRef.current) {
+        if (!forceRefresh && etagStatusRef.current) {
           headers['If-None-Match'] = etagStatusRef.current;
         }
 
         try {
-          const statusRes = await fetchWithTimeout('/api/flights/status', 5_000, headers);
+          // 🔥 Povećaj timeout na 15s + prosljedi eksterni AbortSignal
+          const statusRes = await fetchWithTimeout('/api/flights', 15_000, headers, controller.signal);
 
           if (statusRes.status === 304) {
             setLastUpdate(new Date().toLocaleTimeString('en-GB'));
             isInitialLoad.current = false;
             setLoading(false);
+            isFetchingRef.current = false;
             tid = setTimeout(load, REFRESH_INTERVAL_MS);
             return;
           }
 
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            const newEtag = statusRes.headers.get('ETag');
-            if (newEtag) etagStatusRef.current = newEtag;
+          if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
 
-            statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
+          const statusData = await statusRes.json();
+          const newEtag = statusRes.headers.get('ETag');
+          if (newEtag) etagStatusRef.current = newEtag;
 
-            if (!forceRefresh && statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
-              hashChanged = false;
-            }
-            lastKnownHashRef.current = statusData.hash;
-          }
-        } catch {
-          // ignoriši, nastavi na pun fetch
-        }
+          data = statusData;
 
-        if (!hashChanged) {
-          if (statusAssignments) {
-            // OPTIMIZOVANO: requestIdleCallback na low-end
-            const apply = () => setFlights(prev => applyAssignmentsOnly(prev, statusAssignments!));
-            if (IS_LOW_END && 'requestIdleCallback' in window) {
-              (window as any).requestIdleCallback(apply, { timeout: 1000 });
-            } else {
-              apply();
-            }
-          }
-          setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-          isInitialLoad.current = false;
-          setLoading(false);
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
-          return;
-        }
-
-        // PUN FETCH
-        try {
-          data = await fetchWithRetry('/api/flights?type=departures');
+          // 🔥 Spremi SVE podatke u cache
           if (data && isMountedRef.current) {
-            saveToCache({ departures: data.departures });
-            saveEmergencyCache({ departures: data.departures });
+            saveToCache({
+              departures: data.departures,
+              desks: data.desks || {},
+              gates: data.gates || {}
+            });
+            saveEmergencyCache({
+              departures: data.departures,
+              desks: data.desks || {},
+              gates: data.gates || {}
+            });
           }
         } catch (fe) {
+          // Ako je greška zbog abort-a pri unmountu, ne radi ništa dalje —
+          // komponenta se gasi, nema smisla ažurirati state ili keš.
+          if (!isMountedRef.current) return;
+
           setErrorMessage('Network error. Using cached data.');
           const c = loadFromCache();
-          if (c) { data = c; usedCache = true; }
-          else {
+          if (c) {
+            data = c;
+            usedCache = true;
+          } else {
             const emergency = loadEmergencyCache();
-            if (emergency) { data = emergency; usedCache = true; setErrorMessage('Prikazan stariji poznati raspored'); }
-            else throw fe;
+            if (emergency) {
+              data = emergency;
+              usedCache = true;
+              setErrorMessage('Prikazan stariji poznati raspored');
+            } else throw fe;
           }
         }
 
         if (!isMountedRef.current || !data) return;
 
+        // 🔥 Koristi desks i gates iz data (bilo iz API-ja ili cache-a)
+        const assignments = {
+          desks: data.desks || {},
+          gates: data.gates || {}
+        };
+
         const rawDepartures = getUniqueDeparturesWithDeparted(
           filterRecentDepartures(data.departures)
         );
 
-        const assignments = statusAssignments ?? { desks: {}, gates: {} };
         const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
 
         setFlights(departuresWithMeta);
         setLastUpdate(new Date().toLocaleTimeString('en-GB'));
         if (!usedCache) setErrorMessage(null);
-        else setTimeout(() => setErrorMessage(null), 5_000);
+        else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
 
       } catch (e) {
-        console.error('Critical:', e);
-        setErrorMessage('Unable to load flight data. Check connection.');
+        if (isMountedRef.current) {
+          console.error('Critical:', e);
+          setErrorMessage('Unable to load flight data. Check connection.');
+        }
       } finally {
         isInitialLoad.current = false;
+        isFetchingRef.current = false; // FIX C: fetch ciklus gotov, otvori guard
         if (isMountedRef.current) {
           setLoading(false);
+          // ── JEDINO mjesto (osim ranih 304/night-hours return-ova iznad)
+          // koje zove setTimeout za sledeći ciklus ──
           tid = setTimeout(load, REFRESH_INTERVAL_MS);
         }
       }
     };
 
     load();
-    return () => { isMountedRef.current = false; clearTimeout(tid); };
-  }, [filterRecentDepartures, applyAssignmentsOnly, prepareDepartures]);
+    return () => {
+      isMountedRef.current = false;
+      clearTimeout(tid);
+      controller.abort(); // FIX B: stvarno prekida fetch koji je u toku
+    };
+  }, [filterRecentDepartures, prepareDepartures]);
 
   const allSortedFlights = useMemo(
     () => flights.slice().sort((a, b) =>

@@ -710,7 +710,7 @@ try {
     headers['If-None-Match'] = etagStatusRef.current;
   }
 
-  const statusRes = await fetch('/api/flights/status', { headers });
+  const statusRes = await fetch('/api/flights', { headers });
   
   // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
 if (statusRes.status === 304) {
