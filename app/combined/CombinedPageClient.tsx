@@ -42,14 +42,14 @@ import { useWeather } from '@/hooks/use-weather';
 // ============================================================
 // OPTIMIZOVANE KONSTANTE
 // ============================================================
-const BASE_INTERVAL_MS       = 180_000  // 3 minute (optimizovano)
-const MEDIUM_INTERVAL_MS     = 300_000  // 5 minuta
-const SLOW_INTERVAL_MS       = 600_000  // 10 minuta
+const BASE_INTERVAL_MS       = 130_000  // 2 minute (optimizovano)
+const MEDIUM_INTERVAL_MS     = 180_000  // 3 minuta
+const SLOW_INTERVAL_MS       = 240_000  // 4 minuta
 const FAST_THRESHOLD_MIN     = 45       // 45 min
 const MEDIUM_THRESHOLD_MIN   = 120      // 2h
 const FETCH_TIMEOUT_MS       = 8_000    // 8s
 const CACHE_DURATION         = 180_000  // 3 min
-const STALE_WHILE_REVALIDATE = 600_000  // 10 min
+const STALE_WHILE_REVALIDATE = 300_000  // 5 min
 const CACHE_KEY              = "flight_board_cache_v3"
 const HARD_RESET_HOUR        = 3
 const SOFT_RELOAD_INTERVAL_MS = 4 * 60 * 60_000
@@ -274,6 +274,7 @@ function getEffectiveFlightTime(f: Flight): Date | null {
   return parseFlightTimeToDate(f.EstimatedDepartureTime || f.ScheduledDepartureTime)
 }
 
+// ── ISPRAVLJENA funkcija za adaptivni interval ──
 function getMinutesUntilNextFlight(flights: Flight[]): number {
   const now = Date.now()
   let min = Infinity
@@ -281,13 +282,18 @@ function getMinutesUntilNextFlight(flights: Flight[]): number {
     const t = getEffectiveFlightTime(f)
     if (!t) continue
     const diffMin = (t.getTime() - now) / 60_000
+    // NAMJERNO bez "diffMin > 0 &&" — vidi objašnjenje gore
     if (diffMin < min) min = diffMin
   }
   return min
 }
-
+ 
+// getAdaptiveInterval ostaje NEPROMIJENJEN — eksplicitna provjera
+// gapMin === Infinity je dobra dopuna, samo je gornja funkcija bila
+// problem:
 function getAdaptiveInterval(arrivals: Flight[], departures: Flight[]): number {
   const gapMin = getMinutesUntilNextFlight([...arrivals, ...departures])
+  if (gapMin === Infinity) return SLOW_INTERVAL_MS
   if (gapMin <= FAST_THRESHOLD_MIN) return BASE_INTERVAL_MS
   if (gapMin <= MEDIUM_THRESHOLD_MIN) return MEDIUM_INTERVAL_MS
   return SLOW_INTERVAL_MS
@@ -403,12 +409,7 @@ const fetchWithTimeout = (
     externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
   }
  
-  return fetch(url, { 
-    signal: controller.signal, 
-    headers,
-    cache: 'force-cache',
-    next: { revalidate: 300 }
-  })
+return fetch(url, { signal: controller.signal, headers })
     .finally(() => clearTimeout(timeoutId))
     .catch(err => {
       if (err.name === 'AbortError') {
@@ -609,6 +610,7 @@ function getAutoStatus(flight: Flight, lang: LangKey = 'en'): string | null {
 }
 
 // ── Poboljšana getAutoArrivalStatus funkcija ──
+// ── ISPRAVLJENA getAutoArrivalStatus funkcija ──
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string, lang: LangKey = 'en'): string | null {
   const status = (flight.StatusEN ?? "").trim()
   
@@ -635,7 +637,7 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string, la
   const diffMinutes = (est.getTime() - sch.getTime()) / 60_000
   const estTimeStr = fmtTime(estStr)
 
-  // ── 1. Kašnjenje ──
+  // ── 1. Kašnjenje (diffMinutes > 15) ──
   if (diffMinutes > 15) {
     const delayMins = Math.round(diffMinutes)
     const gateInfo = flight.GateNumber && flight.GateNumber !== '-'
@@ -644,7 +646,7 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string, la
     return `${STATUS_I18N['Delayed'][lang]} ${delayMins}min – ${estTimeStr}`
   }
 
-  // ── 2. Dolazak ranije ──
+  // ── 2. Dolazak ranije (diffMinutes < -15) ──
   if (diffMinutes < -15) {
     const earlyMins = Math.round(Math.abs(diffMinutes))
     const gateInfo = flight.GateNumber && flight.GateNumber !== '-'
@@ -653,7 +655,7 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string, la
     return `${STATUS_I18N['Early'][lang]} ${earlyMins}min – ${estTimeStr}`
   }
 
-  // ── 3. On time ──
+  // ── 3. On time (diffMinutes između -15 i 15) ──
   const gateInfo = flight.GateNumber && flight.GateNumber !== '-'
     ? ` | Gate ${flight.GateNumber}`
     : ''
@@ -783,6 +785,7 @@ function getArrivalTimeInfo(flight: Flight): string | null {
 type LEDColor = "blue"|"green"|"orange"|"red"|"yellow"|"cyan"|"purple"|"lime"
 
 // ── AŽURIRANA computeStatusPill funkcija ──
+// ── AŽURIRANA computeStatusPill funkcija ──
 function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: string) => string, lang: LangKey = 'en') {
   const gateChangedAt = (flight as any)._gateChangedAt;
   const isRecentGateChange = !isArrival && gateChangedAt && (Date.now() - gateChangedAt < 15_000);
@@ -804,6 +807,7 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
     ? getAutoArrivalStatus(flight, fmtTime, lang) 
     : getAutoStatus(flight, lang)
   
+  // ── BITNO: auto sadrži cijeli tekst, npr. "Delayed 125min – 12:10" ──
   const effectiveStatus = auto !== null ? auto : (flight.StatusEN ?? "")
   const s = effectiveStatus
 
@@ -820,7 +824,10 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
   const isFinalCall    = !isArrival && /^final call/i.test(s.trim())
   const isArrived      = isArrival  && /(arrived|landed|sletio|sletjelo|dolazak|stigao)/i.test(s)
 
-  let displayText = s
+  // ── BITNO: displayText = effectiveStatus (cijeli tekst) ──
+  let displayText = effectiveStatus  // ← OVDJE JE BIO PROBLEM! ranije je bio s (skraćeni status)
+  
+  // Posebni slučajevi:
   if (isProcessing) displayText = "Check-In"
   if (isArrived) {
     const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime

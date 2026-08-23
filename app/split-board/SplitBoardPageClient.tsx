@@ -606,9 +606,11 @@ useEffect(() => {
   const lastHeartbeat = useRef(Date.now());
   const prevGatesRef = useRef<Record<string, string>>({});
   const arrivalsRef = useRef<Flight[]>([]);
+  const nightModeRef = useRef(false);
 const departuresRef = useRef<Flight[]>([]);
 useEffect(() => { arrivalsRef.current = arrivals }, [arrivals]);
 useEffect(() => { departuresRef.current = departures }, [departures]);
+useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
@@ -689,7 +691,7 @@ const loadData = useCallback(async () => {
   // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
   // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
   // blok se preskače i nastavlja se normalan tok — self-healing.
-  const wasNightMode = nightMode; // vrijednost PRIJE ovog ciklusa
+ const wasNightMode = nightModeRef.current;
 
   if (isNightHours()) {
     if (isMountedRef.current) setNightMode(true);

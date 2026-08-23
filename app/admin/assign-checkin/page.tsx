@@ -737,13 +737,13 @@ useEffect(() => {
   };
 
   // Učitavanje statistike
-  const openStats = useCallback(async () => {
-    setShowStats(true);const handleLogout =
-    setLoadingStats(true);
-    const data = await fetchDailyStats();
-    setDailyStats(data);
-    setLoadingStats(false);
-  }, []);
+  // const openStats = useCallback(async () => {
+  //   setShowStats(true);const handleLogout =
+  //   setLoadingStats(true);
+  //   const data = await fetchDailyStats();
+  //   setDailyStats(data);
+  //   setLoadingStats(false);
+  // }, []);
 
   // ─── FETCH FLIGHTS SA ETag (umjesto statusa) ─────────────
   const fetchFlightsData = useCallback(async (force = false): Promise<Flight[] | null> => {
@@ -1273,10 +1273,6 @@ const handleLogout = performLogout;
               <RefreshCw size={16} className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`} />
             </button>
 
-            <button onClick={openStats} title="Dnevna statistika"
-              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
-              <BarChart2 size={16} className={isDark ? 'text-sky-400' : 'text-sky-600'} />
-            </button>
 
             <button onClick={() => router.push('/admin')}
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
