@@ -105,64 +105,78 @@ export default function BaggagePageClient() {
     setIsLoading(false)
   }, [])
 
-  useEffect(() => {
-    isMountedRef.current = true
-    let tid: ReturnType<typeof setTimeout>
 
-const loadFlights = async () => {
-  if (!isMountedRef.current) return
 
-  if (isNightHours()) {
-    if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
-    tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-    return
-  }
-  if (isMountedRef.current) setNightMode(false)
-
-  try {
-    const headers: HeadersInit = {}
-    if (etagRef.current) headers["If-None-Match"] = etagRef.current
-
-    const statusRes = await fetchWithTimeout("/api/flights", 5_000, headers)
-
-    if (statusRes.status === 304) {
-      setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-      tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-      setIsLoading(false)
+// ============================================================
+// ISPRAVKA GREŠKE iz prethodnog patcha za
+// app/baggage/[beltNumber]/BaggagePageClient.tsx
+//
+// Prethodni patch je pogrešno uklonio scheduling i iz night-hours
+// grane. Ta grana je VAN try/finally bloka (return se dešava PRIJE
+// nego što try počne) — finally je NIKAD ne obuhvata, pa uklanjanjem
+// njenog tid=setTimeout(...) polling petlja se trajno gasi čim
+// nastupi noć i nikad se sama ne probudi. 304 grana OSTAJE bez
+// tid=... (ta jeste unutar try-a, finally je ispravno pokriva).
+// ============================================================
+ 
+useEffect(() => {
+  isMountedRef.current = true
+  let tid: ReturnType<typeof setTimeout>
+ 
+  const loadFlights = async () => {
+    if (!isMountedRef.current) return
+ 
+    if (isNightHours()) {
+      if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
+      tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS) // ← VRAĆENO NAZAD
       return
     }
-
-    if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`)
-
-    const data = await statusRes.json()
-    const newEtag = statusRes.headers.get('ETag')
-    if (newEtag) etagRef.current = newEtag
-    lastKnownHash = data.hash
-
-    if (isMountedRef.current) {
-      setAllArrivals(data.arrivals || [])
-      setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
-      saveToCache(data)
-      saveEmergencyCache(data)
+    if (isMountedRef.current) setNightMode(false)
+ 
+    try {
+      const headers: HeadersInit = {}
+      if (etagRef.current) headers["If-None-Match"] = etagRef.current
+ 
+      const statusRes = await fetchWithTimeout("/api/flights", 5_000, headers)
+ 
+      if (statusRes.status === 304) {
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        setIsLoading(false)
+        return // ← ostaje BEZ tid= — finally to ispravno radi (unutar try-a)
+      }
+ 
+      if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`)
+ 
+      const data = await statusRes.json()
+      const newEtag = statusRes.headers.get('ETag')
+      if (newEtag) etagRef.current = newEtag
+      lastKnownHash = data.hash
+ 
+      if (isMountedRef.current) {
+        setAllArrivals(data.arrivals || [])
+        setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+        saveToCache(data)
+        saveEmergencyCache(data)
+      }
+    } catch (error) {
+      console.error("Failed to load arrivals:", error)
+      const cached = loadFromCache()
+      if (cached) {
+        setAllArrivals(cached.arrivals || [])
+      } else {
+        const emergency = loadEmergencyCache()
+        if (emergency) setAllArrivals(emergency.arrivals || [])
+      }
+    } finally {
+      // ── JEDINO mjesto koje zakazuje sledeći ciklus ZA try-block grane ──
+      if (isMountedRef.current) setIsLoading(false)
+      if (isMountedRef.current) tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
     }
-  } catch (error) {
-    console.error("Failed to load arrivals:", error)
-    const cached = loadFromCache()
-    if (cached) {
-      setAllArrivals(cached.arrivals || [])
-    } else {
-      const emergency = loadEmergencyCache()
-      if (emergency) setAllArrivals(emergency.arrivals || [])
-    }
-  } finally {
-    if (isMountedRef.current) setIsLoading(false)
-    tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
   }
-}
-
-    loadFlights()
-    return () => { isMountedRef.current = false; clearTimeout(tid) }
-  }, [])
+ 
+  loadFlights()
+  return () => { isMountedRef.current = false; clearTimeout(tid) }
+}, [])
 
   // ── MAGIJA: Kompletna logika filtriranja u useMemo. NEPROMIJENJENO ──
   const displayFlights = useMemo(() => {

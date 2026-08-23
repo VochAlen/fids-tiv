@@ -945,7 +945,10 @@ function DeparturesBoard(): JSX.Element {
             isInitialLoad.current = false;
             setLoading(false);
             isFetchingRef.current = false;
-            tid = setTimeout(load, REFRESH_INTERVAL_MS);
+           // tid = setTimeout(load, REFRESH_INTERVAL_MS);
+//            304 grana ima svoj vlastiti tid = setTimeout(load, REFRESH_INTERVAL_MS); return; unutar try bloka — a taj return i dalje prolazi kroz vanjski finally, koji ponovo zakazuje tid = setTimeout(load, REFRESH_INTERVAL_MS). Isti mehanizam kao u arrivals/baggage bug-u.
+
+// Ali — ovdje je posljedica mnogo blaža, zahvaljujući isFetchingRef guard-u koji ovaj fajl već ima (za razliku od arrivals/baggage, koji ga nisu imali). Pratio sam tačnu mehaniku: svaki 304 ciklus stvarno zakaže 2 nezavisna timera umjesto 1, ali kad oba otkucaju, isFetchingRef guard blokira drugu (suvišnu) invokaciju prije nego što ona stigne ponovo bilo šta zakazati — pa se broj timera ne eksponencijalno umnožava (ostaje na "2 umjesto 1" po ciklusu, ne "2→4→8..."). Dakle: nema stvarnih duplih poziva /api/flights, samo se po jedan nepotreban ("mrtav") timer objekat stvara i odmah neutrališe svaki ciklus — kozmetički/memorijski trošak, ne API trošak. Ipak vrijedi počistiti radi konzistentnosti sa Combined patternom
             return;
           }
 

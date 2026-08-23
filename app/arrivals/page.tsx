@@ -240,8 +240,7 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     return estFmt === schFmt ? null : estFmt;
   }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime]);
 
-  const pillCls = `w-[90%] flex items-center justify-center gap-3 text-[2.5rem] font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
-
+const pillCls = `w-[90%] flex items-center justify-center gap-3 text-[2rem] font-extrabold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
   return (
     <div className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "68px", contain: "layout style" }}>
       <div className="flex items-center justify-center" style={{ width: "180px" }}>
@@ -271,8 +270,7 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
       </div>
       <div className="flex items-center justify-center flex-1 min-w-[400px]">
         {pill.hasStatusText ? (
-          <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>
-            {pill.showLEDs && (
+<div className={`${pillCls} overflow-hidden relative text-[2rem]`} style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>            {pill.showLEDs && (
               <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10">
                 <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
                 <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
@@ -335,56 +333,59 @@ function ArrivalsBoard(): JSX.Element {
     });
   }, []);
 
+// ============================================================
+// KRITIČAN FIX za app/arrivals/page.tsx
+// ============================================================
+// ISPRAVKA GREŠKE iz prethodnog patcha za app/arrivals/page.tsx
+// Isti razlog kao za baggage-client-fix-v2.tsx — vidi tamo objašnjenje.
+// ============================================================
+ 
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
   const controller = new AbortController();
-
+ 
   // Učitaj cache prije nego kreneš
   const cached = loadFromCache();
   if (cached?.arrivals) {
     setFlights(filterRecentFlights(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
     setLoading(false);
   }
-
+ 
   const load = async () => {
     if (!isMountedRef.current) return;
     if (isNightHours()) {
       if (isMountedRef.current) setLoading(false);
-      tid = setTimeout(load, REFRESH_INTERVAL_MS);
+      tid = setTimeout(load, REFRESH_INTERVAL_MS); // ← VRAĆENO NAZAD
       return;
     }
-
+ 
     try {
       const headers: HeadersInit = {};
       if (etagRef.current) {
         headers["If-None-Match"] = etagRef.current;
       }
-
-      // ✅ KORISTI fetchWithTimeout
+ 
       const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
         headers,
         signal: controller.signal,
-        cache: 'force-cache',  // ✅ Vercel edge cache
+        cache: 'force-cache',
       });
-
-      // ✅ 304 - ništa se nije promijenilo
+ 
       if (res.status === 304) {
         const newEtag = res.headers.get('ETag');
         if (newEtag) etagRef.current = newEtag;
         setLoading(false);
-        tid = setTimeout(load, REFRESH_INTERVAL_MS);
-        return;
+        return; // ← ostaje BEZ tid= — finally to ispravno radi (unutar try-a)
       }
-
+ 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
+ 
       const data = await res.json();
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagRef.current = newEtag;
-
+ 
       if (data?.arrivals && isMountedRef.current) {
-        // ✅ Samo arrivals (bez desks i gates)
         saveToCache({ arrivals: data.arrivals });
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
@@ -392,29 +393,30 @@ useEffect(() => {
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
       console.error("Arrivals load error:", err);
-      
-      // ✅ Koristi cache
+ 
       const c = loadFromCache();
       if (c?.arrivals && isMountedRef.current) {
         setFlights(filterRecentFlights(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
       }
     } finally {
+      // ── JEDINO mjesto koje zakazuje sledeći ciklus ZA try-block grane ──
       if (isMountedRef.current) {
         setLoading(false);
         tid = setTimeout(load, REFRESH_INTERVAL_MS);
       }
     }
   };
-
+ 
   load();
-
+ 
   return () => {
     isMountedRef.current = false;
     clearTimeout(tid);
     controller.abort();
   };
 }, [filterRecentFlights]);
+ 
 
   const sortedFlights = useMemo(() => [...flights].sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")), [flights]);
 

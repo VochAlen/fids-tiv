@@ -643,7 +643,7 @@ const isLoadingRef = useRef(false);
   overflow:hidden;
 }
         .fids-leds{display:flex;gap:4px;flex-shrink:0}
-   .fids-pill-text{
+.fids-pill-text{
   overflow:hidden;
   display:-webkit-box;
   -webkit-line-clamp:2;
@@ -652,6 +652,7 @@ const isLoadingRef = useRef(false);
   line-height:1.15;
   text-align:center;
   word-break:break-word;
+  font-size:clamp(0.65rem, 1.1vw, 0.98rem) !important;
 }
         .fids-scheduled{
           font-size:clamp(0.8rem,1.4vw,1.1rem);
