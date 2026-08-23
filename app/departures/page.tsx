@@ -9,25 +9,16 @@
 //  1. MEMORY LEAK FIX: Dupli DOM eliminisan — isDesktopLayout state
 //     + uslovni render (samo jedan layout u DOM-u, ne oba)
 //  2. MEMORY LEAK FIX: will-change uklonjen sa svih stalnih animacija
-//     (LED, pill blink, ticker) — zadržavao GPU texture beskonačno
 //  3. MEMORY LEAK FIX: prevGatesRef se čisti na MAX_PREV_GATES (200)
-//  4. MEMORY LEAK FIX: lastKnownHash prebačen u ref (ne preživljava HMR)
-//  5. PERFORMANCE: ClockDisplay 1s → 10s (HH:MM se mijenja svakih 60s)
-//  6. PERFORMANCE: content-visibility: auto na FlightRow (lazy render)
-//  7. PERFORMANCE: contain: layout style paint na redu
-//  8. PERFORMANCE: Ticker 1x umjesto 2x (CSS clone)
-//  9. PERFORMANCE: prepareData/applyAssignmentsOnly ne klonira nepromijenjene
-// 10. PERFORMANCE: IS_LOW_END detekcija — skip FlightAware na slabom hardveru
-// 11. PERFORMANCE: Memory pressure detekcija — smanjuje animacije > 80%
-// 12. PERFORMANCE: requestIdleCallback za non-critical state updates
-// 13. PERFORMANCE: Heartbeat bez mouse/keypress listenera (kiosk mode)
-// 14. FIX C (NOVO): isFetchingRef guard — sprječava preklapanje dva
-//     istovremena load() poziva (StrictMode dev double-invoke, HMR,
-//     remount edge-case). Bez ovoga bi dva paralelna polling lanca
-//     mogla nezavisno zvati /api/flights.
-// 15. FIX B (NOVO): fetchWithTimeout sada prima eksterni AbortSignal
-//     (iz AbortController-a na nivou efekta) — cleanup pri unmountu
-//     stvarno prekida fetch koji je "u letu", ne samo sljedeći poziv.
+//  4. PERFORMANCE: ClockDisplay 1s → 10s
+//  5. PERFORMANCE: content-visibility: auto na FlightRow
+//  6. PERFORMANCE: contain: layout style paint na redu
+//  7. PERFORMANCE: Ticker 1x umjesto 2x (CSS clone)
+//  8. PERFORMANCE: IS_LOW_END detekcija — skip FlightAware
+//  9. PERFORMANCE: Memory pressure detekcija
+// 10. FIX C: isFetchingRef guard
+// 11. FIX B: fetchWithTimeout sa AbortSignal
+// 12. WEATHER: Dodata weather kolona i weather za Tivat u header
 // ═══════════════════════════════════════════════════════════════
 
 import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component, type ErrorInfo, type ReactNode } from 'react';
@@ -36,12 +27,13 @@ import { getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from 'lucide-react';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
+import { useWeather } from '@/hooks/use-weather';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS         = 180_000;
-const FETCH_TIMEOUT_MS            = 20_000;
+const FETCH_TIMEOUT_MS            = 15_000;
 const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
 const CACHE_KEY                   = 'dep_board_cache';
@@ -90,6 +82,23 @@ const SECURITY_MESSAGES = [
   { text: '📶 FREE AIRPORT WIFI: Network: "One Crna Gora" | No password required | Connect to One Crna Gora for access •', language: 'en' },
   { text: '📶 BESPLATAN WIFI: Mreža: "One Crna Gora" | Bez lozinke | Povežite se na One Crna Gora •', language: 'cnr' },
 ];
+
+// ============================================================
+// WEATHER HELPER
+// ============================================================
+function getWeatherEmoji(code: number): string {
+  if (code === 0) return '☀️';
+  if (code === 1) return '⛅';
+  if (code === 2) return '⛅';
+  if (code === 3) return '☁️';
+  if ([45, 48].includes(code)) return '🌫️';
+  if ([51, 53, 55].includes(code)) return '🌦️';
+  if ([61, 63, 65].includes(code)) return '🌧️';
+  if ([71, 73, 75].includes(code)) return '❄️';
+  if ([80, 81, 82].includes(code)) return '🌧️';
+  if ([95, 96, 99].includes(code)) return '⛈️';
+  return '🌡️';
+}
 
 // ============================================================
 // ERROR BOUNDARY
@@ -250,9 +259,6 @@ const loadEmergencyCache = (): { departures: Flight[]; desks: Record<string, str
   } catch { return null; }
 };
 
-// FIX B: fetchWithTimeout sada prima opcioni externalSignal.
-// Ako se on okine (npr. unmount / effect cleanup), fetch se odmah prekida —
-// ne čeka se interni timeout, i stari fetch nikad ne dovrši setState.
 const fetchWithTimeout = async (
   url: string,
   ms: number,
@@ -335,7 +341,6 @@ const ClockDisplay = memo(function ClockDisplay() {
     setMounted(true);
     const tick = () => setTime(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
     tick();
-    // OPTIMIZOVANO: 10s umjesto 1s — HH:MM se mijenja svakih 60s
     const id = setInterval(tick, 10_000);
     return () => clearInterval(id);
   }, []);
@@ -374,12 +379,11 @@ const LEDIndicator = memo(function LEDIndicator({
     blue: 'led-blue', green: 'led-green', orange: 'led-orange', red: 'led-red',
     yellow: 'led-yellow', cyan: 'led-cyan', purple: 'led-purple', lime: 'led-lime',
   };
-  // OPTIMIZOVANO: will-change uklonjen — zadržavao GPU texture beskonačno
   return <div className={`${size} rounded-full led-base ${map[color]} ${phase === 'b' ? 'led-phase-b' : ''}`} />;
 });
 
 // ============================================================
-// TABLE HEADERS — OPTIMIZOVANO: hidden sm:flex uklonjen (uslovni render)
+// TABLE HEADERS
 // ============================================================
 const TableHeaders = memo(function TableHeaders({
   headers,
@@ -480,7 +484,13 @@ const FlightRow = memo(
     const rowBg = index % 2 === 0 ? 'bg-white/15' : 'bg-white/5';
     const icao  = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 
-    // OPTIMIZOVANO: na low-end preskače FlightAware (štedi network + memoriju)
+    // ── Weather za destinaciju ──
+    const weather = useWeather({
+      cityName: flight.DestinationCityName,
+      airportCode: flight.DestinationAirportCode,
+      airportName: flight.DestinationAirportName
+    }, 0);
+
     const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
       const img = e.currentTarget;
       if (IS_LOW_END) {
@@ -513,7 +523,7 @@ const FlightRow = memo(
       return estFmt;
     }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime]);
 
-    // ── OPTIMIZOVANO: Jedan layout umjesto dva ──
+    // ── DESKTOP LAYOUT ──
     if (isDesktopLayout) {
       return (
         <div
@@ -526,23 +536,23 @@ const FlightRow = memo(
           }}
         >
           {/* Scheduled */}
-          <div className="flex items-center justify-center" style={{ width: '180px' }}>
-            <div className="text-[2.5rem] font-black text-white drop-shadow-lg tabular-nums">
+          <div className="flex items-center justify-center" style={{ width: '150px' }}>
+            <div className="text-[2.2rem] font-black text-white drop-shadow-lg tabular-nums">
               {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
             </div>
           </div>
 
           {/* Estimated */}
-          <div className="flex items-center justify-center" style={{ width: '180px' }}>
+          <div className="flex items-center justify-center" style={{ width: '150px' }}>
             {estimatedDisplay
-              ? <div className={`text-[2.5rem] font-black ${COLOR_CONFIG.title} drop-shadow-lg tabular-nums`}>{estimatedDisplay}</div>
+              ? <div className={`text-[2.2rem] font-black ${COLOR_CONFIG.title} drop-shadow-lg tabular-nums`}>{estimatedDisplay}</div>
               : <div className="text-2xl text-white/30 font-bold">-</div>
             }
           </div>
 
           {/* Flight Info */}
-          <div className="flex items-center gap-3" style={{ width: '280px' }}>
-            <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
+          <div className="flex items-center gap-2" style={{ width: '240px' }}>
+            <div className="relative w-[60px] h-10 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
               <img
                 src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
                 alt={`${flight.AirlineName} logo`}
@@ -554,70 +564,84 @@ const FlightRow = memo(
                 fetchPriority={index < 8 ? "high" : "auto"}
               />
             </div>
-            <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+            <div className="text-[2rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
               <div className="text-sm text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
             )}
           </div>
 
           {/* Destination */}
-          <div className="flex items-center" style={{ width: '380px' }}>
-            <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
+          <div className="flex items-center" style={{ width: '320px' }}>
+            <div className="text-[3rem] font-black text-white truncate drop-shadow-lg">
               {flight.DestinationCityName || flight.DestinationAirportName}
             </div>
           </div>
 
+          {/* WEATHER KOLONA */}
+          <div className="flex items-center justify-center" style={{ width: '100px' }}>
+            {weather && !weather.loading && !weather.error ? (
+              <div className="flex items-center gap-1 text-white/80 text-xl font-medium">
+                <span className="text-2xl">{getWeatherEmoji(weather.weatherCode)}</span>
+                <span>{Math.round(weather.temperature)}°</span>
+              </div>
+            ) : weather?.loading ? (
+              <div className="w-6 h-6 border-2 border-white/20 border-t-purple-400 rounded-full animate-spin" />
+            ) : (
+              <span className="text-white/20 text-xl">—</span>
+            )}
+          </div>
+
           {/* Check-In */}
-          <div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: '320px' }}>
+          <div className="flex items-center justify-center flex-wrap gap-1" style={{ width: '280px' }}>
             {flight.CheckInDesk && flight.CheckInDesk !== '-'
               ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
-                  <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
+                  <div key={d} className="text-[1.6rem] font-black text-white bg-black/40 py-1 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
                     {d}
                   </div>
                 ))
-              : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+              : <div className="text-[2rem] font-black text-transparent py-2 px-3">-</div>}
           </div>
 
           {/* Gate */}
-          <div className="flex items-center justify-center" style={{ width: '180px' }}>
+          <div className="flex items-center justify-center" style={{ width: '150px' }}>
             {flight.GateNumber && flight.GateNumber !== '-'
-              ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
+              ? <div className={`text-[2.2rem] font-black py-1.5 px-3 rounded-xl border-2 shadow-xl
                   ${isGateChanged
                     ? 'text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast'
                     : 'text-white bg-black/40 border-white/20'}`}>
                   {flight.GateNumber}
                 </div>
-              : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+              : <div className="text-[2rem] font-black text-transparent py-2 px-3">-</div>}
           </div>
 
           {/* Terminal */}
-          <div className="flex items-center justify-center" style={{ width: '140px' }}>
+          <div className="flex items-center justify-center" style={{ width: '120px' }}>
             {(() => {
               const badge = getFlightTerminalBadge(flight);
               return badge ? (
-                <span className={`text-[1.6rem] font-black rounded-full px-3 py-1.5 leading-none ${badge.bg} ${badge.text}`}>
+                <span className={`text-[1.4rem] font-black rounded-full px-3 py-1.5 leading-none ${badge.bg} ${badge.text}`}>
                   {badge.label}
                 </span>
               ) : (
-                <div className="text-[2.5rem] font-black text-transparent">-</div>
+                <div className="text-[2rem] font-black text-transparent">-</div>
               );
             })()}
           </div>
 
           {/* Status */}
-          <div className="flex items-center justify-center" style={{ width: '420px' }}>
+          <div className="flex items-center justify-center" style={{ width: '360px' }}>
             {pill.hasStatusText ? (
-              <div className={`${pillCls} overflow-hidden`}>
+              <div className={`${pillCls} overflow-hidden text-[1.4rem]`}>
                 {pill.showLEDs && (
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
-                    <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
+                    <LEDIndicator color={pill.led1} phase="a" size="w-3.5 h-3.5" />
+                    <LEDIndicator color={pill.led2} phase="b" size="w-3.5 h-3.5" />
                   </div>
                 )}
-                <span className="truncate whitespace-nowrap">{pill.displayText}</span>
+                <span className="truncate whitespace-nowrap font-extrabold tracking-wide">{pill.displayText}</span>
               </div>
             ) : (
-              <div className="text-[1.3rem] font-bold text-slate-300">Scheduled</div>
+              <div className="text-[1.4rem] font-bold text-slate-300">Scheduled</div>
             )}
           </div>
         </div>
@@ -656,8 +680,16 @@ const FlightRow = memo(
             )}
           </div>
         </div>
-        <div className="text-[1.25rem] font-black text-white truncate leading-tight">
-          {flight.DestinationCityName || flight.DestinationAirportName}
+        <div className="flex items-center justify-between">
+          <div className="text-[1.25rem] font-black text-white truncate leading-tight">
+            {flight.DestinationCityName || flight.DestinationAirportName}
+          </div>
+          {weather && !weather.loading && !weather.error && (
+            <div className="flex items-center gap-1 text-white/80 text-base font-medium flex-shrink-0 ml-2">
+              <span>{getWeatherEmoji(weather.weatherCode)}</span>
+              <span>{Math.round(weather.temperature)}°</span>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {(() => {
@@ -731,7 +763,7 @@ function DeparturesBoard(): JSX.Element {
   const [nightMode,      setNightMode]      = useState(false);
   const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END);
 
-  // ── OPTIMIZOVANO: isDesktopLayout — jedan layout umjesto dva ──
+  // ── isDesktopLayout ──
   const [isDesktopLayout, setIsDesktopLayout] = useState(true)
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return
@@ -742,30 +774,32 @@ function DeparturesBoard(): JSX.Element {
       mql.addEventListener('change', handler)
       return () => mql.removeEventListener('change', handler)
     } else {
-
       (mql as any).addListener(handler)
       return () => (mql as any).removeListener(handler)
     }
   }, [])
+
+  // ── Weather za Tivat (header) ──
+  const tivatWeather = useWeather({
+    cityName: 'Tivat',
+    airportCode: 'TIV',
+    airportName: 'Tivat Airport'
+  }, 0);
 
   const isMountedRef  = useRef(true);
   const prevGatesRef  = useRef<Record<string, string>>({});
   const isInitialLoad = useRef(true);
   const lastHeartbeat = useRef(Date.now());
   const etagStatusRef = useRef<string | null>(null);
-  // FIX: lastKnownHash prebačen u ref
   const lastKnownHashRef = useRef<string | null>(null);
   const flightsRef = useRef<Flight[]>([]);
   const nightModeRef = useRef(false);
-  // FIX C: sprječava preklapanje dva istovremena load() poziva
-  // (npr. StrictMode dev double-invoke effekta, Fast Refresh/HMR, ili
-  // bilo koji edge-case koji bi mogao pokrenuti drugi polling lanac
-  // dok je prvi još u toku).
   const isFetchingRef = useRef(false);
+  
   useEffect(() => { flightsRef.current = flights }, [flights]);
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
 
-  // ── OPTIMIZOVANO: Memory pressure detekcija ──
+  // ── Memory pressure detekcija ──
   useEffect(() => {
     if (IS_LOW_END) return;
     const checkMemory = () => {
@@ -806,7 +840,7 @@ function DeparturesBoard(): JSX.Element {
     return () => clearTimeout(id);
   }, []);
 
-  // ── OPTIMIZOVANO: Heartbeat — bez mouse/keypress listenera (kiosk mode) ──
+  // Heartbeat
   useEffect(() => {
     const id = setInterval(() => {
       if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
@@ -828,12 +862,11 @@ function DeparturesBoard(): JSX.Element {
     return () => window.removeEventListener('error', onErr);
   }, []);
 
-  // ── OPTIMIZOVANO: Memory cleanup — čisti i prevGatesRef ──
+  // Memory cleanup
   useEffect(() => {
     const id = setInterval(() => {
       setFlights(p => p.length > MAX_FLIGHTS_MEMORY ? p.slice(0, MAX_FLIGHTS_MEMORY) : p);
 
-      // FIX: Očisti prevGatesRef — zadrži samo zadnjih MAX_PREV_GATES
       const gateKeys = Object.keys(prevGatesRef.current);
       if (gateKeys.length > MAX_PREV_GATES) {
         const toRemove = gateKeys.slice(0, gateKeys.length - MAX_PREV_GATES);
@@ -863,7 +896,6 @@ function DeparturesBoard(): JSX.Element {
     });
   }, []);
 
-  // ── OPTIMIZOVANO: prepareDepartures — ne klonira nepromijenjene ──
   const prepareDepartures = useCallback((
     rawDepartures: Flight[],
     assignments: { desks: Record<string, string>; gates: Record<string, string> }
@@ -897,15 +929,11 @@ function DeparturesBoard(): JSX.Element {
   useEffect(() => {
     isMountedRef.current = true;
     let tid: ReturnType<typeof setTimeout>;
-    // FIX B: jedan AbortController po lifecycle-u efekta. Kad se efekat
-    // cleanup-uje (unmount/deps promjena), controller.abort() prekida
-    // BILO KOJI fetch koji je trenutno u toku — ne samo sprječava sljedeći.
     const controller = new AbortController();
 
     const load = async () => {
       if (!isMountedRef.current) return;
 
-      // FIX C: guard protiv preklapanja — ako je fetch već u toku, ne pokreći novi
       if (isFetchingRef.current) return;
       isFetchingRef.current = true;
 
@@ -914,7 +942,7 @@ function DeparturesBoard(): JSX.Element {
       if (isNightHours()) {
         if (isMountedRef.current) setNightMode(true);
         setLoading(false);
-        isFetchingRef.current = false; // nije bilo pravog fetch-a, oslobodi guard
+        isFetchingRef.current = false;
         tid = setTimeout(load, REFRESH_INTERVAL_MS);
         return;
       }
@@ -937,18 +965,13 @@ function DeparturesBoard(): JSX.Element {
         }
 
         try {
-          // 🔥 Povećaj timeout na 15s + prosljedi eksterni AbortSignal
-          const statusRes = await fetchWithTimeout('/api/flights', 15_000, headers, controller.signal);
+          const statusRes = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, headers, controller.signal);
 
           if (statusRes.status === 304) {
             setLastUpdate(new Date().toLocaleTimeString('en-GB'));
             isInitialLoad.current = false;
             setLoading(false);
             isFetchingRef.current = false;
-           // tid = setTimeout(load, REFRESH_INTERVAL_MS);
-//            304 grana ima svoj vlastiti tid = setTimeout(load, REFRESH_INTERVAL_MS); return; unutar try bloka — a taj return i dalje prolazi kroz vanjski finally, koji ponovo zakazuje tid = setTimeout(load, REFRESH_INTERVAL_MS). Isti mehanizam kao u arrivals/baggage bug-u.
-
-// Ali — ovdje je posljedica mnogo blaža, zahvaljujući isFetchingRef guard-u koji ovaj fajl već ima (za razliku od arrivals/baggage, koji ga nisu imali). Pratio sam tačnu mehaniku: svaki 304 ciklus stvarno zakaže 2 nezavisna timera umjesto 1, ali kad oba otkucaju, isFetchingRef guard blokira drugu (suvišnu) invokaciju prije nego što ona stigne ponovo bilo šta zakazati — pa se broj timera ne eksponencijalno umnožava (ostaje na "2 umjesto 1" po ciklusu, ne "2→4→8..."). Dakle: nema stvarnih duplih poziva /api/flights, samo se po jedan nepotreban ("mrtav") timer objekat stvara i odmah neutrališe svaki ciklus — kozmetički/memorijski trošak, ne API trošak. Ipak vrijedi počistiti radi konzistentnosti sa Combined patternom
             return;
           }
 
@@ -960,7 +983,6 @@ function DeparturesBoard(): JSX.Element {
 
           data = statusData;
 
-          // 🔥 Spremi SVE podatke u cache
           if (data && isMountedRef.current) {
             saveToCache({
               departures: data.departures,
@@ -974,15 +996,8 @@ function DeparturesBoard(): JSX.Element {
             });
           }
         } catch (fe) {
-          // ── FIX: provjeri OVAJ controller, ne isMountedRef.
-          // isMountedRef je DIJELJEN između StrictMode dvostrukih
-          // effect-invokacija u dev modu — može se vratiti na `true`
-          // od strane DRUGOG (novog) efekta prije nego stigne catch
-          // ovog (starog, već abortovanog) poziva. controller.signal.aborted
-          // je vezan striktno za OVAJ closure i pouzdano kaže da li je
-          // BAŠ OVAJ fetch namjerno prekinut (unmount / effect remount).
           if (controller.signal.aborted) {
-            return; // efekat je cleanup-ovan — ignoriši, ne diraj cache/UI
+            return;
           }
           if (!isMountedRef.current) return;
 
@@ -1001,19 +1016,16 @@ function DeparturesBoard(): JSX.Element {
           }
         }
 
-             if (!isMountedRef.current || !data) return;
+        if (!isMountedRef.current || !data) return;
 
-        // 🔥 Koristi desks i gates iz data (bilo iz API-ja ili cache-a)
         const assignments = {
           desks: data.desks || {},
           gates: data.gates || {}
         };
 
-        // ── NOVO: odvojen try/catch za processing, da se razlikuje
-        // od network grešaka i da se vidi TAČNO gdje puca ──
         try {
           const rawDepartures = getUniqueDeparturesWithDeparted(
-            filterRecentDepartures(data.departures || [])   // ← fallback na [] ako je undefined
+            filterRecentDepartures(data.departures || [])
           );
           const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
           setFlights(departuresWithMeta);
@@ -1021,7 +1033,7 @@ function DeparturesBoard(): JSX.Element {
           if (!usedCache) setErrorMessage(null);
           else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
         } catch (processingError) {
-          console.error('Processing error (data was fetched OK):', processingError, data);
+          console.error('Processing error:', processingError, data);
           setErrorMessage('Data processing error — check console.');
         }
 
@@ -1030,25 +1042,22 @@ function DeparturesBoard(): JSX.Element {
           console.error('Critical:', e);
           setErrorMessage('Unable to load flight data. Check connection.');
         }
-  } finally {
-      isInitialLoad.current = false;
-      isFetchingRef.current = false;
-      if (isMountedRef.current && !controller.signal.aborted) {
-        setLoading(false);
-        tid = setTimeout(load, REFRESH_INTERVAL_MS);   // ← umjesto nextInterval
+      } finally {
+        isInitialLoad.current = false;
+        isFetchingRef.current = false;
+        if (isMountedRef.current && !controller.signal.aborted) {
+          setLoading(false);
+          tid = setTimeout(load, REFRESH_INTERVAL_MS);
+        }
       }
-    }
     };
 
     load();
     return () => {
-    isMountedRef.current = false
-    clearTimeout(tid)
-    controller.abort()
-    isFetchingRef.current = false   // ← NOVO: odmah oslobodi lock, da load() 
-                                     // iz SLJEDEĆEG (StrictMode remount) effect-a 
-                                     // ne bude blokiran dok se stari (abortovani) 
-                                     // fetch asinhrono ne završi
+      isMountedRef.current = false;
+      clearTimeout(tid);
+      controller.abort();
+      isFetchingRef.current = false;
     };
   }, [filterRecentDepartures, prepareDepartures]);
 
@@ -1072,14 +1081,15 @@ function DeparturesBoard(): JSX.Element {
     <Plane className={`${className} text-orange-500`} />, []);
 
   const tableHeaders = useMemo(() => [
-    { label: 'Scheduled',   width: '180px', icon: Clock         },
-    { label: 'Estimated',   width: '180px', icon: Clock         },
-    { label: 'Flight',      width: '280px', icon: DepartureIcon },
-    { label: 'Destination', width: '380px', icon: MapPin        },
-    { label: 'Check-In',    width: '320px', icon: Users         },
-    { label: 'Gate',        width: '180px', icon: DoorOpen      },
-    { label: 'Terminal',    width: '160px', icon: Building2     },
-    { label: 'Status',      width: '400px', icon: Info          },
+    { label: 'Scheduled',   width: '150px', icon: Clock         },
+    { label: 'Estimated',   width: '150px', icon: Clock         },
+    { label: 'Flight',      width: '240px', icon: DepartureIcon },
+    { label: 'Destination', width: '320px', icon: MapPin        },
+    { label: 'TEMP',     width: '200px', icon: () => <span className="text-lg">🌡️</span> },
+    { label: 'Check-In',    width: '280px', icon: Users         },
+    { label: 'Gate',        width: '150px', icon: DoorOpen      },
+    { label: 'Terminal',    width: '120px', icon: Building2     },
+    { label: 'Status',      width: '360px', icon: Info          },
   ], [DepartureIcon]);
 
   if (nightMode) {
@@ -1117,8 +1127,14 @@ function DeparturesBoard(): JSX.Element {
               <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${COLOR_CONFIG.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
                 DEPARTURES
               </h1>
-              <p className={`${COLOR_CONFIG.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate`}>
+              <p className={`${COLOR_CONFIG.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate flex items-center gap-2`}>
                 Real-time departure information • Outgoing flights
+                {tivatWeather && !tivatWeather.loading && !tivatWeather.error && (
+                  <span className="text-white/40 text-base sm:text-xl font-medium flex items-center gap-1">
+                    <span> Weather at TIV: {getWeatherEmoji(tivatWeather.weatherCode)}</span>
+                    <span>{Math.round(tivatWeather.temperature)}°</span>
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -1163,7 +1179,7 @@ function DeparturesBoard(): JSX.Element {
         )}
       </div>
 
-      {/* ── Ticker — OPTIMIZOVANO: 1x umjesto 2x ── */}
+      {/* Ticker */}
       <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
         <div className="ticker-wrap">
           <div className={`ticker-move ${COLOR_CONFIG.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
@@ -1199,60 +1215,55 @@ function DeparturesBoard(): JSX.Element {
         )}
       </div>
 
-<style jsx global>{`
-  #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
+      <style jsx global>{`
+        #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
 
-  /* LED animacije - OSTAJA AKTIVNE na svim uređajima */
-  .led-base{animation:1s ease-in-out infinite alternate led-pulse}
-  .led-phase-b{animation-delay:.5s}
-  .led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}
-  .led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}
-  .led-purple{background:#4a1d96}.led-lime{background:#365314}
-  @keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}
-  @keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}
-  @keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}
-  @keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}
-  @keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}
-  @keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}
-  @keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}
-  @keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}
-  @keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}
-  .led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}
-  .led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}
-  .led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}
-  .led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}
-  .led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}
-  .led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}
-  .led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}
-  .led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}
+        .led-base{animation:1s ease-in-out infinite alternate led-pulse}
+        .led-phase-b{animation-delay:.5s}
+        .led-blue{background:#1e3a5f}.led-green{background:#14532d}.led-orange{background:#7c2d12}
+        .led-red{background:#7f1d1d}.led-yellow{background:#713f12}.led-cyan{background:#164e63}
+        .led-purple{background:#4a1d96}.led-lime{background:#365314}
+        @keyframes led-pulse{0%{opacity:.25;box-shadow:none}100%{opacity:1}}
+        @keyframes led-pulse-blue{100%{background:#60a5fa;box-shadow:0 0 8px #60a5fa88}}
+        @keyframes led-pulse-green{100%{background:#4ade80;box-shadow:0 0 8px #4ade8088}}
+        @keyframes led-pulse-orange{100%{background:#fb923c;box-shadow:0 0 8px #fb923c88}}
+        @keyframes led-pulse-red{100%{background:#f87171;box-shadow:0 0 8px #f8717188}}
+        @keyframes led-pulse-yellow{100%{background:#facc15;box-shadow:0 0 8px #facc1588}}
+        @keyframes led-pulse-cyan{100%{background:#22d3ee;box-shadow:0 0 8px #22d3ee88}}
+        @keyframes led-pulse-purple{100%{background:#a78bfa;box-shadow:0 0 8px #a78bfa88}}
+        @keyframes led-pulse-lime{100%{background:#a3e635;box-shadow:0 0 8px #a3e63588}}
+        .led-blue.led-base:not(.led-phase-b){animation-name:led-pulse-blue}
+        .led-green.led-base:not(.led-phase-b){animation-name:led-pulse-green}
+        .led-orange.led-base:not(.led-phase-b){animation-name:led-pulse-orange}
+        .led-red.led-base:not(.led-phase-b){animation-name:led-pulse-red}
+        .led-yellow.led-base:not(.led-phase-b){animation-name:led-pulse-yellow}
+        .led-cyan.led-base:not(.led-phase-b){animation-name:led-pulse-cyan}
+        .led-purple.led-base:not(.led-phase-b){animation-name:led-pulse-purple}
+        .led-lime.led-base:not(.led-phase-b){animation-name:led-pulse-lime}
 
-  /* Pill blink - OSTAJA AKTIVAN na svim uređajima */
-  @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
-  @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
-  .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
-  .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
+        @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}
+        @keyframes pill-blink-fast{0%,40%{opacity:1}41%,100%{opacity:.55}}
+        .animate-pill-blink{animation:.8s ease-in-out infinite pill-blink}
+        .animate-pill-blink-fast{animation:.4s ease-in-out infinite pill-blink-fast}
 
-  /* Ticker - OSTAJE AKTIVAN na svim uređajima */
-  .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
-  .ticker-move{display:inline-block;white-space:nowrap;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
-  @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
-  @media(max-width:639px){.ticker-move{animation-duration:35s}}
+        .ticker-wrap{width:100%;overflow:hidden;position:absolute;top:0;left:0;height:100%}
+        .ticker-move{display:inline-block;white-space:nowrap;backface-visibility:hidden;animation:ticker-scroll 45s linear infinite}
+        @keyframes ticker-scroll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
+        @media(max-width:639px){.ticker-move{animation-duration:35s}}
 
-  /* reducedAnimations - gasi SAMO dekorativne animacije (pulse, spin), NE LED i ticker */
-  ${reducedAnimations ? `
-    .animate-pulse{animation:none!important;opacity:1!important}
-    .animate-spin{animation:none!important;opacity:1!important}
-  ` : ''}
+        ${reducedAnimations ? `
+          .animate-pulse{animation:none!important;opacity:1!important}
+          .animate-spin{animation:none!important;opacity:1!important}
+        ` : ''}
 
-  /* Poštovanje system preference - ali NE gasi LED i ticker (funkcionalni su) */
-  @media(prefers-reduced-motion:reduce){
-    .animate-pulse,.animate-spin{animation:none!important;opacity:1!important}
-  }
+        @media(prefers-reduced-motion:reduce){
+          .animate-pulse,.animate-spin{animation:none!important;opacity:1!important}
+        }
 
-  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
-  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
-  body,html{overflow:hidden;margin:0;padding:0}
-`}</style>
+        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:rgba(0,0,0,.3);border-radius:3px}
+        ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.4);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.6)}
+        body,html{overflow:hidden;margin:0;padding:0}
+      `}</style>
     </div>
   );
 }
