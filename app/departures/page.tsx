@@ -19,6 +19,7 @@
 // 10. FIX C: isFetchingRef guard
 // 11. FIX B: fetchWithTimeout sa AbortSignal
 // 12. WEATHER: Dodata weather kolona i weather za Tivat u header
+// 13. ADAPTIVNI INTERVAL: getAdaptiveInterval funkcija
 // ═══════════════════════════════════════════════════════════════
 
 import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component, type ErrorInfo, type ReactNode } from 'react';
@@ -48,6 +49,13 @@ const MAX_PREV_GATES              = 200;
 const PAGE_SIZE                   = 8;
 const PAGE_ROTATE_MS              = 20_000;
 const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
+
+// ── Adaptivni interval ──
+const FAST_THRESHOLD_MIN     = 45;
+const MEDIUM_THRESHOLD_MIN   = 120;
+const BASE_INTERVAL_MS       = 180_000;  // 3 min
+const MEDIUM_INTERVAL_MS     = 300_000;  // 5 min
+const SLOW_INTERVAL_MS       = 600_000;  // 10 min
 
 // ── Low-end detekcija ──
 const IS_LOW_END = typeof navigator !== 'undefined' &&
@@ -81,6 +89,8 @@ const SECURITY_MESSAGES = [
   { text: '⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •', language: 'cnr' },
   { text: '📶 FREE AIRPORT WIFI: Network: "One Crna Gora" | No password required | Connect to One Crna Gora for access •', language: 'en' },
   { text: '📶 BESPLATAN WIFI: Mreža: "One Crna Gora" | Bez lozinke | Povežite se na One Crna Gora •', language: 'cnr' },
+  { text: '💻 FIDS SYSTEM DEVELOPED BY: ALEN • Full-stack development from concept to deployment • © 2026 All Rights Reserved •', language: 'en' },
+  { text: '💻 FIDS SISTEM RAZVIO: ALEN • Razvoj od ideje do realizacije • © 2026 Sva prava zadržana •', language: 'cnr' },
 ];
 
 // ============================================================
@@ -210,6 +220,22 @@ function isValidDisplayTime(timeStr: string | null | undefined): boolean {
   if (!timeStr) return false;
   const formatted = formatTimeString(timeStr);
   return formatted !== '' && formatted !== '00:00';
+}
+
+// ── Adaptivni interval ──
+function getAdaptiveInterval(departures: Flight[]): number {
+  const now = Date.now();
+  let min = Infinity;
+  for (const f of departures) {
+    const t = parseFlightTimeToDate(f.EstimatedDepartureTime || f.ScheduledDepartureTime);
+    if (!t) continue;
+    const diffMin = (t.getTime() - now) / 60_000;
+    if (diffMin < min) min = diffMin;
+  }
+  const gapMin = min;
+  if (gapMin <= FAST_THRESHOLD_MIN) return BASE_INTERVAL_MS;
+  if (gapMin <= MEDIUM_THRESHOLD_MIN) return MEDIUM_INTERVAL_MS;
+  return SLOW_INTERVAL_MS;
 }
 
 // ── Cache helpers ──
@@ -925,7 +951,7 @@ function DeparturesBoard(): JSX.Element {
     });
   }, []);
 
-  // Data loading
+  // ── Data loading sa adaptivnim intervalom ──
   useEffect(() => {
     isMountedRef.current = true;
     let tid: ReturnType<typeof setTimeout>;
@@ -933,7 +959,6 @@ function DeparturesBoard(): JSX.Element {
 
     const load = async () => {
       if (!isMountedRef.current) return;
-
       if (isFetchingRef.current) return;
       isFetchingRef.current = true;
 
@@ -943,12 +968,13 @@ function DeparturesBoard(): JSX.Element {
         if (isMountedRef.current) setNightMode(true);
         setLoading(false);
         isFetchingRef.current = false;
-        tid = setTimeout(load, REFRESH_INTERVAL_MS);
+        tid = setTimeout(load, BASE_INTERVAL_MS);
         return;
       }
       if (isMountedRef.current) setNightMode(false);
 
       const justExitedNightMode = wasNightMode;
+      let nextInterval: number = BASE_INTERVAL_MS;
 
       let data: any = null;
       let usedCache = false;
@@ -972,6 +998,7 @@ function DeparturesBoard(): JSX.Element {
             isInitialLoad.current = false;
             setLoading(false);
             isFetchingRef.current = false;
+            // nextInterval ostaje BASE_INTERVAL_MS
             return;
           }
 
@@ -1030,6 +1057,10 @@ function DeparturesBoard(): JSX.Element {
           const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
           setFlights(departuresWithMeta);
           setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+          
+          // ── IZRAČUNAJ adaptivni interval na osnovu trenutnih letova ──
+          nextInterval = getAdaptiveInterval(departuresWithMeta);
+          
           if (!usedCache) setErrorMessage(null);
           else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
         } catch (processingError) {
@@ -1047,7 +1078,7 @@ function DeparturesBoard(): JSX.Element {
         isFetchingRef.current = false;
         if (isMountedRef.current && !controller.signal.aborted) {
           setLoading(false);
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
+          tid = setTimeout(load, nextInterval);
         }
       }
     };
@@ -1085,7 +1116,7 @@ function DeparturesBoard(): JSX.Element {
     { label: 'Estimated',   width: '150px', icon: Clock         },
     { label: 'Flight',      width: '240px', icon: DepartureIcon },
     { label: 'Destination', width: '320px', icon: MapPin        },
-    { label: 'TEMP',     width: '200px', icon: () => <span className="text-lg">🌡️</span> },
+    { label: 'Weather',     width: '100px', icon: () => <span className="text-lg">🌡️</span> },
     { label: 'Check-In',    width: '280px', icon: Users         },
     { label: 'Gate',        width: '150px', icon: DoorOpen      },
     { label: 'Terminal',    width: '120px', icon: Building2     },

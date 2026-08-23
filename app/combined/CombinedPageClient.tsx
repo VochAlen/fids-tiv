@@ -209,7 +209,11 @@ const SECURITY_MESSAGES = [
   "⚠️ POŠTOVANI PUTNICI, MOLIMO VAS DA NE OSTAVLJATE SVOJ PRTLJAG BEZ NADZORA NA AERODROMU - NENADZIRANI PRTLJAG ĆE BITI ODUZET I UNIŠTEN •",
   "📶 FREE AIRPORT WIFI: Network: \"One Crna Gora\" | No password required | Connect to One Crna Gora for access •",
   "📶 BESPLATAN WIFI: Mreža: \"One Crna Gora\" | Bez lozinke | Povežite se na One Crna Gora •",
-]
+
+  "💻 FIDS SYSTEM DEVELOPED BY: Alen • Full-stack development from concept to deployment • © 2025-2026 All Rights Reserved •",
+  "💻 FIDS SISTEM RAZVIO: Alen • Razvoj od ideje do realizacije • © 2025-2026 Sva prava zadržana •",
+];
+
 
 const PLACEHOLDER_IMAGE =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMzQzQzU0Ii8+Cjx0ZXh0IHg9IjE2IiB5PSIxNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZmlsbD0iIzlDQTdCNiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjgiPk5vIExvZ288L3RleHQ+Cjwvc3ZnPgo="
@@ -1497,153 +1501,161 @@ function FlightBoard(): JSX.Element {
     let tid: ReturnType<typeof setTimeout>
     const controller = new AbortController()
  
-    const load = async () => {
-      if (!isMountedRef.current) return
-      if (isFetchingRef.current) return
-      isFetchingRef.current = true
- 
-      const wasNightMode = nightModeRef.current
- 
-      if (isNightHours()) {
-        if (isMountedRef.current) setNightMode(true)
-        batchUpdate({ loading: false })
-        isFetchingRef.current = false
-        tid = setTimeout(load, BASE_INTERVAL_MS)
+  const load = async () => {
+  if (!isMountedRef.current) return
+  if (isFetchingRef.current) return
+  isFetchingRef.current = true
+
+  const wasNightMode = nightModeRef.current
+
+  if (isNightHours()) {
+    if (isMountedRef.current) setNightMode(true)
+    batchUpdate({ loading: false })
+    isFetchingRef.current = false
+    tid = setTimeout(load, BASE_INTERVAL_MS)
+    return
+  }
+  if (isMountedRef.current) setNightMode(false)
+
+  const justExitedNightMode = wasNightMode
+  let nextInterval: number = BASE_INTERVAL_MS
+
+  try {
+    if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0) {
+      batchUpdate({ loading: true })
+    }
+    
+    // ── ISPRAVLJENA Stale-while-revalidate ──
+    // UVIJEK pozivamo fetch, ali koristimo cache kao fallback
+    const cached = loadFromCache()
+    
+    // Ako imamo cache, prikaži ga odmah (smanjuje loading state)
+    if (cached && isMountedRef.current) {
+      const { filteredArrivals, departuresWithMeta } = prepareData(cached.data)
+      // Samo ako je arrivals/departures prazno (prvi load), prikaži cache
+      if (arrivalsRef.current.length === 0 && departuresRef.current.length === 0) {
+        dispatch({
+          type: 'UPDATE_FLIGHTS',
+          payload: {
+            arrivals: filteredArrivals,
+            departures: departuresWithMeta,
+            lastUpdate: cached.data.lastUpdated || new Date().toLocaleTimeString("en-GB")
+          }
+        })
+      }
+    }
+
+    const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
+    const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
+
+    const headers: HeadersInit = {}
+    if (!forceRefresh && etagStatusRef.current) {
+      headers['If-None-Match'] = etagStatusRef.current
+    }
+
+    let res: Response
+    try {
+      res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, headers, controller.signal)
+    } catch (fe) {
+      if (controller.signal.aborted) {
         return
       }
-      if (isMountedRef.current) setNightMode(false)
- 
-      const justExitedNightMode = wasNightMode
-      let nextInterval: number = BASE_INTERVAL_MS
- 
-      try {
-        if (isInitialLoad.current && arrivalsRef.current.length === 0 && departuresRef.current.length === 0) {
-          batchUpdate({ loading: true })
-        }
-        
-        // ── Stale-while-revalidate ──
-        const cached = loadFromCache()
-        if (cached && Date.now() - cached.timestamp < STALE_WHILE_REVALIDATE) {
-          if (Date.now() - cached.timestamp > CACHE_DURATION) {
-            // Background refresh - nastavi sa fetch-om
-          } else {
-            // Dovoljno svjež cache, preskoči fetch
-            isFetchingRef.current = false
-            tid = setTimeout(load, BASE_INTERVAL_MS)
-            return
+
+      // Ako fetch padne, koristi cache
+      const cachedData = loadFromCache()
+      if (cachedData) {
+        const { filteredArrivals, departuresWithMeta } = prepareData(cachedData.data)
+        dispatch({
+          type: 'UPDATE_FLIGHTS',
+          payload: {
+            arrivals: filteredArrivals,
+            departures: departuresWithMeta,
+            lastUpdate: cachedData.data.lastUpdated || new Date().toLocaleTimeString("en-GB")
           }
-        }
- 
-        const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0
-        const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode
- 
-        const headers: HeadersInit = {}
-        if (!forceRefresh && etagStatusRef.current) {
-          headers['If-None-Match'] = etagStatusRef.current
-        }
- 
-        let res: Response
-        try {
-          res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, headers, controller.signal)
-        } catch (fe) {
-          if (controller.signal.aborted) {
-            return
-          }
- 
-          const cachedData = loadFromCache()
-          if (cachedData) {
-            const { filteredArrivals, departuresWithMeta } = prepareData(cachedData.data)
-            dispatch({
-              type: 'UPDATE_FLIGHTS',
-              payload: {
-                arrivals: filteredArrivals,
-                departures: departuresWithMeta,
-                lastUpdate: cachedData.data.lastUpdated || new Date().toLocaleTimeString("en-GB")
-              }
-            })
-            nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
-          } else {
-            const emergencyCached = loadEmergencyCache()
-            if (emergencyCached) {
-              const { filteredArrivals, departuresWithMeta } = prepareData(emergencyCached)
-              dispatch({
-                type: 'UPDATE_FLIGHTS',
-                payload: {
-                  arrivals: filteredArrivals,
-                  departures: departuresWithMeta,
-                  lastUpdate: emergencyCached.lastUpdated || new Date().toLocaleTimeString("en-GB")
-                }
-              })
-              nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
-            } else {
-              batchUpdate({ errorMessage: "Unable to load flight data" })
-              nextInterval = BASE_INTERVAL_MS
-            }
-          }
-          setTimeout(() => { if (isMountedRef.current) batchUpdate({ errorMessage: null }) }, 5_000)
-          return
-        }
- 
-        if (res.status === 304) {
-          batchUpdate({ lastUpdate: new Date().toLocaleTimeString("en-GB") })
-          nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
-          return
-        }
- 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
- 
-        const newEtag = res.headers.get('ETag')
-        if (newEtag) etagStatusRef.current = newEtag
- 
-        const data: FlightDataResponse = await res.json()
- 
-        if (isMountedRef.current) {
-          saveToCache(data)
-          saveEmergencyCache(data)
-        }
- 
-        if (!isMountedRef.current) return
- 
-        const gatesByFlight: Record<string, string> = {}
-        for (const [gateNum, entry] of Object.entries(data.gateEntries ?? {})) {
-          if (entry?.status === 'open' && entry.flightNumber) {
-            const fn = entry.flightNumber
-            gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum
-          }
-        }
-        const assignments = { desks: data.desks ?? {}, gates: gatesByFlight }
-        if (isMountedRef.current) setNightMode(!!data.isNightMode)
- 
-        const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
-        const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
- 
-        if (incomingTotal === 0 && currentlyHasData) {
-          batchUpdate({ lastUpdate: new Date().toLocaleTimeString("en-GB") })
-          nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
-        } else {
-          const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+        })
+        nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
+      } else {
+        const emergencyCached = loadEmergencyCache()
+        if (emergencyCached) {
+          const { filteredArrivals, departuresWithMeta } = prepareData(emergencyCached)
           dispatch({
             type: 'UPDATE_FLIGHTS',
             payload: {
               arrivals: filteredArrivals,
               departures: departuresWithMeta,
-              lastUpdate: new Date().toLocaleTimeString("en-GB")
+              lastUpdate: emergencyCached.lastUpdated || new Date().toLocaleTimeString("en-GB")
             }
           })
           nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
-        }
-      } catch (e) {
-        console.error("Critical:", e)
-        nextInterval = BASE_INTERVAL_MS
-      } finally {
-        isInitialLoad.current = false
-        isFetchingRef.current = false
-        if (isMountedRef.current && !controller.signal.aborted) {
-          batchUpdate({ loading: false })
-          tid = setTimeout(load, nextInterval)
+        } else {
+          batchUpdate({ errorMessage: "Unable to load flight data" })
+          nextInterval = BASE_INTERVAL_MS
         }
       }
+      setTimeout(() => { if (isMountedRef.current) batchUpdate({ errorMessage: null }) }, 5_000)
+      return
     }
+
+    if (res.status === 304) {
+      batchUpdate({ lastUpdate: new Date().toLocaleTimeString("en-GB") })
+      nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
+      return
+    }
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+    const newEtag = res.headers.get('ETag')
+    if (newEtag) etagStatusRef.current = newEtag
+
+    const data: FlightDataResponse = await res.json()
+
+    if (isMountedRef.current) {
+      saveToCache(data)
+      saveEmergencyCache(data)
+    }
+
+    if (!isMountedRef.current) return
+
+    const gatesByFlight: Record<string, string> = {}
+    for (const [gateNum, entry] of Object.entries(data.gateEntries ?? {})) {
+      if (entry?.status === 'open' && entry.flightNumber) {
+        const fn = entry.flightNumber
+        gatesByFlight[fn] = gatesByFlight[fn] ? `${gatesByFlight[fn]}, ${gateNum}` : gateNum
+      }
+    }
+    const assignments = { desks: data.desks ?? {}, gates: gatesByFlight }
+    if (isMountedRef.current) setNightMode(!!data.isNightMode)
+
+    const incomingTotal = (data.departures?.length || 0) + (data.arrivals?.length || 0)
+    const currentlyHasData = arrivalsRef.current.length > 0 || departuresRef.current.length > 0
+
+    if (incomingTotal === 0 && currentlyHasData) {
+      batchUpdate({ lastUpdate: new Date().toLocaleTimeString("en-GB") })
+      nextInterval = getAdaptiveInterval(arrivalsRef.current, departuresRef.current)
+    } else {
+      const { filteredArrivals, departuresWithMeta } = prepareData(data, assignments)
+      dispatch({
+        type: 'UPDATE_FLIGHTS',
+        payload: {
+          arrivals: filteredArrivals,
+          departures: departuresWithMeta,
+          lastUpdate: new Date().toLocaleTimeString("en-GB")
+        }
+      })
+      nextInterval = getAdaptiveInterval(filteredArrivals, departuresWithMeta)
+    }
+  } catch (e) {
+    console.error("Critical:", e)
+    nextInterval = BASE_INTERVAL_MS
+  } finally {
+    isInitialLoad.current = false
+    isFetchingRef.current = false
+    if (isMountedRef.current && !controller.signal.aborted) {
+      batchUpdate({ loading: false })
+      tid = setTimeout(load, nextInterval)
+    }
+  }
+}
  
     load()
     return () => {
