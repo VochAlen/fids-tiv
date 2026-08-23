@@ -53,9 +53,9 @@ const HARD_RESET_INTERVAL_MS      = 6 * 60 * 60 * 1_000;
 // ── Adaptivni interval ──
 const FAST_THRESHOLD_MIN     = 45;
 const MEDIUM_THRESHOLD_MIN   = 120;
-const BASE_INTERVAL_MS       = 180_000;  // 3 min
-const MEDIUM_INTERVAL_MS     = 300_000;  // 5 min
-const SLOW_INTERVAL_MS       = 600_000;  // 10 min
+const BASE_INTERVAL_MS       = 120_000;  // 3 min
+const MEDIUM_INTERVAL_MS     = 180_000;  // 5 min
+const SLOW_INTERVAL_MS       = 240_000;  // 10 min
 
 // ── Low-end detekcija ──
 const IS_LOW_END = typeof navigator !== 'undefined' &&
@@ -230,9 +230,11 @@ function getAdaptiveInterval(departures: Flight[]): number {
     const t = parseFlightTimeToDate(f.EstimatedDepartureTime || f.ScheduledDepartureTime);
     if (!t) continue;
     const diffMin = (t.getTime() - now) / 60_000;
+    // NAMJERNO bez "diffMin > 0 &&" — kasni letovi padaju u FAST prag
     if (diffMin < min) min = diffMin;
   }
   const gapMin = min;
+  if (gapMin === Infinity) return SLOW_INTERVAL_MS;
   if (gapMin <= FAST_THRESHOLD_MIN) return BASE_INTERVAL_MS;
   if (gapMin <= MEDIUM_THRESHOLD_MIN) return MEDIUM_INTERVAL_MS;
   return SLOW_INTERVAL_MS;
@@ -1055,14 +1057,16 @@ function DeparturesBoard(): JSX.Element {
             filterRecentDepartures(data.departures || [])
           );
           const departuresWithMeta = prepareDepartures(rawDepartures, assignments);
-          setFlights(departuresWithMeta);
-          setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+   setFlights(departuresWithMeta);
+setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+
+
           
           // ── IZRAČUNAJ adaptivni interval na osnovu trenutnih letova ──
           nextInterval = getAdaptiveInterval(departuresWithMeta);
           
-          if (!usedCache) setErrorMessage(null);
-          else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
+if (!usedCache) setErrorMessage(null);
+else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000);
         } catch (processingError) {
           console.error('Processing error:', processingError, data);
           setErrorMessage('Data processing error — check console.');
@@ -1074,13 +1078,13 @@ function DeparturesBoard(): JSX.Element {
           setErrorMessage('Unable to load flight data. Check connection.');
         }
       } finally {
-        isInitialLoad.current = false;
-        isFetchingRef.current = false;
-        if (isMountedRef.current && !controller.signal.aborted) {
-          setLoading(false);
-          tid = setTimeout(load, nextInterval);
-        }
-      }
+  isInitialLoad.current = false;
+  isFetchingRef.current = false;
+  if (isMountedRef.current && !controller.signal.aborted) {
+    setLoading(false);
+    tid = setTimeout(load, nextInterval);  // ← koristi nextInterval
+  }
+}
     };
 
     load();
