@@ -1,5 +1,6 @@
 // lib/flight-api-helpers.ts
 import type { Flight, RawFlightData } from '@/types/flight';
+import { getPodgoricaDateString } from '@/lib/night-hours';
 
 // ── Debug logger — aktivan samo u development modu ──────────
 // Smanjuje log šum u produkciji (Vercel logovi imaju kvote/retenciju),
@@ -288,14 +289,18 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
 
       
       if (!isNaN(day) && !isNaN(month) && !isNaN(year) && !isNaN(hours) && !isNaN(minutes)) {
-        // month je 0-indexed u JavaScript Date
-// Kreiraj timestamp kao da je UTC, ali zapravo su sati lokalni
-// Offset u minutama (npr. UTC+2 = -120)
-const tzOffset = new Date().getTimezoneOffset() * 60 * 1000;
-const scheduledDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0, 0));
-sortTime = scheduledDate.getTime() + tzOffset;
-dlog(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | local=${scheduledDate.getHours()}:${scheduledDate.getMinutes()} | timestamp=${sortTime}`);
+        // FIX (čišćenje mrtvog koda): ranije je ovdje postojao izračun
+        // "tzOffset" koji se DODAVAO na sortTime, ali ga je SLEDEĆA
+        // linija odmah prepisivala bez njega — tzOffset izračun nije
+        // imao NIKAKAV stvaran efekat, samo je zbunjivao čitaoca (i
+        // rizikovao da neko slučajno "popravi" kod tako da ga ponovo
+        // aktivira, uvodeći zavisnost od sistemske vremenske zone).
+        // Date.UTC(...) je već ispravno, namjerno i NEZAVISNO od
+        // sistemske zone — isti wall-clock string uvijek daje isti
+        // broj, na Vercel-u i na localhost-u podjednako.
+        const scheduledDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0, 0));
         sortTime = scheduledDate.getTime();
+        dlog(`🕐 ${raw.BrojLeta}: input=${hours}:${minutes} | timestamp=${sortTime}`);
       }
     } catch (err) {
       console.warn(`⚠️ Failed to parse date for ${raw.Kompanija}${raw.BrojLeta}:`, err);
@@ -385,15 +390,34 @@ export async function mapNgrokFlightToFlight(raw: NgrokFlightRaw): Promise<Fligh
 
   const flightId = `${raw.brlet}_${raw.schtime}_${raw.sifFromto}`;
 
-  // ── _sortTime: schtime je već puni ISO string ("2026-07-31T06:40:00"),
-  // pa ga direktno parsiramo — isti princip kao u mapRawFlight (wall-clock
-  // sati se tretiraju dosljedno za sortiranje, bez stvarne TZ konverzije,
-  // jer server (Vercel) radi u UTC pa se brojevi poklapaju).
+  // ── _sortTime: schtime je wall-clock string u lokalnom (Podgorica)
+  // vremenu, npr. "2026-07-31T06:40:00" — BEZ oznake vremenske zone.
+  //
+  // FIX (border stranica prikazivala jučerašnje letove / ne učitava
+  // današnje): raniji kod je radio `new Date(raw.schtime).getTime()`
+  // — pošto string NEMA 'Z'/offset oznaku, JavaScript ga parsira kao
+  // LOKALNO vrijeme SISTEMA NA KOM KOD RADI. Na Vercel-u je to UTC (pa
+  // je "slučajno" ispravno), ali na lokalnoj mašini za testiranje
+  // (drugačija sistemska zona) bi isti string dao DRUGAČIJI apsolutni
+  // trenutak — kvareći i sortiranje i (nizvodno, u filterTodayFlights)
+  // određivanje da li je let "danas". Sad eksplicitno parsiramo
+  // komponente i gradimo timestamp preko Date.UTC(...), što je
+  // GARANTOVANO nezavisno od sistemske vremenske zone — isti string
+  // uvijek daje isti broj, svuda (Vercel produkcija, Vercel preview,
+  // localhost, bilo koji OS).
   let sortTime: number | undefined = undefined;
   if (raw.schtime) {
     try {
-      const parsed = new Date(raw.schtime).getTime();
-      if (!isNaN(parsed)) sortTime = parsed;
+      const m = raw.schtime.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+      if (m) {
+        const [, y, mo, d, h, mi] = m.map(Number) as unknown as number[];
+        sortTime = Date.UTC(y, mo - 1, d, h, mi, 0, 0);
+      } else {
+        // Neočekivan format — pokušaj generičko parsiranje kao fallback,
+        // radije nego da let potpuno nestane iz prikaza.
+        const parsed = new Date(raw.schtime).getTime();
+        if (!isNaN(parsed)) sortTime = parsed;
+      }
     } catch (err) {
       console.warn(`⚠️ Failed to parse schtime for ${raw.brlet}:`, err);
     }
@@ -473,10 +497,33 @@ export function sortFlightsByTime(flights: Flight[]): Flight[] {
   });
 }
 
+// FIX (border stranica prikazivala jučerašnje letove / ne učitava
+// današnje — pravi uzrok pronađen pri analizi): _sortTime je NAMJERNO
+// kodiran (vidi mapNgrokFlightToFlight/mapRawFlight iznad) kao
+// "wall-clock lokalni datum/vrijeme, upisano preko Date.UTC(...)" — to
+// znači da .toISOString() na tom broju UVIJEK vraća TAČAN originalni
+// lokalni datum leta (npr. "2026-07-31"), bez obzira u kojoj se
+// vremenskoj zoni kod izvršava (Vercel produkcija je UTC, ali
+// localhost za testiranje možda nije — ovo više nije bitno).
+//
+// Raniji kod je radio `new Date(f._sortTime).toDateString()` — to NIJE
+// pogrešno samo po sebi, ALI poređeno sa `new Date().toDateString()`
+// za "danas" (koje računa UTC kalendarski dan, ne Podgorica dan) —
+// oko lokalne ponoći ta dva datuma privremeno NISU ista, pa su se
+// letovi neposredno prije/poslije ponoći pogrešno filtrirali kao
+// "nisu danas".
+//
+// Ispravka: "danas" se sad računa u STVARNOM Podgorica lokalnom vremenu
+// (getPodgoricaDateString(), ista funkcija koja se već koristi za
+// noćni prozor u lib/night-hours.ts), a datum leta se izvlači direktno
+// iz UTC-formatiranog _sortTime (BEZ dodatne TZ konverzije — ta
+// konverzija je već "ugrađena" u sam broj pri kodiranju, pa bi drugi
+// prolaz kroz konverziju datum pomjerio pogrešno).
 export function filterTodayFlights(flights: Flight[]): Flight[] {
-  const today = new Date().toDateString();
+  const today = getPodgoricaDateString();
   return flights.filter(f => {
     if (!f._sortTime) return true;
-    return new Date(f._sortTime).toDateString() === today;
+    const flightDate = new Date(f._sortTime).toISOString().split('T')[0];
+    return flightDate === today;
   });
 }

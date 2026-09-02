@@ -23,7 +23,11 @@ import { isNightHours } from '@/lib/night-hours';
 // KONSTANTE — Vercel Free Tier optimizacija
 // ============================================================
 const REFRESH_INTERVAL_MS      = 180_000;   // 90s umjesto 60s → -33% poziva
-const FETCH_TIMEOUT_MS         = 10_000;
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS         = 30_000; // 30s (bilo 10s)
 const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
@@ -441,6 +445,31 @@ useEffect(() => {
   }, 30_000);
   return () => clearInterval(id);
 }, []);
+
+// ── FIX (24/7 rad bez nadzora): border ranije nije imao NI globalni
+// error handler NI handler za neuhvaćene odbijene promise-e — obje
+// greške VAN React render stabla (event handleri, tajmeri, async kod)
+// koje Error Boundary NE hvata. Vidi identičan obrazac u
+// CombinedPageClient.tsx / departures/page.tsx. ──
+useEffect(() => {
+  const onErr = (e: ErrorEvent) => {
+    const m = e.error?.message || '';
+    if (m.includes('Out of memory') || m.includes('stack overflow') || m.includes('heap')) {
+      setTimeout(() => window.location.reload(), 2_000);
+    }
+  };
+  window.addEventListener('error', onErr);
+  return () => window.removeEventListener('error', onErr);
+}, []);
+
+useEffect(() => {
+  const onRejection = (e: PromiseRejectionEvent) => {
+    console.error('[border] Neuhvaćena odbijena promise:', e.reason?.message || e.reason);
+  };
+  window.addEventListener('unhandledrejection', onRejection);
+  return () => window.removeEventListener('unhandledrejection', onRejection);
+}, []);
+
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
 const etagRef = useRef<string | null>(null);
 const tidRef = useRef<ReturnType<typeof setTimeout> | null>(null);

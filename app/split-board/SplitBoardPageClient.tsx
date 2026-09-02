@@ -24,7 +24,11 @@ import { isNightHours } from '@/lib/night-hours';
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS          = 150_000;
-const FETCH_TIMEOUT_MS             = 15_000;
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS             = 30_000; // 30s (bilo 15s)
 const MAX_RETRIES                  = 3;
 const RETRY_DELAY_MS               = 1_000;
 const CACHE_KEY                    = "flight_board_cache";
@@ -669,6 +673,28 @@ useEffect(() => {
       setDepartures(p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p);
     }, MEMORY_CLEANUP_INTERVAL_MS);
     return () => clearInterval(id);
+  }, []);
+
+  // ── FIX (24/7 rad bez nadzora): split-board ranije nije imao NI
+  // globalni error handler NI handler za neuhvaćene odbijene promise-e
+  // — vidi identičan obrazac u CombinedPageClient.tsx/departures. ──
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) => {
+      const m = e.error?.message || '';
+      if (m.includes('Out of memory') || m.includes('stack overflow') || m.includes('heap')) {
+        setTimeout(() => window.location.reload(), 2_000);
+      }
+    };
+    window.addEventListener('error', onErr);
+    return () => window.removeEventListener('error', onErr);
+  }, []);
+
+  useEffect(() => {
+    const onRejection = (e: PromiseRejectionEvent) => {
+      console.error('[split-board] Neuhvaćena odbijena promise:', e.reason?.message || e.reason);
+    };
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => window.removeEventListener('unhandledrejection', onRejection);
   }, []);
 
   // Ticker rotacija

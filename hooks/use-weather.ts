@@ -646,19 +646,50 @@ export const useWeather = (destination: {
   });
 
   useEffect(() => {
+    // FIX (memory leak — Chrome "Aw, Snap!" nakon dana/sedmica rada):
+    // ranije je scheduleNextRefresh() vraćala cleanup funkciju koja je
+    // znala SAMO za PRVI zakazani setTimeout. Rekurzivni poziv unutar
+    // samog setTimeout callback-a (fetchWeather(); scheduleNextRefresh();)
+    // je pravio NOVI timeoutId čiji cleanup nigdje nije bio sačuvan —
+    // useEffect je i dalje držao cleanup samo za prvi (već istekao) timer.
+    // Lanac se nastavljao ZAUVIJEK, čak i nakon unmount-a komponente, jer
+    // ništa nije moglo otkazati bilo koji timer OSIM prvog.
+    //
+    // Na 24/7 kiosku (weather se koristi na combined/departures za svaku
+    // destinaciju) svaki remount — promjena rute, ponovni render sa novim
+    // `destination` objektom (dependency niz ispod uključuje CIJELI
+    // `destination` objekat, ne samo njegova polja — ako pozivalac šalje
+    // inline objekat, on ima nov identitet na SVAKOM render-u, gaseći i
+    // paleći ovaj efekat mnogo češće nego što se čini) — stvarao je JOŠ
+    // JEDAN besmrtan lanac koji svakih do 10 minuta radi fetch + setState
+    // na potencijalno nepostojeću komponentu. To je klasičan uzrok
+    // postepenog rasta memorije koji na kraju obori Chrome tab.
+    //
+    // FIX: `timeoutId` i `cancelled` su sad u SPOLJAŠNJEM scope-u efekta.
+    // scheduleNextRefresh() prepisuje ISTU spoljašnju `timeoutId`
+    // promjenljivu pri svakom pozivu (umjesto da vraća novu, lokalnu
+    // cleanup funkciju) — pa cleanup funkcija efekta UVIJEK zna otkazati
+    // NAJNOVIJI zakazani timer, bez obzira koliko puta se lanac
+    // rekurzivno produžio. `cancelled` flag dodatno sprečava (a) setState
+    // na odjavljenoj komponenti ako fetchWeather() promise razriješi
+    // nakon unmount-a, i (b) zakazivanje BILO KOG narednog timera nakon
+    // cleanup-a.
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
     const fetchWeather = async () => {
       const cacheKey = getCacheKey(destination);
       const cached = weatherCache.get(cacheKey);
       
       if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
         console.log(`Using cached weather data for: ${cacheKey}`);
-        setWeatherData(cached.data);
+        if (!cancelled) setWeatherData(cached.data);
         return;
       }
 
       if (!isWithinOperatingHours()) {
         console.log('Outside operating hours, skipping weather fetch');
-        setWeatherData({
+        if (!cancelled) setWeatherData({
           temperature: 0,
           weatherCode: 0,
           loading: false,
@@ -702,12 +733,13 @@ export const useWeather = (destination: {
           error: `Coordinates not found for ${destination.cityName || destination.airportName || destination.airportCode}`
         };
         weatherCache.set(cacheKey, { data: errorData, timestamp: Date.now() });
-        setWeatherData(errorData);
+        if (!cancelled) setWeatherData(errorData);
         return;
       }
 
       try {
         await new Promise(resolve => setTimeout(resolve, 1000));
+        if (cancelled) return;
 
         const params = {
           latitude: coordinates.latitude.toString(),
@@ -720,6 +752,7 @@ export const useWeather = (destination: {
         const response = await fetch(
           `${url}?${new URLSearchParams(params)}`
         );
+        if (cancelled) return;
 
         if (!response.ok) {
           if (response.status === 429) {
@@ -729,6 +762,7 @@ export const useWeather = (destination: {
         }
 
         const data = await response.json();
+        if (cancelled) return;
         
         console.log(`Weather data for ${destination.cityName || destination.airportName}:`, {
           temperature: data.current.temperature_2m,
@@ -744,6 +778,7 @@ export const useWeather = (destination: {
         weatherCache.set(cacheKey, { data: newWeatherData, timestamp: Date.now() });
         setWeatherData(newWeatherData);
       } catch (error) {
+        if (cancelled) return;
         console.error('Error fetching weather:', error);
         const errorData = {
           temperature: 0,
@@ -757,24 +792,22 @@ export const useWeather = (destination: {
       }
     };
 
+    const scheduleNextRefresh = () => {
+      if (cancelled) return;
+      const refreshInterval = getTimeUntilNextRefresh();
+      console.log(`Scheduling next weather refresh in ${refreshInterval / (60 * 1000)} minutes`);
+      
+      timeoutId = setTimeout(() => {
+        if (cancelled) return;
+        fetchWeather();
+        scheduleNextRefresh();
+      }, refreshInterval);
+    };
+
     if (destination.cityName || destination.airportCode || destination.airportName) {
       console.log(`Fetching weather for:`, destination);
       fetchWeather();
-      
-      const scheduleNextRefresh = () => {
-        const refreshInterval = getTimeUntilNextRefresh();
-        console.log(`Scheduling next weather refresh in ${refreshInterval / (60 * 1000)} minutes`);
-        
-        const timeoutId = setTimeout(() => {
-          fetchWeather();
-          scheduleNextRefresh();
-        }, refreshInterval);
-        
-        return () => clearTimeout(timeoutId);
-      };
-      
-      const cleanup = scheduleNextRefresh();
-      return cleanup;
+      scheduleNextRefresh();
     } else {
       setWeatherData({
         temperature: 0,
@@ -783,6 +816,11 @@ export const useWeather = (destination: {
         error: 'No destination provided'
       });
     }
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [destination.cityName, destination.airportCode, destination.airportName, destination]);
 
   return weatherData;

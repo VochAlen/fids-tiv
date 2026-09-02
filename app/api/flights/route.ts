@@ -34,6 +34,13 @@ const ASSIGNMENTS_CACHE_TTL_MS = 15_000;
 // pa i dalje svaki od njih redovno dobija svjež odgovor — samo se broj
 // STVARNIH function invocation-a (CPU) na ovoj najprometnijoj ruti smanjuje
 // otprilike 3x, jer više zahtjeva unutar istog prozora dijeli isti CDN cache.
+// Duže CDN keširanje (45s) — schedule podaci (destinacija, vrijeme) se ne
+// mijenjaju često, i klijenti sa vremenski osjetljivim potrebama (klasa/
+// status gate-a/šaltera) sad dobijaju te podatke preko posebnog, jeftinog
+// gate-status-override/desk-status-override brzog poll-a (vidi
+// GatePageClient.tsx/CheckInPageClient.tsx), ne preko ovog endpointa —
+// pa /api/flights može ostati na dugom, jeftinom kešu bez štete po
+// brzinu prikaza klase.
 const CDN_CACHE_CONTROL = 'public, s-maxage=45, stale-while-revalidate=30';
 const CACHE_TAG = 'flight-status';
 

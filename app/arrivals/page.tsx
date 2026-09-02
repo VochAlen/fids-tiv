@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 import {
   type JSX,
   useEffect,
@@ -24,12 +25,19 @@ import { isNightHours } from '@/lib/night-hours';
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS = 150_000;
-const FETCH_TIMEOUT_MS = 15_000;
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS = 30_000; // 30s (bilo 15s)
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;
 const CACHE_KEY = "arrivals_board_cache";
 const CACHE_DURATION = 5 * 60 * 1_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Gornja granica veličine niza letova — sprečava neograničen rast state-a
+// ako spoljni izvor podataka ikad vrati abnormalno veliku listu.
+const MAX_FLIGHTS_MEMORY = 300;
 const MAX_FLIGHTS_DISPLAY = 12;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
 
@@ -315,7 +323,19 @@ function ArrivalsBoard(): JSX.Element {
 
   useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
-  useEffect(() => { const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS); return () => clearTimeout(id); }, []);
+
+  // FIX (24/7 rad bez nadzora): zamijenjen "goli" hard-reset tajmer punim
+  // setom zaštita — heartbeat watchdog, globalni error handler, handler za
+  // neuhvaćene odbijene promise-e (ranije nije postojao na ovoj stranici),
+  // i periodično čišćenje MAX_FLIGHTS_MEMORY-limitiranog niza letova. Vidi
+  // opširan komentar u hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: 'arrivals',
+    hardResetIntervalMs: HARD_RESET_INTERVAL_MS,
+    onMemoryCleanup: () => {
+      setFlights(prev => (prev.length > MAX_FLIGHTS_MEMORY ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev));
+    },
+  });
 
   const filterRecentFlights = useCallback((allFlights: Flight[]): Flight[] => {
     const now = new Date();

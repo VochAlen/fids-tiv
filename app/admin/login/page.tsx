@@ -1,29 +1,48 @@
 // app/admin/login/page.tsx
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Lock, LogIn } from 'lucide-react';
 
-export default function AdminLoginPage() {
+function LoginForm() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  // Optimizovana provera sesije - brža i bez nepotrebnog renderovanja
+  // FIX (staff dobija poruku umjesto da se zbunjeno pita "zašto sam
+  // izbačen?"): kad useIdleLogout (hooks/use-idle-logout.ts) automatski
+  // odjavi korisnika, redirect ide na /admin/login?reason=idle — ovdje
+  // to prepoznajemo i prikazujemo prijateljsku poruku umjesto praznog
+  // login ekrana.
+  const wasIdleLogout = searchParams.get('reason') === 'idle';
+
+  // FIX (ubrzaj login — dio 1/2, dio 2 je Edge runtime u
+  // app/api/admin/login/route.ts): pripremi (prefetch) JS bundle za
+  // /admin STRANICU dok korisnik još kuca korisničko ime/lozinku, umjesto
+  // da se preuzimanje tog bundle-a tek pokrene NAKON uspješne prijave.
+  // Next.js router.push('/admin') poslije prijave tada koristi već
+  // preuzeti, keširani chunk — nema dodatnog mrežnog čekanja na
+  // navigaciju, samo trenutni render.
   useEffect(() => {
-    // Brza provera - koristi samo localStorage (sinkrono)
+    router.prefetch('/admin');
+  }, [router]);
+
+  // Optimizovana provera sesije - brža i bez nepotrebnog renderovanja.
+  // NAPOMENA: cookie 'admin-authenticated' je od sada httpOnly (vidi
+  // app/api/admin/login/route.ts) — JS ga namjerno NE MOŽE čitati, to je
+  // svrha httpOnly zaštite. Zato se ovdje oslanjamo SAMO na localStorage
+  // kao brzu, isključivo kozmetičku prečicu ("vjerovatno si već
+  // prijavljen, hajde da odmah probamo /admin"). Ako je localStorage flag
+  // zastario/pogrešan, middleware.ts svejedno provjerava pravi cookie na
+  // serveru i vraća na login ako sesija zaista nije validna — nema
+  // sigurnosnog rizika u ovoj brzoj client-side provjeri.
+  useEffect(() => {
     const isLocalAuth = localStorage.getItem('adminAuthenticated') === 'true';
-    
     if (isLocalAuth) {
-      router.push('/admin');
-      return;
-    }
-    
-    // Provera cookie-a (ako je potrebno)
-    if (document.cookie.includes('admin-authenticated=true')) {
       router.push('/admin');
     }
   }, [router]);
@@ -38,21 +57,29 @@ export default function AdminLoginPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
-        // Dodajte signal za timeout (5 sekundi)
         signal: AbortSignal.timeout(5000),
       });
 
       const data = await response.json();
 
       if (data.success) {
-        // Postavi localStorage i cookie sinkrono
+        // FIX (sigurnost): pravi auth cookie je httpOnly i već je
+        // postavljen NA SERVERU u odgovoru iznad (Set-Cookie header) —
+        // više ga NE postavljamo ovdje ručno preko document.cookie. Stari
+        // kod je to radio, što je imalo dva problema: (1) bilo koji JS u
+        // konzoli je mogao izvršiti istu liniju i lažirati prijavu bez
+        // lozinke, i (2) čak i nakon što je server počeo da šalje pravi
+        // httpOnly cookie, ova client-side linija bi ga ODMAH PREPISALA
+        // običnim (ne-httpOnly) cookie-jem istog imena — tiho poništavajući
+        // sigurnosnu zaštitu na svakoj prijavi.
+        //
+        // localStorage flag ostaje — koristi ga SAMO brza kozmetička
+        // provjera iznad, ne middleware/autentifikacija.
         localStorage.setItem('adminAuthenticated', 'true');
         localStorage.setItem('adminLoginTime', new Date().toISOString());
-        
-        const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        document.cookie = `admin-authenticated=true; path=/; expires=${expires.toUTCString()}; SameSite=Strict`;
-        
-        // Odmah redirect bez čekanja
+
+        // /admin je već prefetch-ovan (vidi useEffect iznad) — ova
+        // navigacija sad koristi keširan bundle.
         router.push('/admin');
       } else {
         setError(data.message || 'Pogrešno korisničko ime ili lozinka');
@@ -77,6 +104,11 @@ export default function AdminLoginPage() {
         </div>
 
         <form className="mt-8 space-y-6" onSubmit={handleLogin}>
+          {wasIdleLogout && !error && (
+            <div className="bg-yellow-500/20 border border-yellow-500/50 text-yellow-200 px-4 py-3 rounded-lg text-sm">
+              Odjavljeni ste zbog neaktivnosti. Prijavite se ponovo da nastavite.
+            </div>
+          )}
           {error && (
             <div className="bg-red-500/20 border border-red-500/50 text-red-200 px-4 py-3 rounded-lg">
               {error}
@@ -145,5 +177,14 @@ export default function AdminLoginPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function AdminLoginPage() {
+  // useSearchParams zahtijeva Suspense granicu u App Router-u.
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

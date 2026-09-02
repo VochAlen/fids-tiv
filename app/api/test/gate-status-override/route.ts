@@ -1,8 +1,17 @@
 // app/api/test/gate-status-override/route.ts
 import { NextResponse } from 'next/server';
-import { safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { safeRedisHGetAll, safeRedisHGet, safeRedisHSet, safeRedisHDel, safeRedisExpire } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { revalidateTag } from 'next/cache';
+
+// ── FIX — RACE CONDITION (izvještaj: "ne mogu da dodijelim let određenom
+// gate-u"): ALL_KEY je bio JEDAN JSON string. POST je radio readAll() →
+// izmijeni SAMO svoj gate → writeAll(cijeli objekat) — nije atomarno. Dva
+// istovremena zahtjeva za RAZLIČITE gate-ove su mogla da se sudare, jer oba
+// čitaju isti stari snapshot pa drugi write tiho prepiše (obriše) izmjenu
+// koju je upisao prvi, iako se ticala drugog gate-a. Sad je ALL_KEY Redis
+// HASH — jedno polje (HSET) po gate-u, atomarno nezavisno od svih ostalih
+// polja. Pun kontekst: vidi komentar u lib/redis.ts iznad safeRedisHSet.
 
 //  export const dynamic = 'force-dynamic';
 
@@ -25,8 +34,16 @@ const CACHE_TTL_MS = 10_000;
 // dashboard/admin prikaz na nju. Ako se to desi, GATE_STATUS_CACHE_
 // CONTROL treba uskladiti sa stvarnim interval-om tog novog klijenta,
 // isto kao što je ranije bilo usklađeno sa FAST_POLL_BASE_MS.
+// FIX (garantovano ≤15s da se klasa/status vidi na gate ekranu, po
+// zahtjevu, BEZ značajnog dodatnog Vercel Active CPU troška): ovaj
+// endpoint vraća SITAN payload (par desetina bajtova po gate-u — jedan
+// Redis HGET, ne cijela lista letova kao /api/flights), pa je kraći keš
+// ovdje mnogo jeftiniji trade-off nego isto na /api/flights. Gate brzi
+// poll radi na 9-12s kadenci — da ukupno kašnjenje (CDN staleness +
+// vrijeme do sledećeg poll-a) sigurno ostane ispod 15s, CDN keš mora
+// biti ≤2-3s (2s + do 12s = 14s, margina od 1s za mrežni overhead).
 const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=10, s-maxage=10, stale-while-revalidate=15';
+  'public, max-age=2, s-maxage=2, stale-while-revalidate=3';
 
 
 type GateEntry = {
@@ -36,14 +53,22 @@ type GateEntry = {
   setAt: number | null;
 };
 
-async function readAll(): Promise<Record<string, GateEntry>> {
-  const raw = await safeRedisGet(ALL_KEY);
+function parseHashEntries(raw: Record<string, string> | null): Record<string, GateEntry> {
   if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  const out: Record<string, GateEntry> = {};
+  for (const [field, json] of Object.entries(raw)) {
+    try {
+      out[field] = JSON.parse(json) as GateEntry;
+    } catch {
+      // izolovano oštećeno polje — preskoči, ne ruši ostatak
+    }
   }
+  return out;
+}
+
+async function readAll(): Promise<Record<string, GateEntry>> {
+  const raw = await safeRedisHGetAll(ALL_KEY);
+  return parseHashEntries(raw);
 }
 
 // ── 2) Dodaj ODMAH ISPOD postojeće readAll() funkcije ──
@@ -70,8 +95,33 @@ async function readAllCached(): Promise<Record<string, GateEntry>> {
 }
  
 
-async function writeAll(data: Record<string, GateEntry>): Promise<void> {
-  await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
+// Više se NE koristi za pisanje pojedinačnih izmjena (to sad ide preko
+// writeOne/deleteOne ispod, atomarno po polju). Ostavljeno samo za GET-time
+// batch čišćenje starih zapisa (gdje je već potreban cijeli snapshot da bi
+// se znalo šta treba obrisati), i to preko individualnih HDEL poziva —
+// vidi cleanupStale() ispod, ne prepisuje cijeli hash.
+async function touchExpiry(): Promise<void> {
+  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
+}
+
+// Piše TAČNO JEDNO polje (jedan gate) — atomarno, ne dira ostale gate-ove.
+async function writeOne(gateNumber: string, entry: GateEntry): Promise<void> {
+  await safeRedisHSet(ALL_KEY, gateNumber, JSON.stringify(entry));
+  await touchExpiry();
+}
+
+async function deleteOne(gateNumber: string): Promise<void> {
+  await safeRedisHDel(ALL_KEY, gateNumber);
+}
+
+// Briše SAMO stara polja (identifikovana u pozivaocu) — pojedinačni HDEL po
+// polju, ne prepisuje cijeli hash. Manji je rizik od namjerno prihvaćenog:
+// ako se neko polje osvježi TAČNO između čitanja i ovog brisanja, obrisaće se
+// ta (svježa) vrijednost — isti, zanemarljivo mali prozor koji je postojao i
+// u staroj implementaciji, ali sad ograničen na POJEDINAČNO polje umjesto da
+// cijeli hash rizikuje da bude prepisan.
+async function cleanupStale(fields: string[]): Promise<void> {
+  await Promise.all(fields.map(f => safeRedisHDel(ALL_KEY, f)));
 }
 
 
@@ -83,23 +133,18 @@ export async function GET(request: Request) {
 
 const all = await readAllCached();
 
-    // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
-    let changed = false;
-    let cleanedCount = 0;
+    // ── ČIŠĆENJE STARIH ZAPISA — sad HDEL po polju (vidi cleanupStale) ──
+    const staleFields: string[] = [];
     for (const key of Object.keys(all)) {
       const entry = all[key];
       if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
-        delete all[key];
-        changed = true;
-        cleanedCount++;
+        delete all[key]; // ukloni i iz lokalne kopije koja se vraća/keš-uje
+        staleFields.push(key);
       }
     }
-    if (changed) {
-await writeAll(all);
-
-console.log(
-  `[gate-cleanup] Total cleaned: ${cleanedCount} old gate-status keys`
-);
+    if (staleFields.length > 0) {
+      await cleanupStale(staleFields);
+      console.log(`[gate-cleanup] Total cleaned: ${staleFields.length} old gate-status keys`);
     }
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
@@ -156,35 +201,49 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'gateNumber required' }, { status: 400 });
   }
 
-  const all = await readAll();
-  const existing = all[gateNumber];
+  // ── FIX (race condition): čitamo SAMO polje ovog gate-a (HGET), i pišemo
+  // SAMO njega nazad (HSET) — ne cijeli objekat. Dva istovremena zahtjeva za
+  // RAZLIČITE gate-ove sad ne mogu da se sudare, jer je svaki HSET izolovan
+  // na svoje polje. Usput i jeftinije od HGETALL — prenosi se samo jedno
+  // polje umjesto svih gate-ova pri svakom POST-u.
+  const existingRaw = await safeRedisHGet(ALL_KEY, gateNumber);
+  let existing: GateEntry | undefined;
+  if (existingRaw) {
+    try { existing = JSON.parse(existingRaw) as GateEntry; } catch { existing = undefined; }
+  }
 
   if (action === 'open' && flightNumber) {
-    all[gateNumber] = {
+    const entry: GateEntry = {
       status: 'open',
       flightNumber,
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
+    await writeOne(gateNumber, entry);
   } else if (action === 'closed') {
-    all[gateNumber] = {
+    const entry: GateEntry = {
       status: 'closed',
       flightNumber: flightNumber || '',
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
+    await writeOne(gateNumber, entry);
   } else if (action === 'clear') {
-    delete all[gateNumber];
+    await deleteOne(gateNumber);
   } else if (action === 'setClass') {
     if (!existing) {
       return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
     }
-    all[gateNumber] = { ...existing, classType: classType ?? null };
+    const entry: GateEntry = { ...existing, classType: classType ?? null };
+    await writeOne(gateNumber, entry);
   } else {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-await writeAll(all);
+  // Invalidiraj lokalni in-process keš odmah — sljedeći GET u ISTOJ
+  // serverless instanci mora vidjeti svježu vrijednost, ne stare cachedAll.
+  cachedAll = null;
+  cachedAllExpiry = 0;
 
   // ── Odmah probij CDN keš na /api/flights/status — isti razlog kao
   // kod desk-status-override.

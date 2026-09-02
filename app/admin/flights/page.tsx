@@ -3,6 +3,8 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { useIdleLogout } from '@/hooks/use-idle-logout';
+import { IdleWarningBanner } from '@/components/idle-warning-banner';
 import {
   RefreshCw,
   Trash2,
@@ -423,6 +425,11 @@ const ConfirmOverlay: React.FC<{ pending: PendingOverride; onConfirm: () => void
 export default function AssignPanel() {
   const router = useRouter();
 
+  // ─── Auto-logout nakon neaktivnosti — usklađeno sa ostalim admin
+  // ekranima (vidi hooks/use-idle-logout.ts): 3 min + 30s upozorenje.
+  // Ranije: ova stranica NIJE imala nikakvu idle-zaštitu. ──
+  const { secondsLeft: idleWarningSeconds } = useIdleLogout();
+
   const [activeTab, setActiveTab] = useState<TabType>('checkin');
   const [flights, setFlights] = useState<Flight[]>([]);
   const [loadingFlights, setLoadingFlights] = useState(true);
@@ -458,8 +465,9 @@ const [gateClasses,    setGateClasses]    = useState<Record<string, ClassType>>(
   // Tema
   useEffect(() => {
     const stored = localStorage.getItem('theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const shouldBeDark = stored === 'dark' || (stored === null && prefersDark);
+    // FIX (default tema = LIGHT) — vidi identičan komentar u
+    // app/admin/assign-checkin/page.tsx.
+    const shouldBeDark = stored === 'dark';
     setIsDark(shouldBeDark);
     document.documentElement.classList.toggle('dark', shouldBeDark);
   }, []);
@@ -841,6 +849,7 @@ const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignme
 
   return (
     <div className={`min-h-screen p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-gray-900'}`}>
+      <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       {pendingOverride && (
         <ConfirmOverlay pending={pendingOverride} onConfirm={handleConfirmOverride} onCancel={() => setPendingOverride(null)} isDark={isDark} />
       )}

@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useIdleLogout } from '@/hooks/use-idle-logout';
+import { IdleWarningBanner } from '@/components/idle-warning-banner';
 import { 
   Plane,CheckSquare, 
   Settings, 
@@ -210,28 +212,11 @@ const handleLogout = useCallback(async () => {
       window.location.href = '/admin/login';
     }
   }, []);
-  // ─── Auto-logout nakon 180s neaktivnosti ──────────────────────
-useEffect(() => {
-  const IDLE_LOGOUT_MS = 180_000;
-  let idleTimer: ReturnType<typeof setTimeout>;
-
-  const resetIdleTimer = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { handleLogout(); }, IDLE_LOGOUT_MS);
-  };
-
-  const activityEvents = ['mousedown', 'touchstart', 'keydown', 'click'];
-  activityEvents.forEach(evt =>
-    window.addEventListener(evt, resetIdleTimer, { passive: true })
-  );
-
-  resetIdleTimer(); // pokreni odmah pri učitavanju stranice
-
-  return () => {
-    clearTimeout(idleTimer);
-    activityEvents.forEach(evt => window.removeEventListener(evt, resetIdleTimer));
-  };
-}, [handleLogout]);
+  // ─── Auto-logout nakon neaktivnosti — sad zajednički hook (vidi
+  // hooks/use-idle-logout.ts), 3 min, sa 30s upozorenjem prije odjave.
+  // Ranije: ručna implementacija bez upozorenja, 180s, samo na ovoj
+  // stranici (usklađeno je sa ostalim admin ekranima). ──
+  const { secondsLeft: idleWarningSeconds } = useIdleLogout();
   
   // Računanje vremena od ažuriranja
   const getTimeSinceUpdate = useCallback(() => {
@@ -268,6 +253,7 @@ useEffect(() => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
+      <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <header className="mb-8">

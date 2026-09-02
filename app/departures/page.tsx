@@ -29,12 +29,17 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from 'lucide-r
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useWeather } from '@/hooks/use-weather';
+import WeatherIcon from '@/components/weather-icon';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS         = 180_000;
-const FETCH_TIMEOUT_MS            = 15_000;
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi identičan komentar u
+// app/combined/CombinedPageClient.tsx — server može legitimno trebati do
+// ~25s tačno na noć→dan prelazu (FETCH_LOCK wait u lib/flight-data-service.ts,
+// LOCK_WAIT_MAX_MS=25000). 15s timeout je bio prekratak. Podignuto na 30s.
+const FETCH_TIMEOUT_MS            = 30_000; // 30s (bilo 15s)
 const MAX_RETRIES                 = 1;
 const RETRY_DELAY_MS              = 1_000;
 const CACHE_KEY                   = 'dep_board_cache';
@@ -96,19 +101,13 @@ const SECURITY_MESSAGES = [
 // ============================================================
 // WEATHER HELPER
 // ============================================================
-function getWeatherEmoji(code: number): string {
-  if (code === 0) return '☀️';
-  if (code === 1) return '⛅';
-  if (code === 2) return '⛅';
-  if (code === 3) return '☁️';
-  if ([45, 48].includes(code)) return '🌫️';
-  if ([51, 53, 55].includes(code)) return '🌦️';
-  if ([61, 63, 65].includes(code)) return '🌧️';
-  if ([71, 73, 75].includes(code)) return '❄️';
-  if ([80, 81, 82].includes(code)) return '🌧️';
-  if ([95, 96, 99].includes(code)) return '⛈️';
-  return '🌡️';
-}
+// FIX (weather ikone prikazane kao kockica na kiosk PC-jevima):
+// Stari getWeatherEmoji() je vraćao Unicode emoji string koji zavisi od
+// sistemskog color-emoji fonta (Segoe UI Emoji) — na kiosk Windows
+// instalacijama taj font često nedostaje/je zastario pa se glif renderuje
+// kao prazna kockica ili se uopšte ne prikaže. Zamijenjeno <WeatherIcon />
+// komponentom (components/weather-icon.tsx) koja iscrtava sopstveni SVG,
+// identično na svakom uređaju, bez zavisnosti od fontova.
 
 // ============================================================
 // ERROR BOUNDARY
@@ -608,10 +607,7 @@ const FlightRow = memo(
           {/* WEATHER KOLONA */}
           <div className="flex items-center justify-center" style={{ width: '100px' }}>
             {weather && !weather.loading && !weather.error ? (
-              <div className="flex items-center gap-1 text-white/80 text-xl font-medium">
-                <span className="text-2xl">{getWeatherEmoji(weather.weatherCode)}</span>
-                <span>{Math.round(weather.temperature)}°</span>
-              </div>
+              <WeatherIcon code={weather.weatherCode} temperature={weather.temperature} size={22} textSize={18} />
             ) : weather?.loading ? (
               <div className="w-6 h-6 border-2 border-white/20 border-t-purple-400 rounded-full animate-spin" />
             ) : (
@@ -713,9 +709,8 @@ const FlightRow = memo(
             {flight.DestinationCityName || flight.DestinationAirportName}
           </div>
           {weather && !weather.loading && !weather.error && (
-            <div className="flex items-center gap-1 text-white/80 text-base font-medium flex-shrink-0 ml-2">
-              <span>{getWeatherEmoji(weather.weatherCode)}</span>
-              <span>{Math.round(weather.temperature)}°</span>
+            <div className="flex-shrink-0 ml-2">
+              <WeatherIcon code={weather.weatherCode} temperature={weather.temperature} size={16} textSize={13} />
             </div>
           )}
         </div>
@@ -888,6 +883,16 @@ function DeparturesBoard(): JSX.Element {
     };
     window.addEventListener('error', onErr);
     return () => window.removeEventListener('error', onErr);
+  }, []);
+
+  // ── FIX (24/7 rad bez nadzora): handler za neuhvaćene odbijene
+  // promise-e — vidi identičan komentar u CombinedPageClient.tsx. ──
+  useEffect(() => {
+    const onRejection = (e: PromiseRejectionEvent) => {
+      console.error('[departures] Neuhvaćena odbijena promise:', e.reason?.message || e.reason);
+    };
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => window.removeEventListener('unhandledrejection', onRejection);
   }, []);
 
   // Memory cleanup
@@ -1166,8 +1171,8 @@ else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000
                 Real-time departure information • Outgoing flights
                 {tivatWeather && !tivatWeather.loading && !tivatWeather.error && (
                   <span className="text-white/40 text-base sm:text-xl font-medium flex items-center gap-1">
-                    <span> Weather at TIV: {getWeatherEmoji(tivatWeather.weatherCode)}</span>
-                    <span>{Math.round(tivatWeather.temperature)}°</span>
+                    <span>Weather at TIV:</span>
+                    <WeatherIcon code={tivatWeather.weatherCode} temperature={tivatWeather.temperature} size={18} textSize={15} />
                   </span>
                 )}
               </p>

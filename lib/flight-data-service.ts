@@ -302,8 +302,17 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
     const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
     if (!Array.isArray(rawData) || rawData.length === 0) return null;
 
-    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapNgrokFlightToFlight(raw)));
-    return mapped;
+    // FIX (letovi od jučer čak ni greškom): ranije se ovdje mapiralo prvih
+    // 5 SIROVIH stavki i vraćalo BEZ filterTodayFlights() filtera koji
+    // svaki drugi put (live fetch, backup) obavezno prolazi. Izvor
+    // (FLIGHT_API_URL) ne vraća podatke ograničene/sortirane po datumu —
+    // ovo je bio jedini put u cijelom sistemu gdje je let van "danas"
+    // teoretski mogao proći nefiltriran, baš u najkritičnijem trenutku
+    // (kad su i live API i backup već pali). Sad se filtrira PRIJE
+    // rezanja na prvih 5, dosljedno sa ostatkom sistema.
+    const mapped = await Promise.all(rawData.map(raw => mapNgrokFlightToFlight(raw)));
+    const todayOnly = filterTodayFlights(mapped);
+    return todayOnly.slice(0, 5);
   } catch {
     return null;
   }

@@ -14,60 +14,46 @@ import {
 import { useWeather } from '@/hooks/use-weather';
 import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 import Image from 'next/image';
 
 // ------------------------------------------------------------
-// Konstante
-// ------------------------------------------------------------
 // ═══════════════════════════════════════════════════════════
-// FIX (ADAPTIVNI POLLING): prije je BASE_INTERVAL_MS = 14_000
-// važio ZAUVIJEK dok god gate NIJE "open" (zatvoren, bez
-// override-a, let još daleko) — a to je >95% dana. Rezultat:
-// /api/flights se zvao na svakih 14s NON-STOP po svakom gate
-// ekranu → ogroman broj edge poziva na Vercel-u.
+// FIX (SPAJANJE DVA POLL CIKLUSA U JEDAN — Vercel Edge Requests):
+// Ranije su postojala DVA nezavisna polling ciklusa na ovoj stranici:
+//   1) "brzi" poll (9-12s) → samo /api/test/gate-status-override,
+//      lagan payload, čiji je jedini posao bio da DETEKTUJE promjenu
+//      i onda pokrene loadFlights() van reda.
+//   2) "spori" poll (14-90s, adaptivan) → loadFlights() → /api/flights,
+//      koji sadrži i sam gate status (gateEntries polje).
 //
-// Sad:
-//   • dok je gate "open" (boarding u toku)  → ISTA logika kao
-//     prije: kreće od BASE_INTERVAL_MS (14s) i penje se do
-//     MAX_OPEN_INTERVAL_MS (90s) dok se ništa ne mijenja
-//     (BACKOFF_STEP_MS po ciklusu). Ovo je tačno traženo
-//     ponašanje: "kad se let otvori, refresh se povećava do
-//     90 sekundi".
-//   • dok gate NIJE "open" (idle/closed/no override)
-//     → koristi se IDLE_INTERVAL_MS (45s) umjesto fiksnih 14s.
-//     Nema razloga za near-realtime osvježavanje kad se ništa
-//     ne dešava; ovo samo drastično smanjuje broj poziva u
-//     najvećem dijelu dana, bez gubitka odzivnosti kad staff
-//     stvarno otvori gate (sljedeći poll će to uhvatiti unutar
-//     IDLE_INTERVAL_MS, tj. najviše ~45-53s).
+// Pošto /api/flights VEĆ sadrži gateEntries (gate status override
+// podatak), poseban "brzi" watchdog je bio suvišan — loadFlights()
+// sam po sebi već otkriva promjenu statusa na svakom pozivu. Sad
+// postoji SAMO JEDAN ciklus, na brzoj (9-12s) kadenci, koji radi
+// istovremeno oba posla u jednom pozivu. Ovo:
+//   • eliminiše ~495.000 poziva/mjesec po gate ekranu (odvojeni
+//     watchdog sloj), bez ikakvog gubitka u brzini reagovanja
+//   • ubrzava osvježavanje rasporeda leta (bilo do 53s, sad 9-12s
+//     kao i status)
+//   • pojednostavljuje kod — jedan tajmer umjesto dva koordinirana
 // ═══════════════════════════════════════════════════════════
 const REFRESH_INTERVAL_MS    = 14_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-const BASE_INTERVAL_MS       = 14_000;   // starting/ near-realtime interval dok je gate "open"
-const MAX_OPEN_INTERVAL_MS   = 90_000;   // gornja granica dok je gate stabilno "open"
-const BACKOFF_STEP_MS        = 8_000;    // koliko se produžava po ciklusu bez promjene (samo za "open")
-
-// ── UŠTEDA #2: IDLE_INTERVAL_MS podignut sa 20s na 45s. Gate NIJE
-// "open" >95% dana (zatvoren/bez override-a/let još daleko) — u tom
-// stanju nema razloga za near-realtime osvježavanje. Kombinovano sa
-// uklanjanjem fast-poll-a (vidi ispod), ovo je glavni ekran sad
-// gađa /api/flights u prosjeku svakih ~45-53s dok je idle, umjesto
-// svakih ~14s + dodatnih ~2-4s od fast-polla ranije. ──
-const IDLE_INTERVAL_MS       = 45_000;
-const IDLE_JITTER_MS         = 8_000;    // jitter za idle stanje, da se ekrani ne sinhronizuju
 
 const getJitterMs            = () => Math.floor(Math.random() * 4_000);
 
 const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 4_000);
 
-// ── BRZI POLL — vraćen na zahtjev osoblja: gate treba da se otvori/
-// zatvori ekranu vidljivo u roku od ~15s od trenutka dodjele. 10s baza
-// + do 2s jitter = worst-case ~12s, sigurno ispod granice, uz ~4-5x
-// manje requesta nego originalnih 2-4s. Usklađeno sa
-// GATE_STATUS_CACHE_CONTROL (max-age=10) na serveru.
-const FAST_POLL_BASE_MS   = 12_000;
-const FAST_POLL_JITTER_MS = 2_000;
+// ── JEDINI poll ciklus — zahtjev osoblja: gate treba da se otvori/
+// zatvori na ekranu vidljivo u roku od 10-12s od trenutka dodjele.
+// Baza 9s + do 3s jitter = raspon 9-12s, WORST-CASE TAČNO 12s.
+// Usklađeno sa GATE_STATUS_CACHE_CONTROL (max-age=10, ispod 12s
+// garancije) i sa identičnim ciklusom na check-in ekranima. Sad
+// pokreće SAM loadFlights() (koji već čita i gateEntries status),
+// umjesto da postoji poseban watchdog za samo status.
+const FAST_POLL_BASE_MS   = 9_000;
+const FAST_POLL_JITTER_MS = 3_000;
 const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
 
 // Klasa → boja (isti sistem kao u check-in display-u)
@@ -319,27 +305,20 @@ const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 const etagStatusRef = useRef<string | null>(null);
-const lastGateOverrideRef = useRef<{ status: string | null; flightNumber: string | null; classType: string | null } | null>(null);
+// FIX (klasa se ne prikazuje/kasni): ovo je sad JEDINI izvor istine za
+// status/klasu/broj leta ovog gate-a — puni ga poseban brzi poll (vidi
+// efekat "Brzi status/klasa poll" niže), ne loadFlights()/api/flights.
+const authoritativeGateStatusRef = useRef<{ status: string | null; flightNumber: string | null; classType: string | null } | null>(null);
+const etagGateStatusRef = useRef<string | null>(null);
 
 // ── NOVO: hash-check da se izbjegne nepotreban /api/flights fetch ──
 const lastKnownHashRef  = useRef<string | null>(null);
 const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
 const etagGateRef = useRef<string | null>(null);
-const noChangeStreakRef = useRef(0);
 const loadFlightsRef = useRef(false);
-// ── 1) Dodaj ova dva ref-a uz ostale ref-ove (pored abortControllerRef) ──
- 
-// Omogućavaju brzom pollu da restartuje glavni raspored nakon što
-// sam izazove vanredni loadFlights() — bez ovoga bi glavni tid i
-// dalje otkucao po starom (sad zastarjelom) rasporedu ubrzo nakon.
+// Ref za setTimeout handle glavnog (jedinog) poll ciklusa — potreban
+// za cleanup u effect-u koji ga postavlja.
 const mainTidRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
-const scheduleMainRef = useRef<(() => void) | null>(null);
-
-// Prati zadnji poznati override iz BRZOG poll-a (odvojeno od
-// lastGateOverrideRef koji puni glavni /api/flights poziv), da bi se
-// promjena mogla detektovati poredjenjem vrijednosti, bez oslanjanja
-// na ETag/304 semantiku na klijentu.
-const lastFastOverrideRef = useRef<string | null>(null);
 
 // ── FIX: AbortController za /api/flights poziv unutar loadFlights.
 // Kreira se jednom po lifecycle-u glavnog polling efekta i abort-uje
@@ -347,29 +326,6 @@ const lastFastOverrideRef = useRef<string | null>(null);
 // unmountu (ili promjeni gateNumber-a) i dalje završi i pozove
 // setState na već odjavljenoj komponenti.
 const abortControllerRef = useRef<AbortController | null>(null);
-
-const getNextInterval = useCallback((): number => {
-  // ── "open" (boarding u toku) — ISTA logika kao prije: kreni od
-  // BASE_INTERVAL_MS (14s) i penji se do MAX_OPEN_INTERVAL_MS (90s)
-  // dok se ništa ne mijenja. Ovo je traženo ponašanje: "kad se let
-  // otvori, refresh se povećava do 90 sekundi".
-  if (manualGateStatusRef.current === 'open') {
-    const base = Math.min(BASE_INTERVAL_MS + noChangeStreakRef.current * BACKOFF_STEP_MS, MAX_OPEN_INTERVAL_MS);
-    // 🟢 Veći jitter za "open" status (manje poziva)
-    const jitter = Math.floor(Math.random() * 6000);  // do 6s
-    return base + jitter;
-  }
-
-  // ── FIX: idle/closed/no-override (>95% dana) — prije je ovdje
-  // bio BASE_INTERVAL_MS (14s) FIKSNO, bez ikakvog backoff-a, što je
-  // generisalo ogroman broj /api/flights poziva po svakom gate
-  // ekranu, non-stop, cijeli dan. Sad koristimo IDLE_INTERVAL_MS
-  // (45s) — dovoljno rijetko za stanje kad se ništa ne dešava, a i
-  // dalje dovoljno često da se let/boarding uhvati unutar ~53s od
-  // trenutka kad ga osoblje otvori/dodijeli.
-  const jitter = Math.floor(Math.random() * IDLE_JITTER_MS); // do 8s
-  return IDLE_INTERVAL_MS + jitter;
-}, []);
 
   // ------------------------------------------------------------
   // (fetchGateStatusOverride uklonjen — bio je mrtav kod, nikad
@@ -458,9 +414,18 @@ const loadFlights = useCallback(async () => {
   loadFlightsRef.current = true;
 
   try {
-    // 1. JEDAN POZIV PREMA /api/flights
+    // FIX (klasa se ne prikazuje/kasni — trošak-svjesno rješenje): status/
+    // klasa/broj leta za OVAJ gate sad dolaze iz POSEBNOG, jeftinog, brzog
+    // poll-a (vidi authoritativeGateStatusRef i efekat "Brzi status/klasa
+    // poll" niže) koji cilja /api/test/gate-status-override?gateNumber=X —
+    // mali, već kešrandom (max-age=10) endpoint, isti princip kao
+    // CheckInPageClient.tsx (koji NIKAD nije imao ovaj bug jer je uvijek
+    // koristio ovaj obrazac). /api/flights se i dalje poziva ovdje, ali
+    // SAMO za PUN raspored leta (destinacija, vrijeme) — ne više za
+    // status/klasu, pa /api/flights može ostati na dugom (45s), jeftinom
+    // CDN kešu bez štete po brzinu prikaza klase.
     let data: { departures: Flight[]; arrivals: Flight[] } | null = null;
-    let gateOverrideFromStatus: { status: string | null; flightNumber: string | null; classType: string | null } | null = null;
+    const gateOverrideFromStatus = authoritativeGateStatusRef.current;
 
     const headers: HeadersInit = {};
     if (etagStatusRef.current) {
@@ -489,7 +454,6 @@ const loadFlights = useCallback(async () => {
 
     if (statusRes.status === 304) {
       data = lastFlightsDataRef.current;
-      gateOverrideFromStatus = lastGateOverrideRef.current;
     } else if (statusRes.ok) {
       const statusData = await statusRes.json();
       const newEtag = statusRes.headers.get('ETag');
@@ -497,20 +461,6 @@ const loadFlights = useCallback(async () => {
 
       data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
       lastFlightsDataRef.current = data;
-
-      const entry = statusData.gateEntries?.[gateNumber];
-      gateOverrideFromStatus = entry
-        ? { status: entry.status ?? null, flightNumber: entry.flightNumber ?? null, classType: entry.classType ?? null }
-        : { status: null, flightNumber: null, classType: null };
-      lastGateOverrideRef.current = gateOverrideFromStatus;
-      // Sinhronizuj i brzi-poll referencu, da fast-poll ne detektuje
-      // lažnu "promjenu" odmah nakon što je glavni ciklus već svježe
-      // učitao isti podatak.
-      lastFastOverrideRef.current = JSON.stringify({
-        status: gateOverrideFromStatus?.status ?? null,
-        flightNumber: gateOverrideFromStatus?.flightNumber ?? null,
-        classType: gateOverrideFromStatus?.classType ?? null,
-      });
     }
 
     // 2. Ako nema podataka - izađi
@@ -520,7 +470,7 @@ const loadFlights = useCallback(async () => {
       return;
     }
 
-    // 3. Override - KORISTI PODATKE IZ ISTOG POZIVA
+    // 3. Override - KORISTI PODATKE IZ BRZOG STATUS POLL-A (vidi gore)
     let overrideStatus: string | null = gateOverrideFromStatus?.status ?? null;
     let overrideFlightNumber: string | null = gateOverrideFromStatus?.flightNumber ?? null;
     let classType: string | null = gateOverrideFromStatus?.classType ?? null;
@@ -646,13 +596,6 @@ const loadFlights = useCallback(async () => {
       setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
     }
 
-    // 12. Adaptivni backoff
-    if (hasChanged || overrideStatus !== 'open') {
-      noChangeStreakRef.current = 0;
-    } else {
-      noChangeStreakRef.current += 1;
-    }
-
     setLastUpdate(new Date().toLocaleTimeString('en-GB'));
     setLoading(false);
 
@@ -670,16 +613,23 @@ const loadFlights = useCallback(async () => {
 }, [gateNumber, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
 
-// ── 2) Zamijeni cijeli "Polling interval (glavni)" useEffect ovim
-//      (jedina promjena: tid → mainTidRef.current, i schedule se
-//      upisuje u scheduleMainRef da bude dostupan izvan efekta) ──
- 
+// ── FIX (troškovno-svjesno vraćanje na 30-45s za PUN raspored leta):
+// klasa/status/broj leta se sad rješavaju kroz poseban, jeftin brzi poll
+// (vidi efekat "Brzi status/klasa poll" niže) — loadFlights() (poziva
+// veći, /api/flights) više ne mora da radi na 9-12s kadenci, jer nije
+// više odgovoran za vremenski osjetljive podatke. Ovo vraća /api/flights
+// pozive na relaksiran tempo, smanjujući Vercel Active CPU trošak, bez
+// gubitka brzine prikaza klase/statusa (to sad garantuje brzi poll ispod).
+const getGateNextInterval = useCallback((): number => {
+  return 30_000 + Math.floor(Math.random() * 15_000); // 30-45s
+}, []);
+
 useEffect(() => {
   isMountedRef.current = true;
   abortControllerRef.current = new AbortController();
  
   const schedule = () => {
-    const interval = getNextInterval();
+    const interval = getGateNextInterval();
     setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
     mainTidRef.current = setTimeout(async () => {
       if (isMountedRef.current) {
@@ -690,7 +640,6 @@ useEffect(() => {
       }
     }, interval);
   };
-  scheduleMainRef.current = schedule;
  
   if (!isNightHours()) {
     loadFlights().then(schedule);
@@ -702,37 +651,22 @@ useEffect(() => {
   return () => {
     isMountedRef.current = false;
     if (mainTidRef.current) clearTimeout(mainTidRef.current);
-    scheduleMainRef.current = null;
     abortControllerRef.current?.abort();
   };
-}, [loadFlights, getNextInterval]);
+}, [loadFlights, getGateNextInterval]);
 
-
- 
 // ------------------------------------------------------------
-// BRZI POLL — vraćen na zahtjev osoblja (potrebna reakcija ≤15s
-// kad se gate otvori/zatvori odmah nakon dodjele leta), ali na
-// MNOGO sporijem tempu nego ranije: 10s baza + do 2s jitter =
-// worst-case ~12s, umjesto ranijih 2-4s. To je ~4-5x manje requesta
-// od originalne verzije, uz i dalje siguran margin ispod tražene
-// granice od 15s. Usklađeno sa GATE_STATUS_CACHE_CONTROL na serveru
-// (app/api/test/gate-status-override/route.ts) koji je isto podignut
-// na max-age=10/s-maxage=10.
-//
-// Napomena o daljem smanjenju: pošto svih N gate ekrana dijeli JEDAN
-// CDN cache ključ (URL bez ?gateNumber=), CPU trošak po requestu je
-// već minimalan (CDN hit, ne invocation) — preostali trošak je čisto
-// BROJ requesta. Uz tvrdo ograničenje od ≤15s worst-case, 10s+jitter
-// je praktično donja granica za čisti polling pristup. Sledeći nivo
-// uštede (bez žrtvovanja brzine) bio bi prelazak sa pollinga na
-// push mehanizam (npr. Server-Sent Events ili Redis pub/sub preko
-// Edge rute) koji bi gate ekranu javio PROMJENU čim se desi, umjesto
-// da ekran svakih 10-12s pita "je l' bilo nešto novo?". To je veća
-// arhitekturna promjena (zahtijeva testiranje trajanja veze na
-// Vercel-u) i nije implementirana u ovom prolazu — vidi napomenu u
-// odgovoru asistenta za detalje ako poželiš da se to istraži.
+// FIX (klasa se ne prikazuje/kasni — pravo rješenje bez dodatnog
+// Vercel Active CPU troška): BRZI STATUS/KLASA POLL — cilja mali, već
+// jeftin /api/test/gate-status-override?gateNumber=X (per-gate, ETag,
+// max-age=10 CDN keš), IDENTIČAN princip kao CheckInPageClient.tsx koji
+// NIKAD nije imao ovaj bug. Ovo je sad JEDINI izvor istine za
+// status/klasu/broj leta (loadFlights() gore samo dopunjava PUNE detalje
+// rasporeda za taj flightNumber). Kad detektuje promjenu, ODMAH patch-uje
+// display state — bez čekanja na sledeći loadFlights() ciklus — garantuje
+// vidljivost promjene u roku od 9-12s (FAST_POLL kadenca), sigurno ispod
+// tražene granice od 15s.
 // ------------------------------------------------------------
-
 useEffect(() => {
   if (!gateNumber) return;
 
@@ -749,36 +683,50 @@ useEffect(() => {
     }
 
     try {
-      // BEZ ?gateNumber=X — svih N gate ekrana gađa ISTI URL,
-      // pa dijele JEDAN CDN cache ključ (isti princip kao /api/flights).
-      const res = await fetch(
-        `/api/test/gate-status-override`,
-        { signal: controller.signal }
-      );
-      if (res.ok) {
-        const allEntries = await res.json();
-        const entry = allEntries[gateNumber] ?? { status: null, flightNumber: null, classType: null };
-        const key = JSON.stringify({
-          status: entry.status ?? null,
-          flightNumber: entry.flightNumber ?? null,
-          classType: entry.classType ?? null,
-        });
+      const headers: HeadersInit = {};
+      if (etagGateStatusRef.current) headers['If-None-Match'] = etagGateStatusRef.current;
 
-        if (lastFastOverrideRef.current !== null && lastFastOverrideRef.current !== key) {
-          console.log('[gate] Brzi poll: override promijenjen, pokrećem loadFlights()');
-          loadFlights().then(() => {
-            // Restartuj glavni raspored da ne dođe do suvišnog
-            // /api/flights poziva ubrzo nakon ovog vanrednog
-            // osvježavanja.
-            if (mainTidRef.current) clearTimeout(mainTidRef.current);
-            scheduleMainRef.current?.();
-          });
+      const res = await fetch(
+        `/api/test/gate-status-override?gateNumber=${gateNumber}`,
+        { headers, signal: controller.signal }
+      );
+
+      if (res.status === 304) {
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagGateStatusRef.current = newEtag;
+      } else if (res.ok) {
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagGateStatusRef.current = newEtag;
+
+        const entry = await res.json();
+        const fresh = {
+          status: entry?.status ?? null,
+          flightNumber: entry?.flightNumber ?? null,
+          classType: entry?.classType ?? null,
+        };
+        const prev = authoritativeGateStatusRef.current;
+        const changed = !prev
+          || prev.status !== fresh.status
+          || prev.flightNumber !== fresh.flightNumber
+          || prev.classType !== fresh.classType;
+
+        authoritativeGateStatusRef.current = fresh;
+
+        // Ako se SAMO klasa (ili status, bez promjene leta) promijenila,
+        // patch-uj display ODMAH — ne čekaj sledeći loadFlights() ciklus
+        // (koji može biti do 45s daleko). Ako se PROMIJENIO flightNumber,
+        // prepusti puni loadFlights() ciklus (treba mu novi flight detalj).
+        if (changed && fresh.flightNumber === prev?.flightNumber) {
+          setDisplay(d => ({ ...d, classType: fresh.classType }));
+        } else if (changed) {
+          // Novi let na ovom gate-u ili status closed/open promjena —
+          // pokreni pun loadFlights() da povuče detalje novog leta.
+          loadFlights();
         }
-        lastFastOverrideRef.current = key;
       }
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
-        console.warn('[gate] fast poll error:', err);
+        console.warn('[gate] brzi status/klasa poll greška:', err);
       }
     } finally {
       if (!cancelled) tid = setTimeout(poll, getFastPollInterval());
@@ -793,6 +741,24 @@ useEffect(() => {
     controller.abort();
   };
 }, [gateNumber, loadFlights]);
+
+
+ 
+// ------------------------------------------------------------
+// FIX (SPAJANJE POLL CIKLUSA — vidi opširan komentar uz
+// FAST_POLL_BASE_MS na vrhu fajla): odvojeni "brzi" watchdog koji je
+// ovdje ranije postojao (poseban poziv ka /api/test/gate-status-override
+// svakih 9-12s, samo da bi detektovao promjenu i onda pokrenuo
+// loadFlights()) je UKLONJEN. Glavni ciklus iznad sad SAM radi na
+// 9-12s kadenci (getNextInterval → getFastPollInterval) i loadFlights()
+// već čita gateEntries (gate status override) iz /api/flights odgovora
+// na SVAKOM pozivu — nema više potrebe za posebnim, dupliranim pozivom
+// koji je čitao IDENTIČAN podatak sa drugog endpointa.
+//
+// Ušteda: ~495.000 zahtjeva/mjesec manje po gate ekranu, uz BOLJU (ne
+// istu) odzivnost za sam raspored leta (bio je do 53s star, sad je
+// svježe koliko i status — 9-12s).
+// ------------------------------------------------------------
 
   // ------------------------------------------------------------
   // Timer za automatsko prebacivanje na STD-1min
@@ -834,12 +800,14 @@ useEffect(() => {
   // ------------------------------------------------------------
   // Hard reset nakon 6h
   // ------------------------------------------------------------
-// ── Hard reset nakon ~6h (sa jitterom da se izbjegne sinhroni reload svih ekrana) ──
-useEffect(() => {
-  const jitteredResetMs = HARD_RESET_INTERVAL_MS + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
-  const id = setTimeout(() => window.location.reload(), jitteredResetMs);
-  return () => clearTimeout(id);
-}, []);
+// FIX (24/7 rad bez nadzora) — zamijenjen "goli" hard-reset tajmer
+// punim setom zaštita (heartbeat watchdog, globalni error handler,
+// handler za neuhvaćene odbijene promise-e — ranije nije postojao na
+// ovoj stranici). Vidi opširan komentar u hooks/use-kiosk-resilience.ts.
+useKioskResilience({
+  pageName: `gate-${gateNumber}`,
+  hardResetIntervalMs: HARD_RESET_INTERVAL_MS,
+});
 
   // ------------------------------------------------------------
   // Kiosk mode

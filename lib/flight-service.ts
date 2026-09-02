@@ -18,7 +18,10 @@ const HASH_CHECK_INTERVAL = 35_000; // 10 sekundi minimalno između provjera
 
 
 // ─────────────────────────────────────────────────────────────
-// IZMJENA 1: Koristi /api/flights-cached umjesto /api/flights
+// NAPOMENA: FLIGHT_API_URL ispod pokazuje direktno na /api/flights.
+// (Stari komentar je ovdje pominjao /api/flights-cached — ta ruta je bila
+// mrtav kod, nijedan klijent je nije pozivao, i imala je pokvarenu
+// NEXT_PUBLIC_BASE_URL self-fetch zavisnost — uklonjena je iz projekta.)
 // Jedan red izmjene — sve ostalo radi identično.
 // Svi kiosci dijele isti server-side cache (45s svježina),
 // umjesto da svaki poziva vanjski API direktno.
