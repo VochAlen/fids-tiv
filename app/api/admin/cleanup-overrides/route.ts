@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { runAutoReset } from '@/lib/override-utils';
+import { runAutoReset, cleanupDepartedResourceAssignments } from '@/lib/override-utils';
 import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 
 async function fetchAllFlights(): Promise<any[]> {
@@ -25,12 +25,21 @@ async function runCleanup() {
 
     const results = await runAutoReset(allFlights);
 
+    // FIX (automatsko čišćenje DEPARTED dodjela — sigurnosna mreža): vidi
+    // opširan komentar iznad cleanupDepartedResourceAssignments() u
+    // lib/override-utils.ts. Pokriva test:gate-status:all/test:desk-status:all
+    // sistem koji assign-checkin panel stvarno koristi (odvojen od
+    // override:* sistema koji runAutoReset iznad čisti).
+    const departedCleanup = await cleanupDepartedResourceAssignments(allFlights);
+
     return NextResponse.json({
       success: true,
       resetCount: results.length,
       details: results,
-      message: results.length > 0
-        ? `Resetovano ${results.length} polja`
+      departedCleanupCount: departedCleanup.length,
+      departedCleanupDetails: departedCleanup,
+      message: results.length > 0 || departedCleanup.length > 0
+        ? `Resetovano ${results.length} override polja, uklonjeno ${departedCleanup.length} dodjela za poletjele letove`
         : 'Nema zastarjelih override-ova'
     });
 

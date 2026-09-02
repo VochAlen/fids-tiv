@@ -16,18 +16,25 @@ import {
 } from "react"
 import type { Flight } from "@/types/flight"
 import { fetchFlightData } from "@/lib/flight-service"
+import { isNightHours } from "@/lib/night-hours"
+import { useKioskResilience } from "@/hooks/use-kiosk-resilience"
 import { Info, Plane, Clock, MapPin } from "lucide-react"
 
 // ============================================================
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS = 60_000
-const FETCH_TIMEOUT_MS = 15_000
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS = 30_000  // 30s (bilo 15s)
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1_000
 const CACHE_KEY = "arrivals_small_cache"
 const CACHE_DURATION = 5 * 60 * 1_000
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000
+const MAX_FLIGHTS_MEMORY = 300
 const MAX_FLIGHTS_DISPLAY = 6
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"]
 
@@ -261,7 +268,15 @@ function ArrivalsSmallBoard(): JSX.Element {
 
   useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id); }, [])
   useEffect(() => { const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000); return () => clearInterval(id); }, [])
-  useEffect(() => { const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS); return () => clearTimeout(id); }, [])
+
+  // FIX (24/7 rad bez nadzora) — vidi identičan komentar u app/arrivals/page.tsx
+  useKioskResilience({
+    pageName: 'arrivals-small',
+    hardResetIntervalMs: HARD_RESET_INTERVAL_MS,
+    onMemoryCleanup: () => {
+      setFlights(prev => (prev.length > MAX_FLIGHTS_MEMORY ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev));
+    },
+  });
 
   const filterRecentFlights = useCallback((allFlights: Flight[]): Flight[] => {
     const now = new Date()
@@ -283,6 +298,17 @@ function ArrivalsSmallBoard(): JSX.Element {
     isMountedRef.current = true; let tid: ReturnType<typeof setTimeout>
     const load = async () => {
       if (!isMountedRef.current) return; let data: any | null = null; let usedCache = false
+      // FIX (Vercel Edge Requests/Active CPU minimizacija): aerodrom nema
+      // letove tokom noćnog prozora (vidi lib/night-hours.ts) — usklađeno sa
+      // ostalim "big board" stranicama (combined/departures/border/arrivals/
+      // split-board), koje su već preskakale polling noću. arrivals-small je
+      // bila jedina koja je nastavljala da gađa /api/flights svakih 60s
+      // 24/7, uključujući ~7-13h noćnog perioda bez ijednog leta.
+      if (isNightHours()) {
+        setLoading(false)
+        tid = setTimeout(load, REFRESH_INTERVAL_MS)
+        return
+      }
       try {
         setLoading(true)
         try { data = await fetchWithRetry("/api/flights?type=arrivals"); if (data && isMountedRef.current) saveToCache(data); } catch { const c = loadFromCache(); if (c) { data = c; usedCache = true; } else throw new Error("No cache"); }

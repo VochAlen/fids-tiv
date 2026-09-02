@@ -25,14 +25,20 @@ export function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
 
   // ── BOT BLOKIRANJE (SAMO za admin i glavne rute) ──
-  // Kiosk ekrani (ver2/ver2/checkin, ver2/ver2/gate, combined, departures)
-  // NE trebaju bot provjeru — to su fizički displeji na aerodromu.
+  // Kiosk ekrani (ver2/ver2/checkin, ver2/ver2/gate, combined, departures,
+  // border, split-board) NE trebaju bot provjeru — to su fizički displeji
+  // na aerodromu. Lista ažurirana nakon audita: /border i /split-board su
+  // potvrđeno u upotrebi (ranije nisu bili na listi, pa su nepotrebno
+  // prolazili kroz bot-check); /arrivals-small NIJE u upotrebi i obrisan
+  // je (vidi redirect ispod).
   const isKioskRoute = 
     path.startsWith('/ver2/ver2/checkin') ||
     path.startsWith('/ver2/ver2/gate') ||
     path === '/ver2/ver2' ||
     path === '/combined' ||
-    path === '/departures';
+    path === '/departures' ||
+    path === '/border' ||
+    path === '/split-board';
 
   // Bot provjeru primjenjuj SAMO na admin i ostale rute (ne na kiosk)
   if (!isKioskRoute) {
@@ -40,6 +46,15 @@ export function middleware(request: NextRequest) {
     if (BLOCKED_USER_AGENT_PATTERNS.some((pattern) => pattern.test(userAgent))) {
       return new NextResponse('Blocked', { status: 403 });
     }
+  }
+
+  // ── REDIRECT: /arrivals-small → /combined ──
+  // Stranica obrisana (potvrđeno nekorišćena). Defanzivan redirect za
+  // slučaj da neki uređaj/bookmark i dalje pokazuje na ovu rutu.
+  if (path === '/arrivals-small') {
+    const url = request.nextUrl.clone();
+    url.pathname = '/combined';
+    return NextResponse.redirect(url, 301);
   }
 
   // ── REDIRECT: /checkin/[deskNumber] → /ver2/ver2/checkin/[deskNumber] ──
@@ -55,6 +70,32 @@ export function middleware(request: NextRequest) {
   const gateMatch = path.match(/^\/gate\/(.+)$/);
   if (gateMatch) {
     const gateNumber = gateMatch[1];
+    const url = request.nextUrl.clone();
+    url.pathname = `/ver2/ver2/gate/${gateNumber}`;
+    return NextResponse.redirect(url, 301);
+  }
+
+  // ── REDIRECT: /ver2/checkin/[deskNumber] → /ver2/ver2/checkin/[deskNumber] ──
+  // Ovo je "srednja generacija" ekrana (app/ver2/checkin/[deskNumber]/page.tsx)
+  // koja je do sad bila LIVE i NEREDIREKTOVANA — ima svoj nezavisan polling
+  // ciklus, potpuno odvojen od zvaničnog ver2/ver2 ekrana. Ako je ijedan
+  // fizički šalter (ili zaboravljen browser tab) i dalje pokazivao na ovu
+  // rutu, radio je potpuno redundantan, dupli polling. Redirect zatvara tu
+  // rupu bez obzira da li je trenutno neko na nju pokazuje.
+  const ver2CheckinMatch = path.match(/^\/ver2\/checkin\/(.+)$/);
+  if (ver2CheckinMatch) {
+    const deskNumber = ver2CheckinMatch[1];
+    const url = request.nextUrl.clone();
+    url.pathname = `/ver2/ver2/checkin/${deskNumber}`;
+    return NextResponse.redirect(url, 301);
+  }
+
+  // ── REDIRECT: /ver2/gate/[gateNumber] → /ver2/ver2/gate/[gateNumber] ──
+  // Isti razlog kao gore, za srednju generaciju gate ekrana
+  // (app/ver2/gate/[gateNumber]/page.tsx).
+  const ver2GateMatch = path.match(/^\/ver2\/gate\/(.+)$/);
+  if (ver2GateMatch) {
+    const gateNumber = ver2GateMatch[1];
     const url = request.nextUrl.clone();
     url.pathname = `/ver2/ver2/gate/${gateNumber}`;
     return NextResponse.redirect(url, 301);

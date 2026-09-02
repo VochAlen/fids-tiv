@@ -14,6 +14,7 @@ interface Coordinates {
 
 // Mapa aerodroma i koordinata
 const AIRPORT_COORDINATES: Record<string, Coordinates> = {
+  // ── POSTOJEĆE ──
   'IST': { latitude: 41.2753, longitude: 28.7519 },
   'SAW': { latitude: 40.8986, longitude: 29.3092 },
   'ESB': { latitude: 40.1281, longitude: 32.9950 },
@@ -43,7 +44,7 @@ const AIRPORT_COORDINATES: Record<string, Coordinates> = {
   'BUD': { latitude: 47.4395, longitude: 19.2618 },
   'PRG': { latitude: 50.1008, longitude: 14.2600 },
   'DUB': { latitude: 53.4214, longitude: -6.2700 },
-  'MAN': { latitude: 53.3537, longitude: -2.2750 }, // Manchester, UK
+  'MAN': { latitude: 53.3537, longitude: -2.2750 },
   'EDI': { latitude: 55.9500, longitude: -3.3725 },
   'MAD': { latitude: 40.4719, longitude: -3.5626 },
   'BCN': { latitude: 41.2971, longitude: 2.0785 },
@@ -63,7 +64,7 @@ const AIRPORT_COORDINATES: Record<string, Coordinates> = {
   'DBV': { latitude: 42.5614, longitude: 18.2683 },
   'SPU': { latitude: 43.5389, longitude: 16.2981 },
   'VNO': { latitude: 54.6341, longitude: 25.2858 },
-  'TLV': { latitude: 32.0114, longitude: 34.8867 }, // Tel Aviv, Israel
+  'TLV': { latitude: 32.0114, longitude: 34.8867 },
   'KWI': { latitude: 29.2266, longitude: 47.9689 },
   'RUH': { latitude: 24.9576, longitude: 46.6988 },
   'DXB': { latitude: 25.2528, longitude: 55.3644 },
@@ -118,10 +119,189 @@ const AIRPORT_COORDINATES: Record<string, Coordinates> = {
   'NYO': { latitude: 58.7886, longitude: 16.9122 },
   'KEF': { latitude: 63.9850, longitude: -22.6056 },
   'REK': { latitude: 64.1300, longitude: -21.9406 },
+
+  // ── BALKAN ──
+  'BNX': { latitude: 44.9414, longitude: 17.2975 },  // Banja Luka, BiH
+  'ZAD': { latitude: 44.1083, longitude: 15.3467 },  // Zadar, Croatia
+  'PUY': { latitude: 44.8934, longitude: 13.9222 },  // Pula, Croatia
+  'RJK': { latitude: 45.2169, longitude: 14.5703 },  // Rijeka, Croatia
+  'OSI': { latitude: 45.4627, longitude: 18.8102 },  // Osijek, Croatia
+
+  // ── SRBIJA ──
+  'INI': { latitude: 43.3373, longitude: 21.8537 },  // Niš, Serbia
+  'KVO': { latitude: 43.8188, longitude: 20.5958 },  // Kraljevo, Serbia
+
+  // ── POLJSKA ──
+  'GDN': { latitude: 54.3776, longitude: 18.4662 },  // Gdansk, Poland
+  'POZ': { latitude: 52.4210, longitude: 16.8263 },  // Poznan, Poland
+  'WRO': { latitude: 51.1027, longitude: 16.8858 },  // Wroclaw, Poland
+  'SZZ': { latitude: 53.5847, longitude: 14.9022 },  // Szczecin, Poland
+  'LUZ': { latitude: 51.2402, longitude: 22.7147 },  // Lublin, Poland
+  'BZG': { latitude: 53.0968, longitude: 17.9777 },  // Bydgoszcz, Poland
+  'LCJ': { latitude: 51.7219, longitude: 19.3981 },  // Lodz, Poland
+
+  // ── NJEMAČKA - DODATNI ──
+  'FKB': { latitude: 48.7794, longitude: 8.0805 },   // Karlsruhe/Baden-Baden, Germany
+  'MHG': { latitude: 49.4731, longitude: 8.5143 },   // Mannheim, Germany
+  'DTM': { latitude: 51.5183, longitude: 7.6123 },   // Dortmund, Germany
+  'NRN': { latitude: 51.6024, longitude: 6.1422 },   // Weeze (Niederrhein), Germany
+  'SCN': { latitude: 49.2148, longitude: 7.1095 },   // Saarbrücken, Germany
+  'ERF': { latitude: 50.9798, longitude: 10.9581 },  // Erfurt, Germany
+
+  // ── ITALIJA - DODATNI ──
+  'TRN': { latitude: 45.2008, longitude: 7.6496 },   // Turin, Italy
+  'GOA': { latitude: 44.4135, longitude: 8.8375 },   // Genoa, Italy
+  'OLB': { latitude: 40.8987, longitude: 9.5176 },   // Olbia, Sardinia
+  'CAG': { latitude: 39.2515, longitude: 9.0543 },   // Cagliari, Sardinia
+  'LAME': { latitude: 38.9054, longitude: 16.2423 }, // Lamezia Terme, Italy
+  'REG': { latitude: 38.0711, longitude: 15.6536 },  // Reggio Calabria, Italy
+
+  // ── FRANCUSKA - DODATNI ──
+  'BVE': { latitude: 45.1508, longitude: 1.4698 },   // Brive-la-Gaillarde, France
+  'LDE': { latitude: 43.1784, longitude: -0.0064 },  // Tarbes-Lourdes, France
+  'PUF': { latitude: 43.3807, longitude: -0.4186 },  // Pau, France
+  'CFE': { latitude: 45.7867, longitude: 3.1692 },   // Clermont-Ferrand, France
+  'DNR': { latitude: 48.5833, longitude: -2.0769 },  // Dinard, France
+  'BIA': { latitude: 42.5528, longitude: 9.4840 },   // Bastia, Corsica
+  'AJA': { latitude: 41.9236, longitude: 8.8029 },   // Ajaccio, Corsica
+
+  // ── ŠPANIJA - DODATNI ──
+  'LEI': { latitude: 36.8439, longitude: -2.3703 },  // Almeria, Spain
+  'XRY': { latitude: 36.7446, longitude: -6.0603 },  // Jerez, Spain
+  'VGO': { latitude: 42.2232, longitude: -8.6262 },  // Vigo, Spain
+  'LCG': { latitude: 43.3021, longitude: -8.3777 },  // A Coruña, Spain
+  'OVD': { latitude: 43.5636, longitude: -6.0346 },  // Asturias, Spain
+  'FUE': { latitude: 28.4527, longitude: -13.8638 }, // Fuerteventura, Canary Islands
+
+  // ── UK - DODATNI ──
+  'EMA': { latitude: 52.8311, longitude: -1.3281 },  // East Midlands, UK
+  'DSA': { latitude: 53.4805, longitude: -1.0107 },  // Doncaster Sheffield, UK
+  'LPL': { latitude: 53.3336, longitude: -2.8497 },  // Liverpool, UK
+  'MME': { latitude: 54.5092, longitude: -1.4294 },  // Durham Tees Valley, UK
+  'HUY': { latitude: 53.5744, longitude: -0.3508 },  // Humberside, UK
+  'NQY': { latitude: 50.4406, longitude: -4.9954 },  // Newquay Cornwall, UK
+
+  // ── SKANDINAVIJA - DODATNI ──
+  'KSU': { latitude: 63.1118, longitude: 7.8245 },   // Kristiansund, Norway
+  'MQN': { latitude: 66.3667, longitude: 14.3000 },  // Mo i Rana, Norway
+  'BOO': { latitude: 67.2692, longitude: 14.3653 },  // Bodø, Norway
+
+  // ── ISTOČNA EVROPA ──
+  'KIV': { latitude: 47.0544, longitude: 28.8247 },  // Chisinau, Moldova
+  'IAS': { latitude: 47.1585, longitude: 27.6208 },  // Iasi, Romania
+  'CLJ': { latitude: 46.7852, longitude: 23.6862 },  // Cluj-Napoca, Romania
+  'TSR': { latitude: 45.8100, longitude: 21.3379 },  // Timisoara, Romania
+  'BRQ': { latitude: 49.1513, longitude: 16.6944 },  // Brno, Czech Republic
+  'KSC': { latitude: 48.6631, longitude: 21.2411 },  // Kosice, Slovakia
+
+  // ── BLISKI ISTOK - DODATNI ──
+  'AMM': { latitude: 31.7226, longitude: 35.9932 },  // Amman, Jordan
+  'BEY': { latitude: 33.8209, longitude: 35.4884 },  // Beirut, Lebanon
+  'BAH': { latitude: 26.2708, longitude: 50.6336 },  // Bahrain
+  'MCT': { latitude: 23.5880, longitude: 58.2900 },  // Muscat, Oman
+  'SHJ': { latitude: 25.3286, longitude: 55.5172 },  // Sharjah, UAE
+
+  // ── RUSIJA - DODATNI ──
+  'AER': { latitude: 43.4499, longitude: 39.9566 },  // Sochi, Russia
+  'ROV': { latitude: 47.2582, longitude: 39.8181 },  // Rostov-on-Don, Russia
+  'KUF': { latitude: 53.5049, longitude: 50.1643 },  // Samara, Russia
+  'UFA': { latitude: 54.5577, longitude: 55.8744 },  // Ufa, Russia
+  'OMS': { latitude: 54.9670, longitude: 73.3105 },  // Omsk, Russia
+
+  // ── KAVKAZ ──
+  'EVN': { latitude: 40.1474, longitude: 44.3959 },  // Yerevan, Armenia
+  'GYD': { latitude: 40.4675, longitude: 50.0467 },  // Baku, Azerbaijan
+  'TBS': { latitude: 41.6693, longitude: 44.9548 },  // Tbilisi, Georgia
+
+  // ── ITALIJA (dodatni) ──
+  'BRI': { latitude: 41.1389, longitude: 16.7606 },  // Bari, Italy
+  'BDS': { latitude: 40.6576, longitude: 17.9470 },  // Brindisi, Italy
+  'NAP': { latitude: 40.8780, longitude: 14.2828 },  // Naples, Italy
+  'LIN': { latitude: 45.4451, longitude: 9.2767 },   // Milan Linate, Italy
+  'BGY': { latitude: 45.6739, longitude: 9.7042 },   // Milan Bergamo, Italy
+  'VCE': { latitude: 45.5051, longitude: 12.3519 },  // Venice, Italy
+  'BLQ': { latitude: 44.5354, longitude: 11.2887 },  // Bologna, Italy
+  'FLR': { latitude: 43.8100, longitude: 11.2051 },  // Florence, Italy
+  'PSA': { latitude: 43.6839, longitude: 10.3927 },  // Pisa, Italy
+  'CTA': { latitude: 37.4668, longitude: 15.0664 },  // Catania, Sicily
+  'PMO': { latitude: 38.1760, longitude: 13.0910 },  // Palermo, Sicily
+
+  // ── UK (dodatni) ──
+  'LBA': { latitude: 53.8659, longitude: -1.6607 },  // Leeds Bradford, UK
+  'BRS': { latitude: 51.3827, longitude: -2.7191 },  // Bristol, UK
+  'BHM': { latitude: 52.4539, longitude: -1.7480 },  // Birmingham, UK
+  'NCL': { latitude: 55.0375, longitude: -1.6917 },  // Newcastle, UK
+  'GLA': { latitude: 55.8719, longitude: -4.4330 },  // Glasgow, UK
+  'ABZ': { latitude: 57.2019, longitude: -2.1978 },  // Aberdeen, UK
+  'BFS': { latitude: 54.6575, longitude: -6.2158 },  // Belfast, UK
+  'CWL': { latitude: 51.3967, longitude: -3.3433 },  // Cardiff, UK
+  'EXT': { latitude: 50.7344, longitude: -3.4139 },  // Exeter, UK
+  'SOU': { latitude: 50.9503, longitude: -1.3567 },  // Southampton, UK
+  'LCY': { latitude: 51.5053, longitude: 0.0553 },   // London City, UK
+  'SEN': { latitude: 51.5714, longitude: 0.6956 },   // London Southend, UK
+
+  // ── NJEMAČKA (dodatni) ──
+  'HAJ': { latitude: 52.4611, longitude: 9.6851 },   // Hanover, Germany
+  'NUE': { latitude: 49.4987, longitude: 11.0781 },  // Nuremberg, Germany
+  'BRE': { latitude: 53.0475, longitude: 8.7867 },   // Bremen, Germany
+  'FMO': { latitude: 52.1346, longitude: 7.6848 },   // Münster Osnabrück, Germany
+  'PAD': { latitude: 51.6141, longitude: 8.6163 },   // Paderborn, Germany
+
+  // ── FRANCUSKA (dodatni) ──
+  'BVA': { latitude: 49.4544, longitude: 2.1128 },   // Paris Beauvais, France
+  'XCR': { latitude: 48.7729, longitude: 4.1889 },   // Paris Vatry, France
+  'RNS': { latitude: 48.0695, longitude: -1.7348 },  // Rennes, France
+  'BES': { latitude: 48.4478, longitude: -4.4185 },  // Brest, France
+  'LIL': { latitude: 50.5633, longitude: 3.0869 },   // Lille, France
+
+  // ── ŠPANIJA (dodatni) ──
+  'ALC': { latitude: 38.2822, longitude: -0.5582 },  // Alicante, Spain
+  'GRO': { latitude: 41.9000, longitude: 2.7606 },   // Girona, Spain
+  'REU': { latitude: 41.1474, longitude: 1.1672 },   // Reus, Spain
+  'IBZ': { latitude: 38.8729, longitude: 1.3731 },   // Ibiza, Spain
+  'MAH': { latitude: 39.8626, longitude: 4.2187 },   // Menorca, Spain
+
+  // ── PORTUGAL (dodatni) ──
+  'FNC': { latitude: 32.6942, longitude: -16.7746 }, // Funchal, Madeira
+  'PDL': { latitude: 37.7412, longitude: -25.6979 }, // Ponta Delgada, Azores
+
+  // ── GRČKA (dodatni) ──
+  'JTR': { latitude: 36.3992, longitude: 25.4793 },  // Santorini, Greece
+  'JMK': { latitude: 37.4351, longitude: 25.3411 },  // Mykonos, Greece
+  'CFU': { latitude: 39.6019, longitude: 19.9117 },  // Corfu, Greece
+  'ZTH': { latitude: 37.7509, longitude: 20.8843 },  // Zakynthos, Greece
+  'KGS': { latitude: 36.7933, longitude: 26.9405 },  // Kos, Greece
+  'CHQ': { latitude: 35.5317, longitude: 24.1497 },  // Chania, Crete
+  'EFL': { latitude: 38.1201, longitude: 20.5005 },  // Kefalonia, Greece
+  'PVK': { latitude: 38.9254, longitude: 20.7658 },  // Preveza, Greece
+  'VOL': { latitude: 39.2196, longitude: 22.7943 },  // Volos, Greece
+
+  // ── SKANDINAVIJA (dodatni) ──
+  'TRF': { latitude: 59.1867, longitude: 10.2586 },  // Sandefjord, Norway
+  'AES': { latitude: 62.5625, longitude: 6.1197 },   // Ålesund, Norway
+
+  // ── EVROPA - OSTALI ──
+  'LJU': { latitude: 46.2237, longitude: 14.4576 },  // Ljubljana, Slovenia
+  'SKP': { latitude: 41.9616, longitude: 21.6214 },  // Skopje, North Macedonia
+  'TIA': { latitude: 41.4147, longitude: 19.7206 },  // Tirana, Albania
+
+  // ═══════════════════════════════════════════════════════════
+  // ── NOVO DODANO ──
+  // ═══════════════════════════════════════════════════════════
+
+  // ── LUKSEMBURG ──
+  'LUX': { latitude: 49.6236, longitude: 6.2044 },   // Luxembourg Airport
+
+  // ── AUSTRIJA ──
+  'SZG': { latitude: 47.7933, longitude: 13.0043 },  // Salzburg, Austria
+
+  // ── UZBEKISTAN ──
+  'TAS': { latitude: 41.2579, longitude: 69.2812 },  // Tashkent, Uzbekistan
 };
 
 // Mapa gradova za aerodrome
 const CITY_TO_AIRPORT: Record<string, string> = {
+  // ── POSTOJEĆE ──
   'Istanbul': 'IST',
   'Ankara': 'ESB',
   'Izmir': 'ADB',
@@ -132,10 +312,15 @@ const CITY_TO_AIRPORT: Record<string, string> = {
   'Zurich': 'ZRH',
   'Geneva': 'GVA',
   'Paris': 'CDG',
+  'Paris Orly': 'ORY',
+  'Paris Beauvais': 'BVA',
+  'Paris Vatry': 'XCR',
   'London': 'LHR',
   'London Luton': 'LTN',
   'London Gatwick': 'LGW',
   'London Stansted': 'STN',
+  'London City': 'LCY',
+  'London Southend': 'SEN',
   'Amsterdam': 'AMS',
   'Brussels': 'BRU',
   'Copenhagen': 'CPH',
@@ -149,13 +334,16 @@ const CITY_TO_AIRPORT: Record<string, string> = {
   'Budapest': 'BUD',
   'Prague': 'PRG',
   'Dublin': 'DUB',
-  'Manchester': 'MAN', // Manchester, UK
+  'Manchester': 'MAN',
   'Edinburgh': 'EDI',
   'Madrid': 'MAD',
   'Barcelona': 'BCN',
   'Lisbon': 'LIS',
+  'Porto': 'OPO',
   'Rome': 'FCO',
   'Milan': 'MXP',
+  'Milan Bergamo': 'BGY',
+  'Milan Linate': 'LIN',
   'Athens': 'ATH',
   'Thessaloniki': 'SKG',
   'Sofia': 'SOF',
@@ -168,7 +356,7 @@ const CITY_TO_AIRPORT: Record<string, string> = {
   'Dubrovnik': 'DBV',
   'Split': 'SPU',
   'Vilnius': 'VNO',
-  'Tel Aviv': 'TLV', // Tel Aviv, Israel
+  'Tel Aviv': 'TLV',
   'Kuwait City': 'KWI',
   'Kuwait': 'KWI',
   'Riyadh': 'RUH',
@@ -194,7 +382,6 @@ const CITY_TO_AIRPORT: Record<string, string> = {
   'Heraklion': 'HER',
   'Rhodes': 'RHO',
   'Faro': 'FAO',
-  'Porto': 'OPO',
   'Gran Canaria': 'LPA',
   'Tenerife': 'TFS',
   'Lanzarote': 'ACE',
@@ -220,6 +407,194 @@ const CITY_TO_AIRPORT: Record<string, string> = {
   'Gothenburg': 'GOT',
   'Malmo': 'MMA',
   'Reykjavik': 'KEF',
+
+  // ── BALKAN ──
+  'Banja Luka': 'BNX',
+  'Zadar': 'ZAD',
+  'Pula': 'PUY',
+  'Rijeka': 'RJK',
+  'Osijek': 'OSI',
+
+  // ── SRBIJA ──
+  'Nis': 'INI',
+  'Niš': 'INI',
+  'Kraljevo': 'KVO',
+
+  // ── POLJSKA ──
+  'Gdansk': 'GDN',
+  'Gdańsk': 'GDN',
+  'Poznan': 'POZ',
+  'Poznań': 'POZ',
+  'Wroclaw': 'WRO',
+  'Wrocław': 'WRO',
+  'Szczecin': 'SZZ',
+  'Lublin': 'LUZ',
+  'Bydgoszcz': 'BZG',
+  'Lodz': 'LCJ',
+  'Łódź': 'LCJ',
+
+  // ── NJEMAČKA ──
+  'Karlsruhe': 'FKB',
+  'Baden-Baden': 'FKB',
+  'Mannheim': 'MHG',
+  'Dortmund': 'DTM',
+  'Weeze': 'NRN',
+  'Saarbrücken': 'SCN',
+  'Erfurt': 'ERF',
+  'Hanover': 'HAJ',
+  'Hannover': 'HAJ',
+  'Nuremberg': 'NUE',
+  'Nürnberg': 'NUE',
+  'Bremen': 'BRE',
+  'Munster': 'FMO',
+  'Münster': 'FMO',
+  'Paderborn': 'PAD',
+
+  // ── ITALIJA ──
+  'Turin': 'TRN',
+  'Torino': 'TRN',
+  'Genoa': 'GOA',
+  'Genova': 'GOA',
+  'Olbia': 'OLB',
+  'Cagliari': 'CAG',
+  'Lamezia Terme': 'LAME',
+  'Reggio Calabria': 'REG',
+  'Bari': 'BRI',
+  'Brindisi': 'BDS',
+  'Naples': 'NAP',
+  'Napoli': 'NAP',
+  'Venice': 'VCE',
+  'Venezia': 'VCE',
+  'Bologna': 'BLQ',
+  'Florence': 'FLR',
+  'Firenze': 'FLR',
+  'Pisa': 'PSA',
+  'Catania': 'CTA',
+  'Palermo': 'PMO',
+
+  // ── FRANCUSKA ──
+  'Brive-la-Gaillarde': 'BVE',
+  'Tarbes': 'LDE',
+  'Lourdes': 'LDE',
+  'Pau': 'PUF',
+  'Clermont-Ferrand': 'CFE',
+  'Dinard': 'DNR',
+  'Bastia': 'BIA',
+  'Ajaccio': 'AJA',
+  'Rennes': 'RNS',
+  'Brest': 'BES',
+  'Lille': 'LIL',
+
+  // ── ŠPANIJA ──
+  'Almeria': 'LEI',
+  'Almería': 'LEI',
+  'Jerez': 'XRY',
+  'Vigo': 'VGO',
+  'A Coruña': 'LCG',
+  'Asturias': 'OVD',
+  'Fuerteventura': 'FUE',
+  'Alicante': 'ALC',
+  'Girona': 'GRO',
+  'Reus': 'REU',
+  'Ibiza': 'IBZ',
+  'Menorca': 'MAH',
+
+  // ── UK ──
+  'East Midlands': 'EMA',
+  'Doncaster': 'DSA',
+  'Sheffield': 'DSA',
+  'Liverpool': 'LPL',
+  'Durham Tees Valley': 'MME',
+  'Humberside': 'HUY',
+  'Newquay': 'NQY',
+  'Leeds': 'LBA',
+  'Leeds Bradford': 'LBA',
+  'Bristol': 'BRS',
+  'Birmingham': 'BHM',
+  'Newcastle': 'NCL',
+  'Glasgow': 'GLA',
+  'Aberdeen': 'ABZ',
+  'Belfast': 'BFS',
+  'Cardiff': 'CWL',
+  'Exeter': 'EXT',
+  'Southampton': 'SOU',
+
+  // ── PORTUGAL ──
+  'Funchal': 'FNC',
+  'Madeira': 'FNC',
+  'Ponta Delgada': 'PDL',
+  'Azores': 'PDL',
+
+  // ── GRČKA ──
+  'Santorini': 'JTR',
+  'Mykonos': 'JMK',
+  'Corfu': 'CFU',
+  'Kerkyra': 'CFU',
+  'Zakynthos': 'ZTH',
+  'Kos': 'KGS',
+  'Chania': 'CHQ',
+  'Kefalonia': 'EFL',
+  'Preveza': 'PVK',
+  'Volos': 'VOL',
+
+  // ── SKANDINAVIJA ──
+  'Sandefjord': 'TRF',
+  'Alesund': 'AES',
+  'Ålesund': 'AES',
+  'Kristiansund': 'KSU',
+  'Mo i Rana': 'MQN',
+  'Bodo': 'BOO',
+  'Bodø': 'BOO',
+
+  // ── ISTOČNA EVROPA ──
+  'Chisinau': 'KIV',
+  'Chișinău': 'KIV',
+  'Iasi': 'IAS',
+  'Iași': 'IAS',
+  'Cluj-Napoca': 'CLJ',
+  'Timisoara': 'TSR',
+  'Timișoara': 'TSR',
+  'Brno': 'BRQ',
+  'Kosice': 'KSC',
+  'Košice': 'KSC',
+
+  // ── BLISKI ISTOK ──
+  'Amman': 'AMM',
+  'Beirut': 'BEY',
+  'Bahrain': 'BAH',
+  'Muscat': 'MCT',
+  'Sharjah': 'SHJ',
+
+  // ── RUSIJA ──
+  'Sochi': 'AER',
+  'Сочи': 'AER',
+  'Rostov-on-Don': 'ROV',
+  'Samara': 'KUF',
+  'Ufa': 'UFA',
+  'Omsk': 'OMS',
+
+  // ── KAVKAZ ──
+  'Yerevan': 'EVN',
+  'Baku': 'GYD',
+  'Tbilisi': 'TBS',
+
+  // ── EVROPA - OSTALI ──
+  'Ljubljana': 'LJU',
+  'Skopje': 'SKP',
+  'Tirana': 'TIA',
+
+  // ═══════════════════════════════════════════════════════════
+  // ── NOVO DODANO ──
+  // ═══════════════════════════════════════════════════════════
+
+  // ── LUKSEMBURG ──
+  'Luxembourg': 'LUX',
+
+  // ── AUSTRIJA ──
+  'Salzburg': 'SZG',
+
+  // ── UZBEKISTAN ──
+  'Tashkent': 'TAS',
 };
 
 // Cache za weather podatke
@@ -230,7 +605,6 @@ const CACHE_DURATION = 180 * 60 * 1000; // 10 minuta cache
 const isWithinOperatingHours = (): boolean => {
   const now = new Date();
   const currentHour = now.getHours();
-  // Radno vrijeme od 05:00 do 19:00
   return currentHour >= 5 && currentHour < 19;
 };
 
@@ -239,7 +613,6 @@ const getTimeUntilNextRefresh = (): number => {
   const now = new Date();
   const currentHour = now.getHours();
   
-  // Ako je izvan radnog vremena, vrati vrijeme do 05:00 sljedeći dan
   if (currentHour >= 19) {
     const tomorrow = new Date(now);
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -247,15 +620,13 @@ const getTimeUntilNextRefresh = (): number => {
     return tomorrow.getTime() - now.getTime();
   }
   
-  // Ako je prije 05:00, vrati vrijeme do 05:00
   if (currentHour < 5) {
     const today = new Date(now);
     today.setHours(5, 0, 0, 0);
     return today.getTime() - now.getTime();
   }
   
-  // U radnom vremenu - osvježi svakih 30 minuta (umjesto 60)
-  return 180 * 60 * 1000; // 30 minuta
+  return 180 * 60 * 1000; // 10 minuta
 };
 
 // Funkcija za dobivanje cache ključa
@@ -275,21 +646,50 @@ export const useWeather = (destination: {
   });
 
   useEffect(() => {
+    // FIX (memory leak — Chrome "Aw, Snap!" nakon dana/sedmica rada):
+    // ranije je scheduleNextRefresh() vraćala cleanup funkciju koja je
+    // znala SAMO za PRVI zakazani setTimeout. Rekurzivni poziv unutar
+    // samog setTimeout callback-a (fetchWeather(); scheduleNextRefresh();)
+    // je pravio NOVI timeoutId čiji cleanup nigdje nije bio sačuvan —
+    // useEffect je i dalje držao cleanup samo za prvi (već istekao) timer.
+    // Lanac se nastavljao ZAUVIJEK, čak i nakon unmount-a komponente, jer
+    // ništa nije moglo otkazati bilo koji timer OSIM prvog.
+    //
+    // Na 24/7 kiosku (weather se koristi na combined/departures za svaku
+    // destinaciju) svaki remount — promjena rute, ponovni render sa novim
+    // `destination` objektom (dependency niz ispod uključuje CIJELI
+    // `destination` objekat, ne samo njegova polja — ako pozivalac šalje
+    // inline objekat, on ima nov identitet na SVAKOM render-u, gaseći i
+    // paleći ovaj efekat mnogo češće nego što se čini) — stvarao je JOŠ
+    // JEDAN besmrtan lanac koji svakih do 10 minuta radi fetch + setState
+    // na potencijalno nepostojeću komponentu. To je klasičan uzrok
+    // postepenog rasta memorije koji na kraju obori Chrome tab.
+    //
+    // FIX: `timeoutId` i `cancelled` su sad u SPOLJAŠNJEM scope-u efekta.
+    // scheduleNextRefresh() prepisuje ISTU spoljašnju `timeoutId`
+    // promjenljivu pri svakom pozivu (umjesto da vraća novu, lokalnu
+    // cleanup funkciju) — pa cleanup funkcija efekta UVIJEK zna otkazati
+    // NAJNOVIJI zakazani timer, bez obzira koliko puta se lanac
+    // rekurzivno produžio. `cancelled` flag dodatno sprečava (a) setState
+    // na odjavljenoj komponenti ako fetchWeather() promise razriješi
+    // nakon unmount-a, i (b) zakazivanje BILO KOG narednog timera nakon
+    // cleanup-a.
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
     const fetchWeather = async () => {
-      // Provjeri cache prvo
       const cacheKey = getCacheKey(destination);
       const cached = weatherCache.get(cacheKey);
       
       if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
         console.log(`Using cached weather data for: ${cacheKey}`);
-        setWeatherData(cached.data);
+        if (!cancelled) setWeatherData(cached.data);
         return;
       }
 
-      // Ako je izvan radnog vremena, ne dohvaćaj podatke
       if (!isWithinOperatingHours()) {
         console.log('Outside operating hours, skipping weather fetch');
-        setWeatherData({
+        if (!cancelled) setWeatherData({
           temperature: 0,
           weatherCode: 0,
           loading: false,
@@ -298,14 +698,12 @@ export const useWeather = (destination: {
         return;
       }
 
-      // Prvo pokušaj pronaći koordinate preko IATA koda
       let coordinates: Coordinates | undefined;
       
       if (destination.airportCode && AIRPORT_COORDINATES[destination.airportCode]) {
         coordinates = AIRPORT_COORDINATES[destination.airportCode];
         console.log(`Found coordinates for airport code: ${destination.airportCode}`, coordinates);
       } 
-      // Ako nema IATA koda, pokušaj preko naziva grada
       else if (destination.cityName) {
         const airportCodeFromCity = CITY_TO_AIRPORT[destination.cityName];
         if (airportCodeFromCity && AIRPORT_COORDINATES[airportCodeFromCity]) {
@@ -314,9 +712,7 @@ export const useWeather = (destination: {
         }
       }
       
-      // Ako još uvijek nema koordinata, pokušaj preko naziva aerodroma
       if (!coordinates && destination.airportName) {
-        // Pokušaj pronaći IATA kod u nazivu aerodroma
         const airportMatch = Object.keys(AIRPORT_COORDINATES).find(code => 
           destination.airportName?.includes(code) || 
           destination.airportName?.toLowerCase().includes(code.toLowerCase())
@@ -337,13 +733,13 @@ export const useWeather = (destination: {
           error: `Coordinates not found for ${destination.cityName || destination.airportName || destination.airportCode}`
         };
         weatherCache.set(cacheKey, { data: errorData, timestamp: Date.now() });
-        setWeatherData(errorData);
+        if (!cancelled) setWeatherData(errorData);
         return;
       }
 
       try {
-        // Dodaj delay između zahtjeva da izbjegneš rate limit
         await new Promise(resolve => setTimeout(resolve, 1000));
+        if (cancelled) return;
 
         const params = {
           latitude: coordinates.latitude.toString(),
@@ -356,6 +752,7 @@ export const useWeather = (destination: {
         const response = await fetch(
           `${url}?${new URLSearchParams(params)}`
         );
+        if (cancelled) return;
 
         if (!response.ok) {
           if (response.status === 429) {
@@ -365,6 +762,7 @@ export const useWeather = (destination: {
         }
 
         const data = await response.json();
+        if (cancelled) return;
         
         console.log(`Weather data for ${destination.cityName || destination.airportName}:`, {
           temperature: data.current.temperature_2m,
@@ -377,11 +775,10 @@ export const useWeather = (destination: {
           loading: false,
         };
 
-        // Spremi u cache
         weatherCache.set(cacheKey, { data: newWeatherData, timestamp: Date.now() });
-        
         setWeatherData(newWeatherData);
       } catch (error) {
+        if (cancelled) return;
         console.error('Error fetching weather:', error);
         const errorData = {
           temperature: 0,
@@ -390,31 +787,27 @@ export const useWeather = (destination: {
           error: error instanceof Error ? error.message : 'Failed to fetch weather data'
         };
         
-        // Spremi error u cache na kraće vrijeme (1 minuta)
         weatherCache.set(cacheKey, { data: errorData, timestamp: Date.now() });
         setWeatherData(errorData);
       }
     };
 
+    const scheduleNextRefresh = () => {
+      if (cancelled) return;
+      const refreshInterval = getTimeUntilNextRefresh();
+      console.log(`Scheduling next weather refresh in ${refreshInterval / (60 * 1000)} minutes`);
+      
+      timeoutId = setTimeout(() => {
+        if (cancelled) return;
+        fetchWeather();
+        scheduleNextRefresh();
+      }, refreshInterval);
+    };
+
     if (destination.cityName || destination.airportCode || destination.airportName) {
       console.log(`Fetching weather for:`, destination);
       fetchWeather();
-      
-      const scheduleNextRefresh = () => {
-        const refreshInterval = getTimeUntilNextRefresh();
-        console.log(`Scheduling next weather refresh in ${refreshInterval / (180 * 1000)} minutes`);
-        
-        const timeoutId = setTimeout(() => {
-          fetchWeather();
-          scheduleNextRefresh(); // Re-schedule next refresh
-        }, refreshInterval);
-        
-        return () => clearTimeout(timeoutId);
-      };
-      
-      // Pokreni scheduling
-      const cleanup = scheduleNextRefresh();
-      return cleanup;
+      scheduleNextRefresh();
     } else {
       setWeatherData({
         temperature: 0,
@@ -423,7 +816,12 @@ export const useWeather = (destination: {
         error: 'No destination provided'
       });
     }
-  }, [destination.cityName, destination.airportCode, destination.airportName]);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [destination.cityName, destination.airportCode, destination.airportName, destination]);
 
   return weatherData;
 };

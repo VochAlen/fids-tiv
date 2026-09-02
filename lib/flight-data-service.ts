@@ -4,7 +4,8 @@ import { FlightBackupService } from '@/lib/backup/flight-backup-service';
 import { FlightAutoProcessor, type AutoProcessedFlight } from '@/lib/backup/flight-auto-processor';
 import type { Flight, FlightData, RawFlightData } from '@/types/flight';
 import {
-  mapRawFlight,
+  mapNgrokFlightToFlight,
+  type NgrokFlightRaw,
   expandFlightForMultipleGates,
   sortFlightsByTime,
   filterTodayFlights
@@ -12,32 +13,6 @@ import {
 import { cleanupRedisTTLs } from '@/lib/redis-cleanup';
 
 import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
-// ── FETCH LOCK — garantuje da se live fetch dešava max 1x po ciklusu,
-// bez obzira koliko istovremenih poziva stigne iz drugih fajlova/instanci.
-const FETCH_LOCK_KEY = 'lock:flights:fetch';
-// Mora biti veći od worst-case trajanja cijele fetch faze (~22-23s po
-// komentarima gore) — inače lock istekne dok fetch još traje i neko
-// drugi krene paralelno.
-const FETCH_LOCK_TTL_SECONDS = 28;
-const LOCK_WAIT_POLL_MS = 300;
-// Koliko čekamo da TUĐI fetch završi prije nego odustanemo (ne radimo
-// svoj fetch nikad u ovoj grani — to bi narušilo "1 fetch po ciklusu").
-const LOCK_WAIT_MAX_MS = 12000;
-
-function generateLockToken(): string {
-  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-// Atomic "obriši SAMO ako je ovo moj lock" — Lua skripta, da izbjegnemo
-// scenario gdje instanca A obriše lock koji trenutno drži instanca B
-// (npr. A-in lock je istekao pa ga je B zauzeo, a A tek sad stiže do finally).
-const UNLOCK_SCRIPT = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-else
-  return 0
-end
-`;
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
@@ -48,7 +23,7 @@ const FLIGHT_META_KEY = 'cache:flights:meta';
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
 // Promijeni na false da potpuno isključiš korišćenje backup podataka
 // (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
-const BACKUP_ENABLED = true;
+const BACKUP_ENABLED = false;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
@@ -56,52 +31,31 @@ let overrideCacheExpiry = 0;
 const OVERRIDE_CACHE_MS = 10_000;
 
 // ── IN-PROCESS FLIGHT DATA CACHE ──────────────────────────────
-// TTL namjerno usklađen sa FLIGHT_CACHE_TTL_SECONDS (240s) ispod, ne
-// proizvoljno kraći. Ranije je ovo bilo 60_000 dok je Redis TTL bio
-// 240s — na toplom instance-u je to tjeralo Redis GET + JSON.parse()
-// (stvaran CPU rad, ne I/O čekanje) na svakih 60s, iako se podatak
-// ispod njega realno ne mijenja brže od 240s (toliko traje Redis TTL
-// prije nego što novi live fetch prepiše vrijednost). Rezultat: 3 od
-// svaka 4 parsiranja su bila potpuno nepotrebna — isti JSON, parsiran
-// iznova. Sad je ovo tik ispod 240s: dovoljno kratko da nikad ne drži
-// podatak nakon što je Redis vrijednost mogla biti osvježena, dovoljno
-// dugo da eliminiše te nepotrebne re-parseve. Noćni TTL (3600s) i
-// jutarnji prelaz i dalje rade nezavisno od ovoga — provjera
-// `cached.isNightMode && !nightNow` se izvršava na SVAKI poziv bez
-// obzira na TTL, pa ovo ne unosi stale-data rizik.
 let inProcessFlightData: FlightData | null = null;
 let inProcessFlightExpiry = 0;
-const IN_PROCESS_FLIGHT_TTL_MS = 220_000;
+const IN_PROCESS_FLIGHT_TTL_MS = 60_000;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 let lastRedisCleanup = 0;
 const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
-// ── Header-i uhvaćeni direktno iz pravog Chrome desktop browsera (DevTools
-// Network → Copy as fetch, sa isključenom mobile emulacijom) dok učitava
-// https://montenegroairports.com/aerodrom-tivat/ — ne ručno pretpostavljeni.
-// Verzija Chrome-a (150) i sec-ch-ua header-i moraju ostati međusobno
-// konzistentni; ako se ažurira User-Agent verzija, MORA se ažurirati i
-// sec-ch-ua string ispod, inače se vraća isti mismatch problem kao ranije
-// (kad je User-Agent govorio Android/mobile a sec-ch-ua-platform Windows).
+
+// ── Sopstveni ngrok proxy umjesto direktnog poziva ka montenegroairports.com.
+// MORA biti deklarisano PRIJE FETCH_HEADERS ispod, jer FETCH_HEADERS
+// koristi PROXY_SECRET — const deklaracije u JS/TS nisu dostupne prije
+// svoje linije (temporal dead zone), pa obrnut redoslijed puca na builds.
+const FLIGHT_API_URL = process.env.FLIGHT_PROXY_URL || 'https://crafty-dumpling-molehill.ngrok-free.dev/schedule';
+const PROXY_SECRET = process.env.FLIGHT_PROXY_SECRET || '';
+
+// ── Header-i za poziv ka SOPSTVENOM ngrok proxy-ju. Chrome-spoofing
+// header-i više nisu potrebni jer se poziva vlastiti server, ne tuđi.
+// ngrok-skip-browser-warning je bitan za besplatne ngrok-free domene —
+// bez njega ngrok ponekad vraća HTML interstitial umjesto JSON-a.
 const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/javascript, */*; q=0.01',
-  'Accept-Language': 'en-US,en;q=0.9,hr;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://montenegroairports.com/aerodrom-tivat/',
-  'Origin': 'https://montenegroairports.com',
-  'X-Requested-With': 'XMLHttpRequest',
-  'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  'Connection': 'keep-alive',
-  'DNT': '1',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
+  'Accept': 'application/json',
+  'x-proxy-secret': PROXY_SECRET,
+  'ngrok-skip-browser-warning': 'true',
 } as const;
+
 const SLIM_FIELDS = [
   'FlightNumber',
   'FlightType',
@@ -139,46 +93,62 @@ function slimFlightData(data: FlightData): FlightData {
   };
 }
 
-const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-
 // ── RETRY / TIMEOUT BUDŽETI ─────────────────────────────────────
-// Ovi brojevi su usklađeni sa maxDuration=30 (eksplicitno postavljen
-// u route.ts). Ranija verzija je bila mnogo agresivnija (3500ms po
-// pokušaju) jer je tada maxDuration bio na Vercel default-u (15s) i
-// trebalo je striktno budžetirati. Sad kad imamo dvostruko veći
-// budžet, per-attempt timeout je vraćen bliže originalnoj vrijednosti
-// (10s) — jer se pokazalo da montenegroairports.com API zna legitimno
-// (ne mrtav, samo spor) odgovoriti sporije od 3.5s, naročito tokom
-// perioda kad cache-flights.php interno regeneriše svoj keš. Prekratak
-// timeout je tjerao sistem da odustane PRIJE nego što stigne ispravan
-// odgovor — pošto je BACKUP_ENABLED false, to je značilo prazan/
-// emergency prikaz umjesto ispravnih podataka, iako API nije bio
-// zaista nedostupan.
-const MAX_RETRIES = 3;               // ukupno pokušaja ka live API-ju — umjereno povećano sa 2
-const RETRY_DELAY_BASE = 600;        // bazna pauza za exponential backoff (ms)
-const PER_ATTEMPT_TIMEOUT_MS = 6000; // AbortSignal timeout po pokušaju — blago smanjeno da ostavi prostor za 3. pokušaj
+// Usklađeno sa maxDuration=30 u route.ts. Izvor podataka sad ide
+// preko lanca desktop → ngrok tunel → tiv.nais.aero — INHERENTNO
+// manje pouzdano od direktnog poziva starom API-ju (tri karike koje
+// mogu zakazati umjesto jedne: desktop se može ugasiti, ngrok tunel
+// može pući, WiFi može otkazati). Zato je budžet OVDJE namjerno
+// konzervativniji, ne velikodušniji — kad proxy najviše zakaže,
+// funkcija ne smije najduže čekati.
+const MAX_RETRIES = 2;               // bilo 5
+const RETRY_DELAY = 800;             // bilo 1500
+const PER_ATTEMPT_TIMEOUT_MS = 6000; // bilo hardkodirano 8000 unutar fetchWithQuickRetry
 
 // Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
-// Matematika: 3 × 6000 + (600 + 1200) backoff + jitter margin ≈ 20.000ms
-// worst-case iz retry logike, pa 22000ms ovdje ostavlja mali safety margin
-// bez da bude prekratak. I dalje je ovo "safety net" iznad per-attempt
-// timeouta, ne primarni mehanizam — retry logika treba sama da završi ranije.
+// Matematika: 2 × 6000 + 1 × 800 = 12.800ms worst-case iz retry logike,
+// 15.000ms ovdje ostavlja mali safety margin. Promise.race garantuje
+// da ova faza NIKAD ne pređe ovaj rok, bez obzira šta se dešava unutar
+// fetchWithQuickRetry (retry logika treba sama da završi ranije, ovo
+// je apsolutna gornja granica "za svaki slučaj").
+const LIVE_FETCH_HARD_DEADLINE_MS = 15000;
 
-
-// Tvrd, apsolutni rok za CIJELU live-fetch fazu (svi pokušaji zajedno).
-// Matematika: 2 × 7000 + 1 × 500 = 14500ms worst-case iz retry logike,
-// pa 15000ms ovdje ostavlja mali safety margin bez da bude
-// prekratak. I dalje je ovo "safety net" iznad per-attempt timeouta,
-// ne primarni mehanizam — retry logika treba sama da završi ranije.
-const LIVE_FETCH_HARD_DEADLINE_MS = 22000;
-
-// Emergency fetch (korak 5, "zadnja linija odbrane") — ranije 4000ms,
-// vraćeno na 6000ms iz istog razloga kao gore: prekratak timeout je
-// tjerao lažne "critical failure" ishode kad je API bio samo spor.
+// Emergency fetch (korak 5, zadnja linija odbrane) — smanjeno sa
+// 10000 na 6000, jer se dešava TEK NAKON što je live fetch već
+// potrošio svoj budžet.
 const EMERGENCY_FETCH_TIMEOUT_MS = 6000;
 
 // Ukupan worst-case sad: ~15s (live) + ~6s (emergency) + ~1-2s (ostalo)
-// ≈ 22-23s, i dalje udobno ispod maxDuration=30 (≈7-8s margin).
+// ≈ 22-23s, i dalje udobno ispod maxDuration=30 (≈7-8s margin) — čak
+// i sa manje pouzdanim ngrok/desktop lancem.
+
+// ── FETCH LOCK ────────────────────────────────────────────────
+// NAPOMENA: komentar ispod je bio zastario (referencirao je stare
+// brojeve 10 pokušaja × 10s ≈ 120s koji više ne postoje u kodu).
+// Sad usklađeno sa stvarnim worst-case budžetom iznad (~22s), plus
+// dobra margina. Kraći TTL takođe znači: ako Vercel NASILNO ubije
+// funkciju zbog maxDuration dok drži lock (finally blok se tada možda
+// NE izvrši), lock se sam "izliječi" mnogo brže — 60s umjesto 130s
+// blokiranja ostalih ciklusa.
+const FETCH_LOCK_KEY = 'lock:flights:fetch';
+const FETCH_LOCK_TTL_SECONDS = 60; // bilo 130
+const LOCK_WAIT_POLL_MS = 500;
+const LOCK_WAIT_MAX_MS = 25000; // bilo 30000 — usklađeno sa novim, kraćim worst-case
+
+function generateLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Atomic "obriši SAMO ako je ovo moj lock" — sprečava scenario gdje
+// instanca A obriše lock koji trenutno drži instanca B (npr. A-in lock
+// je istekao pa ga je B zauzeo, a A tek sad stiže do finally).
+const UNLOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
 
 // ── REDIS CLEANUP ──────────────────────────────────────────────
 // Throttle: opportunistic cleanup iz live traffic-a, najviše 1x/12h.
@@ -296,33 +266,24 @@ async function fetchWithQuickRetry(
       clearTimeout(timeoutId);
       if (response.ok) return response;
 
-      // Uhvati tijelo odgovora prije nego što ga baciš — pomaže da se vidi
-      // da li je 500 generička PHP greška, WAF/Cloudflare block stranica,
-      // ili nešto treće.
+      // ── PRIVREMENO: uhvati tijelo 400 odgovora da vidimo TAČAN uzrok —
+      // da li je to ngrok-ov error/interstitial page, ili nešto iz
+      // proxy-server.js, ili nešto treće. Bez ovoga pucamo u mrak.
       let bodyPreview = '';
       try {
-        bodyPreview = (await response.clone().text()).substring(0, 300);
+        bodyPreview = (await response.clone().text()).substring(0, 500);
       } catch {
         bodyPreview = '(tijelo nije moglo biti pročitano)';
       }
       console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries} — body: ${bodyPreview}`);
+      console.error(`   → URL: ${url}`);
+      console.error(`   → Headers sent:`, JSON.stringify(options.headers));
 
-      if (attempt < retries) {
-        // Exponential backoff + jitter: 600ms → ~1200ms → ~2400ms, uz malu
-        // nasumičnu varijaciju da izbjegnemo savršeno pravilan, mašinski
-        // izgledajući obrazac ponavljanja (bitno i zbog WAF-a spomenutog ranije).
-        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
-        const jitter = Math.random() * 200;
-        await new Promise(r => setTimeout(r, backoff + jitter));
-      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`❌ Fetch attempt ${attempt}/${retries} failed: ${errMsg}`);
-      if (attempt < retries) {
-        const backoff = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
-        const jitter = Math.random() * 200;
-        await new Promise(r => setTimeout(r, backoff + jitter));
-      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
     }
   }
   throw new Error(`Live API fetch failed after ${retries} attempts`);
@@ -338,11 +299,20 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
     });
     if (!emergencyResponse.ok) return null;
 
-    const rawData: RawFlightData[] = await emergencyResponse.json();
+    const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
     if (!Array.isArray(rawData) || rawData.length === 0) return null;
 
-    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapRawFlight(raw)));
-    return mapped;
+    // FIX (letovi od jučer čak ni greškom): ranije se ovdje mapiralo prvih
+    // 5 SIROVIH stavki i vraćalo BEZ filterTodayFlights() filtera koji
+    // svaki drugi put (live fetch, backup) obavezno prolazi. Izvor
+    // (FLIGHT_API_URL) ne vraća podatke ograničene/sortirane po datumu —
+    // ovo je bio jedini put u cijelom sistemu gdje je let van "danas"
+    // teoretski mogao proći nefiltriran, baš u najkritičnijem trenutku
+    // (kad su i live API i backup već pali). Sad se filtrira PRIJE
+    // rezanja na prvih 5, dosljedno sa ostatkom sistema.
+    const mapped = await Promise.all(rawData.map(raw => mapNgrokFlightToFlight(raw)));
+    const todayOnly = filterTodayFlights(mapped);
+    return todayOnly.slice(0, 5);
   } catch {
     return null;
   }
@@ -376,13 +346,10 @@ function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
 }
 
 // ── Računa koliko je minuta prošlo od planiranog/procijenjenog vremena leta,
-// u odnosu na SADAŠNJI trenutak. Koristi EstimatedDepartureTime ako postoji
-// (precizniji, ažuriran podatak), inače pada na ScheduledDepartureTime.
-// Handluje prelaz preko ponoći (npr. let u 00:20 dok je "sad" 23:50 dan ranije,
-// ili obrnuto) — bez toga bi razlika ispala pogrešna za skoro cio dan.
-// Vraća null ako vrijeme nije moguće parsirati (prazan string, loš format).
+// u odnosu na SADAŠNJI trenutak. Handluje prelaz preko ponoći. Vraća null
+// ako vrijeme nije moguće parsirati.
 function minutesSinceFlightTime(timeStr: string | undefined): number | null {
-  if (!timeStr) return null;
+  if (!timeStr || timeStr === '--:--') return null;
   const [hours, minutes] = timeStr.split(':').map(Number);
   if (isNaN(hours) || isNaN(minutes)) return null;
 
@@ -393,9 +360,6 @@ function minutesSinceFlightTime(timeStr: string | undefined): number | null {
   let diffMs = now.getTime() - flightDate.getTime();
   const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 
-  // Ako je razlika veća od 12h u budućnost/prošlost, vjerovatno je riječ
-  // o vremenu koje pripada susjednom kalendarskom danu (prelaz preko ponoći) —
-  // pomjeri datum i preračunaj.
   if (diffMs > TWELVE_HOURS_MS) {
     flightDate.setDate(flightDate.getDate() + 1);
     diffMs = now.getTime() - flightDate.getTime();
@@ -407,26 +371,8 @@ function minutesSinceFlightTime(timeStr: string | undefined): number | null {
   return Math.floor(diffMs / 60_000);
 }
 
-// ── Filtrira letove čije je planirano/procijenjeno vrijeme više od
-// `cutoffMinutes` U PROŠLOSTI — bez obzira šta piše u StatusEN. Ovo je
-// pouzdanije od filtriranja po tekstu statusa jer backup podatak može biti
-// star i njegov status tekst zastario (npr. i dalje piše "Scheduled" iako
-// je let odavno otišao). Koristi se SAMO u BACKUP granama, isto kao
-// filterOutCompletedFlights — live podatak API sam čisti.
-function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: number = 40): T[] {
-  return flights.filter(flight => {
-    const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
-    const minutesSince = minutesSinceFlightTime(timeStr);
-    // null (vrijeme nepoznato/neparsivo) → ne filtriraj, radije prikaži nego sakrij
-    if (minutesSince === null) return true;
-    return minutesSince <= cutoffMinutes;
-  });
-}
-// ← Generička po T extends Flight, da očuva konkretan tip ulaza (npr.
-// AutoProcessedFlight) na izlazu. Bez generika, TypeScript bi suzio
-// povratnu vrijednost na "obični" Flight[] i izgubio AutoProcessed/
-// OriginalStatus polja koja poziv u koraku 4 (BACKUP MODE) treba
-// kasnije da pročita.
+// ── Filtrira letove koji su VEĆ poletjeli/sletjeli po tekstu statusa —
+// koristi se SAMO u BACKUP granama (kad ngrok proxy nije dostupan).
 function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
   return flights.filter(flight => {
     const statusLower = (flight.StatusEN || '').toLowerCase();
@@ -436,6 +382,19 @@ function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
       statusLower.includes('sletio') ||
       statusLower.includes('landed');
     return !(isDeparted || isArrived);
+  });
+}
+
+// ── Filtrira letove čije je planirano/procijenjeno vrijeme više od
+// cutoffMinutes U PROŠLOSTI — hvata letove čiji je status u starom
+// backupu ostao zastario (npr. i dalje piše "Scheduled" iako je let
+// odavno otišao dok je tvoj računar bio ugašen).
+function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: number = 30): T[] {
+  return flights.filter(flight => {
+    const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
+    const minutesSince = minutesSinceFlightTime(timeStr);
+    if (minutesSince === null) return true;
+    return minutesSince <= cutoffMinutes;
   });
 }
 
@@ -464,18 +423,9 @@ async function buildFlightData(
   };
 }
 
-// ── Mali nasumičan jitter na TTL, da fetch ciklusi ne budu savršeno
-// periodični (npr. tačno svakih 240.000ms). Neki WAF/bot-detekcija sistemi
-// prepoznaju besprijekorno pravilne intervale kao mašinski, ne ljudski
-// saobraćaj — par sekundi nasumičnosti to razbija bez ikakvog uticaja
-// na svježinu podataka.
-function jitteredTTL(baseSeconds: number, maxJitterSeconds: number = 8): number {
-  const jitter = Math.floor(Math.random() * maxJitterSeconds);
-  return baseSeconds + jitter;
-}
 // ── GLAVNA FUNKCIJA — pozivaju je i /api/flights ruta i cleanup-overrides cron,
 // direktno, bez HTTP self-fetch-a ──────────────────────────────────────────
-async function getCurrentFlightData(): Promise<FlightData> {
+export async function getCurrentFlightData(): Promise<FlightData> {
  const nightNow = isNightHours();   // ← izračunaj JEDNOM, koristi svuda ispod
   // ── 1. PROVJERI CACHE PRVO (in-process → Redis) ──────────
   const cached = await getFlightDataFromCache();
@@ -500,7 +450,7 @@ async function getCurrentFlightData(): Promise<FlightData> {
 const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
 const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
 
-if (nightNow) {   // ← bilo: isNightHours() — nepotreban drugi poziv, nightNow je već izračunat gore
+if (isNightHours()) {
   const client = getRedisClient();
   const nightFetchGateKey = 'night:fetch:gate';
 
@@ -530,36 +480,32 @@ if (!canFetchNow) {
   console.log('🌙 Noćni period — probam live fetch (dozvoljeno 1x/h)');
 }
 
-  // ── 3. POKUŠAJ LIVE FETCH (sa tvrdim globalnim rokom) ─────
-  // Promise.race garantuje da ova faza NIKAD ne traje duže od
-  // LIVE_FETCH_HARD_DEADLINE_MS, bez obzira šta se dešava unutar
-  // fetchWithQuickRetry (retry logika po sebi treba da završi ranije,
-  // ovo je samo apsolutna gornja granica "za svaki slučaj").
+  // ── 3. POKUŠAJ LIVE FETCH ─────────────────────────────────
   try {
-    const response = await Promise.race([
-      fetchWithQuickRetry(FLIGHT_API_URL, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: FETCH_HEADERS,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Live fetch hard deadline exceeded')),
-          LIVE_FETCH_HARD_DEADLINE_MS
-        )
-      ),
-    ]);
+  const response = await Promise.race([
+    fetchWithQuickRetry(FLIGHT_API_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: FETCH_HEADERS,
+    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error('Live fetch hard deadline exceeded')),
+        LIVE_FETCH_HARD_DEADLINE_MS
+      )
+    ),
+  ]);
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
 const rawPayload: unknown = await response.json();
-const rawData: RawFlightData[] = normalizeRawFlightArray(rawPayload);
+const rawData: NgrokFlightRaw[] = normalizeRawFlightArray(rawPayload) as unknown as NgrokFlightRaw[];
 
 if (!Array.isArray(rawData)) throw new Error('Invalid data format');
 
     console.log(`✅ Live fetch: ${rawData.length} flights`);
 
-    const mappedFlights = await Promise.all(rawData.map((raw: RawFlightData) => mapRawFlight(raw)));
+    const mappedFlights = await Promise.all(rawData.map((raw: NgrokFlightRaw) => mapNgrokFlightToFlight(raw)));
     let todayFlights = filterTodayFlights(mappedFlights);
     todayFlights = removeDuplicateFlights(todayFlights);
 
@@ -574,11 +520,10 @@ if (!Array.isArray(rawData)) throw new Error('Invalid data format');
 
 const finalFlights = removeDuplicateFlights(expandedFlights);
 
-// ── BACKUP_ENABLED je true — svaki uspješan live fetch osvježava backup,
-// tako da kad live API kasnije padne, backup mode ima najsvježiji mogući
-// podatak (ne stari po nekoliko sati). Namjerno se NE piše backup kad je
-// finalFlights prazan (0 letova) — to bi moglo prepisati dobar, pun backup
-// praznim rezultatom u slučaju da API vrati privremeno prazan niz.
+// ── Svaki uspješan fetch sa ngrok proxy-ja osvježava backup, tako da kad
+// tvoj računar/ngrok kasnije padne, backup ima najsvježiji mogući podatak.
+// Namjerno se NE piše kad je finalFlights prazan (0 letova) — to bi moglo
+// prepisati dobar, pun backup praznim rezultatom.
 if (finalFlights.length > 0) {
   try {
     await backupService.saveBackup(finalFlights);
@@ -596,9 +541,7 @@ if (finalFlights.length === 0 && BACKUP_ENABLED) {
   const todayPodgorica = getPodgoricaDateString();
 
 if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica) {
-    // ← NOVO: makni letove koji su već poletjeli/sletjeli prije nego što ih prikažemo
-   const filteredBackupFlights = filterOutStaleFlights(filterOutCompletedFlights(existingBackup.flights));
-  //  const filteredBackupFlights = filterOutStaleFlights(filterOutCompletedFlights(existingBackup.flights), 45);
+    const filteredBackupFlights = filterOutStaleFlights(filterOutCompletedFlights(existingBackup.flights));
     const bd = await buildFlightData(filteredBackupFlights, 'backup', existingBackup.timestamp, {
       isOfflineMode: true,
       backupTimestamp: existingBackup.timestamp,
@@ -618,7 +561,7 @@ if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica)
 const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow });
     const slimmed = slimFlightData(flightData);
 
-await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : jitteredTTL(FLIGHT_CACHE_TTL_SECONDS));
+await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
 
     console.log(`📊 Live: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
 
@@ -652,15 +595,7 @@ const processor = new FlightAutoProcessor(latestBackup.flights);
     const processedFlights = processor.processFlights();
     const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
 
-    // ← NOVO: filtriraj TEK nakon simulacije — simulacija može ažurirati
-    // status leta (npr. "Scheduled" → "Departed") pa filter mora vidjeti
-    // najnoviji, simulirani status, ne stari iz sirovog backupa.
-const filteredSimulatedFlights = filterOutStaleFlights(filterOutCompletedFlights(simulatedFlights));
-
-    // autoProcessedCount se računa na FILTRIRANOJ listi — brojač treba da
-    // odražava koliko auto-processed letova je STVARNO prikazano, ne koliko
-    // ih je bilo prije filtriranja (inače bi brojka bila veća od broja
-    // letova koje korisnik zapravo vidi na ekranu).
+    const filteredSimulatedFlights = filterOutStaleFlights(filterOutCompletedFlights(simulatedFlights));
     const autoProcessedCount = filteredSimulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
     const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
 
@@ -741,8 +676,8 @@ export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   const gotLock = await client.set(FETCH_LOCK_KEY, token, 'EX', FETCH_LOCK_TTL_SECONDS, 'NX');
 
   if (gotLock) {
-    // Ja sam nosilac locka ovog ciklusa — JA radim live fetch,
-    // svi ostali istovremeni pozivi (iz drugih fajlova/instanci) idu u granu ispod.
+    // Ja sam nosilac locka ovog ciklusa — JA radim fetch ka proxy-ju,
+    // svi ostali istovremeni pozivi idu u granu ispod i čekaju MOJ rezultat.
     try {
       return await getCurrentFlightData();
     } finally {
@@ -755,8 +690,8 @@ export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   }
 
   // Neko drugi već radi fetch ovog ciklusa — čekamo NJEGOV rezultat u kešu,
-  // ne pokrećemo svoj fetch. Ovo je jedini način da se garantuje tačno
-  // 1 live fetch po intervalu bez obzira na broj istovremenih poziva.
+  // ne pokrećemo svoj fetch. Ovo garantuje tačno 1 poziv ka ngrok proxy-ju
+  // po ciklusu, bez obzira na broj istovremenih korisnika na FIDS ekranu.
   const deadline = Date.now() + LOCK_WAIT_MAX_MS;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));

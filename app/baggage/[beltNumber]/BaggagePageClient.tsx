@@ -5,9 +5,12 @@ import type React from "react"
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams } from "next/navigation"
 import type { Flight } from "@/types/flight"
-import { fetchFlightData, getFlightsByBaggage } from "@/lib/flight-service"
+import { getFlightsByBaggage } from "@/lib/flight-service"
 import { isNightHours } from '@/lib/night-hours'
 import { Plane, Luggage, MapPin, Clock, Users } from "lucide-react"
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo'
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience'
+import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 // ============================================================
 // KONSTANTE — isti koncept kao CombinedPageClient
@@ -49,6 +52,16 @@ const loadEmergencyCache = (): FlightDataResponse | null => {
   } catch { return null }
 }
 
+// FIX (podaci se ne učitavaju oko 4h ujutro): isti bug klasa koja je
+// popravljena na svim ostalim "big board" stranicama (combined,
+// departures, border, arrivals, split-board — vidi FETCH_TIMEOUT_MS
+// tamo) — baggage stranica NIJE bila u obuhvatu tog ranijeg fixa.
+// Server (/api/flights) može legitimno trebati do ~25-30s tačno na
+// noć→dan prelazu (FETCH_LOCK wait u lib/flight-data-service.ts). 5s
+// timeout je garantovano prekidao fetch prije nego server stigne da
+// odgovori.
+const FETCH_TIMEOUT_MS = 30_000; // 30s (bilo 5s)
+
 const fetchWithTimeout = (url: string, timeout: number, headers?: HeadersInit): Promise<Response> => {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeout)
@@ -83,9 +96,61 @@ const getStatusColor = (status: string): string => {
   return "text-gray-400";
 }
 
+// ============================================================
+// FIX (24/7 rad bez nadzora): baggage stranica RANIJE NIJE IMALA
+// error boundary — bilo koja render greška bilo gdje u stablu je
+// značila TRAJAN bijeli ekran, bez ikakvog automatskog oporavka, dok
+// neko fizički ne restartuje kiosk. Svaka druga kiosk stranica
+// (combined, departures, gate, checkin, security...) je već imala ovu
+// zaštitu — ovo je bio jedini propust te vrste.
+// ============================================================
+interface BaggageEBState { hasError: boolean; message: string }
+class BaggageErrorBoundary extends Component<{ children: ReactNode }, BaggageEBState> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+  static getDerivedStateFromError(e: Error) { return { hasError: true, message: e.message }; }
+  componentDidCatch(e: Error, i: ErrorInfo) {
+    console.error('🚨 Baggage ErrorBoundary:', e, i);
+    // Automatski pokušaj oporavka nakon 10s — isti obrazac kao na
+    // ostalim kiosk stranicama.
+    setTimeout(() => this.setState({ hasError: false, message: '' }), 10_000);
+  }
+  render() {
+    if (this.state.hasError) return (
+      <div style={{
+        minHeight: '100vh', display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', background: '#0f172a', color: '#fff',
+      }}>
+        <div style={{ fontSize: '4rem' }}>⚠</div>
+        <div style={{ fontSize: '2rem', fontWeight: 700 }}>Reconnecting…</div>
+        <div style={{ fontSize: '1rem', opacity: 0.7 }}>{this.state.message}</div>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
 export default function BaggagePageClient() {
+  return (
+    <BaggageErrorBoundary>
+      <BaggageDisplay />
+    </BaggageErrorBoundary>
+  );
+}
+
+function BaggageDisplay() {
   const params = useParams()
   const beltNumber = params.beltNumber as string
+
+  // FIX (24/7 rad bez nadzora): ranije nije postojao NI heartbeat
+  // watchdog, NI globalni error handler, NI handler za neuhvaćene
+  // odbijene promise-e, NI periodičan "hard reset" — vidi opširan
+  // komentar u hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: `baggage-${beltNumber}`,
+  });
 
   const [allArrivals, setAllArrivals] = useState<Flight[]>([])
   const [lastUpdate, setLastUpdate] = useState<string>("")
@@ -104,80 +169,78 @@ export default function BaggagePageClient() {
     setIsLoading(false)
   }, [])
 
-  useEffect(() => {
-    isMountedRef.current = true
-    let tid: ReturnType<typeof setTimeout>
 
-    const loadFlights = async () => {
-      if (!isMountedRef.current) return
 
-      // ── NOĆNI REŽIM — nikakav network poziv dok aerodrom ne radi ──
-      if (isNightHours()) {
-        if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
-        tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-        return
-      }
-      if (isMountedRef.current) setNightMode(false)
-
-      try {
-        let hashChanged = true
-        const headers: HeadersInit = {}
-        if (etagRef.current) headers["If-None-Match"] = etagRef.current
-
-        try {
-          const statusRes = await fetchWithTimeout("/api/flights/status", 5_000, headers)
-          if (statusRes.status === 304) {
-            setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-            tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-            setIsLoading(false)
-            return
-          }
-          if (statusRes.ok) {
-            const data = await statusRes.json()
-            const newEtag = statusRes.headers.get('ETag')
-            if (newEtag) etagRef.current = newEtag
-            if (data.hash === lastKnownHash && lastKnownHash !== null) hashChanged = false
-            lastKnownHash = data.hash
-          }
-        } catch { /* nastavi na pun fetch */ }
-
-        if (!hashChanged) {
-          setLastUpdate(new Date().toLocaleTimeString("en-GB"))
-          tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-          setIsLoading(false)
-          return
-        }
-
-        // ── PUN FETCH — samo ako se hash promijenio ──
-        try {
-          const data = await fetchFlightData()
-          if (isMountedRef.current) {
-            setAllArrivals(data.arrivals || [])
-            setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
-            saveToCache(data)
-            saveEmergencyCache(data)
-          }
-        } catch (error) {
-          console.error("Failed to load arrivals:", error)
-          // ── Fallback lanac: obični keš → emergency keš → zadrži staro ──
-          const cached = loadFromCache()
-          if (cached) {
-            setAllArrivals(cached.arrivals || [])
-          } else {
-            const emergency = loadEmergencyCache()
-            if (emergency) setAllArrivals(emergency.arrivals || [])
-            // ako ni to ne postoji, ostaje trenutno stanje (ne prazni ekran)
-          }
-        }
-      } finally {
-        if (isMountedRef.current) setIsLoading(false)
-        tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
-      }
+// ============================================================
+// ISPRAVKA GREŠKE iz prethodnog patcha za
+// app/baggage/[beltNumber]/BaggagePageClient.tsx
+//
+// Prethodni patch je pogrešno uklonio scheduling i iz night-hours
+// grane. Ta grana je VAN try/finally bloka (return se dešava PRIJE
+// nego što try počne) — finally je NIKAD ne obuhvata, pa uklanjanjem
+// njenog tid=setTimeout(...) polling petlja se trajno gasi čim
+// nastupi noć i nikad se sama ne probudi. 304 grana OSTAJE bez
+// tid=... (ta jeste unutar try-a, finally je ispravno pokriva).
+// ============================================================
+ 
+useEffect(() => {
+  isMountedRef.current = true
+  let tid: ReturnType<typeof setTimeout>
+ 
+  const loadFlights = async () => {
+    if (!isMountedRef.current) return
+ 
+    if (isNightHours()) {
+      if (isMountedRef.current) { setNightMode(true); setIsLoading(false) }
+      tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS) // ← VRAĆENO NAZAD
+      return
     }
-
-    loadFlights()
-    return () => { isMountedRef.current = false; clearTimeout(tid) }
-  }, [])
+    if (isMountedRef.current) setNightMode(false)
+ 
+    try {
+      const headers: HeadersInit = {}
+      if (etagRef.current) headers["If-None-Match"] = etagRef.current
+ 
+      const statusRes = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, headers)
+ 
+      if (statusRes.status === 304) {
+        setLastUpdate(new Date().toLocaleTimeString("en-GB"))
+        setIsLoading(false)
+        return // ← ostaje BEZ tid= — finally to ispravno radi (unutar try-a)
+      }
+ 
+      if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`)
+ 
+      const data = await statusRes.json()
+      const newEtag = statusRes.headers.get('ETag')
+      if (newEtag) etagRef.current = newEtag
+      lastKnownHash = data.hash
+ 
+      if (isMountedRef.current) {
+        setAllArrivals(data.arrivals || [])
+        setLastUpdate(new Date().toLocaleTimeString("en-GB", { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+        saveToCache(data)
+        saveEmergencyCache(data)
+      }
+    } catch (error) {
+      console.error("Failed to load arrivals:", error)
+      const cached = loadFromCache()
+      if (cached) {
+        setAllArrivals(cached.arrivals || [])
+      } else {
+        const emergency = loadEmergencyCache()
+        if (emergency) setAllArrivals(emergency.arrivals || [])
+      }
+    } finally {
+      // ── JEDINO mjesto koje zakazuje sledeći ciklus ZA try-block grane ──
+      if (isMountedRef.current) setIsLoading(false)
+      if (isMountedRef.current) tid = setTimeout(loadFlights, REFRESH_INTERVAL_MS)
+    }
+  }
+ 
+  loadFlights()
+  return () => { isMountedRef.current = false; clearTimeout(tid) }
+}, [])
 
   // ── MAGIJA: Kompletna logika filtriranja u useMemo. NEPROMIJENJENO ──
   const displayFlights = useMemo(() => {
@@ -223,10 +286,17 @@ export default function BaggagePageClient() {
     const s = flight.StatusEN?.toLowerCase() || ""
     return s.includes("cancelled") || s.includes("otkazan")
   }
-
-  const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    e.currentTarget.src = "https://via.placeholder.com/180x120?text=No+Logo"
+const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget
+  const icao = img.dataset.icao || ''
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw'
+    const fw = icao ? `https://www.flightaware.com/images/airline_logos/180px/${icao}.png` : ''
+    if (fw) { img.src = fw; return }
   }
+  img.src = "https://via.placeholder.com/180x120?text=No+Logo"
+  img.onerror = null
+}
 
   // ── Noćni mod: jednostavan prikaz umjesto pune table (dizajn ostaje minimalan) ──
   if (nightMode) {
@@ -325,12 +395,17 @@ export default function BaggagePageClient() {
                   >
                     <div className="col-span-2">
                       <div className="flex items-center gap-3">
-                        <img
-                          src={flight.AirlineLogoURL || "/placeholder.svg"}
-                          alt={flight.AirlineName}
-                          className="w-16 h-16 object-contain bg-white rounded-xl p-2 shadow-lg"
-                          onError={handleImageError}
-                        />
+           <img
+  src={getInitialAirlineLogoSrc(
+    flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '',
+    "/placeholder.svg"
+  )}
+  alt={flight.AirlineName}
+  className="w-16 h-16 object-contain bg-white rounded-xl p-2 shadow-lg"
+  onError={handleImageError}
+  data-icao={flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ''}
+  data-tried={isKnownLocalLogo(flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '') ? 'local' : 'fw'}
+/>
                         <div>
                           <div className="text-5xl font-black text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.5)]">{flight.FlightNumber}</div>
                           <div className="text-xl text-purple-300 font-semibold">{flight.AirlineName}</div>

@@ -25,14 +25,34 @@ import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
-const POLL_INTERVAL = 10_000; // Svako 10s provjerava admin promjene
+const getJitterMs          = () => Math.floor(Math.random() * 3_000);
 const AD_SWITCH_INTERVAL = 15_000;
-// ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
-const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 3_000);
+
+// ── FIX (SPAJANJE POLL CIKLUSA — vidi identičan princip i opširan
+// komentar u GatePageClient.tsx): fetchDeskData() (poziva
+// /api/test/desk-status-override?deskNumber=X) je već lagan, per-desk,
+// ETag/304-svjestan poziv. Ranije je pored njega postojao i ODVOJEN
+// "brzi" watchdog poll (BEZ ?deskNumber=X, dijeljen CDN ključ) čiji je
+// jedini posao bio da detektuje promjenu i onda pokrene fetchDeskData()
+// ranije nego što bi inače došla na red — dupliran mrežni poziv za
+// suštinski isti podatak. Taj watchdog je uklonjen; fetchDeskData()
+// sad SAMA radi na ovoj brzoj (10-12s) kadenci, bez posebnog
+// "open"/"idle" razlikovanja koje je ranije postojalo (BASE_INTERVAL_MS/
+// MAX_OPEN_INTERVAL_MS/BACKOFF_STEP_MS/IDLE_INTERVAL_MS/IDLE_JITTER_MS —
+// uklonjeni, više se nigdje ne čitaju).
+//
+// Ušteda: ~825.000 zahtjeva/mjesec manje po instalaciji (18 šaltera),
+// bez ikakvog gubitka u brzini reagovanja (i dalje 10-12s worst-case,
+// isti zahtjev osoblja kao i ranije).
+const FAST_POLL_BASE_MS   = 10_000;
+const FAST_POLL_JITTER_MS = 2_000;
+const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
+
 
 // ── Koliko dugo se u browser-memoriji (unutar ove kiosk sesije) drži
 // zadnji uspješan /api/flights odgovor za lookup detalja leta. Ako se
@@ -68,6 +88,19 @@ const isEasyJetFlight = (flightNumber: string, airlineName?: string): boolean =>
 };
 
 const EASYJET_PLUS_IMAGE = '/easyjet/easyjet_plus.avif';
+// ── NOVO: Lufthansa Group (Lufthansa + Austrian) — ista logika kao BA/easyJet,
+// samo bez classType uslova: SVAKI LH/OS let dobija fiksnu grupnu sliku ──
+const LUFTHANSA_GROUP_PREFIXES = ['LH', 'OS'];
+
+const isLufthansaGroupFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/\s+/g, '');
+  if (name.includes('lufthansa') || name.includes('austrian')) return true;
+
+  const fn = flightNumber.toUpperCase();
+  return LUFTHANSA_GROUP_PREFIXES.some(prefix => fn.startsWith(prefix));
+};
+
+const LUFTHANSA_GROUP_IMAGE = '/lufthansa/LH_group.avif';
 
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
@@ -248,14 +281,16 @@ const AdBanner = memo(function AdBanner({
   nextIndex,
   isTransitioning,
   baImageSrc,
-  overrideImageSrc,   // ← NOVO — generički override (BA ili easyJet ili bilo šta ubuduće)
+  overrideImageSrc,
+  lufthansaImageSrc,   // ← NOVO
 }: {
   adImages: string[];
   currentIndex: number;
   nextIndex: number;
   isTransitioning: boolean;
   baImageSrc: string | null;
-  overrideImageSrc?: string | null;   // ← NOVO
+  overrideImageSrc?: string | null;
+  lufthansaImageSrc?: string | null;   // ← NOVO
 }) {
   // BA let — prikaži statičnu sliku umjesto ads
   if (baImageSrc) {
@@ -302,6 +337,30 @@ const AdBanner = memo(function AdBanner({
       </div>
     );
   }
+  // ── NOVO: Lufthansa Group (LH/OS) override ──
+  if (lufthansaImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={lufthansaImageSrc}
+            alt="Lufthansa Group"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (!adImages.length) return null;
 
   if (!adImages.length) return null;
 
@@ -373,6 +432,20 @@ const isMountedRef = useRef(true);
   const logoCacheRef = useRef<Map<string, string>>(new Map());
   // const etagDeskRef = useRef<string | null>(null);
  const etagDeskRef = useRef<string | null>(null);
+const noChangeStreakRef  = useRef(0);
+const lastKnownStatusRef = useRef<'open' | 'closed' | null>(null);
+const lastClassTypeRef   = useRef<string | null>(null);
+
+// ── NOVO: omogućavaju brzom pollu (ispod) da resetuje glavni ciklus
+// nakon vanrednog osvježavanja, i da prati zadnje poznato stanje sa
+// DIJELJENOG (svi šalteri, jedan CDN cache ključ) endpointa.
+const mainTidRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
+const scheduleMainRef   = useRef<(() => void) | null>(null);
+const lastFastStatusRef = useRef<string | null>(null);
+// FIX: sprječava da fetchDeskData() radi konkurentno kad ga skoro
+// istovremeno pozovu i glavna petlja (schedule) i fast-poll
+// (change-trigger) — bez ovoga bi oba mogla poslati fetch istovremeno.
+const isFetchingDeskRef = useRef(false);
 
   // ── Klijentski (in-browser) keš za /api/flights lookup ─────────
   // Drži zadnji uspješan flights payload + njegov ETag unutar ove
@@ -396,6 +469,12 @@ const easyJetPlusImage = useMemo((): string | null => {
   if (assignment.classType === 'EASYJET_PLUS') return EASYJET_PLUS_IMAGE;
   return null;
 }, [assignment.flightNumber, assignment.airlineName, assignment.classType]);
+
+// ── NOVO: Lufthansa Group — bez classType uslova, svaki LH/OS let ──
+const lufthansaGroupImage = useMemo((): string | null => {
+  if (!isLufthansaGroupFlight(assignment.flightNumber, assignment.airlineName)) return null;
+  return LUFTHANSA_GROUP_IMAGE;
+}, [assignment.flightNumber, assignment.airlineName]);
 
   // ── CSS injection ──────────────────────────────────────────
   useEffect(() => {
@@ -422,13 +501,14 @@ const easyJetPlusImage = useMemo((): string | null => {
 
   
 
-  // ── Hard reset svakih ~6h (sa jitterom da se izbjegne sinhroni
-  // reload svih desk ekrana u istoj sekundi) ──────────────────
-  useEffect(() => {
-    const jitteredResetMs = 6 * 60 * 60 * 1000 + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
-    const id = setTimeout(() => window.location.reload(), jitteredResetMs);
-    return () => clearTimeout(id);
-  }, []);
+  // ── FIX (24/7 rad bez nadzora) — zamijenjen "goli" hard-reset tajmer
+  // punim setom zaštita (heartbeat watchdog, globalni error handler,
+  // handler za neuhvaćene odbijene promise-e — ranije nije postojao na
+  // ovoj stranici). Vidi opširan komentar u hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: `checkin-${deskNumberParam}`,
+    hardResetIntervalMs: 6 * 60 * 60 * 1000,
+  });
 
   // ── Reset praćenja leta pri promjeni šaltera ────────────────
   useEffect(() => {
@@ -466,12 +546,34 @@ const easyJetPlusImage = useMemo((): string | null => {
     return () => clearInterval(id);
   }, [adImages, currentAdIndex]);
 
+  const getNextInterval = useCallback((): number => {
+  // FIX (SPAJANJE POLL CIKLUSA — vidi opširan komentar iznad
+  // FAST_POLL_BASE_MS): fetchDeskData() je već lagan, per-desk,
+  // ETag/304-svjestan poziv — nema više potrebe za ODVOJENIM watchdog
+  // pollom koji je gađao IDENTIČNU rutu (samo bez ?deskNumber=X) svakih
+  // 10-12s samo da bi DETEKTOVAO promjenu i onda ionako pokrenuo
+  // fetchDeskData(). Sad fetchDeskData() SAMA radi na toj kadenci,
+  // bez obzira na "open"/"idle" stanje — jednostavnije, i eliminiše
+  // ~825.000 suvišnih zahtjeva/mjesec po instalaciji (18 šaltera) bez
+  // ikakvog gubitka u brzini reagovanja (i dalje 10-12s worst-case).
+  return getFastPollInterval();
+}, []);
+
   // ── Glavni fetch iz desk-status-override ──────────────────
 const fetchDeskData = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (!deskNumberParam) return;
+  // FIX: spriječi konkurentno izvršavanje (vidi napomenu kod deklaracije)
+  if (isFetchingDeskRef.current) return;
+  isFetchingDeskRef.current = true;
 if (isNightHours()) {
+     // Resetuj backoff state pri ulasku u noćni mod — bez ovoga bi streak
+   // ostao "zamrznut" na vrijednosti iz trenutka kad je noćni mod počeo,
+  // pa bi ujutru prvi ciklus krenuo sa pogrešno visokim intervalom
+   // umjesto sa čistog, brzog stanja.
+   noChangeStreakRef.current = 0;
     setLoading(false);
+    isFetchingDeskRef.current = false;
     return;
 }
   try {
@@ -481,20 +583,22 @@ if (isNightHours()) {
       headers['If-None-Match'] = etagDeskRef.current;
     }
 
-    // const res = await fetch(`/api/test/desk-status-override?deskNumber=${deskNumberParam}`, { headers });
 const res = await fetch(
-  `/api/test/desk-status-override`,
-  {
-    headers,
-    cache: 'no-store',
-  }
-);
+      `/api/test/desk-status-override?deskNumber=${deskNumberParam}`,
+      {
+        headers,
+        cache: 'no-store',
+      }
+    );
 
     // ── OBRADI 304 ───────────────────────────────────────────
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagDeskRef.current = newEtag;
-      // Nema promjene – ne ažuriramo assignment
+     // Nema promjene – backoff napreduje samo dok je šalter stabilno otvoren
+    if (lastKnownStatusRef.current === 'open') {
+      noChangeStreakRef.current += 1;
+    }
       return;
     }
 
@@ -504,9 +608,8 @@ const res = await fetch(
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagDeskRef.current = newEtag;
 
-    // const myData = await res.json();
-    const allData = await res.json();
-const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+    // ── Route sa ?deskNumber= vraća direktno entry objekat, ne cijelu mapu ──
+    const myData = await res.json();
 
     if (!isMountedRef.current) return;
 
@@ -516,7 +619,11 @@ const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', cla
     // Nema dodjele → instant reset
     if (!myData || !myData.flightNumber || myData.status === null) {
       lastFlightNumberRef.current = '';
+      lastKnownStatusRef.current = null;
+     lastClassTypeRef.current = null;
+     noChangeStreakRef.current = 0;
       setAssignment(EMPTY_ASSIGNMENT);
+      lastFastStatusRef.current = JSON.stringify({ status: null, flightNumber: '', classType: null });
       return;
     }
 
@@ -524,6 +631,20 @@ const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', cla
 
     // Isti let – samo status/klasa
     if (myData.flightNumber === lastFlightNumberRef.current) {
+          const statusChanged = myData.status !== lastKnownStatusRef.current;
+    const classChanged  = classType !== lastClassTypeRef.current;
+     if (statusChanged || classChanged || myData.status !== 'open') {
+       noChangeStreakRef.current = 0;
+     } else {
+       noChangeStreakRef.current += 1;
+     }
+     lastKnownStatusRef.current = myData.status as 'open' | 'closed';
+     lastClassTypeRef.current = classType;
+     lastFastStatusRef.current = JSON.stringify({
+       status: myData.status ?? null,
+       flightNumber: myData.flightNumber ?? '',
+       classType: classType ?? null,
+     });
       setAssignment((prev) => ({
         ...prev,
         status: myData.status as 'open' | 'closed',
@@ -624,29 +745,43 @@ const myData = allData[deskNumberParam] ?? { status: null, flightNumber: '', cla
       codeshareFlights: (flightDetails.CodeShareFlights as string[]) || [],
       setAt: myData.setAt || null,
     });
+      lastKnownStatusRef.current = myData.status as 'open' | 'closed';
+   lastClassTypeRef.current = classType;
+   noChangeStreakRef.current = 0; // novi let — uvijek brzi interval
+   // Sinhronizuj i brzi-poll referencu
+   lastFastStatusRef.current = JSON.stringify({
+     status: myData.status ?? null,
+     flightNumber: myData.flightNumber ?? '',
+     classType: classType ?? null,
+   });
   } catch (err) {
     console.error('fetchDeskData error:', err);
     if (isMountedRef.current) {
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setLoading(false);
     }
+  } finally {
+    // FIX: garantovano oslobađa guard bez obzira na tačku izlaska iz
+    // try bloka (304 early-return, "nema dodjele" early-return, uspjeh,
+    // ili greška) — finally se uvijek izvršava.
+    isFetchingDeskRef.current = false;
   }
 }, [deskNumberParam]);
 
   // ── Polling ────────────────────────────────────────────────
 useEffect(() => {
   isMountedRef.current = true;
-  let tid: ReturnType<typeof setTimeout>;
   let initialTid: ReturnType<typeof setTimeout>;
 
   const schedule = () => {
-    tid = setTimeout(async () => {
+    mainTidRef.current = setTimeout(async () => {
       if (isMountedRef.current) {
         await fetchDeskData();
         schedule();
       }
-    }, getIntervalWithJitter());
+ }, getNextInterval());
   };
+  scheduleMainRef.current = schedule;
 
   // Mali nasumičan delay na prvi poziv (0-3s) da se izbjegne
   // sinhroni fetch ako se više ekrana upali u istom trenutku
@@ -659,10 +794,12 @@ useEffect(() => {
 
   return () => {
     isMountedRef.current = false;
-    clearTimeout(tid);
+    if (mainTidRef.current) clearTimeout(mainTidRef.current);
+    scheduleMainRef.current = null;
     clearTimeout(initialTid);
   };
-}, [fetchDeskData]);
+ }, [fetchDeskData, getNextInterval]);
+
 
   // ── Stanje za render ───────────────────────────────────────
   const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;
@@ -980,6 +1117,7 @@ useEffect(() => {
   isTransitioning={isAdTransitioning}
   baImageSrc={baAdImage}
   overrideImageSrc={easyJetPlusImage}
+  lufthansaImageSrc={lufthansaGroupImage}
 />
 
           {/* Footer */}

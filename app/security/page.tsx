@@ -6,6 +6,7 @@ import {
 } from 'react';
 import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 
 // REFRESH INTERVAL (podaci)
 const REFRESH_INTERVAL_MS = 60_000;
@@ -198,6 +199,14 @@ function SecurityDisplay() {
   const [nextUpdate, setNextUpdate] = useState('');
   const [currentTime, setCurrentTime] = useState(new Date());
   const isMountedRef = useRef(true);
+
+  // FIX (24/7 rad bez nadzora): security stranica ranije nije imala
+  // NIŠTA od heartbeat/memory-cleanup/error-handler/hard-reset zaštite
+  // koju ostali kiosk ekrani već imaju — vidi opširan komentar u
+  // hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: 'security',
+  });
 
   const loadPriorityFlights = useCallback(async () => {
     if (!isMountedRef.current) return;

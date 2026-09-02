@@ -1,6 +1,8 @@
 'use client';
 
 import type React from "react"
+import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 import {
   type JSX,
   useEffect,
@@ -23,12 +25,19 @@ import { isNightHours } from '@/lib/night-hours';
 // KONSTANTE
 // ============================================================
 const REFRESH_INTERVAL_MS = 150_000;
-const FETCH_TIMEOUT_MS = 15_000;
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS = 30_000; // 30s (bilo 15s)
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;
 const CACHE_KEY = "arrivals_board_cache";
 const CACHE_DURATION = 5 * 60 * 1_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Gornja granica veličine niza letova — sprečava neograničen rast state-a
+// ako spoljni izvor podataka ikad vrati abnormalno veliku listu.
+const MAX_FLIGHTS_MEMORY = 300;
 const MAX_FLIGHTS_DISPLAY = 12;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
 
@@ -90,13 +99,50 @@ function isValidDisplayTime(timeStr: string | null | undefined): boolean {
 }
 
 // ─── Cache ────────────────────────────────────────────────────
-const saveToCache = (data: any) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })) } catch {} };
-const loadFromCache = (): any | null => { try { const raw = localStorage.getItem(CACHE_KEY); if (!raw) return null; const { data, timestamp } = JSON.parse(raw); return Date.now() - timestamp > CACHE_DURATION ? null : data; } catch { return null; } };
+// ─── Cache ────────────────────────────────────────────────────
+const saveToCache = (data: { arrivals: Flight[] }) => {
+  try { 
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ 
+      data, 
+      timestamp: Date.now() 
+    })); 
+  } catch { /* quota exceeded */ }
+};
 
+const loadFromCache = (): { arrivals: Flight[] } | null => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const { data, timestamp } = JSON.parse(raw);
+    if (Date.now() - timestamp > CACHE_DURATION) return null;
+    return { arrivals: data.arrivals || [] };
+  } catch { return null; }
+};
 // ─── Fetch ────────────────────────────────────────────────────
-const fetchWithTimeout = async (url: string, ms: number): Promise<Response> => {
-  const ctrl = new AbortController(); const id = setTimeout(() => ctrl.abort(), ms);
-  try { const r = await fetch(url, { signal: ctrl.signal, headers: { "Cache-Control": "no-cache" } }); clearTimeout(id); return r; } catch (e) { clearTimeout(id); throw e; }
+const fetchWithTimeout = async (url: string, ms: number, options?: RequestInit): Promise<Response> => {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  // FIX: options.signal (ako je proslijeđen, npr. iz efekta pri unmountu)
+  // se ranije tiho gubio jer ga je spread pa override sa ctrl.signal
+  // uvijek prepisivao. Sad se oba signala lančano povezuju — abort na
+  // BILO kojem od njih (eksterni unmount ILI interni timeout) prekida
+  // stvarni fetch.
+  const externalSignal = options?.signal as AbortSignal | null | undefined;
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+  try {
+    const r = await fetch(url, { 
+      ...options, 
+      signal: ctrl.signal 
+    });
+    clearTimeout(id);
+    return r;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
 };
 const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_DELAY_MS): Promise<any> => {
   let last: Error | null = null;
@@ -109,7 +155,13 @@ const fetchWithRetry = async (url: string, retries = MAX_RETRIES, delay = RETRY_
 // ============================================================
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim();
-  if (status && status !== "-") return null;
+  // ── ISTO kao combined: pokreni auto-status i kad je status
+  // generički tekst ("On time"/"Na vrijeme"/"Scheduled"), ne samo
+  // kad je prazan/"-" ──
+  const isGenericStatus =
+    !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status);
+  if (!isGenericStatus) return null;
+
   const scheduledStr = flight.ScheduledDepartureTime;
   const estimatedStr = flight.EstimatedDepartureTime;
   if (!scheduledStr) return null;
@@ -117,12 +169,16 @@ function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): s
   const scheduled = parseFlightTimeToDate(scheduledStr);
   const estimated = parseFlightTimeToDate(estimatedStr);
   if (!scheduled || !estimated) return "Scheduled";
-  const diffMins = (scheduled.getTime() - estimated.getTime()) / 60_000;
-  if (diffMins > 15) return `Arriving early – expected at ${fmtTime(estimatedStr)}`;
-  if (diffMins < -15) return `Delayed – expected at ${fmtTime(estimatedStr)}`;
-  return "On time";
-}
 
+  const diffMinutes = (estimated.getTime() - scheduled.getTime()) / 60_000;
+
+  // ── ISTO kao combined: "Earlier" (ne "Arriving early") da odgovara
+  // regexu /(earlier|ranije)/i u computeStatusPill, i "On time" sad
+  // uvijek nosi i procijenjeno vrijeme ──
+  if (diffMinutes > 15)  return `Delayed – expected at ${fmtTime(estimatedStr)}`;
+  if (diffMinutes < -15) return `Earlier – expected at ${fmtTime(estimatedStr)}`;
+  return `On time – expected at ${fmtTime(estimatedStr)}`;
+}
 // ============================================================
 // LED & STATUS PILL LOGIKA (Iz combined page)
 // ============================================================
@@ -171,15 +227,19 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
   const pill = useMemo(() => computeStatusPill(flight, formatTime), [flight, formatTime, autoStatusTick]);
 
   const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
-  const logoURL = useMemo(() => getFlightawareLogoURL(icao), [icao]);
+
   const rowBg = index % 2 === 0 ? "bg-white/15" : "bg-white/5";
 
-  const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.dataset.fallback === 'png') { img.src = PLACEHOLDER_IMAGE; img.onerror = null; return; }
-    if (img.dataset.fallback === 'jpg') { img.dataset.fallback = 'png'; img.src = `/airlines/${icao}.png`; return; }
-    if (icao) { img.dataset.fallback = 'jpg'; img.src = `/airlines/${icao}.jpg`; } else { img.src = PLACEHOLDER_IMAGE; img.onerror = null; }
-  }, [icao]);
+const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.tried === 'local') {
+    img.dataset.tried = 'fw';
+    const fw = getFlightawareLogoURL(icao);
+    if (fw) { img.src = fw; return; }
+    img.src = PLACEHOLDER_IMAGE; img.onerror = null; return;
+  }
+  img.src = PLACEHOLDER_IMAGE; img.onerror = null;
+}, [icao]);
 
   const estimatedDisplay = useMemo(() => {
     const est = flight.EstimatedDepartureTime, sch = flight.ScheduledDepartureTime;
@@ -188,8 +248,7 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
     return estFmt === schFmt ? null : estFmt;
   }, [flight.EstimatedDepartureTime, flight.ScheduledDepartureTime]);
 
-  const pillCls = `w-[90%] flex items-center justify-center gap-3 text-[2.5rem] font-bold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
-
+const pillCls = `w-[90%] flex items-center justify-center gap-3 text-[2rem] font-extrabold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
   return (
     <div className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "68px", contain: "layout style" }}>
       <div className="flex items-center justify-center" style={{ width: "180px" }}>
@@ -201,9 +260,17 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
         {estimatedDisplay ? <div className="text-[2.5rem] font-black text-cyan-300 drop-shadow-lg">{estimatedDisplay}</div> : <div className="text-2xl text-white/30 font-bold">-</div>}
       </div>
       <div className="flex items-center gap-3" style={{ width: "280px" }}>
-        <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
-          <img src={logoURL || PLACEHOLDER_IMAGE} alt={`${flight.AirlineName} logo`} className="object-contain w-full h-full" onError={onImgErr} decoding="async" loading="eager" />
-        </div>
+    <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
+  <img
+    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+    alt={`${flight.AirlineName} logo`}
+    className="object-contain w-full h-full"
+    onError={onImgErr}
+    data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+    decoding="async"
+    loading="eager"
+  />
+</div>
         <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
       </div>
       <div className="flex items-center" style={{ width: "580px" }}>
@@ -211,8 +278,7 @@ const FlightRow = memo(function FlightRow({ flight, index, autoStatusTick }: { f
       </div>
       <div className="flex items-center justify-center flex-1 min-w-[400px]">
         {pill.hasStatusText ? (
-          <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>
-            {pill.showLEDs && (
+<div className={`${pillCls} overflow-hidden relative text-[2rem]`} style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>            {pill.showLEDs && (
               <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10">
                 <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
                 <LEDIndicator color={pill.led2} phase="b" size="w-4 h-4" />
@@ -257,7 +323,19 @@ function ArrivalsBoard(): JSX.Element {
 
   useEffect(() => { const tick = () => setCurrentTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })); tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
-  useEffect(() => { const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS); return () => clearTimeout(id); }, []);
+
+  // FIX (24/7 rad bez nadzora): zamijenjen "goli" hard-reset tajmer punim
+  // setom zaštita — heartbeat watchdog, globalni error handler, handler za
+  // neuhvaćene odbijene promise-e (ranije nije postojao na ovoj stranici),
+  // i periodično čišćenje MAX_FLIGHTS_MEMORY-limitiranog niza letova. Vidi
+  // opširan komentar u hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: 'arrivals',
+    hardResetIntervalMs: HARD_RESET_INTERVAL_MS,
+    onMemoryCleanup: () => {
+      setFlights(prev => (prev.length > MAX_FLIGHTS_MEMORY ? prev.slice(0, MAX_FLIGHTS_MEMORY) : prev));
+    },
+  });
 
   const filterRecentFlights = useCallback((allFlights: Flight[]): Flight[] => {
     const now = new Date();
@@ -275,113 +353,90 @@ function ArrivalsBoard(): JSX.Element {
     });
   }, []);
 
+// ============================================================
+// KRITIČAN FIX za app/arrivals/page.tsx
+// ============================================================
+// ISPRAVKA GREŠKE iz prethodnog patcha za app/arrivals/page.tsx
+// Isti razlog kao za baggage-client-fix-v2.tsx — vidi tamo objašnjenje.
+// ============================================================
+ 
 useEffect(() => {
   isMountedRef.current = true;
   let tid: ReturnType<typeof setTimeout>;
-
+  const controller = new AbortController();
+ 
+  // Učitaj cache prije nego kreneš
   const cached = loadFromCache();
   if (cached?.arrivals) {
     setFlights(filterRecentFlights(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
     setLoading(false);
   }
-
+ 
   const load = async () => {
     if (!isMountedRef.current) return;
- if (isNightHours()) {
-    if (isMountedRef.current) setLoading(false);
-    tid = setTimeout(load, REFRESH_INTERVAL_MS);
-    return;
-  }
+    if (isNightHours()) {
+      if (isMountedRef.current) setLoading(false);
+      tid = setTimeout(load, REFRESH_INTERVAL_MS); // ← VRAĆENO NAZAD
+      return;
+    }
+ 
     try {
-      let hashChanged = true;
-      const statusHeaders: HeadersInit = { "Cache-Control": "no-cache" };
+      const headers: HeadersInit = {};
       if (etagRef.current) {
-        statusHeaders["If-None-Match"] = etagRef.current;
+        headers["If-None-Match"] = etagRef.current;
       }
-
-      try {
-      const statusRes = await fetch("/api/flights/status");
-
-        if (statusRes.status === 304) {
-          const newEtag = statusRes.headers.get('ETag');
-          if (newEtag) etagRef.current = newEtag;
-          setLoading(false);
-          tid = setTimeout(load, REFRESH_INTERVAL_MS);
-          return;
-        }
-
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          const newEtag = statusRes.headers.get('ETag');
-          if (newEtag) etagRef.current = newEtag;
-
-          // ⭐ POPRAVKA: lastKnownHash je ref, koristi .current
-if (statusData.hash !== null && statusData.hash === lastKnownHash.current) {
-  hashChanged = false;
-} else if (statusData.hash !== null) {
-  lastKnownHash.current = statusData.hash;
-}
-        }
-      } catch {
-        // ignoriši
+ 
+      const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
+        headers,
+        signal: controller.signal,
+        cache: 'force-cache',
+      });
+ 
+      if (res.status === 304) {
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagRef.current = newEtag;
+        setLoading(false);
+        return; // ← ostaje BEZ tid= — finally to ispravno radi (unutar try-a)
       }
-
-      let data: any = null;
-      if (hashChanged) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-        try {
- const res = await fetch("/api/flights?type=arrivals", { signal: controller.signal });
-
-          clearTimeout(timeoutId);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          data = await res.json();
-          if (isMountedRef.current) saveToCache(data);
-        } catch (err) {
-          if ((err as Error).name === "AbortError") {
-            // timeout – pokušaj sa kešom
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        const c = loadFromCache();
-        if (c?.arrivals) {
-          data = c;
-        } else {
-  const res = await fetch("/api/flights?type=arrivals");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          data = await res.json();
-          if (isMountedRef.current) saveToCache(data);
-        }
-      }
-
+ 
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+ 
+      const data = await res.json();
+      const newEtag = res.headers.get('ETag');
+      if (newEtag) etagRef.current = newEtag;
+ 
       if (data?.arrivals && isMountedRef.current) {
+        saveToCache({ arrivals: data.arrivals });
         setFlights(filterRecentFlights(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
       }
     } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
       console.error("Arrivals load error:", err);
+ 
       const c = loadFromCache();
       if (c?.arrivals && isMountedRef.current) {
         setFlights(filterRecentFlights(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
       }
     } finally {
+      // ── JEDINO mjesto koje zakazuje sledeći ciklus ZA try-block grane ──
       if (isMountedRef.current) {
         setLoading(false);
         tid = setTimeout(load, REFRESH_INTERVAL_MS);
       }
     }
   };
-
+ 
   load();
-
+ 
   return () => {
     isMountedRef.current = false;
     clearTimeout(tid);
+    controller.abort();
   };
 }, [filterRecentFlights]);
+ 
 
   const sortedFlights = useMemo(() => [...flights].sort((a, b) => (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")), [flights]);
 

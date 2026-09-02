@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useIdleLogout } from '@/hooks/use-idle-logout';
+import { IdleWarningBanner } from '@/components/idle-warning-banner';
 import { 
   getAllAirlines, 
   getAirlineByIata, 
@@ -104,6 +106,10 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function BusinessClassAdminPage() {
+  // ─── Auto-logout nakon neaktivnosti — usklađeno sa ostalim admin
+  // ekranima (vidi hooks/use-idle-logout.ts): 3 min + 30s upozorenje.
+  // Ranije: ova stranica NIJE imala nikakvu idle-zaštitu. ──
+  const { secondsLeft: idleWarningSeconds } = useIdleLogout();
   const [activeTab, setActiveTab] = useState<'airlines' | 'flights' | 'destinations'>('airlines');
   const [airlines, setAirlines] = useState<Airline[]>([]);
   const [specificFlights, setSpecificFlights] = useState<SpecificFlight[]>([]);
@@ -1317,6 +1323,7 @@ const handleSave = async () => {
   
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
+      <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       <div className="max-w-7xl mx-auto">
         <header className="mb-8">
           <h1 className="text-3xl font-bold text-white">Konfiguracija Business Class sistema</h1>

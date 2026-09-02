@@ -22,7 +22,12 @@ import { isNightHours } from '@/lib/night-hours';
 // ============================================================
 // KONSTANTE — Vercel Free Tier optimizacija
 // ============================================================
-const REFRESH_INTERVAL_MS      = 150_000;   // 90s umjesto 60s → -33% poziva
+const REFRESH_INTERVAL_MS      = 180_000;   // 90s umjesto 60s → -33% poziva
+// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
+// app/combined/CombinedPageClient.tsx — server (/api/flights) može
+// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
+// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
+const FETCH_TIMEOUT_MS         = 30_000; // 30s (bilo 10s)
 const CACHE_KEY                = "arr_cache_v1";
 const CACHE_DURATION           = 8 * 60_000; // 8 min — duži TTL
 const HARD_RESET_HOUR          = 3;
@@ -30,7 +35,14 @@ const MAX_FLIGHTS_DISPLAY      = 12;
 const ARRIVED_SHOW_MINUTES     = 60;        // ← prikaži 45 min nakon dolaska
 const CANCELLED_SHOW_MINUTES   = 15;        // ← prikaži cancelled letove 15 minuta
 const HIDDEN_PATTERNS          = ["ZZZ", "G00", "PVT", "TST"];
+
 // let lastKnownHash: string | null = null;
+// ── Low-end detekcija ──
+const IS_LOW_END = typeof navigator !== 'undefined' &&
+  (navigator.hardwareConcurrency ?? 4) < 4;
+
+// ── Memory pressure threshold ──
+const MEMORY_PRESSURE_THRESHOLD = 0.80;
 
 const PLACEHOLDER =
   "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHZpZXdCb3g9IjAgMCA0MCAyNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iMjYiIHJ4PSI0IiBmaWxsPSIjMjMzMjQ0Ii8+PHRleHQgeD0iMjAiIHk9IjE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNDc2MDdBIiBmb250LXNpemU9IjciIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiPk5PIExPR088L3RleHQ+PC9zdmc+";
@@ -112,16 +124,72 @@ function validTime(t: string | null | undefined): boolean {
   const f = fmt(t); return f !== "" && f !== "00:00";
 }
 
+
+// ── Fetch s timeoutom ────────────────────────────────────────
+const fetchWithTimeout = async (url: string, ms: number, options?: RequestInit): Promise<Response> => {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { 
+      ...options, 
+      signal: ctrl.signal 
+    });
+    clearTimeout(id);
+    return r;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
+};
+// ============================================================
 // ── Cache ─────────────────────────────────────────────────────
-const saveCache = (d: any) => { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ d, ts: Date.now() })); } catch {} };
-const loadCache = (): any | null => {
+const saveCache = (data: { arrivals: Flight[] }) => {
+  try { 
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ 
+      data, 
+      ts: Date.now() 
+    })); 
+  } catch { /* quota exceeded */ }
+};
+
+const loadCache = (): { arrivals: Flight[] } | null => {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
-    const { d, ts } = JSON.parse(raw);
-    return Date.now() - ts > CACHE_DURATION ? null : d;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_DURATION) return null;
+    return { arrivals: data.arrivals || [] };
   } catch { return null; }
 };
+
+function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
+  const status = (flight.StatusEN ?? "").trim()
+
+  // ── Auto-status se računa i kad API vrati generički "On time" /
+  // "Scheduled" tekst, ne samo kad je status prazan ili "-" — novi
+  // izvor (tiv.nais.aero) šalje eksplicitan "On time" umjesto praznog
+  // stringa. Operativno značajni statusi (Cancelled, Boarding,
+  // Processing, Diverted i sl.) i dalje prolaze NEIZMIJENJENI ispod.
+  const isGenericStatus =
+    !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status)
+  if (!isGenericStatus) return null
+
+  const schStr = flight.ScheduledDepartureTime
+  const estStr = flight.EstimatedDepartureTime
+  if (!schStr) return null
+  if (!estStr || !validTime(estStr) || schStr === estStr) return "Scheduled"
+  const sch = parseTime(schStr); const est = parseTime(estStr)
+  if (!sch || !est) return "Scheduled"
+
+  // Razlika PO PREDZNAKU (ne apsolutna vrijednost):
+  //   diff > 0  → estimated je KASNIJE od scheduled (kašnjenje)
+  //   diff < 0  → estimated je RANIJE od scheduled (dolazak prije plana)
+  const diffMinutes = (est.getTime() - sch.getTime()) / 60_000
+
+  if (diffMinutes > 15)  return `Delayed – expected at ${fmtTime(estStr)}`
+  if (diffMinutes < -15) return `Earlier – expected at ${fmtTime(estStr)}`
+  return `On time – expected at ${fmtTime(estStr)}`
+}
 
 // ============================================================
 // STATUS LOGIKA — POPRAVLJENA
@@ -135,6 +203,7 @@ interface Pill {
   hasStatusText: boolean; displayText: string;
 }
 
+
 function computePill(flight: Flight): Pill {
   const rawStatus = (flight.StatusEN ?? "").trim();
   const lowerRaw = rawStatus.toLowerCase();
@@ -147,22 +216,11 @@ function computePill(flight: Flight): Pill {
       showLEDs: true, hasStatusText: true, displayText: "Cancelled",
     };
   }
+  
 
   // ── 2. AUTO-STATUS ako je StatusEN prazan ili "-" ──
-  let finalStatusText = rawStatus;
-  if (!rawStatus || rawStatus === "-") {
-    const sch = parseTime(flight.ScheduledDepartureTime);
-    const est = parseTime(flight.EstimatedDepartureTime);
-    if (sch && est && validTime(flight.EstimatedDepartureTime) &&
-        flight.ScheduledDepartureTime !== flight.EstimatedDepartureTime) {
-      const diff = (est.getTime() - sch.getTime()) / 60_000; // pozitivno = kasni
-      if (diff > 15)       finalStatusText = "Delayed";
-      else if (diff < -15) finalStatusText = "Earlier";
-      else                 finalStatusText = "On Time";
-    } else {
-      finalStatusText = "Scheduled";
-    }
-  }
+ const auto = getAutoArrivalStatus(flight, fmt);
+  const finalStatusText = auto !== null ? auto : rawStatus;
 
   // ── 3. NADJEDI pojedinačne riječi iz finalStatusText ──
   const lowerFinal = finalStatusText.toLowerCase();
@@ -173,21 +231,16 @@ function computePill(flight: Flight): Pill {
   const isOnTime   = /(on time|na vrijeme|ontime)/i.test(lowerFinal) || /(on time)/i.test(lowerRaw);
 
   // ── 4. Formatiranje display teksta ──
+  // Napomena: "Arrived HH:MM" (bez riječi "at") — kraći tekst da stane
+  // u status kolonu na manjim TV ekranima bez sečenja teksta.
+// ── 4. Formatiranje display teksta ──
+  // finalStatusText već sadrži pun tekst (uključujući "expected at
+  // HH:MM") iz getAutoArrivalStatus() ili iz sirovog API statusa —
+  // Earlier/Delayed/On time se više ne rekonstruišu, samo prolaze kroz.
   let displayText = finalStatusText;
-  if (isEarly) {
-    displayText = "Earlier";
-  } else if (isDelayed) {
-    if (displayText.toLowerCase().includes("expected at")) {
-      const match = displayText.match(/expected at\s*(.+)/i);
-      displayText = match ? `Delayed – ${match[1]}` : "Delayed";
-    } else {
-      displayText = "Delayed";
-    }
-  } else if (isArrived) {
+  if (isArrived) {
     const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || flight.ActualDepartureTime;
     displayText = `Arrived at ${t ? fmt(t) : ""}`.trim();
-  } else if (isOnTime) {
-    displayText = "On Time";
   }
 
   // ── 5. BOJE (samo na temelju finalnog statusa) ──
@@ -238,14 +291,17 @@ const FlightRow = memo(function FlightRow({ flight, index, tick }: { flight: Fli
 
 const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const img = e.currentTarget;
-  // Lokalni fajl (png/jpg) je promašio → idi na FlightAware
+  if (IS_LOW_END) {
+    img.src = PLACEHOLDER;
+    img.onerror = null;
+    return;
+  }
   if (img.dataset.t === 'local') {
     img.dataset.t = 'fa';
     const fw = `https://www.flightaware.com/images/airline_logos/180px/${icao}.png`;
     if (icao) { img.src = fw; return; }
     img.src = PLACEHOLDER; img.onerror = null; return;
   }
-  // FlightAware je promašio → placeholder
   img.src = PLACEHOLDER; img.onerror = null;
 }, [icao]);
 
@@ -262,10 +318,10 @@ const onErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     : icao;
 
   return (
-    <div
-      className={`fids-row flex gap-0 p-0 border-b border-white/10 ${rowBg}`}
-      style={{ contain: "layout style" }}
-    >
+<div
+  className={`fids-row flex gap-0 p-0 border-b border-white/10 ${rowBg}`}
+  style={{ contain: "layout style paint", contentVisibility: "auto", containIntrinsicSize: "auto 68px" }}
+>
       <div className="fids-cell fids-w-sch flex items-center justify-center">
         <span className="fids-time">{fmt(flight.ScheduledDepartureTime) || <span className="text-white/30">--:--</span>}</span>
       </div>
@@ -335,7 +391,9 @@ const ClockDisplay = memo(function ClockDisplay() {
   const [t, setT] = useState("");
   useEffect(() => {
     const tick = () => setT(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
+    tick();
+    const id = setInterval(tick, 10_000); // ← bilo 1_000
+    return () => clearInterval(id);
   }, []);
   return <span className="fids-clock">{t || "--:--"}</span>;
 });
@@ -351,7 +409,7 @@ const FooterMessage = memo(function FooterMessage() {
         <Luggage className="w-5 h-5" />
       </div>
       <div className="fids-footer-text">
-        <span>Welcome to Montenegro. Please prepare your travel documents for border control.</span>
+        <span>Welcome to Montenegro. May your stay be enjoyable and memorable.</span>
         <span className="fids-footer-separator">•</span>
         <span>Keep your personal belongings with you at all times.</span>
                 <span className="fids-footer-separator">•</span>
@@ -377,19 +435,70 @@ function ArrivalsBoard(): JSX.Element {
   const [flights, setFlights]   = useState<Flight[]>([]);
   const [loading, setLoading]   = useState(true);
   const [tick, setTick]         = useState(0);
+   const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END); // ← novo
   const mounted                 = useRef(true);
+  const lastHeartbeat = useRef(Date.now());
+useEffect(() => {
+  const id = setInterval(() => {
+    if (Date.now() - lastHeartbeat.current > 120_000) window.location.reload();
+    // ← NEMA više 'else' grane ovdje — samo provjerava, ne ažurira
+  }, 30_000);
+  return () => clearInterval(id);
+}, []);
+
+// ── FIX (24/7 rad bez nadzora): border ranije nije imao NI globalni
+// error handler NI handler za neuhvaćene odbijene promise-e — obje
+// greške VAN React render stabla (event handleri, tajmeri, async kod)
+// koje Error Boundary NE hvata. Vidi identičan obrazac u
+// CombinedPageClient.tsx / departures/page.tsx. ──
+useEffect(() => {
+  const onErr = (e: ErrorEvent) => {
+    const m = e.error?.message || '';
+    if (m.includes('Out of memory') || m.includes('stack overflow') || m.includes('heap')) {
+      setTimeout(() => window.location.reload(), 2_000);
+    }
+  };
+  window.addEventListener('error', onErr);
+  return () => window.removeEventListener('error', onErr);
+}, []);
+
+useEffect(() => {
+  const onRejection = (e: PromiseRejectionEvent) => {
+    console.error('[border] Neuhvaćena odbijena promise:', e.reason?.message || e.reason);
+  };
+  window.addEventListener('unhandledrejection', onRejection);
+  return () => window.removeEventListener('unhandledrejection', onRejection);
+}, []);
+
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
 const etagRef = useRef<string | null>(null);
 const tidRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 const isLoadingRef = useRef(false);
+ useEffect(() => {
+    if (IS_LOW_END) return;
+    const checkMemory = () => {
+      const perf = (performance as any);
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const total = perf.memory.totalJSHeapSize;
+        if (total > 0 && used / total > MEMORY_PRESSURE_THRESHOLD) {
+          setReducedAnimations(true);
+          console.warn('⚠️ Memory pressure detected — reducing animations');
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
 
 
   // Inject CSS on client
-  useEffect(() => {
-    if (document.getElementById('arr-styles')) return;
-    const el = document.createElement('style');
-    el.id = 'arr-styles';
+ useEffect(() => {
+  const existing = document.getElementById('arr-styles');
+  if (existing) existing.remove(); // ← ukloni stari da može da se update-uje
+  const el = document.createElement('style');
+  el.id = 'arr-styles';
     el.textContent = `
         html,body,#__next{height:100vh;margin:0;padding:0;overflow:hidden}
         *{box-sizing:border-box;-webkit-font-smoothing:antialiased}
@@ -468,7 +577,7 @@ const isLoadingRef = useRef(false);
         .fids-w-airline{width:clamp(120px,12vw,200px);flex-shrink:0}
         .fids-w-fn     {width:clamp(110px,9vw,160px);flex-shrink:0}
         .fids-w-city   {flex:1;min-width:0}
-        .fids-w-status {width:clamp(180px,18vw,320px);flex-shrink:0}
+       .fids-w-status {width:clamp(240px,24vw,420px);flex-shrink:0}
 
         .fids-thead{
           display:flex;gap:0;
@@ -549,29 +658,38 @@ const isLoadingRef = useRef(false);
           letter-spacing:-0.01em;
           line-height:1.1;
         }
-
-        .fids-pill{
-          display:flex;align-items:center;justify-content:center;
-          gap:0.4rem;
-          width:96%;
-          padding:0.3rem 0.6rem;
-          border-radius:0.6rem;
-          border-style:solid;
-          font-size:clamp(0.8rem,1.5vw,1.2rem);
-          font-weight:700;
-          text-align:center;
-          position:relative;
-          overflow:hidden;
-        }
+.fids-pill{
+  display:flex;align-items:center;justify-content:center;
+  gap:0.4rem;
+  width:96%;
+  padding:0.3rem 0.6rem;
+  border-radius:0.6rem;
+  border-style:solid;
+  font-size:clamp(0.8rem,1.5vw,1.2rem);
+  font-weight:700;
+  text-align:center;
+  position:relative;
+  overflow:hidden;
+}
         .fids-leds{display:flex;gap:4px;flex-shrink:0}
-        .fids-pill-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fids-pill-text{
+  overflow:hidden;
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  white-space:normal;
+  line-height:1.15;
+  text-align:center;
+  word-break:break-word;
+  font-size:clamp(0.65rem, 1.1vw, 0.98rem) !important;
+}
         .fids-scheduled{
           font-size:clamp(0.8rem,1.4vw,1.1rem);
           font-weight:600;
           color:rgba(255,255,255,0.45);
         }
 
-        .led-base{will-change:opacity,box-shadow;animation:1s ease-in-out infinite alternate led-pulse-generic}
+      .led-base{animation:1s ease-in-out infinite alternate led-pulse-generic}
         .led-phase-b{animation-delay:.55s}
         @keyframes led-pulse-generic{0%{opacity:.2}100%{opacity:1}}
         .led-blue  {background:#60a5fa;box-shadow:0 0 6px #60a5fa80}
@@ -584,7 +702,7 @@ const isLoadingRef = useRef(false);
         .led-lime  {background:#a3e635;box-shadow:0 0 6px #a3e63580}
 
         @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.7}}
-        .animate-pill-blink{animation:.9s ease-in-out infinite pill-blink;will-change:opacity}
+     .animate-pill-blink{animation:.9s ease-in-out infinite pill-blink}
 
         .fids-loading{
           flex:1;display:flex;flex-direction:column;
@@ -658,15 +776,46 @@ const isLoadingRef = useRef(false);
           }
         }
 
-        @media(prefers-reduced-motion:reduce){
-          .animate-pill-blink,.fids-pulse-dot,.led-base,.fids-spinner{
-            animation:none!important;opacity:1!important;
-          }
-        }
+        /* ── Manji TV ekrani — status kolona nije imala dovoljno
+           prostora da ispiše "Arrived HH:MM" bez sečenja teksta.
+           Oslobađamo prostor smanjenjem manje bitnih kolona
+           (airline / flight number) i dajemo status koloni veći
+           minimum, uz kompaktniji pill (manji padding/gap/LED-ovi
+           i font koji se dodatno smanjuje na uskim ekranima). ── */
+      @media (max-width: 1000px) {
+  .fids-row{min-height:clamp(58px,7.5vh,84px)}
+  .fids-w-airline{width:clamp(80px,8vw,140px)}
+  .fids-w-fn     {width:clamp(90px,7vw,130px)}
+  .fids-w-sch    {width:clamp(90px,7vw,140px)}
+  .fids-w-est    {width:clamp(90px,7vw,140px)}
+  .fids-w-status {width:clamp(210px,30vw,420px)}
+  .fids-pill{padding:0.22rem 0.4rem;gap:0.28rem;width:98%}
+  .fids-pill-text{font-size:clamp(0.62rem,1.9vw,1rem)}
+  .fids-leds{gap:2px}
+  .fids-leds > div{width:10px;height:10px}
+}
+@media (max-width: 700px) {
+  .fids-row{min-height:clamp(64px,9vh,90px)}
+  .fids-w-status {width:clamp(180px,34vw,420px)}
+  .fids-pill-text{font-size:clamp(0.56rem,2.1vw,0.9rem)}
+}
+ 
+
+     @media(prefers-reduced-motion:reduce){
+  /* Gasimo SAMO dekorativne animacije, NE LED i pill-blink (funkcionalni su) */
+  .fids-pulse-dot{animation:none!important;opacity:1!important}
+  .fids-spinner{animation:none!important;opacity:1!important}
+  /* LED i pill-blink OSTAJU aktivni */
+}
+${reducedAnimations ? `
+.animate-pulse{animation:none!important;opacity:1!important}
+.fids-spinner{animation:none!important;opacity:1!important}
+/* LED i pill-blink OSTAJU aktivni */
+` : ''}
       `;
-    document.head.appendChild(el);
-    return () => { document.getElementById('arr-styles')?.remove(); };
-  }, []);
+ document.head.appendChild(el);
+  return () => { document.getElementById('arr-styles')?.remove(); };
+}, [reducedAnimations]); // ← dodaj zavisnost
 
   // Auto-status tick svake 60s
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 60_000); return () => clearInterval(id); }, []);
@@ -717,6 +866,7 @@ const isLoadingRef = useRef(false);
     });
   }, []);
   // ── Load funkcija (definisana prije useEffect) ──────────────
+// ── Load funkcija ─────────────────────────────────────────────
 const load = useCallback(async () => {
   // Spriječi istovremene pozive
   if (isLoadingRef.current) {
@@ -740,41 +890,58 @@ const load = useCallback(async () => {
   }
 
   try {
-    // ── DIREKTAN FETCH SA ETag ──────────────────────────────
-    const headers: HeadersInit = { "Cache-Control": "no-cache" };
+    const headers: HeadersInit = {};
     if (etagRef.current) {
       headers["If-None-Match"] = etagRef.current;
     }
 
-    const res = await fetch("/api/flights", { headers });
+    // ✅ KORISTI fetchWithTimeout S cache opcijom
+const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
+  headers,
+  cache: 'force-cache',  // ← Vercel edge cache
+});
 
+    // ✅ 304 - ništa se nije promijenilo
     if (res.status === 304) {
       const newEtag = res.headers.get('ETag');
       if (newEtag) etagRef.current = newEtag;
       setLoading(false);
+      lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat
       clearTimeout(tidRef.current!);
       tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS);
       return;
     }
 
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
     const data = await res.json();
     const newEtag = res.headers.get('ETag');
     if (newEtag) etagRef.current = newEtag;
 
     if (mounted.current) {
-      saveCache(data);
+      // ✅ Spremi SAMO arrivals u cache
+      saveCache({ arrivals: data.arrivals || [] });
+      
       if (data?.arrivals) {
         setFlights(filter(data.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
         setLoading(false);
+        lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat
       }
     }
   } catch (err) {
-    console.error("Border load error:", err);
+    // ✅ Ako je AbortError, samo izađi (timeout)
+    if ((err as Error).name === 'AbortError') {
+      console.log('⏱️ Fetch timeout, using cache if available');
+    } else {
+      console.error("Arrivals load error:", err);
+    }
+
+    // ✅ Koristi cache na bilo kojem erroru
     const c = loadCache();
     if (c?.arrivals && mounted.current) {
       setFlights(filter(c.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
       setLoading(false);
+      lastHeartbeat.current = Date.now(); // ← Ažuriraj heartbeat i na erroru
     }
   } finally {
     isLoadingRef.current = false;
@@ -783,7 +950,7 @@ const load = useCallback(async () => {
       tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS);
     }
   }
-}, [filter, etagRef, tidRef, isLoadingRef, mounted]); // Dodaj zavisnosti
+}, [filter, etagRef, tidRef, isLoadingRef, mounted]);
 
   // Load
 // Load
@@ -791,24 +958,20 @@ const load = useCallback(async () => {
 // ── Inicijalni load i polling ──────────────────────────────
 useEffect(() => {
   mounted.current = true;
-
-  // Prvi poziv (ako nema keša)
   const cached = loadCache();
   if (cached?.arrivals) {
     setFlights(filter(cached.arrivals).slice(0, MAX_FLIGHTS_DISPLAY));
     setLoading(false);
+    tidRef.current = setTimeout(load, REFRESH_INTERVAL_MS); // ← pokreni petlju i iz keš-grane
   } else {
-    // Ako nema keša, pozovi load odmah
     load();
   }
-
-  // Čišćenje timeouta na unmount
   return () => {
     mounted.current = false;
     clearTimeout(tidRef.current!);
     tidRef.current = null;
   };
-}, [filter, load]); // Dodaj load u zavisnosti
+}, [filter, load]);
 
   const sorted = useMemo(() =>
     [...flights].sort((a, b) =>

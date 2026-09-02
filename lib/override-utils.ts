@@ -1,5 +1,5 @@
 // lib/override-utils.ts
-import { getRedisClient } from '@/lib/redis';
+import { getRedisClient, safeRedisHDel, safeRedisHGetAll } from '@/lib/redis';
 
 export interface AutoResetResult {
   flightNumber: string;
@@ -204,23 +204,29 @@ export async function runAutoReset(allFlights: FlightLike[]): Promise<AutoResetR
     console.log(`[auto-reset] Obrisano ${keysToFullyDelete.length} override-ova (terminated letovi)`);
   }
 
-  // ✅ Batch: ukloni desk-status unose iz "test:desk-status:all" bloba
+  // ✅ Batch: ukloni desk-status unose iz "test:desk-status:all"
+  // ── FIX (usklađeno sa Redis Hash prelaskom, vidi lib/redis.ts i
+  // app/api/test/desk-status-override/route.ts): "test:desk-status:all" više
+  // NIJE jedan JSON blob nego Redis HASH (jedno polje po desku). HDEL po
+  // polju je atomaran — nema više čitaj-cijelo/piši-cijelo race-a.
+  //
+  // FIX #2 (svježa analiza — WRONGTYPE gap): ranije se ovdje koristio SIROV
+  // redis.pipeline().hdel(...), zaobilazeći safeRedisHDel wrapper iz
+  // lib/redis.ts koji ima ugrađeno samoisceljujuće WRONGTYPE→migracija
+  // ponašanje. Da je "test:desk-status:all" i dalje bio zaostali JSON
+  // string ključ, ovaj raw pipeline HDEL bi bacio WRONGTYPE (uhvaćen ispod
+  // u catch-u, pa se ne ruši cron/cleanup poziv — ali čišćenje departovanih
+  // letova bi TIHO otkazivalo svaki put, gomilajući zaglavljene desk-status
+  // unose na check-in monitorima i nakon poletanja). Sad koristi
+  // safeRedisHDel po polju (Promise.all — isti obrazac batch-a kao
+  // cleanupStale() u samim override rutama), pa se automatski samoiscijeli
+  // ako naiđe na stari ključ.
   if (deskStatusKeysToDelete.length > 0) {
     try {
-      const raw = await redis.get('test:desk-status:all');
-      if (raw) {
-        const all = JSON.parse(raw);
-        let changed = false;
-        deskStatusKeysToDelete.forEach(desk => {
-          if (all[desk]) { delete all[desk]; changed = true; }
-        });
-        if (changed) {
-          await redis.set('test:desk-status:all', JSON.stringify(all), 'EX', 4 * 60 * 60);
-          console.log(`[auto-reset] Očišćeno ${deskStatusKeysToDelete.length} desk-status unosa`);
-        }
-      }
+      await Promise.all(deskStatusKeysToDelete.map(desk => safeRedisHDel('test:desk-status:all', desk)));
+      console.log(`[auto-reset] Očišćeno ${deskStatusKeysToDelete.length} desk-status unosa`);
     } catch (err) {
-      console.error('[auto-reset] Greška pri čišćenju desk-status bloba:', err);
+      console.error('[auto-reset] Greška pri čišćenju desk-status hash-a:', err);
     }
   }
 
@@ -290,4 +296,66 @@ export async function resetExpiredCheckInOverrides(): Promise<number> {
   });
 
   return count;
+}
+// ─────────────────────────────────────────────
+// FIX (automatsko čišćenje dodjela za DEPARTED letove — sigurnosna mreža):
+// Klijentska strana (app/admin/assign-checkin/page.tsx) već čisti
+// test:gate-status:all / test:desk-status:all unose čim let pređe u
+// status "Departed", ALI samo dok je taj admin panel OTVOREN na nekom
+// uređaju. Ova funkcija je server-side sigurnosna mreža za slučaj da
+// panel nije bio otvoren kad je let poletio — poziva se iz VEĆ
+// zakazanog cron-a (app/api/admin/cleanup-overrides/route.ts, svaka 4h),
+// bez potrebe za novim Vercel Cron job-om (svaki dodatni cron ima svoj
+// trošak/limit).
+//
+// NAMJERNO reaguje SAMO na "Departed" status (ne cancelled/diverted/itd)
+// — tačno po zahtjevu, jer ti slučajevi mogu zahtijevati ručnu pažnju
+// osoblja umjesto tihog automatskog uklanjanja.
+export interface DepartedCleanupResult {
+  resourceType: 'desk' | 'gate';
+  resourceId: string;
+  flightNumber: string;
+}
+
+function isDepartedStatus(statusEN: string | undefined): boolean {
+  const s = (statusEN || '').toLowerCase();
+  return s.includes('departed') || s.includes('poletio') || s.includes('poletjelo');
+}
+
+export async function cleanupDepartedResourceAssignments(
+  allFlights: FlightLike[],
+): Promise<DepartedCleanupResult[]> {
+  const results: DepartedCleanupResult[] = [];
+  const flightByNumber = new Map(allFlights.map(f => [f.FlightNumber, f]));
+
+  const [deskEntries, gateEntries] = await Promise.all([
+    safeRedisHGetAll('test:desk-status:all'),
+    safeRedisHGetAll('test:gate-status:all'),
+  ]);
+
+  const checks: Array<{ type: 'desk' | 'gate'; key: string; entries: Record<string, string> | null }> = [
+    { type: 'desk', key: 'test:desk-status:all', entries: deskEntries },
+    { type: 'gate', key: 'test:gate-status:all', entries: gateEntries },
+  ];
+
+  for (const { type, key, entries } of checks) {
+    if (!entries) continue;
+    for (const [resourceId, rawValue] of Object.entries(entries)) {
+      let flightNumber: string | undefined;
+      try {
+        flightNumber = JSON.parse(rawValue)?.flightNumber;
+      } catch {
+        continue; // oštećen zapis — preskoči, ne diraj
+      }
+      if (!flightNumber) continue;
+
+      const flight = flightByNumber.get(flightNumber);
+      if (flight && isDepartedStatus(flight.StatusEN)) {
+        await safeRedisHDel(key, resourceId);
+        results.push({ resourceType: type, resourceId, flightNumber });
+      }
+    }
+  }
+
+  return results;
 }
