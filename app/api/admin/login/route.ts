@@ -14,7 +14,21 @@ import { NextResponse } from 'next/server';
 export const runtime = 'edge';
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'tivat2025';
+// FIX (problematičan scenario — hardkodirana lozinka u izvornom kodu):
+// bilo je `process.env.ADMIN_PASSWORD || 'tivat2025'` — ako env varijabla
+// ikad NIJE podešena (npr. novi Vercel Preview environment, greška pri
+// deployu, zaboravljeno pri migraciji projekta), sistem je TIHO prihvatao
+// javno vidljivu, hardkodiranu lozinku iz izvornog koda. Sad se to NE
+// dešava tiho — ako ADMIN_PASSWORD nedostaje, login je ONEMOGUĆEN (fail
+// closed) uz jasnu poruku u Vercel function logovima, umjesto da radi sa
+// lozinkom koju bilo ko ko vidi ovaj kod može pročitati.
+//
+// VAŽNO PRIJE DEPLOY-A: potvrdi da je ADMIN_PASSWORD stvarno podešen u
+// Vercel-u (Project Settings → Environment Variables, za SVAKI environment
+// koji koristiš — Production i Preview su odvojeni). Ako NIJE podešen,
+// login će nakon ove izmjene prestati da radi (umjesto da tiho radi sa
+// 'tivat2025') dok ga ne podesiš.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 // Apsolutni "hard cap" sesije — bez obzira na aktivnost, admin panel
 // zahtijeva ponovnu prijavu nakon ove granice. Idle (neaktivnost) logout
@@ -26,6 +40,14 @@ const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60; // 8h (jedna smjena)
 
 export async function POST(request: Request) {
   try {
+    if (!ADMIN_PASSWORD) {
+      console.error('❌ ADMIN_PASSWORD env varijabla nije podešena — login je onemogućen dok se ne podesi (Vercel → Project Settings → Environment Variables).');
+      return NextResponse.json(
+        { success: false, message: 'Server nije konfigurisan (nedostaje ADMIN_PASSWORD) — kontaktiraj administratora.' },
+        { status: 500 },
+      );
+    }
+
     const { username, password } = await request.json();
 
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {

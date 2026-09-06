@@ -72,7 +72,14 @@ const numericId = (id: string): number => {
   return isNaN(n) ? Infinity : n;
 };
 
-
+// FIX (uklonjeno po zahtjevu): ovdje su ranije bile flightMatchesGate /
+// parseScheduleTime / shouldDisplayNaturalFlight / buildNaturalGateAssignments
+// — pomoćne funkcije koje su ovom panelu davale da prikaže isti let koji
+// gate monitor prikazuje "iz rasporeda" bez ručnog override-a ("SLUČAJ B").
+// Gate monitor (GatePageClient.tsx) sad NIKAD ne prikazuje ništa bez ručne
+// dodjele, pa ovaj panel ne treba (i ne smije) da simulira/predviđa taj
+// prikaz — svaka stavka u gateAssignments je sad UVIJEK prava, ručna
+// dodjela iz Redis override-a, ništa više.
 
 // ─────────────────────────────────────────────
 // Tipovi
@@ -86,6 +93,13 @@ interface Assignment {
   scheduledTime: string;
   assignedAt: string;
   classType: ClassType;
+  // FIX (uklonjeno po zahtjevu — vidi opširan komentar u
+  // GatePageClient.tsx uz "SLUČAJ B" ukidanje): ovaj Assignment tip je
+  // ranije imao `isNatural`/`isClosed` polja za letove koje gate monitor
+  // prikazuje "iz rasporeda" bez ručnog override-a. Gate monitor sad
+  // NIKAD ne prikazuje ništa bez ručne dodjele, pa ta polja (i sva logika
+  // koja ih je gradila/prikazivala) više nemaju šta da predstavljaju —
+  // svaki Assignment ovdje je uvijek prava, ručna dodjela.
 }
 
 interface StatSession {
@@ -118,6 +132,45 @@ const isDeparted = (f: Flight) => {
   const s = (f.StatusEN || '').toLowerCase();
   return s.includes('departed') || s.includes('poletio');
 };
+
+const isTerminated = (f: Flight) => {
+  const s = (f.StatusEN || '').toLowerCase();
+  return isDeparted(f) || s.includes('cancelled') || s.includes('otkazan') ||
+         s.includes('diverted') || s.includes('preusmjeren');
+};
+
+// FIX (UX poboljšanje — istaknuti letove koji HITNO trebaju dodjelu):
+// letovi su do sad bili sortirani ISKLJUČIVO po vremenu polaska
+// (sortBySTD) — nedodijeljen let za 20 min je vizuelno izgledao IDENTIČNO
+// kao već dodijeljen let za 20 min, u istoj boji kartice, bez ikakvog
+// upozorenja. Pod pritiskom (više letova odjednom, žurba), lako se
+// previdi baš ONAJ let kojem stvarno treba pažnja. Prag od 60 min je
+// namjerno generičan (ne zavisi od airline-specifičnog check-in
+// prozora iz lib/check-in-service.ts, koji je 120-180 min — PUNO ranije
+// nego što je "hitno" u operativnom smislu) — 60 min bez IKAKVOG
+// šaltera/gate-a je hitno bez obzira na aviokompaniju.
+const URGENT_THRESHOLD_MINUTES = 60;
+
+function minutesUntilDeparture(f: Flight): number | null {
+  const t = f.ScheduledDepartureTime;
+  if (!t || !t.includes(':')) return null;
+  const [h, m] = t.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
+  const now = new Date();
+  const dep = new Date(now);
+  dep.setHours(h, m, 0, 0);
+  let diffMs = dep.getTime() - now.getTime();
+  const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+  if (diffMs > TWELVE_HOURS_MS) diffMs -= 24 * 60 * 60 * 1000;
+  else if (diffMs < -TWELVE_HOURS_MS) diffMs += 24 * 60 * 60 * 1000;
+  return Math.floor(diffMs / 60_000);
+}
+
+function isUrgentUnassigned(f: Flight, assigned: boolean): boolean {
+  if (assigned || isTerminated(f)) return false;
+  const mins = minutesUntilDeparture(f);
+  return mins !== null && mins >= 0 && mins <= URGENT_THRESHOLD_MINUTES;
+}
 
 const sortBySTD = (a: Flight, b: Flight) =>
   (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || '');
@@ -287,6 +340,13 @@ const FlightRow: React.FC<{
   resourceLabel: string;
 }> = ({ flight, assignedTo, selected, onSelect, isDark, resourceLabel }) => {
   const assigned = assignedTo !== null;
+  // FIX (UX poboljšanje — vidi opširan komentar uz isUrgentUnassigned):
+  // nedodijeljen let koji polijeće za manje od 60 min dobija jasno
+  // uočljiv crveni tretman, RAZLIČIT od običnog "nedodijeljen" (bijela/
+  // siva kartica) i od "dodijeljen" (zelena) — da odmah upadne u oči pod
+  // pritiskom, prije nego što se let uopšte selektuje.
+  const urgent = !selected && isUrgentUnassigned(flight, assigned);
+  const urgentMins = urgent ? minutesUntilDeparture(flight) : null;
   let cc = 'cursor-pointer rounded-xl border transition-all duration-150 select-none relative overflow-hidden min-h-[85px] ';
   let fc = '', tc = '', dc = '', ac = '';
 
@@ -294,6 +354,9 @@ const FlightRow: React.FC<{
     if (selected) {
       cc += 'ring-2 ring-amber-400 bg-amber-500/20 border-amber-400/70 shadow-lg shadow-amber-500/30';
       fc = 'text-amber-200'; tc = 'text-amber-400/80'; dc = 'text-amber-300/90'; ac = 'text-amber-400/60';
+    } else if (urgent) {
+      cc += 'bg-red-500/15 border-red-500/60 shadow-lg shadow-red-500/20 animate-pulse-subtle';
+      fc = 'text-red-200'; tc = 'text-red-300/90'; dc = 'text-red-200/90'; ac = 'text-red-300/60';
     } else if (assigned) {
       // FIX (uočljivija oznaka "već dodijeljen"): ranije je dodijeljen let
       // dobijao samo tanku belu ivicu i sitan siv "dodijeljen" tekst — lako
@@ -311,6 +374,9 @@ const FlightRow: React.FC<{
     if (selected) {
       cc += 'ring-2 ring-amber-500 bg-amber-100 border-amber-500 shadow-md';
       fc = 'text-amber-900'; tc = 'text-amber-700'; dc = 'text-amber-800'; ac = 'text-amber-700/70';
+    } else if (urgent) {
+      cc += 'bg-red-50 border-red-500 shadow-md';
+      fc = 'text-red-900'; tc = 'text-red-700'; dc = 'text-red-800'; ac = 'text-red-700/80';
     } else if (assigned) {
       cc += 'bg-emerald-50 border-emerald-300';
       fc = 'text-gray-700'; tc = 'text-gray-500'; dc = 'text-gray-600'; ac = 'text-gray-500';
@@ -324,7 +390,8 @@ const FlightRow: React.FC<{
     <TouchFeedback onTap={onSelect}>
       <div className={cc} style={{ padding: '12px 16px' }}>
         {selected && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-amber-400 rounded-l-xl" />}
-        {!selected && assigned && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-400 rounded-l-xl" />}
+        {!selected && urgent && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-red-500 rounded-l-xl" />}
+        {!selected && !urgent && assigned && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-400 rounded-l-xl" />}
         <div className="flex items-center justify-between gap-3">
           <span className={`font-mono font-bold text-base tracking-tight ${fc}`}>{flight.FlightNumber}</span>
           <div className={`flex items-center gap-1.5 ${tc}`}>
@@ -342,7 +409,12 @@ const FlightRow: React.FC<{
               ✓ ODABRAN
             </span>
           )}
-          {!selected && assigned && (
+          {!selected && urgent && (
+            <span className="text-[11px] font-bold text-white bg-red-600 px-2.5 py-1 rounded-full flex-shrink-0 shadow-sm">
+              ⚠ HITNO {urgentMins !== null ? `${urgentMins}m` : ''}
+            </span>
+          )}
+          {!selected && !urgent && assigned && (
             <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full flex-shrink-0 shadow-sm ${
               isDark ? 'text-emerald-100 bg-emerald-600/80' : 'text-emerald-900 bg-emerald-200'
             }`}>
@@ -688,6 +760,13 @@ export default function AssignPanel() {
   // listu letova, pa je trenutna, bez ikakvog kašnjenja.
   const [flightSearch, setFlightSearch] = useState('');
 
+  // FIX (UX poboljšanje — brzi filter "Samo hitni"): dopunjuje search —
+  // kad je uključen, prikazuje SAMO letove koji ispunjavaju
+  // isUrgentUnassigned (nedodijeljen, polijeće za ≤60 min). Korisno kad
+  // ima puno letova na listi i osoblje želi brzo da vidi šta ODMAH treba
+  // pažnju, bez kucanja bilo čega u pretragu.
+  const [urgentOnly, setUrgentOnly] = useState(false);
+
   // ── Toast obavještenja (FIX: staff sada dobija vizuelnu potvrdu uspjeha/
   // neuspjeha dodjele ili uklanjanja gate-a/šaltera — vidi components/toast.tsx
   // za puno objašnjenje zašto je ovo dodato) ──
@@ -849,6 +928,14 @@ const { secondsLeft: idleWarningSeconds } = useIdleLogout();
       }
 
       const gateList: Assignment[] = [];
+      // FIX (uklonjeno po zahtjevu — vidi komentar uz Assignment interfejs):
+      // ranije se ovdje odvojeno pratilo status:'closed' (da bi se
+      // isključilo iz natural fallback-a) i gradio natural fallback preko
+      // buildNaturalGateAssignments. Gate monitor sad NIKAD ne prikazuje
+      // ništa bez ručne dodjele, pa je 'closed' funkcionalno identično
+      // "nema override-a" — nema više razloga da se posebno prati, i nema
+      // više natural fallback-a koji bi trebalo isključivati iz njega.
+      // gateList sad sadrži ISKLJUČIVO prave, ručne ('open') dodjele.
       for (const [gateNumber, entry] of Object.entries<any>(data.gateEntries ?? {})) {
         if (entry?.flightNumber && entry.status === 'open') {
           const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
@@ -1072,7 +1159,16 @@ if (autoClass) {
     resourceId: string, resourceType: 'desk' | 'gate',
   ) => {
     const flight = selectedFlightRef.current;
-    if (!flight) return;
+
+    // FIX (tap na gate/šalter nije davao nikakvu povratnu informaciju):
+    // ako admin nije prvo izabrao let sa liste, funkcija se ranije tiho
+    // vraćala (`if (!flight) return`) bez ikakve poruke — sad jasno kaže
+    // šta nedostaje.
+    if (!flight) {
+      showToast('Prvo izaberi let sa liste, pa tapni gate/šalter.', 'error');
+      return;
+    }
+
     const assignments = resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
     const existing    = assignments.find(a => a.resourceId === resourceId);
     if (existing) {
@@ -1082,7 +1178,7 @@ if (autoClass) {
     await assignFlightToResource(flight, resourceId, resourceType);
     setSelectedFlight(null);
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
-  }, [assignFlightToResource, setSelectedFlight]);
+  }, [assignFlightToResource, setSelectedFlight, showToast]);
 
 const handleConfirmOverride = useCallback(async () => {
   const p = pendingOverride;
@@ -1178,6 +1274,14 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
     });
   }
 }, [removingResources, rebalanceEasyJetPlus, showToast]);
+
+// FIX (uklonjeno po zahtjevu): handleCloseGate (action:'closed') je ovdje
+// ranije služio da suzbije prikaz "iz rasporeda" na gate-u koji admin ne
+// želi da vidi. Gate monitor sad NIKAD ne prikazuje ništa bez ručne
+// dodjele — "zatvoren" i "nema override-a" su vizuelno IDENTIČNI (prazan
+// ekran), pa eksplicitno zatvaranje više ne postiže ništa što obično
+// "ukloni" (handleRemoveGate, action:'clear') već ne postiže. Uklonjeno
+// zajedno sa pratećom "🚫 Sakrij (zatvori gate)" dugmadi u AssignmentCard.
 
 // ─────────────────────────────────────────────
 // FIX (automatsko čišćenje dodjela za DEPARTED letove): ako osoblje
@@ -1278,17 +1382,28 @@ const handleLogout = performLogout;
   // FIX (pretraga/filter letova): filtrira po broju leta, destinaciji ili
   // aviokompaniji — case-insensitive, bez dijakritike-osjetljivosti za
   // brojeve/kodove (ionako su uglavnom latinica/brojevi).
-  const searchedFlights = flightSearch.trim()
-    ? flights.filter(f => {
-        const q = flightSearch.trim().toLowerCase();
-        return (
-          f.FlightNumber?.toLowerCase().includes(q) ||
-          f.DestinationCityName?.toLowerCase().includes(q) ||
-          f.DestinationAirportCode?.toLowerCase().includes(q) ||
-          f.AirlineName?.toLowerCase().includes(q)
-        );
-      })
-    : flights;
+  //
+  // FIX (dodano — "Samo hitni" toggle): ovo je premješteno IZ globalnog
+  // (dijeljenog) izraza U flightList(tab) ispod, jer "hitno" zavisi od
+  // toga da li je let dodijeljen NA TOM KONKRETNOM tabu (isti let može
+  // biti dodijeljen šalteru ali ne gate-u, ili obrnuto) — getFlightAssignment
+  // je već tab-svjestan po istom principu.
+  const filterFlights = useCallback((tab: TabType): Flight[] => {
+    let list = flights;
+    if (flightSearch.trim()) {
+      const q = flightSearch.trim().toLowerCase();
+      list = list.filter(f =>
+        f.FlightNumber?.toLowerCase().includes(q) ||
+        f.DestinationCityName?.toLowerCase().includes(q) ||
+        f.DestinationAirportCode?.toLowerCase().includes(q) ||
+        f.AirlineName?.toLowerCase().includes(q)
+      );
+    }
+    if (urgentOnly) {
+      list = list.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, tab) !== null));
+    }
+    return list;
+  }, [flights, flightSearch, urgentOnly, getFlightAssignment]);
 
   if (loadingFlights) {
     return (
@@ -1301,7 +1416,10 @@ const handleLogout = performLogout;
     );
   }
 
-  const flightList = (tab: TabType) => (
+  const flightList = (tab: TabType) => {
+    const searchedFlights = filterFlights(tab);
+    const hasActiveFilter = !!flightSearch.trim() || urgentOnly;
+    return (
     <div className="space-y-2">
       {/* FIX (pretraga/filter letova): input iznad liste, filtrira po broju
           leta, destinaciji ili aviokompaniji. Client-side, bez kašnjenja. */}
@@ -1328,7 +1446,16 @@ const handleLogout = performLogout;
           </button>
         )}
       </div>
-      {flightSearch && (
+      <TouchFeedback onTap={() => setUrgentOnly(v => !v)}>
+        <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition-all ${
+          urgentOnly
+            ? 'bg-red-600 border-red-500 text-white'
+            : isDark ? 'bg-white/5 border-white/15 text-white/60' : 'bg-gray-50 border-gray-200 text-gray-600'
+        }`}>
+          <span>⚠ Samo hitni (nedodijeljen, ≤{URGENT_THRESHOLD_MINUTES} min do polaska)</span>
+        </div>
+      </TouchFeedback>
+      {hasActiveFilter && (
         <div className={`text-[11px] px-1 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
           {searchedFlights.length} od {flights.length} letova
         </div>
@@ -1343,7 +1470,7 @@ const handleLogout = performLogout;
         {flights.length > 0 && searchedFlights.length === 0 && (
           <div className={`text-center py-12 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
             <Search size={36} className="mx-auto mb-3 opacity-30" />
-            Nema letova za "{flightSearch}"
+            {urgentOnly && !flightSearch.trim() ? 'Nema hitnih letova 🎉' : `Nema letova za "${flightSearch}"`}
           </div>
         )}
         {searchedFlights.map(flight => (
@@ -1359,8 +1486,8 @@ const handleLogout = performLogout;
         ))}
       </div>
     </div>
-  );
-
+    );
+  };
 
   const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignment[]) => (
     <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-3">

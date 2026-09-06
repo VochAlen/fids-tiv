@@ -583,12 +583,18 @@ if (isNightHours()) {
       headers['If-None-Match'] = etagDeskRef.current;
     }
 
+// FIX (Vercel Active CPU trošak): bilo je `cache: 'no-store'` ovdje —
+// eksplicitno je govorilo browseru da NIKAD ne koristi ni svoj ni CDN
+// keš za ovaj fetch, poništavajući DESK_STATUS_CACHE_CONTROL header koji
+// server šalje (vidi opširan komentar uz njega u
+// app/api/test/desk-status-override/route.ts). GatePageClient.tsx nikad
+// nije imao ovu liniju — ta nedosljednost je bio dio razloga zašto je
+// check-in monitor generisao više stvarnih izvršavanja funkcije nego
+// gate monitor na istoj kadenci. Uklonjeno da fetch poštuje normalno
+// HTTP/CDN keširanje kao i gate stranica.
 const res = await fetch(
       `/api/test/desk-status-override?deskNumber=${deskNumberParam}`,
-      {
-        headers,
-        cache: 'no-store',
-      }
+      { headers }
     );
 
     // ── OBRADI 304 ───────────────────────────────────────────
@@ -671,9 +677,15 @@ const res = await fetch(
           flightsHeaders['If-None-Match'] = etagFlightsRef.current;
         }
 
+        // FIX (Vercel Active CPU trošak — manji doprinos od brzog polla,
+        // ali ista greška): `cache: 'no-store'` je bilo ovdje uprkos tome
+        // što /api/flights već ima s-maxage=45 CDN keš i ETag/304 podršku,
+        // i ovaj poziv se ionako dešava RIJETKO (samo kad se promijeni
+        // flightNumber na ovom šalteru, ne na svakom brzom pollu — vidi
+        // flightsCacheRef TTL keš iznad). Uklonjeno iz istog razloga kao
+        // kod desk-status-override poziva gore.
         const flightsRes = await fetch('/api/flights', {
           headers: flightsHeaders,
-          cache: 'no-store',
         });
 
         const newFlightsEtag = flightsRes.headers.get('ETag');

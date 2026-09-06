@@ -12,7 +12,7 @@ import {
 } from '@/lib/flight-api-helpers';
 import { cleanupRedisTTLs } from '@/lib/redis-cleanup';
 
-import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
+import { isNightHours, getPodgoricaDateString, getPodgoricaMinutesOfDay } from '@/lib/night-hours';
 
 // ── CACHE CONSTANTS ───────────────────────────────────────────
 const FLIGHT_CACHE_KEY = 'cache:flights:tivat';
@@ -348,27 +348,35 @@ function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
 // ── Računa koliko je minuta prošlo od planiranog/procijenjenog vremena leta,
 // u odnosu na SADAŠNJI trenutak. Handluje prelaz preko ponoći. Vraća null
 // ako vrijeme nije moguće parsirati.
+// FIX (backup/emergency letovi su ostajali "svježi" satima nakon što su
+// stvarno poletjeli/sletjeli — najviše primjetno tačno ujutro nakon noćnog
+// ispada ngrok tunela): bilo je `new Date(); flightDate.setHours(h, m)` —
+// server (Vercel) radi u UTC, a h/m iz rasporeda je LOKALNO (Podgorica)
+// vrijeme. setHours(h, m) je te brojeve tumačio kao UTC sate, pa je
+// izračunata "starost" leta bila pogrešna za tačno UTC↔Podgorica razliku
+// (1h zimi, 2h ljeti) — filterOutStaleFlights (cutoff 30 min) je zbog toga
+// mogao zadržati letove koji su stvarno poletjeli/sletjeli i prije 1-2h.
+// Sad koristi getPodgoricaMinutesOfDay() — čisto brojevno poređenje
+// "minuta od ponoći", bez ijedne Date/timezone operacije, pa je potpuno
+// imuno na razliku između serverskog i lokalnog vremena.
 function minutesSinceFlightTime(timeStr: string | undefined): number | null {
   if (!timeStr || timeStr === '--:--') return null;
   const [hours, minutes] = timeStr.split(':').map(Number);
   if (isNaN(hours) || isNaN(minutes)) return null;
 
-  const now = new Date();
-  const flightDate = new Date(now);
-  flightDate.setHours(hours, minutes, 0, 0);
+  const flightMinutesOfDay = hours * 60 + minutes;
+  const nowMinutesOfDay = getPodgoricaMinutesOfDay();
 
-  let diffMs = now.getTime() - flightDate.getTime();
-  const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+  let diffMinutes = nowMinutesOfDay - flightMinutesOfDay;
+  const TWELVE_HOURS_MIN = 12 * 60;
 
-  if (diffMs > TWELVE_HOURS_MS) {
-    flightDate.setDate(flightDate.getDate() + 1);
-    diffMs = now.getTime() - flightDate.getTime();
-  } else if (diffMs < -TWELVE_HOURS_MS) {
-    flightDate.setDate(flightDate.getDate() - 1);
-    diffMs = now.getTime() - flightDate.getTime();
+  if (diffMinutes > TWELVE_HOURS_MIN) {
+    diffMinutes -= 24 * 60;
+  } else if (diffMinutes < -TWELVE_HOURS_MIN) {
+    diffMinutes += 24 * 60;
   }
 
-  return Math.floor(diffMs / 60_000);
+  return diffMinutes;
 }
 
 // ── Filtrira letove koji su VEĆ poletjeli/sletjeli po tekstu statusa —
@@ -450,7 +458,7 @@ export async function getCurrentFlightData(): Promise<FlightData> {
 const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
 const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
 
-if (isNightHours()) {
+if (nightNow) {
   const client = getRedisClient();
   const nightFetchGateKey = 'night:fetch:gate';
 

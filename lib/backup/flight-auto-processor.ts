@@ -1,5 +1,6 @@
 // app/lib/backup/flight-auto-processor.ts
 import type { Flight } from '@/types/flight';
+import { getPodgoricaEpochMsForTime } from '@/lib/night-hours';
 
 export interface AutoProcessedFlight extends Flight {
   OriginalStatus: string;
@@ -128,15 +129,25 @@ export class FlightAutoProcessor {
 
   /**
    * Parse time string to Date object
+   *
+   * FIX (isti server-vs-Podgorica-vrijeme problem kao u
+   * lib/flight-data-service.ts i lib/override-ttl.ts — vidi opširne
+   * komentare tamo za pun kontekst): bilo je
+   * `new Date(this.currentTime); date.setHours(h, m, 0, 0)` — server
+   * (Vercel) radi u UTC, a timeStr je LOKALNO (Podgorica) vrijeme.
+   * Ovo utiče na auto-processing SIMULIRANOG statusa (boarding/departed/
+   * arrived) tokom backup/emergency režima (kad ngrok tunel padne) — baš
+   * scenario gdje je ispravno ponašanje najbitnije. Sad koristi
+   * getPodgoricaEpochMsForTime, koji nikad ne konstruiše Date preko
+   * setHours — radi isključivo u "minuta od this.currentTime" prostoru.
    */
   private parseTime(timeStr: string): Date | null {
     if (!timeStr || timeStr.length < 5) return null;
     
     try {
-      const [hours, minutes] = timeStr.split(':').map(Number);
-      const date = new Date(this.currentTime);
-      date.setHours(hours, minutes, 0, 0);
-      return date;
+      const epochMs = getPodgoricaEpochMsForTime(timeStr, this.currentTime);
+      if (epochMs === null) return null;
+      return new Date(epochMs);
     } catch {
       return null;
     }

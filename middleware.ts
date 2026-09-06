@@ -114,11 +114,71 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/admin/login', request.url));
   }
 
+  // FIX (problematičan scenario — 15 /api/admin/* ruta bilo je potpuno
+  // BEZ autentifikacije): provjera iznad (`isAdminRoute`) štiti SAMO
+  // stranice pod /admin/* (redirektuje na login) — nikad nije pokrivala
+  // API rute pod /api/admin/* (drugačiji prefiks, `startsWith('/admin')`
+  // ne pogađa `/api/admin/...`). Ni same rute (gate-status-override,
+  // desk-status-override, flight-override, stats, checkin-toggle,
+  // auto-reset-departed, desk-class-override, init, i mutacije na
+  // airlines/specific-flights/destinations) nisu imale SOPSTVENU provjeru
+  // cookie-ja — bilo ko sa URL-om ih je mogao pozvati direktno, bez ikad
+  // se prijavivši.
+  //
+  // VAŽAN IZUZETAK (umalo pokvario javne kiosk ekrane!): GET pozivi na
+  // /api/admin/airlines, /api/admin/specific-flights i
+  // /api/admin/destinations NISU admin-only u praksi — lib/flight-service.ts
+  // (koji koriste combined/departures/border/gate/baggage/security stranice,
+  // SVE javne, bez logina) ih čita preko lib/business-class-service.ts da
+  // odredi business/economy klasu za prikaz. Blanket blokiranje ovih 
+  // GET poziva bi pokvarilo prikaz klase na SVIM kiosk ekranima. Samo
+  // POST/PUT/DELETE na te rute (stvarne izmjene, koje radi JEDINO
+  // app/admin/business-class/page.tsx — prava admin stranica) treba
+  // zaštititi.
+  //
+  // /api/admin/login je sama prijava (mora biti javna). /api/admin/logout
+  // je namjerno idempotentan bez obzira na sesiju. /api/admin/cleanup-overrides
+  // ima SOPSTVENU CRON_SECRET provjeru (vidi tu rutu) — MORA ostati
+  // dostupna Vercel cron sistemu koji nema admin-authenticated cookie.
+  const PUBLIC_ADMIN_GET_PREFIXES = [
+    '/api/admin/airlines',
+    '/api/admin/specific-flights',
+    '/api/admin/destinations',
+  ];
+  const isPublicAdminGet = request.method === 'GET'
+    && PUBLIC_ADMIN_GET_PREFIXES.some(p => path === p || path.startsWith(p + '/'));
+
+  const isAdminApiRoute = path.startsWith('/api/admin')
+    && path !== '/api/admin/login'
+    && path !== '/api/admin/logout'
+    && path !== '/api/admin/cleanup-overrides'
+    && !isPublicAdminGet;
+
+  if (isAdminApiRoute && !isAuthenticated) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   return NextResponse.next();
 }
 
 export const config = {
+  // FIX ("Error handling upgrade request TypeError: Cannot read properties
+  // of undefined (reading 'bind')" u `next dev` terminalu): matcher je
+  // isključivao `_next/static` i `_next/image`, ali NE i
+  // `_next/webpack-hmr` — WebSocket rutu koju Next.js dev server koristi
+  // za Hot Module Reload. Middleware nije napravljen da presreće upgrade
+  // (WebSocket) zahtjeve, pa kad ovaj matcher pusti `_next/webpack-hmr`
+  // kroz middleware chain, Next-ov interni dev-server router (koji
+  // hendluje 'upgrade' event odvojeno od običnih HTTP zahtjeva) ne uspije
+  // da sastavi handler lanac i puca na `.bind()` poziva undefined
+  // funkcije — poznat Next.js problem kad middleware matcher ne isključi
+  // ovu putanju (vidi vercel/next.js diskusije o "Error handling upgrade
+  // request" + middleware matcher). Ovo je ČISTO dev-mode šum (HMR
+  // websocket ne postoji u produkciji, `next build`/`next start` ovo
+  // nikad ne pogađaju) — ne ruši stranicu, ali može praviti spor/isprekidan
+  // hot-reload i zatrpavati terminal. Dodao `_next/webpack-hmr` u
+  // isključenja da middleware prestane da ga presreće.
   matcher: [
-    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|reklame|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
+    '/((?!_next/static|_next/image|_next/webpack-hmr|favicon\\.ico|airlines|city-images|british|reklame|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
   ],
 };

@@ -598,8 +598,16 @@ const CITY_TO_AIRPORT: Record<string, string> = {
 };
 
 // Cache za weather podatke
+// FIX (previše Open-Meteo zahtjeva → 429): ovaj Map je in-memory keš
+// UNUTAR JEDNOG browser taba/monitora — i dalje koristan (izbjegava
+// nepotreban network round-trip do NAŠE /api/weather rute za više letova
+// sa istom destinacijom na istom monitoru), ali ne rješava problem sam po
+// sebi jer svaki fizički monitor ima svoj odvojen Map. Stvarno dijeljeni
+// keš (jedan Open-Meteo poziv po lokaciji na 3h, za SVE monitore zajedno)
+// je sada u app/api/weather/route.ts (Redis-backed). Vidi fetchWeather()
+// ispod — više se NE zove api.open-meteo.com direktno.
 const weatherCache = new Map<string, { data: WeatherData; timestamp: number }>();
-const CACHE_DURATION = 180 * 60 * 1000; // 10 minuta cache
+const CACHE_DURATION = 180 * 60 * 1000; // 3 sata cache
 
 // Helper funkcija za provjeru vremena
 const isWithinOperatingHours = (): boolean => {
@@ -738,19 +746,20 @@ export const useWeather = (destination: {
       }
 
       try {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // FIX (previše Open-Meteo zahtjeva → 429): bilo je
+        // `await new Promise(resolve => setTimeout(resolve, 1000))` ovdje —
+        // fiksno kašnjenje od 1s prije SVAKOG fetch-a. Ovo NIJE stagerovalo
+        // ništa (svi pozivi i dalje kreću u istom trenutku, samo 1s
+        // kasnije — isti "thundering herd" ka Open-Meteo, samo pomjeren),
+        // a dodavalo je punu sekundu kašnjenja na svaki hladan prikaz
+        // vremena. Stvarna zaštita od rate-limita sad je server-side keš
+        // u app/api/weather/route.ts (dijeljen za SVE monitore, ne samo
+        // ovaj tab) — dodatno vještačko kašnjenje ovdje više ne rješava
+        // ništa što taj keš već ne rješava bolje.
         if (cancelled) return;
 
-        const params = {
-          latitude: coordinates.latitude.toString(),
-          longitude: coordinates.longitude.toString(),
-          current: 'temperature_2m,weather_code',
-          timezone: 'auto',
-        };
-
-        const url = 'https://api.open-meteo.com/v1/forecast';
         const response = await fetch(
-          `${url}?${new URLSearchParams(params)}`
+          `/api/weather?lat=${coordinates.latitude}&lon=${coordinates.longitude}`
         );
         if (cancelled) return;
 
@@ -765,13 +774,13 @@ export const useWeather = (destination: {
         if (cancelled) return;
         
         console.log(`Weather data for ${destination.cityName || destination.airportName}:`, {
-          temperature: data.current.temperature_2m,
-          weatherCode: data.current.weather_code
+          temperature: data.temperature,
+          weatherCode: data.weatherCode
         });
         
         const newWeatherData = {
-          temperature: data.current.temperature_2m,
-          weatherCode: data.current.weather_code,
+          temperature: data.temperature,
+          weatherCode: data.weatherCode,
           loading: false,
         };
 
@@ -821,7 +830,25 @@ export const useWeather = (destination: {
       cancelled = true;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [destination.cityName, destination.airportCode, destination.airportName, destination]);
+  // FIX (previše Open-Meteo zahtjeva → 429 — DIO 2, isto tako bitan kao
+  // server-side keš gore): dependency niz je do sad uključivao i CIJELI
+  // `destination` objekat POREDO sa njegovim pojedinačnim poljima
+  // (`destination.cityName, destination.airportCode, destination.airportName,
+  // destination`). Pozivaoci (npr. CombinedPageClient.tsx) prosljeđuju
+  // INLINE objekat literal — `useWeather({ cityName: ..., airportCode: ...,
+  // airportName: ... }, 0)` — koji dobija NOV identitet na SVAKOM renderu te
+  // komponente, čak i kad su polja unutra identična. Pošto je `destination`
+  // (kao cijeli objekat) bio u dependency nizu, ovaj efekat se GASIO I
+  // PALIO na SVAKI render roditeljske komponente (npr. autoStatusTick tick
+  // na combined boardu) — svaki put otkazujući stari timer/fetch lanac i
+  // pokrećući NOV odmah (cache check je štitio od stvarnog network poziva
+  // dok je keš važeći, ali je i dalje značilo da SVAKI re-render restartuje
+  // schedule/cache logiku, i da se pun fetchWeather() ciklus izvršava
+  // ponovo čim keš istekne za VRIJEME nekog re-rendera, bez obzira na
+  // pravi 3h interval). Efekat sad zavisi SAMO od primitivnih polja koja
+  // su stvarno bitna — ne re-renderuje se dok se cityName/airportCode/
+  // airportName stvarno ne promijene.
+  }, [destination.cityName, destination.airportCode, destination.airportName]);
 
   return weatherData;
 };

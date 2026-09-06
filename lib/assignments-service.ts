@@ -86,6 +86,23 @@ export async function getRawAssignments(): Promise<RawAssignments> {
   return cachedRaw;
 }
 
+// FIX (build je pucao: "invalidateRawAssignmentsCache is not exported from
+// '@/lib/assignments-service'"): app/api/test/gate-status-override/route.ts
+// i app/api/test/desk-status-override/route.ts oba importuju i pozivaju ovu
+// funkciju POSLIJE uspješnog write-a u Redis (da assign-checkin panel i
+// /api/test/assignments ODMAH vide novu dodjelu, umjesto da čekaju da
+// istekne RAW_CACHE_TTL_MS/8s) — ali funkcija ovdje nikad nije postojala.
+// Bez nje, `getRawAssignments()` gore zna vratiti do 8s star `cachedRaw`
+// čak i odmah nakon što je admin dodijelio/uklonio gate ili šalter.
+export function invalidateRawAssignmentsCache(): void {
+  cachedRaw = null;
+  cachedRawExpiry = 0;
+  // Resetuj i simple maps keš — njegov fingerprint je izveden iz raw
+  // podataka, pa kad raw više ne važi, ni simple ne važi.
+  cachedSimple = null;
+  cachedSimpleFingerprint = '';
+}
+
 // ======================================================
 // SIMPLE MAP CACHE (memoization preko lakog fingerprint-a)
 // ======================================================

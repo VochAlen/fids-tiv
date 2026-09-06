@@ -173,3 +173,43 @@ export function isNightHours(date: Date = new Date()): boolean {
 
   return isWithinWindow(nowMinutes, window.start, window.end);
 }
+
+// FIX (minutesSinceFlightTime u lib/flight-data-service.ts računao pogrešno
+// za 1-2h): server (Vercel) radi u UTC, a HH:MM string iz rasporeda leta je
+// LOKALNO (Podgorica) vrijeme. new Date(); date.setHours(h, m) interpretira
+// h/m kao SERVERSKO (UTC) lokalno vrijeme, ne kao Podgorica vrijeme — isti
+// razlog zašto je getPodgoricaDateString() iznad morao zamijeniti
+// new Date().toISOString(). Ova funkcija vraća "koliko je minuta prošlo od
+// ponoći, po Podgorica vremenu" — poredi se sa HH:MM iz rasporeda BEZ
+// ikakve Date/timezone aritmetike, pa je immune na server-vs-lokalno
+// vrijeme problem u potpunosti (radi samo sa brojevima 0-1439).
+export function getPodgoricaMinutesOfDay(date: Date = new Date()): number {
+  const p = getMontenegroParts(date);
+  return toMinutes(p.hour, p.minute);
+}
+
+// FIX (lib/override-ttl.ts računao TTL pogrešno za 1-2h — override-i su
+// živjeli u Redis-u 1-2h duže nego što je dizajnirano): treći fajl sa
+// istim server-vs-Podgorica-vrijeme problemom (vidi getPodgoricaMinutesOfDay
+// i minutesSinceFlightTime u lib/flight-data-service.ts za pun kontekst
+// obrasca). Ova funkcija računa APSOLUTNI epoch timestamp za dato HH:MM
+// (Podgorica vrijeme) BEZ ikad konstruisati Date objekat preko setHours
+// (što bi h/m protumačilo kao serversko/UTC lokalno vrijeme) — radi
+// isključivo u prostoru "razlika u minutima od sada", pa je razlika
+// dodata na already-correct now.getTime() (koji je UVIJEK apsolutni UTC
+// epoch, bez obzira na serversku vremensku zonu — samo su setHours/
+// getHours "lokalni" accessor-i problematični, ne i getTime()/Date.now()).
+// Vraća null ako hhmm nije parsibilan "HH:MM" string.
+export function getPodgoricaEpochMsForTime(hhmm: string, now: Date = new Date()): number | null {
+  const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const targetMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  const nowMinutes = getPodgoricaMinutesOfDay(now);
+
+  let diffMinutes = targetMinutes - nowMinutes;
+  const TWELVE_HOURS_MIN = 12 * 60;
+  if (diffMinutes > TWELVE_HOURS_MIN) diffMinutes -= 24 * 60;
+  else if (diffMinutes < -TWELVE_HOURS_MIN) diffMinutes += 24 * 60;
+
+  return now.getTime() + diffMinutes * 60_000;
+}

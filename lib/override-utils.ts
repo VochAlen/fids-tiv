@@ -1,5 +1,6 @@
 // lib/override-utils.ts
 import { getRedisClient, safeRedisHDel, safeRedisHGetAll } from '@/lib/redis';
+import { getPodgoricaMinutesOfDay } from '@/lib/night-hours';
 
 export interface AutoResetResult {
   flightNumber: string;
@@ -26,9 +27,23 @@ export function parseTimeToMinutes(timeStr: string): number {
   return h * 60 + m;
 }
 
+// FIX (problematičan scenario, uživo aktivan — auto-reset kasnio 1-2h):
+// bilo je `new Date(); now.getHours()*60+now.getMinutes()` — server
+// (Vercel) radi u UTC, a raspored leta (STD/ETD) je u LOKALNOM (Podgorica)
+// vremenu. Ova funkcija je pozadina za shouldResetCheckIn/shouldResetGate,
+// koje /api/admin/cleanup-overrides cron (svaka 4h) koristi da odluči da
+// li je vrijeme da se ukloni ZABORAVLJENA ručna dodjela nakon što je
+// check-in/gate prozor za taj let stvarno prošao. Pošto je Podgorica ISPRED
+// UTC-a (+1h zimi, +2h ljeti), server je sistemski mislio da je RANIJE
+// nego što je stvarno bilo u Podgorici — auto-reset je zbog toga
+// aktivirao reset 1-2h KASNIJE nego što je trebalo, ostavljajući
+// zaboravljene ručne dodjele na ekranima duže nego što je dizajnirano.
+// Isti razlog i isto rješenje kao getPodgoricaDateString/
+// getPodgoricaMinutesOfDay u lib/night-hours.ts i minutesSinceFlightTime
+// u lib/flight-data-service.ts — sad koristi Podgorica-svjesnu funkciju
+// umjesto server-lokalnog (UTC) Date objekta.
 export function getCurrentMinutes(): number {
-  const now = new Date();
-  return now.getHours() * 60 + now.getMinutes();
+  return getPodgoricaMinutesOfDay();
 }
 
 export function minutesUntil(targetTimeStr: string): number {

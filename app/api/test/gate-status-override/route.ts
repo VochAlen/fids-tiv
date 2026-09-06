@@ -1,6 +1,7 @@
 // app/api/test/gate-status-override/route.ts
 import { NextResponse } from 'next/server';
 import { safeRedisHGetAll, safeRedisHGet, safeRedisHSet, safeRedisHDel, safeRedisExpire } from '@/lib/redis';
+import { invalidateRawAssignmentsCache } from '@/lib/assignments-service';
 import { createHash } from 'crypto';
 import { revalidateTag } from 'next/cache';
 
@@ -34,16 +35,29 @@ const CACHE_TTL_MS = 10_000;
 // dashboard/admin prikaz na nju. Ako se to desi, GATE_STATUS_CACHE_
 // CONTROL treba uskladiti sa stvarnim interval-om tog novog klijenta,
 // isto kao što je ranije bilo usklađeno sa FAST_POLL_BASE_MS.
-// FIX (garantovano ≤15s da se klasa/status vidi na gate ekranu, po
-// zahtjevu, BEZ značajnog dodatnog Vercel Active CPU troška): ovaj
-// endpoint vraća SITAN payload (par desetina bajtova po gate-u — jedan
-// Redis HGET, ne cijela lista letova kao /api/flights), pa je kraći keš
-// ovdje mnogo jeftiniji trade-off nego isto na /api/flights. Gate brzi
-// poll radi na 9-12s kadenci — da ukupno kašnjenje (CDN staleness +
-// vrijeme do sledećeg poll-a) sigurno ostane ispod 15s, CDN keš mora
-// biti ≤2-3s (2s + do 12s = 14s, margina od 1s za mrežni overhead).
+// FIX (Vercel Edge Requests/Active CPU trošak na 12 gate monitora × 9-12s
+// poll = ~2.96M poziva/mjesec, GOTOVO SVI stvarna izvršavanja funkcije):
+// prethodni keš prozor (2-3s) je bio KRAĆI od poll intervala (9-12s), pa
+// CDN keš NIKAD nije stigao da "pogodi" — svaki poll je bio garantovano
+// stvarno izvršavanje funkcije, iako POST handler ispod već poziva
+// `revalidateTag('flight-status')` + šalje Vercel-Cache-Tag header, što
+// je dokumentovana Vercel funkcija (radi na SVIM planovima, uključujući
+// Pro) za TRENUTNU invalidaciju keša čim se nešto stvarno promijeni —
+// kratak TTL kao jedini mehanizam propagacije bio je nepotreban.
+// Sad je s-maxage=20s (duplo duže od poll intervala) — kad se NIŠTA ne
+// promijeni, CDN servira keširan odgovor umjesto da pokreće funkciju, pa
+// stvarna izvršavanja padaju otprilike 2x. Kad se NEŠTO promijeni,
+// revalidateTag() odmah invalidira keš — sledeći poll (isti 9-12s
+// interval kao i prije) i dalje vidi promjenu, propagacija ostaje ista
+// kao prije. stale-while-revalidate=20 je SAMO fallback ako iz bilo kog
+// razloga tag-invalidacija ne bi radila (worst-case do ~40s umjesto ~5s)
+// — nakon deploy-a provjeri Vercel dashboard (Functions → Invocations za
+// ovu rutu) da potvrdiš stvaran pad, i prati par dana da li se dodjele/
+// uklanjanja gate-ova i dalje vide u očekivanom roku. Ako se bilo šta
+// vidi sporije nego prije, vrati na 'public, max-age=2, s-maxage=2,
+// stale-while-revalidate=3' — to je jedina promjena za rollback.
 const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=2, stale-while-revalidate=3';
+  'public, max-age=2, s-maxage=20, stale-while-revalidate=20';
 
 
 type GateEntry = {
@@ -105,9 +119,18 @@ async function touchExpiry(): Promise<void> {
 }
 
 // Piše TAČNO JEDNO polje (jedan gate) — atomarno, ne dira ostale gate-ove.
-async function writeOne(gateNumber: string, entry: GateEntry): Promise<void> {
-  await safeRedisHSet(ALL_KEY, gateNumber, JSON.stringify(entry));
-  await touchExpiry();
+// FIX (assign-checkin ne prikazuje dodijeljene gate-ove): vraća boolean iz
+// safeRedisHSet — ako je Redis circuit breaker otvoren ili je došlo do
+// greške, safeRedisHSet vraća false. Bez ovog check-a, POST handler bi
+// vratio `{ success: true }` iako zapis NIJE upisan — admin vidi toast
+// "Gate 21 → W61234 dodijeljen" ali zapis u Redis-u ne postoji, pa
+// /api/test/assignments i gate monitor ne vide ništa. Sada vraćamo 500
+// da admin zna da nešto nije u redu i da ponovi akciju.
+async function writeOne(gateNumber: string, entry: GateEntry): Promise<boolean> {
+  const ok = await safeRedisHSet(ALL_KEY, gateNumber, JSON.stringify(entry));
+  if (!ok) return false;
+  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
+  return true;
 }
 
 async function deleteOne(gateNumber: string): Promise<void> {
@@ -168,6 +191,16 @@ const all = await readAllCached();
           'Cache-Control': GATE_STATUS_CACHE_CONTROL,
           'CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
           'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
+          // FIX (klasa/status vidljiviji na gate ekranu): bilo je samo
+          // Cache-Control bez Cache-Tag-a. revalidateTag('flight-status')
+          // koji POST handler poziva nakon dodjele/uklanjanja/klase NIJE
+          // probijao CDN keš ove rute jer CDN nije znao da je ovaj odgovor
+          // tagiran sa 'flight-status'. Dodajemo i 'Cache-Tag' i
+          // 'Vercel-Cache-Tag' — Vercel-CDN-Cache-Tag je onaj koji Vercel
+          // CDN stvarno prepoznaje za tag-based invalidaciju, 'Cache-Tag'
+          // je ostavljen radi šire kompatibilnosti.
+          'Cache-Tag': 'flight-status',
+          'Vercel-Cache-Tag': 'flight-status',
         },
       });
     }
@@ -180,6 +213,12 @@ const all = await readAllCached();
       'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
 
       'ETag': etag,
+      // FIX (vidi komentar gore kod 304 grane): bez ovog tag-a,
+      // revalidateTag('flight-status') koji POST handler poziva nije
+      // probijao CDN keš ove rute — gate monitor čekao do 5s da vidi
+      // novu dodjelu iako je server već znao za nju.
+      'Cache-Tag': 'flight-status',
+      'Vercel-Cache-Tag': 'flight-status',
     };
 
     if (gateNumber) {
@@ -219,7 +258,12 @@ export async function POST(request: Request) {
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
-    await writeOne(gateNumber, entry);
+    if (!(await writeOne(gateNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else if (action === 'closed') {
     const entry: GateEntry = {
       status: 'closed',
@@ -227,7 +271,12 @@ export async function POST(request: Request) {
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
-    await writeOne(gateNumber, entry);
+    if (!(await writeOne(gateNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else if (action === 'clear') {
     await deleteOne(gateNumber);
   } else if (action === 'setClass') {
@@ -235,15 +284,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
     }
     const entry: GateEntry = { ...existing, classType: classType ?? null };
-    await writeOne(gateNumber, entry);
+    if (!(await writeOne(gateNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-  // Invalidiraj lokalni in-process keš odmah — sljedeći GET u ISTOJ
-  // serverless instanci mora vidjeti svježu vrijednost, ne stare cachedAll.
+  // FIX (assign-checkin ne prikazuje dodijeljene gate-ove): bilo je
+  // samo `cachedAll = null; cachedAllExpiry = 0;` — to čisti samo
+  // OVU rutinu-local keš, NE i cachedRaw u lib/assignments-service.ts.
+  // Posljedica: assign-checkin panel ne vidi novu dodjelu do 8s kasnije.
+  // Sada invalidate i assignments-service modul-level keš — sledeći GET
+  // /api/test/assignments ODMAH čita svježe iz Redisa.
   cachedAll = null;
   cachedAllExpiry = 0;
+  invalidateRawAssignmentsCache();
 
   // ── Odmah probij CDN keš na /api/flights/status — isti razlog kao
   // kod desk-status-override.
