@@ -101,8 +101,35 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(url, 301);
   }
 
+  // ── PA AUTENTIFIKACIJA (po zahtjevu — potpuno ODVOJENA od opšte admin
+  // autentifikacije, sopstveni cookie `pa-authenticated`, sopstvena
+  // login stranica /pa/login) ──
+  // Prije ove izmjene: /pa (sam ekran koji izgovara najave) NIJE imao
+  // NIKAKVU zaštitu — bilo ko sa URL-om je mogao otvoriti stranicu i
+  // aktivirati razglas na fizičkom aerodromskom pojačalu. /admin/pa
+  // JESTE bio zaštićen, ali OPŠTIM admin cookie-jem (dijeljenim sa
+  // dodjelom gate-ova/business-class konfiguracijom) — ne namjenskom
+  // zaštitom za sam razglas. Vidi app/api/pa/login/route.ts za pun
+  // kontekst i env varijable (PA_USERNAME/PA_PASSWORD).
+  const isPaPage = path === '/pa' || path === '/admin/pa';
+  const isPaLoginPage = path === '/pa/login';
+  const isPaAuthenticated = request.cookies.get('pa-authenticated')?.value === 'true';
+
+  if (isPaLoginPage && isPaAuthenticated) {
+    const dest = request.nextUrl.searchParams.get('next') === 'admin' ? '/admin/pa' : '/pa';
+    return NextResponse.redirect(new URL(dest, request.url));
+  }
+
+  if (isPaPage && !isPaAuthenticated) {
+    const loginUrl = new URL('/pa/login', request.url);
+    if (path === '/admin/pa') loginUrl.searchParams.set('next', 'admin');
+    return NextResponse.redirect(loginUrl);
+  }
+
   // ── ADMIN AUTENTIFIKACIJA ──
-  const isAdminRoute = path.startsWith('/admin');
+  // FIX: /admin/pa je NAMJERNO izuzet odavde (`path !== '/admin/pa'`) —
+  // ima sopstvenu PA-specifičnu zaštitu iznad, ne opšti admin login.
+  const isAdminRoute = path.startsWith('/admin') && path !== '/admin/pa';
   const isLoginPage = path === '/admin/login';
   const isAuthenticated = request.cookies.get('admin-authenticated')?.value === 'true';
 
@@ -140,6 +167,8 @@ export function middleware(request: NextRequest) {
   // je namjerno idempotentan bez obzira na sesiju. /api/admin/cleanup-overrides
   // ima SOPSTVENU CRON_SECRET provjeru (vidi tu rutu) — MORA ostati
   // dostupna Vercel cron sistemu koji nema admin-authenticated cookie.
+  // /api/admin/pa-announcement je NAMJERNO izuzet — ima sopstvenu
+  // PA-specifičnu zaštitu ispod (isti princip kao /admin/pa iznad).
   const PUBLIC_ADMIN_GET_PREFIXES = [
     '/api/admin/airlines',
     '/api/admin/specific-flights',
@@ -152,9 +181,25 @@ export function middleware(request: NextRequest) {
     && path !== '/api/admin/login'
     && path !== '/api/admin/logout'
     && path !== '/api/admin/cleanup-overrides'
+    && path !== '/api/admin/pa-announcement'
     && !isPublicAdminGet;
 
   if (isAdminApiRoute && !isAuthenticated) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // ── PA API ZAŠTITA ──
+  // /api/pa-announcements (GET, poll-uje ga sam /pa ekran) i
+  // /api/admin/pa-announcement (POST, zove ga /admin/pa panel) —
+  // OBOJE sad zahtijevaju pa-authenticated, NE admin-authenticated.
+  // Pošto /pa i /admin/pa stranice već zahtijevaju ovaj isti cookie
+  // (vidi provjeru iznad), njihovi VLASTITI fetch() pozivi automatski
+  // nose taj cookie (isti-origin) — legitimnim korisnicima se ništa ne
+  // mijenja, ovo samo zatvara direktan-URL zaobilazak za sve ostale.
+  // /api/pa/login i /api/pa/logout su namjerno izuzeti (login mora
+  // biti javan, logout je idempotentan).
+  const isPaApiRoute = path === '/api/pa-announcements' || path === '/api/admin/pa-announcement';
+  if (isPaApiRoute && !isPaAuthenticated) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

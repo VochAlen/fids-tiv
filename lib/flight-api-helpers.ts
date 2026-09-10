@@ -464,6 +464,136 @@ export async function mapNgrokFlightToFlight(raw: NgrokFlightRaw): Promise<Fligh
     modificationCount: 0,
   };
 }
+
+// ── FIX (KRITIČNO — otkriveno direktnim uživo testom, ne pretpostavkom):
+// montenegroairports.com/aerodromixs/cache-flights.php TRENUTNO vraća
+// OData format ({"@odata.context":..., "value":[...]})  sa POTPUNO
+// drugačijim imenima polja (FlightType, ScheduledDateTime,
+// FlightNumberIATA, Gates kao NIZ, itd.) — NE format koji odgovara
+// RawFlightData/mapRawFlight (TipLeta/BrojLeta/Planirano) iznad. Taj
+// stariji format se možda koristio ranije, ili se koristi na nekom
+// DRUGOM endpoint-u — ali OVAJ, tačan URL, SAD vraća ovo. Ako se format
+// ikad ponovo promijeni, ovaj mapper će trebati odgovarajuće ažuriranje
+// — nema garancije da eksterni API zadrži oblik odgovora zauvijek
+// nepromijenjen.
+export interface AlternateApiFlight {
+  ID: string;
+  FlightType: string; // 'Departure' | 'Arrival'
+  ScheduledDateTime: string | null; // ISO SA eksplicitnim offset-om, npr. "2026-09-10T07:00:00+02:00"
+  EstimatedDateTime: string | null;
+  ActualDateTime: string | null;
+  FlightNumberIATA: string;
+  FlightNumberICAO: string | null;
+  StatusID: string | null;
+  PublicRemarkAdhoc: string | null;
+  Airline: string;
+  Airport: string;
+  Checkins: string[];
+  Gates: string[];
+  BaggageBelts: string[];
+  Codeshares: string[];
+}
+
+export interface AlternateApiResponse {
+  value: AlternateApiFlight[];
+}
+
+// Izvlači "HH:MM" DIREKTNO iz ISO stringa regex-om, BEZ prolaska kroz
+// Date objekat/toLocaleTimeString — ovo drugo bi reinterpretiralo
+// vrijeme u SISTEMSKOJ vremenskoj zoni servera (Vercel = UTC),
+// pomjerajući npr. "22:50+02:00" (Podgorica) na "20:50" (UTC) — ista
+// klasa greške koja je već popravljena na više mjesta u ovom projektu
+// za wall-clock vremena BEZ offseta. Ovdje string VEĆ sadrži tačno
+// aerodromsko-lokalno vrijeme (offset je samo prateća informacija o
+// zoni, ne nešto što treba primijeniti/konvertovati), pa se čita
+// direktno.
+function extractHHMM(isoWithOffset: string | null): string {
+  if (!isoWithOffset) return '';
+  const m = isoWithOffset.match(/T(\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}` : '';
+}
+
+export async function mapAlternateApiFlight(raw: AlternateApiFlight): Promise<Flight> {
+  const flightType: 'departure' | 'arrival' = raw.FlightType === 'Departure' ? 'departure' : 'arrival';
+
+  const rawNumber = (raw.FlightNumberIATA || '').trim();
+  // IATA kod avio kompanije je UVIJEK tačno 2 karaktera (slovo i/ili
+  // broj, po IATA standardu) — npr. "W4"+"6450", "JU"+"660", "4O"+"100",
+  // "TK"+"1085". Ovaj izvor ne daje odvojeno polje za kod, pa se
+  // izvlači iz prva 2 karaktera broja leta.
+  const airlineCode = rawNumber.slice(0, 2);
+  const cleanNumber = cleanFlightNumber(rawNumber, airlineCode) || rawNumber;
+
+  const gate = (raw.Gates || []).filter(Boolean).join(',');
+  const checkIn = (raw.Checkins || []).filter(Boolean).join(',');
+  const baggage = (raw.BaggageBelts || []).filter(Boolean).join(',');
+  const codeShareFlights = (raw.Codeshares || []).filter(Boolean);
+
+  const schHHMM = extractHHMM(raw.ScheduledDateTime);
+  const estHHMM = extractHHMM(raw.EstimatedDateTime) || schHHMM;
+  const actHHMM = extractHHMM(raw.ActualDateTime);
+
+  // Za razliku od wall-clock stringova BEZ offseta koje ostatak
+  // projekta mora ručno parsirati preko Date.UTC() (vidi komentare u
+  // lib/flight-data-service.ts), OVDJE je string već EKSPLICITNO
+  // vremenski-zonski nedvosmislen (+02:00/+01:00) — new Date(...) ga
+  // ispravno tumači NEZAVISNO od sistemske zone servera, pa je
+  // bezbjedno koristiti direktno za sortiranje.
+  let sortTime: number | undefined = undefined;
+  if (raw.ScheduledDateTime) {
+    const parsed = new Date(raw.ScheduledDateTime).getTime();
+    if (!isNaN(parsed)) sortTime = parsed;
+  }
+
+  // StatusID dolazi kao "Departed 00:15"/"Arrived 23:27" (riječ +
+  // ugrađeno vrijeme) ili null za letove koji još nemaju status —
+  // izvlači se samo prva riječ radi dosljednosti sa StatusEN oblikom
+  // koji ostatak sistema očekuje (i dalje sadrži "departed"/"arrived"
+  // kao podstring, pa .includes() provjere elsewhere rade ispravno i
+  // bez ove izmjene — ali čist prikaz na ekranu je bolji ovako).
+  const statusWord = (raw.StatusID || 'Scheduled').trim().split(/\s+/)[0];
+
+  const flightId = `${cleanNumber}_${schHHMM}_${raw.Airport}`;
+
+  return {
+    id: flightId,
+    FlightNumber: cleanNumber,
+    AirlineCode: airlineCode,
+    AirlineICAO: raw.FlightNumberICAO || '',
+    AirlineName: raw.Airline || '',
+    DestinationAirportName: raw.Airport || '',
+    DestinationAirportCode: '',
+    ScheduledDepartureTime: schHHMM || '--:--',
+    EstimatedDepartureTime: estHHMM || '--:--',
+    ActualDepartureTime: actHHMM || '--:--',
+    StatusEN: statusWord,
+    StatusMN: '',
+    Terminal: '',
+    GateNumber: gate,
+    GateNumbers: parseGateNumbers(gate),
+    CheckInDesk: checkIn,
+    CheckInDesks: parseCheckInDesks(checkIn),
+    BaggageReclaim: baggage,
+    CodeShareFlights: codeShareFlights,
+    // Nema ICAO koda za pouzdano pretraživanje logoa u ovom izvoru —
+    // getLogoURLWithFallback('') vraća placeholder ODMAH, bez mrežnog
+    // poziva (provjereno u samoj funkciji), pa ovo nije trošak.
+    AirlineLogoURL: await getLogoURLWithFallback(raw.FlightNumberICAO || ''),
+    FlightType: flightType,
+    DestinationCityName: raw.Airport || '',
+
+    _sortTime: sortTime,
+
+    _id: undefined,
+    manualOverride: undefined,
+    checkInDesks: undefined,
+    adminNotes: undefined,
+    lastModifiedBy: undefined,
+    lastModifiedAt: undefined,
+    modificationCount: 0,
+  };
+}
+
 export function expandFlightForMultipleGates(flight: Flight): Flight[] {
   const flights: Flight[] = [flight];
   

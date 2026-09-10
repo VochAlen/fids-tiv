@@ -1321,8 +1321,12 @@ const handleSave = async () => {
   
   const currentSeason = getCurrentSeason();
   
+  // FIX (po zahtjevu — admin stranice MORAJU da se skroluju): isti
+  // globalni overflow:hidden problem kao app/admin/pa/page.tsx (vidi
+  // opširan komentar tamo) — h-screen (fiksno) + overflow-y-auto na
+  // ovom div-u, umjesto min-h-screen bez skrola.
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
+    <div className="h-screen overflow-y-auto bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
       <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       <div className="max-w-7xl mx-auto">
         <header className="mb-8">

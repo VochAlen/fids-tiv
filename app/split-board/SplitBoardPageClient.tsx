@@ -653,8 +653,12 @@ const lastKnownHashRef = useRef<string | null>(null);
   }, []);
 
   // Hard reset
+  // FIX (24/7/365 self-recovery audit — isti razlog kao CombinedPageClient.tsx):
+  // jitter sprečava da se svi split-board ekrani restartuju u istom
+  // trenutku tokom dana ako su upaljeni približno istovremeno ujutro.
   useEffect(() => {
-    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS);
+    const jitter = Math.floor(Math.random() * 20 * 60_000);
+    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS + jitter);
     return () => clearTimeout(id);
   }, []);
 

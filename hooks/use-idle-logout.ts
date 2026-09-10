@@ -37,12 +37,24 @@ interface UseIdleLogoutOptions {
   idleMs?: number;
   warningMs?: number;
   enabled?: boolean;
+  // FIX (po zahtjevu — PA sistem dobija sopstvenu prijavu, odvojenu od
+  // opšteg admin login-a): ranije je ovaj hook bio TVRDO vezan za
+  // /api/admin/logout i /admin/login — sad je konfigurabilan, pa
+  // app/admin/pa/page.tsx može koristiti /api/pa/logout i
+  // /pa/login umjesto opšteg admin sistema, bez duplirane kopije cijele
+  // idle-logout logike. Default vrijednosti su NEPROMIJENJENE — svih 5
+  // postojećih admin stranica koje već koriste ovaj hook bez ovih opcija
+  // nastavljaju identično da rade.
+  logoutUrl?: string;
+  redirectUrl?: string;
 }
 
 export function useIdleLogout(options: UseIdleLogoutOptions = {}) {
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const warningMs = options.warningMs ?? DEFAULT_WARNING_MS;
   const enabled = options.enabled ?? true;
+  const logoutUrl = options.logoutUrl ?? '/api/admin/logout';
+  const redirectUrl = options.redirectUrl ?? '/admin/login?reason=idle';
 
   // Sekunde preostale do odjave, ili null kad NIJE u periodu upozorenja
   // (tj. korisnik je aktivan i nema razloga za prikaz banner-a).
@@ -54,15 +66,15 @@ export function useIdleLogout(options: UseIdleLogoutOptions = {}) {
 
   const doLogout = useCallback(async () => {
     try {
-      await fetch('/api/admin/logout', { method: 'POST' });
+      await fetch(logoutUrl, { method: 'POST' });
     } catch {
       // I ako mrežni poziv padne, ipak forsiramo redirect — httpOnly
-      // cookie ima svoj 8h hard-cap kao posljednju liniju odbrane, ali ne
+      // cookie ima svoj hard-cap kao posljednju liniju odbrane, ali ne
       // treba da čekamo mrežni odgovor da bismo maknuli osoblje sa
       // osjetljivog ekrana kad je isteklo vrijeme neaktivnosti.
     }
-    window.location.href = '/admin/login?reason=idle';
-  }, []);
+    window.location.href = redirectUrl;
+  }, [logoutUrl, redirectUrl]);
 
   useEffect(() => {
     if (!enabled) return;

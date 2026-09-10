@@ -855,11 +855,15 @@ function DeparturesBoard(): JSX.Element {
   }, []);
 
   // Hard reset
+  // FIX (24/7/365 self-recovery audit — isti razlog kao CombinedPageClient.tsx):
+  // jitter sprečava da se svi departures ekrani restartuju u istom
+  // trenutku tokom dana ako su upaljeni približno istovremeno ujutro.
   useEffect(() => {
+    const jitter = Math.floor(Math.random() * 20 * 60_000);
     const id = setTimeout(() => {
       if ((window as any).electronAPI?.restartApp) (window as any).electronAPI.restartApp();
       else window.location.reload();
-    }, HARD_RESET_INTERVAL_MS);
+    }, HARD_RESET_INTERVAL_MS + jitter);
     return () => clearTimeout(id);
   }, []);
 

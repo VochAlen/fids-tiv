@@ -6,6 +6,9 @@ import type { Flight, FlightData, RawFlightData } from '@/types/flight';
 import {
   mapNgrokFlightToFlight,
   type NgrokFlightRaw,
+  mapAlternateApiFlight,
+  type AlternateApiFlight,
+  type AlternateApiResponse,
   expandFlightForMultipleGates,
   sortFlightsByTime,
   filterTodayFlights
@@ -21,9 +24,24 @@ const FLIGHT_CACHE_TTL_SECONDS = 240;
 const FLIGHT_META_KEY = 'cache:flights:meta';
 
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
-// Promijeni na false da potpuno isključiš korišćenje backup podataka
-// (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
-const BACKUP_ENABLED = false;
+// FIX (24/7/365 self-recovery audit): PROMIJENJENO NA true. Ranije je
+// bilo `false`, što je značilo da kad uživo API (ngrok tunel) padne,
+// SVI kiosk ekrani (42+ fizička monitora) prikazuju PRAZAN raspored
+// ("Backup je isključen — nema podataka za prikaz") umjesto da
+// automatski prebace na poslednji poznati raspored — direktno
+// protivno cilju da sistem radi bez ljudske intervencije. Backup lanac
+// (lib/backup/flight-backup-service.ts, flight-auto-processor.ts) je
+// potpuno izgrađen i testiran (filtriranje zastarjelih/završenih
+// letova, simulacija napretka u realnom vremenu, jasno "warning" polje
+// da se zna da se prikazuje stari podatak) — samo je bio ugašen na
+// ovom jednom mjestu.
+//
+// VAŽNA NAPOMENA ZA TIM: ako je ovo BILO namjerno ugašeno zbog
+// konkretnog incidenta (npr. loš/zastarjeo backup podatak je jednom
+// prikazan kao da je uživo), OBAVEZNO provjeri prije deploy-a da li je
+// taj uzrok otklonjen — inače će se isti problem sad ponovo pojaviti
+// (samo sad tiho, jer je ovo "self-recovery" put, ne vidljiva greška).
+const BACKUP_ENABLED = true;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
 let overrideCacheData: Record<string, Record<string, string>> = {};
@@ -45,6 +63,29 @@ const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
 // svoje linije (temporal dead zone), pa obrnut redoslijed puca na builds.
 const FLIGHT_API_URL = process.env.FLIGHT_PROXY_URL || 'https://crafty-dumpling-molehill.ngrok-free.dev/schedule';
 const PROXY_SECRET = process.env.FLIGHT_PROXY_SECRET || '';
+
+// FIX (po zahtjevu — nezavisan uživo izvor kad ngrok tunel PADNE, ne
+// samo kad usporI): do sad je CIO uživo lanac (uključujući "emergency"
+// granu, korak 5 ispod) zavisio od ISTOG lanca desktop → ngrok tunel →
+// tiv.nais.aero — ako ngrok padne (računar se restartuje, izgubi
+// struju, tunel istekne), NIJEDAN "uživo" pokušaj ne bi uspio, sistem
+// bi direktno pao na STARI keširan backup (sad opet uključen, ali i
+// dalje zastario podatak, ne stvaran uživo). montenegroairports.com/
+// aerodromixs/cache-flights.php je JAVNO dostupan direktno preko
+// interneta — NE zavisi od bilo kog lokalnog računara/tunela.
+//
+// FIX (ISPRAVLJENO nakon direktnog uživo testa): prvobitna verzija ove
+// izmjene je PRETPOSTAVILA da ovaj URL vraća isti oblik kao
+// RawFlightData/mapRawFlight (TipLeta/BrojLeta/Planirano...) — direktan
+// poziv je pokazao da TRENUTNO vraća SASVIM DRUGAČIJI, OData oblik
+// ({"value":[{"FlightType":"Departure","FlightNumberIATA":"W46450",
+// "Gates":["07"],...}]}). Mapiranje je sad preko mapAlternateApiFlight
+// (lib/flight-api-helpers.ts), koje odgovara STVARNOM, provjerenom
+// obliku odgovora. NAPOMENA ZA BUDUĆNOST: ovo je eksterni, tuđi API —
+// ako ikad promijeni oblik odgovora, ovaj mapper će trebati odgovarajuće
+// ažuriranje; nema garancije da će oblik ostati zauvijek isti.
+const ALTERNATE_FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
+const ALTERNATE_FETCH_TIMEOUT_MS = 8000;
 
 // ── Header-i za poziv ka SOPSTVENOM ngrok proxy-ju. Chrome-spoofing
 // header-i više nisu potrebni jer se poziva vlastiti server, ne tuđi.
@@ -290,6 +331,7 @@ async function fetchWithQuickRetry(
 }
 
 async function performEmergencyFetch(): Promise<Flight[] | null> {
+  // Pokušaj 1: ngrok (isti kao ranije).
   try {
     const emergencyResponse = await fetch(FLIGHT_API_URL, {
       method: 'GET',
@@ -297,22 +339,55 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
       headers: FETCH_HEADERS,
       signal: AbortSignal.timeout(EMERGENCY_FETCH_TIMEOUT_MS),
     });
-    if (!emergencyResponse.ok) return null;
+    if (emergencyResponse.ok) {
+      const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
+      if (Array.isArray(rawData) && rawData.length > 0) {
+        // FIX (letovi od jučer čak ni greškom): ranije se ovdje mapiralo
+        // prvih 5 SIROVIH stavki i vraćalo BEZ filterTodayFlights()
+        // filtera koji svaki drugi put (live fetch, backup) obavezno
+        // prolazi. Izvor ne vraća podatke ograničene/sortirane po
+        // datumu — ovo je bio jedini put u cijelom sistemu gdje je let
+        // van "danas" teoretski mogao proći nefiltriran, baš u
+        // najkritičnijem trenutku. Sad se filtrira PRIJE rezanja na
+        // prvih 5, dosljedno sa ostatkom sistema.
+        const mapped = await Promise.all(rawData.map(raw => mapNgrokFlightToFlight(raw)));
+        const todayOnly = filterTodayFlights(mapped);
+        if (todayOnly.length > 0) return todayOnly.slice(0, 5);
+      }
+    }
+  } catch {
+    // Padni na alternativni izvor ispod — ne vraćamo null ovdje jer
+    // ngrok pad ne znači da je i montenegroairports.com pao.
+  }
 
-    const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
-    if (!Array.isArray(rawData) || rawData.length === 0) return null;
+  // FIX (po zahtjevu — "šta ako i backup API padne?" analiza otkrila
+  // pravu rupu): ovaj emergency korak je RANIJE pokušavao SAMO ngrok —
+  // ako su i glavni ngrok fetch (korak 3) I alternativni izvor (korak
+  // 3.5) VEĆ pali prije nego što se stiglo dovde, ovaj "poslednji
+  // pokušaj" bi ponovo gađao isti, već-potvrđeno-mrtav ngrok URL, bez
+  // ikakve stvarne šanse za uspjeh — montenegroairports.com nikad nije
+  // ni proban kao stvarna poslednja linija odbrane. Sad, ako ngrok
+  // ovdje (ponovo) padne, probamo montenegroairports.com prije nego
+  // se preda i vrati prazno "critical failure" stanje.
+  try {
+    const altEmergencyResponse = await fetch(ALTERNATE_FLIGHT_API_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(EMERGENCY_FETCH_TIMEOUT_MS),
+    });
+    if (!altEmergencyResponse.ok) return null;
 
-    // FIX (letovi od jučer čak ni greškom): ranije se ovdje mapiralo prvih
-    // 5 SIROVIH stavki i vraćalo BEZ filterTodayFlights() filtera koji
-    // svaki drugi put (live fetch, backup) obavezno prolazi. Izvor
-    // (FLIGHT_API_URL) ne vraća podatke ograničene/sortirane po datumu —
-    // ovo je bio jedini put u cijelom sistemu gdje je let van "danas"
-    // teoretski mogao proći nefiltriran, baš u najkritičnijem trenutku
-    // (kad su i live API i backup već pali). Sad se filtrira PRIJE
-    // rezanja na prvih 5, dosljedno sa ostatkom sistema.
-    const mapped = await Promise.all(rawData.map(raw => mapNgrokFlightToFlight(raw)));
-    const todayOnly = filterTodayFlights(mapped);
-    return todayOnly.slice(0, 5);
+    // FIX (KRITIČNO — isti ispravljen oblik odgovora kao korak 3.5,
+    // vidi opširan komentar tamo): OData omotač ({"value":[...]}), ne
+    // goli niz.
+    const altRawPayload = await altEmergencyResponse.json() as AlternateApiResponse;
+    const altRawData: AlternateApiFlight[] = Array.isArray(altRawPayload?.value) ? altRawPayload.value : [];
+    if (altRawData.length === 0) return null;
+
+    const altMapped = await Promise.all(altRawData.map((raw: AlternateApiFlight) => mapAlternateApiFlight(raw)));
+    const altTodayOnly = filterTodayFlights(altMapped);
+    return altTodayOnly.length > 0 ? altTodayOnly.slice(0, 5) : null;
   } catch {
     return null;
   }
@@ -408,7 +483,7 @@ function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: nu
 
 async function buildFlightData(
   rawFlights: Flight[],
-  source: 'live' | 'backup' | 'auto-processed' | 'emergency',
+  source: 'live' | 'live-alternate' | 'backup' | 'auto-processed' | 'emergency',
   lastUpdated: string,
   options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number; isNightMode?: boolean }
 ): Promise<FlightData> {
@@ -578,6 +653,84 @@ await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECO
   } catch (liveError) {
     console.error('❌ Live API failed:', liveError instanceof Error ? liveError.message : liveError);
   }
+
+// ── 3.5. ALTERNATE LIVE FETCH (montenegroairports.com direktno) ──
+// FIX (po zahtjevu): pokušava se SAMO ako je gornji (ngrok) pokušaj
+// pao — vidi opširan komentar uz ALTERNATE_FLIGHT_API_URL na vrhu
+// fajla za PUN kontekst zašto ovo postoji. Namjerno jednostavniji
+// fetch (bez Promise.race/retry logike gornjeg bloka, koja postoji
+// SPECIFIČNO zbog manje pouzdanog ngrok/desktop lanca) — ovo je VEĆ
+// fallback grana ka JAVNOM, direktno dostupnom API-ju; ako i ona
+// zakaže, nastavlja se dolje na BACKUP MODE kao i ranije (ponašanje
+// prije ove izmjene, netaknuto).
+//
+// FIX (KRITIČNO — ispravljen oblik odgovora): direktan uživo test ovog
+// URL-a je otkrio da vraća OData omotač ({"value": [...]}), NE goli
+// niz kao pretpostavljeno u prvoj verziji ovog koda — normalizeRawFlightArray
+// (namijenjena STAROM RawFlightData obliku) bi ovdje tiho vratila 0
+// letova (payload nije Array na vrhu, pada u "0 letova" granu) umjesto
+// da baci grešku, što bi značilo da ova grana NIKAD stvarno ne bi
+// uspjela a da se to primijeti. Sad se `.value` eksplicitno izvlači, a
+// mapira preko mapAlternateApiFlight (lib/flight-api-helpers.ts) koji
+// odgovara STVARNOM, provjerenom obliku odgovora.
+try {
+  const altResponse = await fetch(ALTERNATE_FLIGHT_API_URL, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: { 'Accept': 'application/json' },
+    signal: AbortSignal.timeout(ALTERNATE_FETCH_TIMEOUT_MS),
+  });
+
+  if (!altResponse.ok) throw new Error(`HTTP ${altResponse.status}`);
+
+  const altPayload = await altResponse.json() as AlternateApiResponse;
+  const altRawData: AlternateApiFlight[] = Array.isArray(altPayload?.value) ? altPayload.value : [];
+
+  if (altRawData.length === 0) throw new Error('Alternate izvor vratio prazan/neočekivan odgovor');
+
+  console.log(`✅ Alternate live fetch (montenegroairports.com): ${altRawData.length} letova`);
+
+  const altMappedFlights = await Promise.all(altRawData.map((raw: AlternateApiFlight) => mapAlternateApiFlight(raw)));
+  let altTodayFlights = filterTodayFlights(altMappedFlights);
+  altTodayFlights = removeDuplicateFlights(altTodayFlights);
+
+  const altExpandedFlights: Flight[] = [];
+  altTodayFlights.forEach(flight => {
+    if ((flight.GateNumber?.includes(',')) || (flight.CheckInDesk?.includes(','))) {
+      altExpandedFlights.push(...expandFlightForMultipleGates(flight));
+    } else {
+      altExpandedFlights.push(flight);
+    }
+  });
+
+  const altFinalFlights = removeDuplicateFlights(altExpandedFlights);
+
+  if (altFinalFlights.length > 0) {
+    // Isti princip kao glavni uživo fetch — osvježi backup i sa OVOG
+    // izvora, da backup uvijek ima najsvježiji dostupan podatak bez
+    // obzira koji je izvor dao poslednji uspješan rezultat.
+    try {
+      await backupService.saveBackup(altFinalFlights);
+    } catch (e) {
+      console.error('⚠️ Backup save failed (alternate source):', e);
+    }
+
+    const altFlightData = await buildFlightData(altFinalFlights, 'live-alternate', new Date().toISOString(), {
+      isNightMode: nightNow,
+      warning: 'Glavni uživo izvor trenutno nije dostupan. Prikazan podatak sa rezervnog izvora.',
+    });
+    const altSlimmed = slimFlightData(altFlightData);
+    await saveFlightDataAndMetadata(altSlimmed, 'live-alternate', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
+
+    console.log(`📊 Alternate live: ${altFlightData.departures.length} dep, ${altFlightData.arrivals.length} arr`);
+
+    return altSlimmed;
+  } else {
+    console.warn('⚠️ Alternate izvor vratio 0 letova — nastavljam na backup mode');
+  }
+} catch (alternateError) {
+  console.error('❌ Alternate live fetch (montenegroairports.com) takođe pao:', alternateError instanceof Error ? alternateError.message : alternateError);
+}
 
 // ── 4. BACKUP MODE ────────────────────────────────────────
 

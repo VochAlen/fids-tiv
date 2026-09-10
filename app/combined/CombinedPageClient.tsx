@@ -1331,9 +1331,18 @@ function FlightBoard(): JSX.Element {
   }, [])
 
   // ── Periodični "meki" reload ──
+  // FIX (24/7/365 self-recovery audit): flat 4h interval bez varijacije
+  // znači da, ako se sva 4 combined-board ekrana uključe u približno
+  // isto vrijeme ujutro (realan scenario — osoblje pali sve ekrane u
+  // sklopu jutarnje rutine), svi bi se ponovo učitali u ISTOM trenutku
+  // tokom dana, dok putnici gledaju — kratak, ali primjetan "svi ekrani
+  // odjednom trepnu" efekat. Dodat nasumičan jitter (do 20 min) da se to
+  // razvuče — isti princip kao hooks/use-kiosk-resilience.ts (koji gate
+  // i checkin ekrani već koriste).
   useEffect(() => {
-    const id = setInterval(() => window.location.reload(), SOFT_RELOAD_INTERVAL_MS)
-    return () => clearInterval(id)
+    const jitter = Math.floor(Math.random() * 20 * 60_000)
+    const id = setTimeout(() => window.location.reload(), SOFT_RELOAD_INTERVAL_MS + jitter)
+    return () => clearTimeout(id)
   }, [])
 
   // ── Kiosk: prevent context menu ──
