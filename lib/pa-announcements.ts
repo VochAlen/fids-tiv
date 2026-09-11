@@ -212,9 +212,60 @@ function stripLeadingZero(value: string): string {
 // dodijeljene gate-ove, dovoljan je jedan za usmjeravanje putnika), pa
 // tek onda skida vodeću nulu. Naziv "Number" jer se koristi za OBA
 // polja (gate i check-in desk), ne samo gate.
-function firstNumberField(value: string): string {
-  const first = value.split(',')[0]?.trim() || value.trim();
-  return stripLeadingZero(first);
+// FIX (po zahtjevu — čitao je SAMO PRVI gate/šalter kad ih ima više,
+// npr. "05,06" → "5", trebalo bi "5 i 6"/"5 and 6"): ranija verzija
+// (firstNumberField) je NAMJERNO uzimala samo prvu vrijednost — to je
+// bilo dobro za sprečavanje "TTS čita zarez kao riječ comma" bug-a, ali
+// je kao nuspojavu OTKIDALO stvarne dodatne gate-ove/šaltere umjesto da
+// ih pročita. Ova funkcija čita SVE vrijednosti, spojene riječju
+// "and"/"i" (NE zarezom — isti razlog kao prije). Za 3+ vrijednosti
+// ponavlja veznik između svake ("5 and 6 and 7") umjesto standardnog
+// "5, 6 and 7" — malo neobičnije gramatički, ali potpuno bezbjedno od
+// zarez-bug-a, i u praksi RIJETKO ima više od 2 dodijeljena gate-a/
+// šaltera odjednom.
+function allNumbersField(value: string, conjunctionWord: string): string {
+  const parts = value.split(',').map(s => stripLeadingZero(s.trim())).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.join(` ${conjunctionWord} `);
+}
+
+// FIX (po zahtjevu — crnogorski/srpski TTS je čitao gate/šalter broj
+// kao REDNI umjesto GLAVNOG broja, npr. "šalteru 26" → "šalteru
+// dvadesetšestI" [dvadeset šesti/redni], i "1 i 2" → "jedan i dugi"
+// umjesto "jedan i dva"): u kontekstu "na šalteru/gate-u X", ovaj glas
+// očigledno ima gramatičku naviku da X tumači kao redni broj (prirodan
+// govorni obrazac na srpskom — "na šalteru drugom" — ali NIJE ono što
+// PA najava treba, treba EKSPLICITAN broj šaltera, ne redni broj).
+// Umjesto da se oslanjamo na TTS da ispravno pogodi oblik iz golog
+// broja "26", ovdje se broj EKSPLICITNO pretvara u riječi ("dvadeset
+// šest") — glasu više ne ostaje ništa da "tumači", samo čita gotove
+// riječi. Pokriva 0-99 (realan opseg za gate/šalter brojeve na jednom
+// aerodromu); van tog opsega ili za alfanumeričke oznake (npr. "A7"),
+// bezbjedno pada nazad na goli string.
+const SR_UNITS = ['nula', 'jedan', 'dva', 'tri', 'četiri', 'pet', 'šest', 'sedam', 'osam', 'devet'];
+const SR_TEENS = ['deset', 'jedanaest', 'dvanaest', 'trinaest', 'četrnaest', 'petnaest', 'šesnaest', 'sedamnaest', 'osamnaest', 'devetnaest'];
+const SR_TENS = ['', '', 'dvadeset', 'trideset', 'četrdeset', 'pedeset', 'šezdeset', 'sedamdeset', 'osamdeset', 'devedeset'];
+
+function numberToLocalWords(n: number): string {
+  if (!Number.isInteger(n) || n < 0 || n > 99) return String(n);
+  if (n < 10) return SR_UNITS[n];
+  if (n < 20) return SR_TEENS[n - 10];
+  const tens = Math.floor(n / 10);
+  const units = n % 10;
+  return units === 0 ? SR_TENS[tens] : `${SR_TENS[tens]} ${SR_UNITS[units]}`;
+}
+
+function spellNumberLocal(value: string): string {
+  const cleaned = stripLeadingZero(value.trim());
+  const n = parseInt(cleaned, 10);
+  // Alfanumerička oznaka (npr. "A7") — parseInt daje NaN, ne diramo je.
+  return isNaN(n) ? cleaned : numberToLocalWords(n);
+}
+
+function allNumbersFieldLocal(value: string, conjunctionWord: string): string {
+  const parts = value.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.map(spellNumberLocal).join(` ${conjunctionWord} `);
 }
 
 // FIX (po zahtjevu — TTS je čitao broj leta kao cio broj, npr. "683"
@@ -233,18 +284,26 @@ function spellFlightNumber(flightNumber: string): string {
   return flightNumber.replace(/\d+/g, (digits) => ' ' + digits.split('').join(' ')).trim();
 }
 
-function gateOrFallback(f: Flight): string {
-  return f.GateNumber ? firstNumberField(f.GateNumber) : '—';
+// FIX: gateOrFallback je sad odvojen po jeziku (gateOrFallbackEN/
+// gateOrFallbackLocal), isti obrazac kao checkInDeskPhraseEN/Local —
+// lokalna verzija koristi allNumbersFieldLocal (riječi, ne cifre) zbog
+// gore opisanog redni-vs-glavni-broj problema, engleska ostaje na
+// ciframa (nije prijavljen problem za engleski izgovor brojeva).
+function gateOrFallbackEN(f: Flight): string {
+  return f.GateNumber ? allNumbersField(f.GateNumber, 'and') : '—';
+}
+function gateOrFallbackLocal(f: Flight): string {
+  return f.GateNumber ? allNumbersFieldLocal(f.GateNumber, 'i') : '—';
 }
 function airlineOrFallback(f: Flight): string {
   return f.AirlineName || 'the airline';
 }
 function checkInDeskPhraseEN(f: Flight): string {
-  return f.CheckInDesk ? `check-in desk ${firstNumberField(f.CheckInDesk)}` : `the check-in area`;
+  return f.CheckInDesk ? `check-in desk ${allNumbersField(f.CheckInDesk, 'and')}` : `the check-in area`;
 }
 
 export function buildDepartureEN(f: Flight, type: DepartureWindowType): string {
-  const airline = airlineOrFallback(f), city = destOrFallback(f), gate = gateOrFallback(f), num = spellFlightNumber(f.FlightNumber);
+  const airline = airlineOrFallback(f), city = destOrFallback(f), gate = gateOrFallbackEN(f), num = spellFlightNumber(f.FlightNumber);
   const desk = checkInDeskPhraseEN(f);
 
   if (type === 'checkin_120') {
@@ -296,7 +355,7 @@ export function buildDelayNoticeEN(f: Flight, minutesUntilUpdate: 30 | 60): stri
 }
 
 export function buildCancelledEN(f: Flight): string {
-  const desk = f.CheckInDesk ? ` at check-in desk ${firstNumberField(f.CheckInDesk)}` : '';
+  const desk = f.CheckInDesk ? ` at check-in desk ${allNumbersField(f.CheckInDesk, 'and')}` : '';
   return `We regret to inform you that ${airlineOrFallback(f)} flight ${spellFlightNumber(f.FlightNumber)} to ${destOrFallback(f)} has been cancelled. Please contact the ${airlineOrFallback(f)} check-in staff${desk} for further information.`;
 }
 
@@ -315,7 +374,7 @@ export function buildDivertedToEN(f: Flight, divertedTo: string): string {
 }
 
 export function buildGateChangeEN(f: Flight, oldGate: string, newGate: string): string {
-  return `Attention please. The departure gate for ${airlineOrFallback(f)} flight ${spellFlightNumber(f.FlightNumber)} to ${destOrFallback(f)} has been changed from gate ${firstNumberField(oldGate)} to gate ${firstNumberField(newGate)}.`;
+  return `Attention please. The departure gate for ${airlineOrFallback(f)} flight ${spellFlightNumber(f.FlightNumber)} to ${destOrFallback(f)} has been changed from gate ${allNumbersField(oldGate, 'and')} to gate ${allNumbersField(newGate, 'and')}.`;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -362,11 +421,11 @@ function destOrFallbackLocal(f: Flight): string {
   return f.DestinationCityName || f.DestinationAirportName || f.DestinationAirportCode || 'destinaciju';
 }
 function checkInDeskPhraseLocal(f: Flight): string {
-  return f.CheckInDesk ? `šalteru ${firstNumberField(f.CheckInDesk)}` : `šalterima za registraciju`;
+  return f.CheckInDesk ? `šalteru ${allNumbersFieldLocal(f.CheckInDesk, 'i')}` : `šalterima za registraciju`;
 }
 
 export function buildDepartureLocal(f: Flight, type: DepartureWindowType): string {
-  const airline = airlineOrFallback(f), city = destOrFallbackLocal(f), gate = gateOrFallback(f), num = spellFlightNumber(f.FlightNumber);
+  const airline = airlineOrFallback(f), city = destOrFallbackLocal(f), gate = gateOrFallbackLocal(f), num = spellFlightNumber(f.FlightNumber);
   const desk = checkInDeskPhraseLocal(f);
 
   if (type === 'checkin_120') {
@@ -404,7 +463,7 @@ export function buildDelayNoticeLocal(f: Flight, minutesUntilUpdate: 30 | 60): s
 }
 
 export function buildCancelledLocal(f: Flight): string {
-  const desk = f.CheckInDesk ? `, šalter ${firstNumberField(f.CheckInDesk)}` : '';
+  const desk = f.CheckInDesk ? `, šalter ${allNumbersFieldLocal(f.CheckInDesk, 'i')}` : '';
   return `Obavještavamo vas da je let ${airlineOrFallback(f)}, broj ${spellFlightNumber(f.FlightNumber)}, za ${destOrFallbackLocal(f)} otkazan. Za dodatne informacije obratite se osoblju na šalteru ${airlineOrFallback(f)}${desk}.`;
 }
 
@@ -420,12 +479,14 @@ export function buildGateChangeLocal(f: Flight, oldGate: string, newGate: string
   // FIX (po zahtjevu — "gate" → "izlaz" na crnogorskom): "promijenjen
   // gate" → "promijenjen izlaz", "sa gate-a" → "sa izlaza" (genitiv),
   // "na gate" → "na izlaz".
-  return `Poštovani putnici, obavještavamo vas da je promijenjen izlaz za let ${airlineOrFallback(f)}, broj ${spellFlightNumber(f.FlightNumber)}, za ${destOrFallbackLocal(f)}, sa izlaza ${firstNumberField(oldGate)} na izlaz ${firstNumberField(newGate)}.`;
+  return `Poštovani putnici, obavještavamo vas da je promijenjen izlaz za let ${airlineOrFallback(f)}, broj ${spellFlightNumber(f.FlightNumber)}, za ${destOrFallbackLocal(f)}, sa izlaza ${allNumbersFieldLocal(oldGate, 'i')} na izlaz ${allNumbersFieldLocal(newGate, 'i')}.`;
 }
 
 function pageLocationPhraseLocal(locationType: PageLocationType, locationNumber: string): string {
-  const num = locationNumber ? stripLeadingZero(locationNumber) : '—';
-  // FIX (po zahtjevu — "gate" → "izlaz" na crnogorskom).
+  // FIX (isti redni-vs-glavni problem kao gate/šalter u ostatku fajla —
+  // vidi opširan komentar uz spellNumberLocal): riječi umjesto golog
+  // broja, i ovdje je isti "na šalteru/izlazu X" gramatički kontekst.
+  const num = locationNumber ? spellNumberLocal(locationNumber) : '—';
   if (locationType === 'gate')    return `izlazu ${num}`;
   if (locationType === 'checkin') return `šalteru ${num}`;
   return 'info pultu';

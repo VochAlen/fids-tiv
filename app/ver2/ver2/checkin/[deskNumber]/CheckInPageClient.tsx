@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
-import { isNightHours } from '@/lib/night-hours';
+import { isNightHours, getPodgoricaDateString } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 
@@ -101,6 +101,122 @@ const isLufthansaGroupFlight = (flightNumber: string, airlineName?: string): boo
 };
 
 const LUFTHANSA_GROUP_IMAGE = '/lufthansa/LH_group.avif';
+
+// ── NOVO: Sundor holiday kampanja (El Al grupa) — privremena slika koja
+// zamjenjuje reklame SAMO za El Al letove, SAMO u definisanom periodu.
+// FIX (po zahtjevu): "Sundor" je poznat brend paket-aranžmana koji
+// operiše El Al (potvrđeno u stvarnim podacima leta — avio kompanija se
+// ponekad prikazuje kao "El-Al Israel Airlines Ltd Sundor") — otud
+// spajanje El Al detekcije sa "sundor-holiday" slikom.
+//
+// FIX (po zahtjevu — provjereno: OVAJ period NIJE fiksan svake godine):
+// 11.9-3.10.2026 tačno odgovara jevrejskim "Visokim praznicima" (Roš
+// Hašana 11-13.9 → Jom Kipur 20-21.9 → Sukot 25.9-2.10 → Šemini Aceret
+// 3.10, godina 5787) — perioda velike putničke potražnje za El Al/
+// Sundor. Ovo je LUNISOLARNI (hebrejski) kalendar — datumi se pomjeraju
+// svake godine i do 3-4 nedjelje na gregorijanskom kalendaru (npr. 2027:
+// Roš Hašana počinje tek 1. oktobra, ne 11. septembra). Zato NIJE
+// dovoljno samo "ponoviti" isti mjesec/dan svake godine.
+//
+// Umjesto punog hebrejskog kalendar algoritma (nepotrebna složenost/
+// nova zavisnost za ovu potrebu), ovdje je EKSPLICITNA lista perioda po
+// godini — laka za proširiti (samo dodaj novi red) kad zatreba sledeća
+// godina, bez potrebe da bilo ko računa hebrejski kalendar ručno.
+//
+// POUZDANOST: 2026 red je PRECIZNO potvrđen (unakrsno provjereno preko
+// više izvora, poklapa se tačno sa originalno zadatim periodom). 2027 i
+// 2028 redovi su PROCJENA (Roš Hašana početak + ~22 dana, isti razmak
+// kao 2026) — VAŽNO: ako se kampanja stvarno nastavlja te godine,
+// OBAVEZNO provjeri tačne datume (npr. preko hebcal.com ili direktno sa
+// El Al/Sundor partnerom, koji možda žele malo drugačiji marketinški
+// prozor od čistih liturgijskih datuma) prije nego što se ta godina
+// osloni na ove brojeve.
+//
+// Poređenje datuma ide preko getPodgoricaDateString() (Intl sa
+// eksplicitnom Europe/Podgorica zonom) umjesto golog `new Date()` —
+// isti princip kao isNightHours() iznad — ne zavisi od toga da li je
+// sistemski sat kiosk računara slučajno pogrešno podešen/u pogrešnoj
+// zoni, niti gdje se kod izvršava.
+interface SundorHolidayWindow { start: string; end: string }
+const SUNDOR_HOLIDAY_WINDOWS: SundorHolidayWindow[] = [
+  { start: '2026-09-11', end: '2026-10-03' }, // POTVRĐENO — Roš Hašana → Šemini Aceret 5787
+  { start: '2027-10-01', end: '2027-10-23' }, // PROCJENA — provjeriti prije 2027 (vidi napomenu iznad)
+  { start: '2028-09-20', end: '2028-10-12' }, // PROCJENA — provjeriti prije 2028 (vidi napomenu iznad)
+];
+
+function isWithinSundorHolidayWindow(): boolean {
+  const today = getPodgoricaDateString();
+  return SUNDOR_HOLIDAY_WINDOWS.some(w => today >= w.start && today <= w.end);
+}
+
+// El Al: IATA "LY" (prefiks broja leta), i naziv kompanije koji ponekad
+// uključuje "Sundor" ili se piše sa crticom ("El-Al") — normalizacija
+// uklanja I razmake I crtice prije poređenja, hvata sve varijante
+// ("El Al", "EL AL", "El-Al Israel Airlines Ltd Sundor", itd.).
+const isElAlFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('elal')) return true;
+  return flightNumber.toUpperCase().startsWith('LY');
+};
+
+// FIX (po zahtjevu — .jpg prvo, .avif kao fallback ako .jpg ne
+// postoji): za razliku od ostalih statičnih override slika u ovom
+// fajlu (BA/easyJet/Lufthansa, koje su UVIJEK .avif, poznato unaprijed),
+// za ovu sliku ne znamo unaprijed koji fajl stvarno postoji na serveru
+// — provjera se radi u browseru preko onError (vidi SundorHolidayBanner
+// niže), isti tehnika kao AirlineLogo-ov handleError.
+const SUNDOR_HOLIDAY_JPG  = '/sundor/sundor-holiday.jpg';
+const SUNDOR_HOLIDAY_AVIF = '/sundor/sundor-holiday.avif';
+
+// ── NOVO: nacionalni/aerodromski praznici — FIKSNI gregorijanski
+// datumi koji se PONAVLJAJU svake godine (za razliku od Sundor/El Al
+// kampanje iznad, koja prati POKRETNI hebrejski kalendar — ovi ne
+// trebaju nikakvu godišnju provjeru/ažuriranje). Ne zavise od avio
+// kompanije — prikazuju se za BILO KOJI let dok su na snazi.
+//
+// 20-22. maj: Dan nezavisnosti Crne Gore (referendum 21. maja 2006.)
+// 13-14. jul: Dan državnosti Crne Gore
+// 23. decembar - 14. januar: novogodišnji/božićni period (obuhvata
+//   katolički Božić 25.12, Novu godinu 1.1, pravoslavni Božić 7.1, i
+//   pravoslavnu/"staru" Novu godinu 14.1) — namjerno "wraparound" period
+//   koji prelazi iz jedne kalendarske godine u drugu
+// 7. decembar: Međunarodni dan civilnog vazduhoplovstva (ICAO/UN) —
+//   posebno relevantno za aerodromski ekran
+interface FixedHolidayImage {
+  image: string;
+  startMonth: number; startDay: number;
+  endMonth: number;   endDay: number;
+}
+
+const FIXED_HOLIDAY_IMAGES: FixedHolidayImage[] = [
+  { image: '/praznici/21maj.avif',          startMonth: 5,  startDay: 20, endMonth: 5,  endDay: 22 },
+  { image: '/praznici/13jul.avif',          startMonth: 7,  startDay: 13, endMonth: 7,  endDay: 14 },
+  { image: '/praznici/newyear.avif',        startMonth: 12, startDay: 23, endMonth: 1,  endDay: 14 }, // wraparound preko Nove godine
+  { image: '/praznici/civil-aviation.avif', startMonth: 12, startDay: 7,  endMonth: 12, endDay: 7  },
+];
+
+// Poređenje ide preko mjesec*100+dan brojeva (npr. 21. maj → 521), bez
+// godine — namjerno, pošto se ovi datumi ponavljaju svake godine.
+// Podržava "wraparound" opseg koji prelazi preko Nove godine (kad je
+// startMmdd > endMmdd, npr. decembar → januar).
+function isWithinFixedHolidayWindow(h: FixedHolidayImage, month: number, day: number): boolean {
+  const mmdd = month * 100 + day;
+  const startMmdd = h.startMonth * 100 + h.startDay;
+  const endMmdd = h.endMonth * 100 + h.endDay;
+  if (startMmdd <= endMmdd) return mmdd >= startMmdd && mmdd <= endMmdd;
+  return mmdd >= startMmdd || mmdd <= endMmdd; // wraparound
+}
+
+// Poređenje ide preko getPodgoricaDateString() (Intl sa eksplicitnom
+// Europe/Podgorica zonom) — isti princip kao isNightHours() i Sundor
+// provjera iznad — ne zavisi od sistemske vremenske zone uređaja.
+function getFixedHolidayImage(): string | null {
+  const dateStr = getPodgoricaDateString(); // "YYYY-MM-DD"
+  const month = parseInt(dateStr.slice(5, 7), 10);
+  const day = parseInt(dateStr.slice(8, 10), 10);
+  const match = FIXED_HOLIDAY_IMAGES.find(h => isWithinFixedHolidayWindow(h, month, day));
+  return match ? match.image : null;
+}
 
 const CSS_ANIMATIONS = `
   .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
@@ -273,6 +389,44 @@ const CityImage = memo(function CityImage({
 });
 
 // ============================================================
+// SUNDOR HOLIDAY BANNER (El Al grupa, vremenski ograničena kampanja)
+// ============================================================
+// FIX (po zahtjevu): .jpg se pokušava PRVI, .avif je fallback SAMO ako
+// .jpg ne postoji na serveru (404) — provjereno preko onError, ista
+// tehnika kao AirlineLogo.handleError iznad. `unoptimized` prop (kao i
+// svuda drugo u ovom fajlu) znači da je ovo praktično goli <img> ispod
+// haube, pa direktno mijenjanje .src na grešku pouzdano radi.
+const SundorHolidayBanner = memo(function SundorHolidayBanner() {
+  const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    if (img.dataset.fallback === 'true') return; // već probali .avif, stop (spriječava beskonačnu petlju ako ni on ne postoji)
+    img.dataset.fallback = 'true';
+    img.src = SUNDOR_HOLIDAY_AVIF;
+  }, []);
+
+  return (
+    <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+      <div className="relative w-full h-full">
+        <Image
+          src={SUNDOR_HOLIDAY_JPG}
+          alt="Sundor Holiday"
+          fill
+          className="object-fill"
+          priority
+          quality={90}
+          sizes="100vw"
+          placeholder="blur"
+          blurDataURL={BLUR_DATA_URL}
+          decoding="async"
+          unoptimized
+          onError={handleError}
+        />
+      </div>
+    </div>
+  );
+});
+
+// ============================================================
 // AD BANNER
 // ============================================================
 const AdBanner = memo(function AdBanner({
@@ -283,6 +437,8 @@ const AdBanner = memo(function AdBanner({
   baImageSrc,
   overrideImageSrc,
   lufthansaImageSrc,   // ← NOVO
+  showSundorHoliday,   // ← NOVO (El Al kampanja)
+  fixedHolidayImageSrc, // ← NOVO (nacionalni/aerodromski praznici)
 }: {
   adImages: string[];
   currentIndex: number;
@@ -291,7 +447,18 @@ const AdBanner = memo(function AdBanner({
   baImageSrc: string | null;
   overrideImageSrc?: string | null;
   lufthansaImageSrc?: string | null;   // ← NOVO
+  showSundorHoliday?: boolean;         // ← NOVO
+  fixedHolidayImageSrc?: string | null; // ← NOVO
 }) {
+  // FIX (po zahtjevu — El Al Sundor holiday kampanja): namjerno PRVA
+  // provjera, prije BA/easyJet/Lufthansa — vremenski ograničena
+  // promotivna kampanja treba prioritet nad ostalim statičnim
+  // override-ima (iako se u praksi nikad ne bi preklopili, pošto je
+  // avio-kompanija svakog leta jednoznačna).
+  if (showSundorHoliday) {
+    return <SundorHolidayBanner />;
+  }
+
   // BA let — prikaži statičnu sliku umjesto ads
   if (baImageSrc) {
     return (
@@ -345,6 +512,35 @@ const AdBanner = memo(function AdBanner({
           <Image
             src={lufthansaImageSrc}
             alt="Lufthansa Group"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // ── NOVO: fiksni nacionalni/aerodromski praznici (vidi
+  // FIXED_HOLIDAY_IMAGES na vrhu fajla) — NAMJERNO poslije svih
+  // avio-kompanija-specifičnih override-a (BA/easyJet/Lufthansa/Sundor)
+  // iznad, ali PRIJE generičke rotacije reklama ispod: ako je danas
+  // npr. Dan nezavisnosti, a trenutni let je BA (koji ima svoj
+  // ugovoreni business/economy prikaz), BA slika i dalje ima prednost
+  // — praznik se prikazuje SAMO kad nema specifičnijeg override-a.
+  if (fixedHolidayImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={fixedHolidayImageSrc}
+            alt="Holiday"
             fill
             className="object-fill"
             priority
@@ -475,6 +671,33 @@ const lufthansaGroupImage = useMemo((): string | null => {
   if (!isLufthansaGroupFlight(assignment.flightNumber, assignment.airlineName)) return null;
   return LUFTHANSA_GROUP_IMAGE;
 }, [assignment.flightNumber, assignment.airlineName]);
+
+// ── NOVO: Sundor holiday kampanja (El Al grupa) — vremenski ograničena
+// (vidi SUNDOR_HOLIDAY_WINDOWS na vrhu fajla). Provjera
+// datuma NIJE u dependency nizu — namjerno, pošto se datum mijenja
+// jednom dnevno, ne po svakom renderu/promjeni leta; taj (rijedak)
+// dnevni prelaz kampanje uđe/izađe se pokupi na sledeći put kad se
+// ekran ionako osvježi (hard reset u useKioskResilience niže, ili
+// obična promjena leta na šalteru).
+const showSundorHoliday = useMemo((): boolean => {
+  if (!isElAlFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+// ── NOVO: fiksni nacionalni/aerodromski praznici (vidi
+// FIXED_HOLIDAY_IMAGES na vrhu fajla) — NAMJERNO BEZ useMemo. Za
+// razliku od Sundor provjere iznad (zavisi od TRENUTNOG leta na
+// šalteru), ova je UNIVERZALNA — ne zavisi ni od čega osim
+// DANAŠNJEG DATUMA. Da je umotana u useMemo sa praznim dependency
+// nizom, izračunala bi se SAMO JEDNOM pri prvom renderu i nikad više
+// ne bi provjerila promjenu datuma (npr. prelaz na ponoć 23.12. kad
+// treba da se upali novogodišnja slika) — komponenta bi morala da se
+// potpuno re-montira da bi se to primijetilo. Provjera je jeftina
+// (samo poređenje par brojeva, 4 stavke), pa se računa direktno u
+// svakom renderu — React re-renderuje ovu komponentu prirodno svakih
+// ~10-12s (brzi poll ciklus), što je više nego dovoljno često da se
+// promjena datuma primijeti u razumnom roku.
+const fixedHolidayImage = getFixedHolidayImage();
 
   // ── CSS injection ──────────────────────────────────────────
   useEffect(() => {
@@ -1130,6 +1353,8 @@ useEffect(() => {
   baImageSrc={baAdImage}
   overrideImageSrc={easyJetPlusImage}
   lufthansaImageSrc={lufthansaGroupImage}
+  showSundorHoliday={showSundorHoliday}
+  fixedHolidayImageSrc={fixedHolidayImage}
 />
 
           {/* Footer */}
