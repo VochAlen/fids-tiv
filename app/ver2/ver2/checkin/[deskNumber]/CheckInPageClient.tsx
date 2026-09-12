@@ -941,13 +941,18 @@ const res = await fetch(
       (flightDetails.AirlineICAO as string) ||
       myData.flightNumber.substring(0, 2).toUpperCase();
 
-    let logoUrl = '/airlines/placeholder.jpg';
+    // FIX (dosljednost formata — vidi opširnu analizu u lib/airline-logo.ts):
+    // svi lokalni logotipovi, uključujući placeholder, su konvertovani u
+    // .avif — ovo je ranije bilo .jpg (fajl koji je u međuvremenu obrisan
+    // kao suvišan nakon konverzije), pa bi bez ove izmjene placeholder
+    // bio slomljena slika u SVIM slučajevima kad let nema poznat ICAO kod.
+    let logoUrl = '/airlines/placeholder.avif';
     if (icao) {
       const cachedLogo = logoCacheRef.current.get(icao);
       if (cachedLogo) {
         logoUrl = cachedLogo;
       } else {
-        logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.jpg');
+        logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.avif');
         logoCacheRef.current.set(icao, logoUrl);
       }
     }

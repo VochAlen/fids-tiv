@@ -398,7 +398,14 @@ const handleImageError = (e: React.SyntheticEvent<HTMLImageElement>) => {
            <img
   src={getInitialAirlineLogoSrc(
     flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '',
-    "/placeholder.svg"
+    // FIX (bug — 404 na svaki nepoznat ICAO kod): "/placeholder.svg"
+    // nikad nije ni postojao u public/ — svaki put kad let nema
+    // poznat lokalni logo, browser bi pokušao (i uvijek pao na) ovu
+    // nepostojeću putanju, PRIJE nego što bi onError kaskada nastavila
+    // ka FlightAware pa konačno ka via.placeholder.com (eksterni
+    // servis). Zamijenjeno stvarnim, postojećim lokalnim placeholder-om
+    // koji ostatak aplikacije već koristi.
+    "/airlines/placeholder.avif"
   )}
   alt={flight.AirlineName}
   className="w-16 h-16 object-contain bg-white rounded-xl p-2 shadow-lg"

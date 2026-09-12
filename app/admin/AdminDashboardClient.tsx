@@ -94,9 +94,14 @@ export default function AdminDashboardClient() {
       setRefreshing(true);
       setError(null);
       
-      const response = await fetch('/api/flights', {
-        cache: 'no-store'
-      });
+      // FIX (CPU/trošak revizija): `no-store` je zaobilazio CDN keš koji
+      // /api/flights već ima (s-maxage=45, ETag/304) — bez ikakve
+      // stvarne potrebe za apsolutno svježim podatkom svake sekunde na
+      // admin dashboard-u (staff osvježava ručno ili periodično, ne
+      // opslužuje 40+ kiosk ekrana). Manji uticaj od kiosk-flote
+      // popravki (ovo je jedna admin stranica, ne desetine ekrana), ali
+      // ista, ispravna praksa — koristi normalno HTTP/CDN keširanje.
+      const response = await fetch('/api/flights');
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: Greška pri učitavanju podataka`);
@@ -405,8 +410,7 @@ const handleLogout = useCallback(async () => {
           </Link>
 
           <Link
-            // href="/admin/pa"
-              href="/pa"
+            href="/admin/pa"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
           >
             <div className="flex items-start gap-4">

@@ -8,10 +8,6 @@ import { getPodgoricaDateString } from '@/lib/night-hours';
 const isDev = process.env.NODE_ENV !== 'production';
 const dlog = (...args: unknown[]) => { if (isDev) console.log(...args); };
 
-
-// Cache for logo URLs
-const logoCache = new Map<string, string>();
-
 function cleanFlightNumber(flightNumber: string, airlineCode: string): string {
   if (!flightNumber) return flightNumber;
   
@@ -88,112 +84,20 @@ export function parseCheckInDesks(checkInString: string): string[] {
     .filter(desk => desk !== '');
 }
 
-async function findExistingLogo(icaoCode: string): Promise<string | null> {
-  if (!icaoCode || typeof window === 'undefined') {
-    return null;
-  }
-
-  const normalizedIcao = icaoCode.trim().toUpperCase();
-  const cacheKey = `exists-${normalizedIcao}`;
-  
-  const cached = logoCache.get(cacheKey);
-  if (cached !== undefined) {
-    return cached === 'none' ? null : cached;
-  }
-
-  const extensions = ['.png', '.jpg', '.jpeg', '.svg', '.webp'];
-  
-  for (const ext of extensions) {
-    const logoUrl = `/airlines/${normalizedIcao}${ext}`;
-    
-    try {
-      const exists = await new Promise<boolean>((resolve) => {
-        const img = new Image();
-        img.onload = () => resolve(true);
-        img.onerror = () => resolve(false);
-        img.src = logoUrl;
-        setTimeout(() => resolve(false), 100);
-      });
-      
-      if (exists) {
-        dlog(`✅ Found logo for ${normalizedIcao}: ${logoUrl}`);
-        logoCache.set(cacheKey, logoUrl);
-        return logoUrl;
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-
-  dlog(`❌ No logo found for ${normalizedIcao}`);
-  logoCache.set(cacheKey, 'none');
-  return null;
-}
-
-export async function getLogoURL(icaoCode: string): Promise<string> {
-  if (!icaoCode || icaoCode.trim() === '') {
-    return '/airlines/placeholder.jpg';
-  }
-
-  const normalizedIcao = icaoCode.trim().toUpperCase();
-  const cacheKey = `url-${normalizedIcao}`;
-  
-  const cachedUrl = logoCache.get(cacheKey);
-  if (cachedUrl !== undefined && cachedUrl !== 'none') {
-    return cachedUrl;
-  }
-
-  const existingLogo = await findExistingLogo(normalizedIcao);
-  
-  if (existingLogo) {
-    logoCache.set(cacheKey, existingLogo);
-    return existingLogo;
-  }
-
-  const placeholder = '/airlines/placeholder.jpg';
-  logoCache.set(cacheKey, placeholder);
-  return placeholder;
-}
-
-export function getSimpleLogoURL(icaoCode: string): string {
-  if (!icaoCode || icaoCode.trim() === '') {
-    return '/airlines/placeholder.jpg';
-  }
-  
-  const normalizedIcao = icaoCode.trim().toUpperCase();
-  return `/airlines/${normalizedIcao}.jpg`;
-}
-
-export async function getLogoURLWithFallback(icaoCode: string, fallbackUrl?: string): Promise<string> {
-  if (!icaoCode || icaoCode.trim() === '') {
-    return fallbackUrl || '/airlines/placeholder.jpg';
-  }
-
-  const normalizedIcao = icaoCode.trim().toUpperCase();
-  const cacheKey = `optimized-${normalizedIcao}`;
-  
-  const cachedUrl = logoCache.get(cacheKey);
-  if (cachedUrl !== undefined && cachedUrl !== 'none') {
-    return cachedUrl;
-  }
-
-  const checkLogo = async () => {
-    try {
-      const existingLogo = await findExistingLogo(normalizedIcao);
-      if (existingLogo) {
-        logoCache.set(cacheKey, existingLogo);
-      }
-    } catch (error) {
-      // Silent fail
-    }
-  };
-  
-  if (typeof window !== 'undefined') {
-    void checkLogo();
-  }
-
-  return `/airlines/${normalizedIcao}.jpg`;
-}
+// FIX (mrtav kod uklonjen — CPU/bundle trošak): ovdje je ranije
+// postojao cio "logo URL" podsistem (logoCache Map, findExistingLogo,
+// getLogoURL, getSimpleLogoURL, getLogoURLWithFallback) — provjereno
+// kroz cio projekat da NIŠTA više ne poziva nijednu od ovih funkcija
+// (poslednja tri poziva, u sva tri flight-mapera ispod, upravo su
+// uklonjena jer se izračunata vrijednost Flight.AirlineLogoURL nigdje
+// ne čita/renderuje — svih 8 kiosk tipova nezavisno računa sopstveni
+// logo preko lib/airline-logo.ts). findExistingLogo je i onako radio
+// SAMO u browseru (eksplicitna `typeof window === 'undefined'`
+// provjera), pa server-side pozivi (jedini stvarni pozivaoci, iz
+// lib/flight-data-service.ts) nikad nisu ni mogli pronaći stvaran
+// logo — uvijek su tiho padali na placeholder, uz nepotreban
+// async/Promise/try-catch trošak po letu na najprometnijoj ruti u
+// aplikaciji (/api/flights).
 
 export function formatTime(time: string): string {
   if (!time || time.trim() === '') return '--:--';
@@ -261,8 +165,20 @@ export async function mapRawFlight(raw: RawFlightData): Promise<Flight> {
     ? raw.CodeShare.split(',').map(f => f.trim()).filter(Boolean)
     : [];
 
-  // Dohvati logo URL
-  const airlineLogoURL = await getLogoURLWithFallback(raw.KompanijaICAO);
+  // FIX (CPU trošak na najprometnijoj ruti — /api/flights): ranije se
+  // ovdje pozivalo `await getLogoURLWithFallback(...)` za SVAKI let u
+  // SVAKOM mapiranju — provjereno kroz cio projekat: `Flight.AirlineLogoURL`
+  // se NIGDJE ne čita/renderuje (svih 8 kiosk tipova nezavisno računaju
+  // sopstveni logo URL preko lib/airline-logo.ts). Sam poziv je i onako
+  // gotovo uvijek odmah vraćao placeholder — findExistingLogo() (unutar
+  // getLogoURLWithFallback) eksplicitno provjerava `typeof window ===
+  // 'undefined'` i vraća null kad se izvršava na serveru (a mapiranje
+  // se UVIJEK dešava server-side, u lib/flight-data-service.ts) — ali i
+  // dalje je to bio async poziv + Promise + try/catch PO LETU, na ruti
+  // koju poll-uje 40+ kiosk ekrana. Prazan string je funkcionalno
+  // identičan ishod (vrijednost se svejedno nigdje ne koristi), samo
+  // bez ikakvog rada da se do njega dođe.
+  const airlineLogoURL = '';
 
   // Kreiraj deterministički ID
   const flightId = `${raw.Kompanija}${raw.BrojLeta}_${raw.Planirano}_${raw.IATA}`;
@@ -386,7 +302,10 @@ export async function mapNgrokFlightToFlight(raw: NgrokFlightRaw): Promise<Fligh
     ? raw.codeShareFlights.split(',').map(f => f.trim()).filter(Boolean)
     : [];
 
-  const airlineLogoURL = await getLogoURLWithFallback(raw.airlineICAO);
+  // FIX (CPU trošak — isti razlog kao mapRawFlight iznad, vidi opširan
+  // komentar tamo): AirlineLogoURL se nigdje ne čita, poziv je bio
+  // čist otpad na najprometnijoj ruti u aplikaciji.
+  const airlineLogoURL = '';
 
   const flightId = `${raw.brlet}_${raw.schtime}_${raw.sifFromto}`;
 
@@ -575,10 +494,11 @@ export async function mapAlternateApiFlight(raw: AlternateApiFlight): Promise<Fl
     CheckInDesks: parseCheckInDesks(checkIn),
     BaggageReclaim: baggage,
     CodeShareFlights: codeShareFlights,
-    // Nema ICAO koda za pouzdano pretraživanje logoa u ovom izvoru —
-    // getLogoURLWithFallback('') vraća placeholder ODMAH, bez mrežnog
-    // poziva (provjereno u samoj funkciji), pa ovo nije trošak.
-    AirlineLogoURL: await getLogoURLWithFallback(raw.FlightNumberICAO || ''),
+    // FIX (CPU trošak — isti razlog kao ostala dva mapera): provjereno
+    // kroz cio projekat, AirlineLogoURL se nigdje ne čita/renderuje —
+    // svih 8 kiosk tipova nezavisno računa sopstveni logo preko
+    // lib/airline-logo.ts. Prazan string umjesto await poziva.
+    AirlineLogoURL: '',
     FlightType: flightType,
     DestinationCityName: raw.Airport || '',
 

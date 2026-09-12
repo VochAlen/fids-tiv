@@ -34,7 +34,9 @@ import WeatherIcon from '@/components/weather-icon';
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS         = 180_000;
+// FIX (mrtav kod — CPU/higijena revizija): REFRESH_INTERVAL_MS je
+// ovdje stajao neiskorišćen (adaptivni BASE/MEDIUM/SLOW_INTERVAL_MS
+// sistem ispod je stvarni, aktivni mehanizam) — uklonjen.
 // FIX (podaci se ne učitavaju oko 4h ujutro): vidi identičan komentar u
 // app/combined/CombinedPageClient.tsx — server može legitimno trebati do
 // ~25s tačno na noć→dan prelazu (FETCH_LOCK wait u lib/flight-data-service.ts,
