@@ -26,6 +26,11 @@ export interface ToastMessage {
   id: number;
   message: string;
   type: ToastType;
+  // FIX (po zahtjevu — "korisnije za osoblje"): opciono dugme za akciju
+  // unutar samog toast-a (npr. "Poništi" nakon uklanjanja dodjele).
+  // Opciono polje — potpuno bezbjedno za postojeće pozivaoce koji ga ne
+  // koriste (app/admin/pa/page.tsx), ne mijenja njihovo ponašanje.
+  action?: { label: string; onClick: () => void };
 }
 
 let toastIdCounter = 0;
@@ -56,7 +61,15 @@ function SingleToast({
       role="status"
     >
       {style.icon}
-      <span className="text-sm font-medium leading-snug">{toast.message}</span>
+      <span className="text-sm font-medium leading-snug flex-1">{toast.message}</span>
+      {toast.action && (
+        <button
+          onClick={() => { toast.action!.onClick(); onClose(toast.id); }}
+          className="text-xs font-bold uppercase tracking-wide underline underline-offset-2 flex-shrink-0 opacity-90 hover:opacity-100 px-1"
+        >
+          {toast.action.label}
+        </button>
+      )}
     </div>
   );
 }
@@ -78,7 +91,10 @@ export function ToastStack({
     <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none">
       {toasts.map((t) => (
         <div key={t.id} className="pointer-events-auto">
-          <SingleToast toast={t} onClose={onDismiss} durationMs={DEFAULT_DURATION_MS[t.type]} />
+          {/* FIX: toast sa akcijom (npr. "Poništi") dobija duže vrijeme
+              prije nego nestane — osoblju treba momenat da primijeti I
+              stigne da tapne dugme, ne samo da pročita poruku. */}
+          <SingleToast toast={t} onClose={onDismiss} durationMs={t.action ? DEFAULT_DURATION_MS[t.type] + 2_500 : DEFAULT_DURATION_MS[t.type]} />
         </div>
       ))}
     </div>

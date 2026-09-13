@@ -159,6 +159,34 @@ const isElAlFlight = (flightNumber: string, airlineName?: string): boolean => {
   return flightNumber.toUpperCase().startsWith('LY');
 };
 
+// FIX (po zahtjevu — ista praznična kampanja, dvije dodatne izraelske
+// kompanije): Israir (IATA "6H", ICAO "ISR") i Arkia (IATA "IZ", ICAO
+// "AIZ") — isti vremenski period kao El Al/Sundor (SUNDOR_HOLIDAY_WINDOWS
+// niže), pošto su sve tri izraelske kompanije sa istim sezonskim
+// obrascem putničke potražnje oko jevrejskih Visokih praznika. Detekcija
+// prati IDENTIČAN obrazac kao isElAlFlight — normalizovan naziv
+// kompanije KAO fallback na IATA prefiks broja leta.
+const isIsrairFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('israir')) return true;
+  return flightNumber.toUpperCase().startsWith('6H');
+};
+
+const isArkiaFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('arkia')) return true;
+  return flightNumber.toUpperCase().startsWith('IZ');
+};
+
+// FIX (po zahtjevu — samo .avif, BEZ jpg fallback-a): za razliku od
+// Sundor/El Al slike (gdje smo morali podržati i .jpg jer nismo znali
+// unaprijed koji fajl stvarno postoji na serveru), ove dvije slike su
+// eksplicitno zadate kao .avif — isti, jednostavniji obrazac kao
+// BA/easyJet/Lufthansa (direktan string, bez posebne komponente/
+// onError fallback logike).
+const ISRAIR_HOLIDAY_IMAGE = '/israir/israir-holiday.avif';
+const ARKIA_HOLIDAY_IMAGE  = '/arkia/arkia-holiday.avif';
+
 // FIX (po zahtjevu — .jpg prvo, .avif kao fallback ako .jpg ne
 // postoji): za razliku od ostalih statičnih override slika u ovom
 // fajlu (BA/easyJet/Lufthansa, koje su UVIJEK .avif, poznato unaprijed),
@@ -438,6 +466,8 @@ const AdBanner = memo(function AdBanner({
   overrideImageSrc,
   lufthansaImageSrc,   // ← NOVO
   showSundorHoliday,   // ← NOVO (El Al kampanja)
+  israirHolidayImageSrc, // ← NOVO (Israir, ista kampanja)
+  arkiaHolidayImageSrc,  // ← NOVO (Arkia, ista kampanja)
   fixedHolidayImageSrc, // ← NOVO (nacionalni/aerodromski praznici)
 }: {
   adImages: string[];
@@ -448,6 +478,8 @@ const AdBanner = memo(function AdBanner({
   overrideImageSrc?: string | null;
   lufthansaImageSrc?: string | null;   // ← NOVO
   showSundorHoliday?: boolean;         // ← NOVO
+  israirHolidayImageSrc?: string | null; // ← NOVO
+  arkiaHolidayImageSrc?: string | null;  // ← NOVO
   fixedHolidayImageSrc?: string | null; // ← NOVO
 }) {
   // FIX (po zahtjevu — El Al Sundor holiday kampanja): namjerno PRVA
@@ -457,6 +489,55 @@ const AdBanner = memo(function AdBanner({
   // avio-kompanija svakog leta jednoznačna).
   if (showSundorHoliday) {
     return <SundorHolidayBanner />;
+  }
+
+  // FIX (po zahtjevu — ista kampanja, Israir i Arkia): ista prioritetska
+  // grupa kao Sundor/El Al iznad (sve tri su dio istog sezonskog
+  // perioda) — jednostavniji render od Sundor-a jer ove dvije slike
+  // nemaju jpg fallback komplikaciju (vidi opširan komentar uz
+  // ISRAIR_HOLIDAY_IMAGE/ARKIA_HOLIDAY_IMAGE na vrhu fajla).
+  if (israirHolidayImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={israirHolidayImageSrc}
+            alt="Israir Holiday"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (arkiaHolidayImageSrc) {
+    return (
+      <div className="flex-1 min-h-[400px] rounded-xl overflow-hidden flex items-stretch">
+        <div className="relative w-full h-full">
+          <Image
+            src={arkiaHolidayImageSrc}
+            alt="Arkia Holiday"
+            fill
+            className="object-fill"
+            priority
+            quality={90}
+            sizes="100vw"
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            decoding="async"
+            unoptimized
+          />
+        </div>
+      </div>
+    );
   }
 
   // BA let — prikaži statičnu sliku umjesto ads
@@ -681,6 +762,19 @@ const lufthansaGroupImage = useMemo((): string | null => {
 // obična promjena leta na šalteru).
 const showSundorHoliday = useMemo((): boolean => {
   if (!isElAlFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+// FIX (po zahtjevu — ista kampanja, Israir i Arkia): identičan obrazac
+// kao showSundorHoliday iznad, isti vremenski period
+// (SUNDOR_HOLIDAY_WINDOWS), samo drugačija avio kompanija/slika svaka.
+const showIsrairHoliday = useMemo((): boolean => {
+  if (!isIsrairFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+const showArkiaHoliday = useMemo((): boolean => {
+  if (!isArkiaFlight(assignment.flightNumber, assignment.airlineName)) return false;
   return isWithinSundorHolidayWindow();
 }, [assignment.flightNumber, assignment.airlineName]);
 
@@ -1359,6 +1453,8 @@ useEffect(() => {
   overrideImageSrc={easyJetPlusImage}
   lufthansaImageSrc={lufthansaGroupImage}
   showSundorHoliday={showSundorHoliday}
+  israirHolidayImageSrc={showIsrairHoliday ? ISRAIR_HOLIDAY_IMAGE : null}
+  arkiaHolidayImageSrc={showArkiaHoliday ? ARKIA_HOLIDAY_IMAGE : null}
   fixedHolidayImageSrc={fixedHolidayImage}
 />
 

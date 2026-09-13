@@ -36,6 +36,11 @@ import type { Flight } from "@/types/flight"
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+// zamjena za lokalnu, hardkodiranu CHECKIN_OFFSETS tabelu ispod (sad
+// uklonjenu) — ovaj servis čita STVARNU konfiguraciju iz settings.ini
+// (preko /api/checkin-config), sa ugrađenim fallback-om ako API padne.
+import { loadCheckInConfig, getCheckInOffsetMinutes } from '@/lib/check-in-service';
 import { isNightHours } from '@/lib/night-hours';
 import { useWeather } from '@/hooks/use-weather';
 import WeatherIcon from '@/components/weather-icon';
@@ -423,86 +428,16 @@ return fetch(url, { signal: controller.signal, headers })
 };
 
 // ── Auto-status logika ──
-// ── Prošireni CHECKIN_OFFSETI sa tačnim podacima ──
-const CHECKIN_OFFSETS: Record<string, number> = {
-  // ── POSTOJEĆE (zadržano) ──
-  "6H": 180,  // Israir
-  "FZ": 180,  // flydubai
-  "LS": 150,  // Jet2.com
-  "LY": 180,  // El Al Israel Airlines
-  "IZ": 180,  // Arkia Israeli Airlines
-  "BA": 150,  // British Airways
-
-  // ── EVROPSKI PREVOZNICI ──
-  // Lufthansa Group (180 min)
-  "LH": 180,  // Lufthansa
-  "OS": 180,  // Austrian Airlines
-  "LX": 180,  // Swiss International Air Lines
-  "SN": 180,  // Brussels Airlines
-  "EW": 180,  // Eurowings
-  
-  // Air France-KLM Group (180 min)
-  "AF": 180,  // Air France
-  "KL": 180,  // KLM Royal Dutch Airlines
-  
-  // IAG Group (180 min)
-  "IB": 180,  // Iberia
-  "EI": 180,  // Aer Lingus
-  "VY": 180,  // Vueling
-  
-  // Ostali evropski (180 min)
-  "TK": 180,  // Turkish Airlines
-  "A3": 180,  // Aegean Airlines
-  "JU": 180,  // Air Serbia
-  "OU": 180,  // Croatia Airlines
-  "LO": 180,  // LOT Polish Airlines
-  "OK": 180,  // Czech Airlines
-  "MA": 180,  // Malév Hungarian Airlines (ako još postoji)
-  "RO": 180,  // TAROM
-  "FB": 180,  // Bulgaria Air
-  "JP": 180,  // Adria Airways (ako još postoji)
-  
-  // Low-cost evropski (120-150 min)
-  "FR": 120,  // Ryanair
-  "U2": 120,  // easyJet
-  "W6": 150,  // Wizz Air
-  "DY": 120,  // Norwegian Air Shuttle
-  "SK": 120,  // SAS Scandinavian Airlines
-  "BT": 120,  // airBaltic
-  
-  // ── RUSKI I CIS PREVOZNICI ──
-  "SU": 180,  // Aeroflot
-  "A4": 180,  // Azimuth
-  "DP": 180,  // Pobeda (low-cost, ali 180 min)
-  "U6": 180,  // Ural Airlines
-  "S7": 180,  // S7 Airlines
-  "UT": 180,  // UTair
-  "B2": 180,  // Belavia (Belarus)
-  "PS": 180,  // Ukraine International Airlines
-  
-  // ── BLISKOISTOČNI PREVOZNICI ──
-  "EK": 180,  // Emirates
-  "QR": 180,  // Qatar Airways
-  "EY": 180,  // Etihad Airways
-  "KU": 180,  // Kuwait Airways
-  "SV": 180,  // Saudia
-  "G9": 180,  // Air Arabia
-  "J9": 180,  // Jazeera Airways
-  
-  // ── ČARTER I SEZONSKI ──
-  "H1": 150,  // Hahn Air (čarter)
-  "H2": 150,  // Sky Airline (čarter)
-  "H3": 150,  // Niki (čarter)
-  "R6": 150,  // DAT (čarter)
-  "S3": 150,  // Santa Barbara Airlines (čarter)
-  
-  // ── BALKANSKI PREVOZNICI ──
-  "4O": 150,  // Montenegro Airlines (bivši)
-  "YM": 150,  // Montenegro Airlines
-  "GP": 150,  // GP Aviation (čarter)
-  "DI": 150,  // DIA (čarter)
-  "YR": 150,  // Scandinavian Airlines System (SAS) - ponavljanje, ali ostavljam
-}
+// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+// hardkodirana CHECKIN_OFFSETS tabela je OVDJE UKLONJENA — bila je
+// potpuno nezavisna kopija podataka koje settings.ini treba da
+// kontroliše (preko /api/checkin-config i lib/check-in-service.ts).
+// Kad bi se settings.ini ažurirao, ova zaboravljena kopija bi i dalje
+// prikazivala STARE brojeve (npr. JU 180 umjesto ispravnih 120,
+// 4O 150 umjesto 120) — tačno uzrok prijavljenog bug-a. Sad se koristi
+// getCheckInOffsetMinutes() iz lib/check-in-service.ts (vidi import na
+// vrhu fajla i loadCheckInConfig() poziv niže), koji čita STVARNU,
+// trenutnu konfiguraciju.
 
 // ── Mapa za prevod statusa na više jezika ──
 const STATUS_I18N: Record<string, Record<LangKey, string>> = {
@@ -535,7 +470,7 @@ const STATUS_I18N: Record<string, Record<LangKey, string>> = {
   },
 }
 
-// ── Poboljšana getAutoStatus funkcija sa CHECKIN_OFFSETS ──
+// ── Poboljšana getAutoStatus funkcija sa check-in-service konfiguracijom ──
 function getAutoStatus(flight: Flight, lang: LangKey = 'en'): string | null {
   const status = (flight.StatusEN ?? "").trim()
   
@@ -591,9 +526,9 @@ function getAutoStatus(flight: Flight, lang: LangKey = 'en'): string | null {
 
   // ── 5. Check-In (30+ minuta do polijetanja) ──
   if (minsToSTD > 30) {
-    // Koristi CHECKIN_OFFSETS za specifične kompanije, default 120 min
+    // Koristi konfiguraciju iz settings.ini (lib/check-in-service.ts) za specifične kompanije, default 120 min
     const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase()
-    const offset = CHECKIN_OFFSETS[iata] ?? 120
+    const offset = getCheckInOffsetMinutes(iata)
     const checkInTime = new Date(scheduled.getTime() - offset * 60_000)
     const checkInTimeStr = `${String(checkInTime.getHours()).padStart(2, "0")}:${String(checkInTime.getMinutes()).padStart(2, "0")}`
     
@@ -1280,6 +1215,20 @@ function FlightBoard(): JSX.Element {
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode])
 
   const colors = useMemo(() => showArrivals ? COLOR_CONFIG.arrivals : COLOR_CONFIG.departures, [showArrivals])
+
+  // FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+  // učitava STVARNU konfiguraciju iz settings.ini (preko
+  // /api/checkin-config) jednom pri mount-u. getCheckInOffsetMinutes()
+  // (pozvan sinhrono unutar getAutoStatus, u render putanji) čita iz
+  // ove keširane konfiguracije nakon što se ovaj poziv završi — do
+  // tada bezopasno vraća default 120, samokoriguje se na sledeći
+  // periodični re-render (autoStatusTick, svakih 60s).
+  useEffect(() => {
+    loadCheckInConfig().catch(() => {
+      // Greška je već obrađena unutar loadCheckInConfig (pada na
+      // ugrađen fallback) — ovdje samo sprječava neuhvaćen rejection.
+    })
+  }, [])
 
   // ── Throttled resize ──
   useEffect(() => {

@@ -19,6 +19,11 @@ import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-s
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react";
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
+// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+// zamjena za lokalnu, hardkodiranu CHECKIN_OFFSETS tabelu ispod (sad
+// uklonjenu) — vidi identičan, opširniji komentar u
+// app/combined/CombinedPageClient.tsx za pun kontekst bug-a.
+import { loadCheckInConfig, getCheckInOffsetMinutes } from '@/lib/check-in-service';
 
 // ============================================================
 // KONSTANTE
@@ -226,9 +231,11 @@ const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] =
 // ============================================================
 // AUTO-STATUS (isti)
 // ============================================================
-const CHECKIN_OFFSETS: Record<string, number> = {
-  "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180,"BA": 150,
-};
+// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+// hardkodirana CHECKIN_OFFSETS tabela je OVDJE UKLONJENA — vidi
+// identičan, opširniji komentar u app/combined/CombinedPageClient.tsx.
+// Sad se koristi getCheckInOffsetMinutes() iz lib/check-in-service.ts,
+// koji čita stvarnu konfiguraciju iz settings.ini.
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim();
@@ -245,7 +252,7 @@ function getAutoStatus(flight: Flight): string | null {
   if (minsToRef <= 30) return "Go to Gate";
   if (minsToSTD > 30) {
     const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase();
-    const checkInMinutesOffset = CHECKIN_OFFSETS[iata] ?? 120;
+    const checkInMinutesOffset = getCheckInOffsetMinutes(iata);
     const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000));
     const hh = String(checkInDate.getHours()).padStart(2, "0");
     const mm = String(checkInDate.getMinutes()).padStart(2, "0");
@@ -615,6 +622,15 @@ const departuresRef = useRef<Flight[]>([]);
 useEffect(() => { arrivalsRef.current = arrivals }, [arrivals]);
 useEffect(() => { departuresRef.current = departures }, [departures]);
 useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
+
+// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
+// učitava stvarnu konfiguraciju iz settings.ini jednom pri mount-u —
+// vidi identičan, opširniji komentar u
+// app/combined/CombinedPageClient.tsx.
+useEffect(() => {
+  loadCheckInConfig().catch(() => {})
+}, [])
+
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──

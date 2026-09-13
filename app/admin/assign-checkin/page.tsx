@@ -181,11 +181,20 @@ const processFlights = (deps: Flight[]) =>
 const todayKey = () => new Date().toISOString().split('T')[0];
 
 // ─────────────────────────────────────────────
-// Stats API helpers — sve ide kroz /api/test/stats
+// Stats API helpers
 // ─────────────────────────────────────────────
+// FIX (KRITIČNO — pravi uzrok crash-a u StatsModal-u, "Cannot convert
+// undefined or null to object"): ovo je RANIJE išlo na /api/test/stats,
+// koja je u međuvremenu prenamijenjena za potpuno drugu svrhu (provjera
+// svježine flight-meta keša — hash/count/lastModified, NE desk/gate
+// sesije). trackStart/trackEnd POST pozivi su otud TIHO padali (405,
+// uhvaćeno u .catch bez vidljive greške) — dnevna statistika NIKAD
+// nije imala stvaran backend. Nova, namjenska ruta:
+// app/api/admin/checkin-stats/route.ts.
+const STATS_API_URL = '/api/admin/checkin-stats';
 
 const statsPost = (body: object) =>
-  fetch('/api/test/stats', {
+  fetch(STATS_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -199,9 +208,17 @@ const trackEnd = (type: 'desk' | 'gate', resourceId: string) =>
 
 const fetchDailyStats = async (date?: string): Promise<DailyStats> => {
   try {
-    const res = await fetch(`/api/test/stats${date ? `?date=${date}` : ''}`);
+    const res = await fetch(`${STATS_API_URL}${date ? `?date=${date}` : ''}`);
     if (!res.ok) return { desks: {}, gates: {} };
-    return res.json();
+    const data = await res.json();
+    // FIX (odbrambeno — dodatna sigurnosna mreža pored ispravke same
+    // rute): čak i da ruta ikad ponovo vrati neočekivan oblik, ovdje se
+    // to normalizuje na ispravan { desks: {}, gates: {} } umjesto da
+    // StatsModal padne na Object.entries(undefined).
+    return {
+      desks: data?.desks && typeof data.desks === 'object' ? data.desks : {},
+      gates: data?.gates && typeof data.gates === 'object' ? data.gates : {},
+    };
   } catch {
     return { desks: {}, gates: {} };
   }
@@ -557,7 +574,10 @@ const StatsModal: React.FC<{
     sessions.reduce((s, x) => s + x.minutes, 0);
 
   const currentActive = tab === 'desks' ? currentCheckin : currentGates;
-  const data          = tab === 'desks' ? stats.desks    : stats.gates;
+  // FIX: odbrambena zaštita — treći sloj (uz ispravku same rute i
+  // normalizaciju u fetchDailyStats) protiv "Cannot convert undefined
+  // or null to object" ako stats prop ikad stigne malformiran.
+  const data          = (tab === 'desks' ? stats.desks : stats.gates) ?? {};
 
   const activeOnlyIds = currentActive
     .filter(a => !data[a.resourceId])
@@ -771,8 +791,11 @@ export default function AssignPanel() {
   // neuspjeha dodjele ili uklanjanja gate-a/šaltera — vidi components/toast.tsx
   // za puno objašnjenje zašto je ovo dodato) ──
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const showToast = useCallback((message: string, type: ToastType) => {
-    setToasts(list => [...list, { id: nextToastId(), message, type }]);
+  // FIX (po zahtjevu — "korisnije za osoblje"): treći, opcioni parametar
+  // za akciju (npr. "Poništi" dugme unutar toast-a) — vidi opširan
+  // komentar u components/toast.tsx.
+  const showToast = useCallback((message: string, type: ToastType, action?: ToastMessage['action']) => {
+    setToasts(list => [...list, { id: nextToastId(), message, type, action }]);
   }, []);
   const dismissToast = useCallback((id: number) => {
     setToasts(list => list.filter(t => t.id !== id));
@@ -840,14 +863,20 @@ const { secondsLeft: idleWarningSeconds } = useIdleLogout();
     localStorage.setItem('theme', newDark ? 'dark' : 'light');
   };
 
-  // Učitavanje statistike
-  // const openStats = useCallback(async () => {
-  //   setShowStats(true);const handleLogout =
-  //   setLoadingStats(true);
-  //   const data = await fetchDailyStats();
-  //   setDailyStats(data);
-  //   setLoadingStats(false);
-  // }, []);
+  // FIX (po zahtjevu — "korisnije za osoblje"): cijela StatsModal
+  // funkcija (dnevna statistika zauzetosti šaltera/gate-ova) je bila
+  // potpuno IZGRAĐENA — modal, tabovi, agregacija po resursu, sve — ali
+  // NEDOSTUPNA osoblju, jer je ova funkcija (jedino mjesto koje bi
+  // ikad postavilo showStats na true) bila zakomentarisana, i nigdje
+  // drugdje u fajlu nije postojalo dugme koje je poziva. Vraćeno u
+  // funkciju + dodato dugme u header (vidi JSX niže).
+  const openStats = useCallback(async () => {
+    setShowStats(true);
+    setLoadingStats(true);
+    const data = await fetchDailyStats();
+    setDailyStats(data);
+    setLoadingStats(false);
+  }, []);
 
   // ─── FETCH FLIGHTS SA ETag (umjesto statusa) ─────────────
   const fetchFlightsData = useCallback(async (force = false): Promise<Flight[] | null> => {
@@ -1202,7 +1231,7 @@ const handleConfirmOverride = useCallback(async () => {
     touchTimeoutRef.current = setTimeout(() => setSelectedFlight(null), TOUCH_TIMEOUT_MS);
   }, [setSelectedFlight]);
 
-const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
+const handleRemoveCheckin = useCallback(async (deskNumber: string, opts?: { silent?: boolean }) => {
   if (removingResources.has(`desk:${deskNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`desk:${deskNumber}`));
 
@@ -1220,7 +1249,22 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
       rebalanceEasyJetPlus(removed.flightNumber, 'desk');
     }
-   // isDirty = true;
+    // FIX (po zahtjevu — "korisnije za osoblje"): uklanjanje je do sad
+    // bilo TIHO na uspjehu (samo greška je prikazivala toast) — jedan
+    // slučajan tap na kantu za smeće je odmah, bez ikakve potvrde ili
+    // mogućnosti povratka, brisao aktivnu dodjelu. Sad se prikazuje
+    // potvrda SA dugmetom "Poništi" (osim kad je ovo AUTOMATSKO
+    // uklanjanje zbog poletanja leta — opts.silent — tamo undo nema
+    // smisla, i taj poziv već ima svoju posebnu poruku, vidi efekat
+    // niže koji zove ovu funkciju).
+    if (!opts?.silent) {
+      const flightForUndo = removed ? flightsRef.current.find(f => f.FlightNumber === removed.flightNumber) : undefined;
+      showToast(
+        `Šalter ${deskNumber} uklonjen${removed ? ` (${removed.flightNumber})` : ''}.`,
+        'success',
+        flightForUndo ? { label: 'Poništi', onClick: () => { void assignFlightToResource(flightForUndo, deskNumber, 'desk'); } } : undefined,
+      );
+    }
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
     showToast(`Greška pri uklanjanju šaltera ${deskNumber}. Pokušajte ponovo.`, 'error');
@@ -1237,9 +1281,9 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources, rebalanceEasyJetPlus, showToast]);
+}, [removingResources, rebalanceEasyJetPlus, showToast, assignFlightToResource]);
 
-const handleRemoveGate = useCallback(async (gateNumber: string) => {
+const handleRemoveGate = useCallback(async (gateNumber: string, opts?: { silent?: boolean }) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`gate:${gateNumber}`));
 
@@ -1257,7 +1301,16 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
     if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
       rebalanceEasyJetPlus(removed.flightNumber, 'gate');
     }
- //   isDirty = true;
+    // FIX (po zahtjevu — vidi identičan, opširan komentar u
+    // handleRemoveCheckin iznad).
+    if (!opts?.silent) {
+      const flightForUndo = removed ? flightsRef.current.find(f => f.FlightNumber === removed.flightNumber) : undefined;
+      showToast(
+        `Gate ${gateNumber} uklonjen${removed ? ` (${removed.flightNumber})` : ''}.`,
+        'success',
+        flightForUndo ? { label: 'Poništi', onClick: () => { void assignFlightToResource(flightForUndo, gateNumber, 'gate'); } } : undefined,
+      );
+    }
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
     showToast(`Greška pri uklanjanju gate-a ${gateNumber}. Pokušajte ponovo.`, 'error');
@@ -1273,7 +1326,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources, rebalanceEasyJetPlus, showToast]);
+}, [removingResources, rebalanceEasyJetPlus, showToast, assignFlightToResource]);
 
 // FIX (uklonjeno po zahtjevu): handleCloseGate (action:'closed') je ovdje
 // ranije služio da suzbije prikaz "iz rasporeda" na gate-u koji admin ne
@@ -1316,7 +1369,9 @@ useEffect(() => {
     if (flight && isDeparted(flight.StatusEN)) {
       departedAutoCleanupRef.current.add(dedupeKey);
       showToast(`Automatski uklonjeno (let poletio): Šalter ${a.resourceId} — ${a.flightNumber}`, 'success');
-      handleRemoveCheckin(a.resourceId);
+      // FIX: { silent: true } — ovaj poziv već ima sopstvenu poruku
+      // iznad, i "Poništi" nema smisla za let koji je stvarno poletio.
+      handleRemoveCheckin(a.resourceId, { silent: true });
     }
   }
 
@@ -1327,7 +1382,7 @@ useEffect(() => {
     if (flight && isDeparted(flight.StatusEN)) {
       departedAutoCleanupRef.current.add(dedupeKey);
       showToast(`Automatski uklonjeno (let poletio): Gate ${a.resourceId} — ${a.flightNumber}`, 'success');
-      handleRemoveGate(a.resourceId);
+      handleRemoveGate(a.resourceId, { silent: true });
     }
   }
 }, [flights, showToast, handleRemoveCheckin, handleRemoveGate]);
@@ -1404,6 +1459,16 @@ const handleLogout = performLogout;
     }
     return list;
   }, [flights, flightSearch, urgentOnly, getFlightAssignment]);
+
+  // FIX (po zahtjevu — "jasnije osoblju"): broj hitnih letova PO TABU,
+  // vidljiv na samom dugmetu taba — osoblje ne mora ući u "Gate" tab da
+  // bi saznalo da tamo nešto hitno čeka dok gleda "Check-in". Namjerno
+  // NEZAVISNO od trenutne pretrage/"Samo hitni" filtera (uvijek pokazuje
+  // STVARNO stanje, ne filtrirani prikaz).
+  const urgentCounts = {
+    checkin: flights.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, 'checkin') !== null)).length,
+    gate:    flights.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, 'gate')    !== null)).length,
+  };
 
   if (loadingFlights) {
     return (
@@ -1536,27 +1601,49 @@ const handleLogout = performLogout;
               <span className={isDark ? 'text-white/30' : 'text-gray-500'}>🕐 Ažurirano: {lastUpdate || '—'}</span>
               <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
               <span className={`tabular-nums ${isDark ? 'text-white/25' : 'text-gray-500'}`}>🔄 Refresh za {tickSec}s</span>
+              {/* FIX (po zahtjevu — "jasnije osoblju"): ukupan broj
+                  hitnih letova (oba taba zajedno), vidljiv ODMAH u
+                  header-u — bez potrebe da se čak ni pogleda ka
+                  tabovima. Prikazuje se SAMO kad ima šta da se prikaže. */}
+              {(urgentCounts.checkin + urgentCounts.gate) > 0 && (
+                <>
+                  <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
+                  <span className="flex items-center gap-1 font-bold text-red-500">
+                    ⚠ {urgentCounts.checkin + urgentCounts.gate} hitno
+                  </span>
+                </>
+              )}
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={handleRefresh} disabled={refreshing}
+            {/* FIX (po zahtjevu — vraćena nedostupna funkcija + jasnoća):
+                dugme za statistiku je ranije bilo potpuno nedostupno
+                (vidi opširan komentar uz openStats). title atributi
+                dodati na SVA dugmad ispod — ranije su bila samo golе
+                ikonice bez ikakvog objašnjenja funkcije. */}
+            <button onClick={openStats} title="Dnevna statistika zauzetosti"
+              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
+              <BarChart2 size={16} className={isDark ? 'text-white/60' : 'text-gray-600'} />
+            </button>
+
+            <button onClick={handleRefresh} disabled={refreshing} title="Osvježi sada"
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               <RefreshCw size={16} className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`} />
             </button>
 
 
-            <button onClick={() => router.push('/admin')}
+            <button onClick={() => router.push('/admin')} title="Nazad na admin početnu"
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               <Home size={16} className={isDark ? 'text-white/60' : 'text-gray-600'} />
             </button>
 
-            <button onClick={toggleTheme}
+            <button onClick={toggleTheme} title={isDark ? 'Prebaci na svijetlu temu' : 'Prebaci na tamnu temu'}
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               {isDark ? <Sun size={16} className="text-yellow-400" /> : <Moon size={16} className="text-slate-700" />}
             </button>
 
-            <button onClick={handleLogout}
+            <button onClick={handleLogout} title="Odjava sa panela"
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/25 text-red-400 text-xs font-medium transition-all active:scale-95">
               <LogOut size={14} /> Odjava
             </button>
@@ -1566,13 +1653,13 @@ const handleLogout = performLogout;
         {/* Tabovi */}
         <div className="flex gap-3 mb-6">
           {([
-            { id: 'checkin' as TabType, label: '🏷️ Check-in', icon: CheckSquare, count: checkinAssignments.length },
-            { id: 'gate'    as TabType, label: '🚪 Gate-ovi', icon: GitBranch,   count: gateAssignments.length    },
+            { id: 'checkin' as TabType, label: '🏷️ Check-in', icon: CheckSquare, count: checkinAssignments.length, urgent: urgentCounts.checkin },
+            { id: 'gate'    as TabType, label: '🚪 Gate-ovi', icon: GitBranch,   count: gateAssignments.length,    urgent: urgentCounts.gate    },
           ] as const).map(tab => {
             const isActive = activeTab === tab.id;
             return (
               <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${
+                className={`relative flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${
                   isActive
                     ? isDark ? 'bg-sky-500/20 border-sky-500/50 text-sky-300 shadow-lg'
                              : 'bg-sky-200 border-sky-500 text-sky-900 shadow-md'
@@ -1586,14 +1673,32 @@ const handleLogout = performLogout;
                     ? isDark ? 'bg-white/20 text-white' : 'bg-white/80 text-gray-800'
                     : isDark ? 'bg-white/10 text-white/40' : 'bg-gray-300 text-gray-600'
                 }`}>{tab.count}</span>
+                {/* FIX (po zahtjevu — "jasnije osoblju"): vidi opširan
+                    komentar uz urgentCounts iznad. Prikazuje se SAMO kad
+                    ima hitnih letova na tom tabu, bez obzira da li je
+                    tab trenutno aktivan — osoblje treba da vidi ovo i
+                    dok gleda DRUGI tab. */}
+                {tab.urgent > 0 && (
+                  <span className="absolute -top-2 -right-2 flex items-center justify-center min-w-[22px] h-[22px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold shadow-lg animate-pulse-subtle ring-2 ring-white dark:ring-slate-950">
+                    {tab.urgent}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
 
         {/* Selected Flight Banner */}
+        {/* FIX (po zahtjevu — "jasnije osoblju"): sticky umjesto
+            običnog — na dužoj listi gate-ova/šaltera (npr. Terminal 1 +
+            Terminal 2 zajedno), skrolovanje nadole je ranije guralo ovaj
+            baner van vidokruga, i osoblje bi izgubilo iz vida KOJI je
+            let trenutno izabran dok traži pravi gate. Sad ostaje
+            zalijepljen za vrh dok se skroluje. Dodat i kratak tekst
+            uputstva ("Tapni...") — jasnije šta je sledeći korak za
+            nekog ko prvi put koristi panel. */}
         {selectedFlightForTouch && (
-          <div className="mb-5 p-4 rounded-xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20">
+          <div className="sticky top-2 z-30 mb-5 p-4 rounded-xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20 backdrop-blur-md">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-3">
                 <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse" />
@@ -1602,6 +1707,9 @@ const handleLogout = performLogout;
                 </span>
                 <span className={`text-base ${isDark ? 'text-amber-400/80' : 'text-amber-800'}`}>
                   → {selectedFlightForTouch.DestinationCityName || selectedFlightForTouch.DestinationAirportCode}
+                </span>
+                <span className={`text-xs hidden sm:inline ${isDark ? 'text-amber-300/60' : 'text-amber-700/70'}`}>
+                  · Tapni {activeTab === 'checkin' ? 'šalter' : 'gate'} ispod da dodijeliš
                 </span>
               </div>
               <button onClick={() => setSelectedFlight(null)}

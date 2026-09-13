@@ -27,6 +27,12 @@ import type { Flight } from '@/types/flight';
 import { getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
 import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from 'lucide-react';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
+// FIX (po zahtjevu — isti bug kao Combined/SplitBoard, vidi opširan
+// komentar u app/combined/CombinedPageClient.tsx): zamjena za lokalne
+// EARLY_CHECKIN_AIRLINES/EXTRA_EARLY_CHECKIN_AIRLINES skupove ispod
+// (sad uklonjene) — treći nezavisan, hardkodiran izvor iste
+// informacije koju settings.ini treba da kontroliše.
+import { loadCheckInConfig, getCheckInOffsetMinutes } from '@/lib/check-in-service';
 import { isNightHours } from '@/lib/night-hours';
 import { useWeather } from '@/hooks/use-weather';
 import WeatherIcon from '@/components/weather-icon';
@@ -321,8 +327,12 @@ const checkStatus = {
 // ============================================================
 // AUTO-STATUS ZA DEPARTURES
 // ============================================================
-const EARLY_CHECKIN_AIRLINES = new Set(['6H', 'FZ', 'IZ', 'LY']);
-const EXTRA_EARLY_CHECKIN_AIRLINES = new Set(['LS','BA']);
+// FIX (po zahtjevu — isti bug kao Combined/SplitBoard): hardkodirani
+// EARLY_CHECKIN_AIRLINES/EXTRA_EARLY_CHECKIN_AIRLINES skupovi su OVDJE
+// UKLONJENI — vidi opširan komentar u
+// app/combined/CombinedPageClient.tsx za pun kontekst bug-a. Sad se
+// koristi getCheckInOffsetMinutes() iz lib/check-in-service.ts, koji
+// čita stvarnu konfiguraciju iz settings.ini.
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? '').trim();
@@ -343,13 +353,7 @@ function getAutoStatus(flight: Flight): string | null {
 
   if (minsToSTD > 30) {
     const iata = (flight.FlightNumber ?? '').replace(/\s/g, '').substring(0, 2).toUpperCase();
-
-    let checkInMinutesOffset = 120;
-    if (EXTRA_EARLY_CHECKIN_AIRLINES.has(iata)) {
-      checkInMinutesOffset = 150;
-    } else if (EARLY_CHECKIN_AIRLINES.has(iata)) {
-      checkInMinutesOffset = 180;
-    }
+    const checkInMinutesOffset = getCheckInOffsetMinutes(iata);
 
     const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000));
     const hh = String(checkInDate.getHours()).padStart(2, '0');
@@ -823,6 +827,12 @@ function DeparturesBoard(): JSX.Element {
   
   useEffect(() => { flightsRef.current = flights }, [flights]);
   useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
+
+  // FIX (po zahtjevu — isti bug kao Combined/SplitBoard): učitava
+  // stvarnu konfiguraciju iz settings.ini jednom pri mount-u.
+  useEffect(() => {
+    loadCheckInConfig().catch(() => {})
+  }, [])
 
   // ── Memory pressure detekcija ──
   useEffect(() => {
