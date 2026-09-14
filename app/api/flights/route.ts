@@ -50,6 +50,17 @@ export async function GET(request: Request): Promise<NextResponse> {
     const type = searchParams.get('type');
     const ifNoneMatch = request.headers.get('if-none-match');
     const now = Date.now();
+    // FIX (KRITIČNO — pronađeno dok se implementirala dinamička noćna
+    // detekcija): ova ruta je RANIJE računala SVOJU, isključivo
+    // statičku `nightNow` i koristila JE za `isNightMode` polje u
+    // odgovoru — potpuno IGNORIŠUĆI bogatiju vrijednost koju
+    // getCurrentFlightDataSafe()/lib/flight-data-service.ts već
+    // računa (statička ILI dinamička, vidi computeDynamicNightMode
+    // tamo). Bez ove ispravke, dinamički noćni režim bi bio IZRAČUNAT
+    // ispravno u servisu, ali NIKAD ne bi stigao do klijenata — ruta
+    // bi ga tiho zamijenila nazad na statičko-samo `nightNow`.
+    // `nightNow` ovdje se i dalje računa (koristi se samo kao fallback
+    // u catch bloku ispod, gdje `data` nije dostupan jer je sve palo).
     const nightNow = isNightHours();
 
     // ── 1. LETOVI — UVIJEK se poziva, bez prečice ispred (isti razlog kao
@@ -170,7 +181,10 @@ export async function GET(request: Request): Promise<NextResponse> {
         count: meta.count || 0,
         lastModified: meta.lastModified || null,
         timestamp: new Date().toISOString(),
-        isNightMode: nightNow,
+        // FIX: koristi data.isNightMode (statička ILI dinamička odluka
+        // iz servisa), NE lokalnu nightNow (samo statička) — vidi
+        // opširan komentar iznad, uz deklaraciju nightNow.
+        isNightMode: data.isNightMode ?? nightNow,
         desks,
         gates,
         deskEntries: rawAssignments.desks,

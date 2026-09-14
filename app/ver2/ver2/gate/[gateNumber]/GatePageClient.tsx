@@ -317,6 +317,12 @@ const etagGateStatusRef = useRef<string | null>(null);
 const lastKnownHashRef  = useRef<string | null>(null);
 const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
 const etagGateRef = useRef<string | null>(null);
+// FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): vidi
+// opširan komentar uz identičnu ref u CheckInPageClient.tsx. Ovdje se
+// NE traži poseban dodatan poziv — loadFlights() ionako već poziva
+// /api/flights svakih 30-45s, pa se isNightMode iz TOG odgovora samo
+// zapamti ovdje (vidi hvatanje niže, gdje se parsira statusData).
+const dynamicNightModeRef = useRef(false);
 const loadFlightsRef = useRef(false);
 // Ref za setTimeout handle glavnog (jedinog) poll ciklusa — potreban
 // za cleanup u effect-u koji ga postavlja.
@@ -362,6 +368,14 @@ const abortControllerRef = useRef<AbortController | null>(null);
 // ------------------------------------------------------------
 const loadFlights = useCallback(async () => {
   if (!isMountedRef.current) return;
+  // FIX (namjerno SAMO statička provjera ovdje, ne i dynamicNightModeRef):
+  // ovaj poziv je JEDINI izvor koji osvježava dynamicNightModeRef (vidi
+  // hvatanje statusData.isNightMode niže) — kad bi se i on gasio na
+  // osnovu iste dinamičke vrijednosti, ta vrijednost bi se zaglavila i
+  // NIKAD ne bi mogla da se ispravi (npr. ako se pojavi nov/preusmjeren
+  // let nakon što je dinamički noćni režim već okinut). Dinamička
+  // vrijednost gasi SAMO brzi poll (gate-status-override) ispod, ne i
+  // ovaj, sporiji izvor istine.
   if (isNightHours()) {
     setLoading(false);
     return;
@@ -424,6 +438,10 @@ const loadFlights = useCallback(async () => {
       const statusData = await statusRes.json();
       const newEtag = statusRes.headers.get('ETag');
       if (newEtag) etagStatusRef.current = newEtag;
+      // FIX: hvata kombinovanu (statička ILI dinamička) noćnu odluku
+      // iz servisa — vidi opširan komentar uz deklaraciju
+      // dynamicNightModeRef.
+      dynamicNightModeRef.current = !!statusData.isNightMode;
 
       data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
       lastFlightsDataRef.current = data;
@@ -567,6 +585,8 @@ useEffect(() => {
     setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
     mainTidRef.current = setTimeout(async () => {
       if (isMountedRef.current) {
+        // FIX: samo statička provjera — vidi opširan komentar u
+        // loadFlights() iznad.
         if (!isNightHours()) {
           await loadFlights();
         }
@@ -575,6 +595,7 @@ useEffect(() => {
     }, interval);
   };
  
+  // FIX: samo statička provjera — vidi opširan komentar u loadFlights() iznad.
   if (!isNightHours()) {
     loadFlights().then(schedule);
   } else {
@@ -611,7 +632,13 @@ useEffect(() => {
   const poll = async () => {
     if (cancelled) return;
 
-    if (isNightHours()) {
+    // FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): ovo
+    // je BRZI, skupi poll (9-12s) — konzument dinamičke odluke koju
+    // loadFlights() (sporiji poll, ~30-45s) osvježava, ne izvor same
+    // vrijednosti — bezbjedno gasi mrežni poziv na osnovu obje
+    // provjere, bez rizika "zaglavljivanja" (vidi opširan komentar uz
+    // dynamicNightModeRef i loadFlights() iznad).
+    if (isNightHours() || dynamicNightModeRef.current) {
       tid = setTimeout(poll, getFastPollInterval());
       return;
     }

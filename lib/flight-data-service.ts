@@ -468,6 +468,55 @@ function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
   });
 }
 
+// FIX (po zahtjevu — dinamičan ulazak u noćni režim, RANIJE od fiksnog
+// sezonskog prozora ako je poslednji let danas stvarno gotov): nalazi
+// let (odlazak ILI dolazak zajedno — koji god je HRONOLOŠKI poslednji
+// po rasporedu danas) i provjerava da li je TAJ KONKRETAN let već
+// dobio STVARAN status "departed"/"poletio" (za odlazak) ili
+// "arrived"/"landed"/"sletio" (za dolazak) — NE bilo koji let sa takvim
+// statusom, jer bi to lažno okinulo noćni režim ako je poslednji let
+// dana KASNI i još nije stvarno otišao, dok je neki RANIJI let već
+// odavno kompletiran. Vraća true tek 15+ minuta NAKON što se taj
+// stvaran status pojavio u podacima (mjereno preko VEĆ postojeće
+// minutesSinceFlightTime — imuna na server-vs-Podgorica vremensku
+// razliku, isti mehanizam kao filterOutStaleFlights).
+//
+// Namjerno vraća false (nikad ne uđe u dinamičku noć) ako danas nema
+// NIJEDNOG leta sa poznatim vremenom — bez rasporeda, nema signala na
+// osnovu kog bi se sigurno moglo zaključiti da je "gotovo za danas";
+// statička, sezonska provjera (isNightHours()) ostaje jedina koja
+// garantovano radi u tom slučaju.
+const DYNAMIC_NIGHT_GRACE_MINUTES = 15;
+
+function computeDynamicNightMode(flights: Flight[]): boolean {
+  let lastFlight: Flight | null = null;
+  let lastMinutesOfDay = -1;
+
+  for (const f of flights) {
+    const timeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime;
+    if (!timeStr || timeStr === '--:--') continue;
+    const [h, m] = timeStr.split(':').map(Number);
+    if (isNaN(h) || isNaN(m)) continue;
+    const minutesOfDay = h * 60 + m;
+    if (minutesOfDay > lastMinutesOfDay) {
+      lastMinutesOfDay = minutesOfDay;
+      lastFlight = f;
+    }
+  }
+
+  if (!lastFlight) return false;
+
+  const statusLower = (lastFlight.StatusEN || '').toLowerCase();
+  const isCompleted =
+    statusLower.includes('departed') || statusLower.includes('poletio') ||
+    statusLower.includes('arrived') || statusLower.includes('landed') || statusLower.includes('sletio');
+
+  if (!isCompleted) return false; // hronološki poslednji let danas JOŠ NIJE stvarno potvrđen kao gotov — čekamo
+
+  const minutesSince = minutesSinceFlightTime(lastFlight.EstimatedDepartureTime || lastFlight.ScheduledDepartureTime);
+  return minutesSince !== null && minutesSince >= DYNAMIC_NIGHT_GRACE_MINUTES;
+}
+
 // ── Filtrira letove čije je planirano/procijenjeno vrijeme više od
 // cutoffMinutes U PROŠLOSTI — hvata letove čiji je status u starom
 // backupu ostao zastario (npr. i dalje piše "Scheduled" iako je let
@@ -641,7 +690,7 @@ if (existingBackup.flights.length > 0 && existingBackup.date === todayPodgorica)
   }
 }
 
-const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow });
+const flightData = await buildFlightData(finalFlights, 'live', new Date().toISOString(), { isNightMode: nightNow || computeDynamicNightMode(finalFlights) });
     const slimmed = slimFlightData(flightData);
 
 await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
@@ -716,7 +765,7 @@ try {
     }
 
     const altFlightData = await buildFlightData(altFinalFlights, 'live-alternate', new Date().toISOString(), {
-      isNightMode: nightNow,
+      isNightMode: nightNow || computeDynamicNightMode(altFinalFlights),
       warning: 'Glavni uživo izvor trenutno nije dostupan. Prikazan podatak sa rezervnog izvora.',
     });
     const altSlimmed = slimFlightData(altFlightData);
@@ -756,6 +805,12 @@ const processor = new FlightAutoProcessor(latestBackup.flights);
     const processedFlights = processor.processFlights();
     const simulatedFlights = FlightAutoProcessor.simulateRealTimeProgress(processedFlights);
 
+    // FIX: dinamička provjera MORA ići na simulatedFlights (PRIJE
+    // filterOutCompletedFlights), jer upravo TRAŽIMO letove sa
+    // "departed"/"arrived" statusom — filtrirana verzija ispod ih
+    // namjerno uklanja iz PRIKAZA, ali signal nam treba prije toga.
+    const dynamicNightFromBackup = computeDynamicNightMode(simulatedFlights);
+
     const filteredSimulatedFlights = filterOutStaleFlights(filterOutCompletedFlights(simulatedFlights));
     const autoProcessedCount = filteredSimulatedFlights.filter((f: AutoProcessedFlight) => f.AutoProcessed).length;
     const source = autoProcessedCount > 0 ? 'auto-processed' : 'backup';
@@ -766,7 +821,7 @@ const flightData = await buildFlightData(
   latestBackup.timestamp,
   {
     isOfflineMode: true,
-    isNightMode: nightNow,   // ← DODATO
+    isNightMode: nightNow || dynamicNightFromBackup,   // ← DODATO
     backupTimestamp: latestBackup.timestamp,
     autoProcessedCount,
     warning: 'Using backup data. Live API temporarily unavailable.',

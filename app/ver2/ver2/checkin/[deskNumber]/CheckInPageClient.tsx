@@ -724,6 +724,22 @@ const lastFastStatusRef = useRef<string | null>(null);
 // (change-trigger) — bez ovoga bi oba mogla poslati fetch istovremeno.
 const isFetchingDeskRef = useRef(false);
 
+// FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): brzi
+// desk-status-override poll (10-12s) ispod se OSLANJA na ovu
+// vrijednost da zna da li da UOPŠTE zove mrežu — vidi provjeru
+// "isNightHours() || dynamicNightModeRef.current" u fetchDeskData().
+// isNightHours() (statička, sezonska) je BESPLATNA (lokalan sat, bez
+// mreže) i pokriva većinu slučajeva sama. Ova ref vrijednost dodaje
+// DRUGI, DINAMIČAN signal — server (lib/flight-data-service.ts,
+// computeDynamicNightMode) može zaključiti da je "gotovo za danas" i
+// PRIJE fiksnog sezonskog prozora, ako je hronološki poslednji let
+// danas (odlazak ili dolazak, koji god kasniji) stvarno dobio
+// departed/landed status prije 15+ minuta. Ažurira se preko odvojenog,
+// NAMJERNO rijetkog provjeravanja ispod (svaka 3 min) — ne treba
+// sub-minutna preciznost za ovo, cilj je da brzi poll STANE ranije na
+// danima sa malo letova, ne da reaguje trenutno na promjenu.
+const dynamicNightModeRef = useRef(false);
+
   // ── Klijentski (in-browser) keš za /api/flights lookup ─────────
   // Drži zadnji uspješan flights payload + njegov ETag unutar ove
   // kiosk sesije, da se izbjegne ponovni pun fetch (i JSON.parse nad
@@ -883,7 +899,7 @@ const fetchDeskData = useCallback(async () => {
   // FIX: spriječi konkurentno izvršavanje (vidi napomenu kod deklaracije)
   if (isFetchingDeskRef.current) return;
   isFetchingDeskRef.current = true;
-if (isNightHours()) {
+if (isNightHours() || dynamicNightModeRef.current) {
      // Resetuj backoff state pri ulasku u noćni mod — bez ovoga bi streak
    // ostao "zamrznut" na vrijednosti iz trenutka kad je noćni mod počeo,
   // pa bi ujutru prvi ciklus krenuo sa pogrešno visokim intervalom
@@ -1101,6 +1117,35 @@ const res = await fetch(
     isFetchingDeskRef.current = false;
   }
 }, [deskNumberParam]);
+
+// FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): odvojena,
+// NAMJERNO rijetka provjera (3 min) koja ažurira dynamicNightModeRef —
+// vidi opširan komentar uz deklaraciju te ref vrijednosti. Poziva
+// /api/flights direktno (bez If-None-Match logike koju flightsCacheRef
+// koristi za lookup detalja leta) — ruta je već CDN-keširana (s-maxage
+// 45s, ~98% cache hit u praksi), pa je ovaj dodatni, rijedak poziv
+// gotovo besplatan i ne dodaje mjerljivo opterećenje istoj ruti koju i
+// ionako pozivaju sve druge kiosk stranice.
+useEffect(() => {
+  let cancelled = false;
+
+  const checkDynamicNightMode = async () => {
+    try {
+      const res = await fetch('/api/flights');
+      if (!res.ok || cancelled) return;
+      const data = await res.json();
+      if (!cancelled) dynamicNightModeRef.current = !!data.isNightMode;
+    } catch {
+      // Tiho — ako ovaj rijedak poziv padne, dynamicNightModeRef samo
+      // zadrži svoju POSLEDNJU poznatu vrijednost; isNightHours()
+      // (statička) i dalje radi nezavisno kao sigurnosna mreža.
+    }
+  };
+
+  checkDynamicNightMode();
+  const id = setInterval(checkDynamicNightMode, 3 * 60_000);
+  return () => { cancelled = true; clearInterval(id); };
+}, []);
 
   // ── Polling ────────────────────────────────────────────────
 useEffect(() => {
