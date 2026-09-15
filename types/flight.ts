@@ -96,7 +96,7 @@ export interface FlightData {
   isNightMode?: boolean;
   arrivals: Flight[];
   lastUpdated: string;
-  source?: 'live' | 'cached' | 'fallback' | 'backup' | 'auto-processed' | 'emergency';
+  source?: 'live' | 'live-alternate' | 'cached' | 'fallback' | 'backup' | 'auto-processed' | 'emergency';
   error?: string;
   warning?: string;
   backupTimestamp?: string;

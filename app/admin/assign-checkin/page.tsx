@@ -4,9 +4,12 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   RefreshCw, Trash2, LogOut, Home, CheckSquare, GitBranch,
-  X, Plane, Clock, Sun, Moon, Fingerprint, BarChart2,
+  X, Plane, Clock, Sun, Moon, Fingerprint, BarChart2, Search,
 } from 'lucide-react';
 import type { Flight } from '@/types/flight';
+import { ToastStack, nextToastId, type ToastMessage, type ToastType } from '@/components/toast';
+import { useIdleLogout } from '@/hooks/use-idle-logout';
+import { IdleWarningBanner } from '@/components/idle-warning-banner';
 
 // ─────────────────────────────────────────────
 // Konstante
@@ -69,7 +72,14 @@ const numericId = (id: string): number => {
   return isNaN(n) ? Infinity : n;
 };
 
-
+// FIX (uklonjeno po zahtjevu): ovdje su ranije bile flightMatchesGate /
+// parseScheduleTime / shouldDisplayNaturalFlight / buildNaturalGateAssignments
+// — pomoćne funkcije koje su ovom panelu davale da prikaže isti let koji
+// gate monitor prikazuje "iz rasporeda" bez ručnog override-a ("SLUČAJ B").
+// Gate monitor (GatePageClient.tsx) sad NIKAD ne prikazuje ništa bez ručne
+// dodjele, pa ovaj panel ne treba (i ne smije) da simulira/predviđa taj
+// prikaz — svaka stavka u gateAssignments je sad UVIJEK prava, ručna
+// dodjela iz Redis override-a, ništa više.
 
 // ─────────────────────────────────────────────
 // Tipovi
@@ -83,6 +93,13 @@ interface Assignment {
   scheduledTime: string;
   assignedAt: string;
   classType: ClassType;
+  // FIX (uklonjeno po zahtjevu — vidi opširan komentar u
+  // GatePageClient.tsx uz "SLUČAJ B" ukidanje): ovaj Assignment tip je
+  // ranije imao `isNatural`/`isClosed` polja za letove koje gate monitor
+  // prikazuje "iz rasporeda" bez ručnog override-a. Gate monitor sad
+  // NIKAD ne prikazuje ništa bez ručne dodjele, pa ta polja (i sva logika
+  // koja ih je gradila/prikazivala) više nemaju šta da predstavljaju —
+  // svaki Assignment ovdje je uvijek prava, ručna dodjela.
 }
 
 interface StatSession {
@@ -116,6 +133,45 @@ const isDeparted = (f: Flight) => {
   return s.includes('departed') || s.includes('poletio');
 };
 
+const isTerminated = (f: Flight) => {
+  const s = (f.StatusEN || '').toLowerCase();
+  return isDeparted(f) || s.includes('cancelled') || s.includes('otkazan') ||
+         s.includes('diverted') || s.includes('preusmjeren');
+};
+
+// FIX (UX poboljšanje — istaknuti letove koji HITNO trebaju dodjelu):
+// letovi su do sad bili sortirani ISKLJUČIVO po vremenu polaska
+// (sortBySTD) — nedodijeljen let za 20 min je vizuelno izgledao IDENTIČNO
+// kao već dodijeljen let za 20 min, u istoj boji kartice, bez ikakvog
+// upozorenja. Pod pritiskom (više letova odjednom, žurba), lako se
+// previdi baš ONAJ let kojem stvarno treba pažnja. Prag od 60 min je
+// namjerno generičan (ne zavisi od airline-specifičnog check-in
+// prozora iz lib/check-in-service.ts, koji je 120-180 min — PUNO ranije
+// nego što je "hitno" u operativnom smislu) — 60 min bez IKAKVOG
+// šaltera/gate-a je hitno bez obzira na aviokompaniju.
+const URGENT_THRESHOLD_MINUTES = 60;
+
+function minutesUntilDeparture(f: Flight): number | null {
+  const t = f.ScheduledDepartureTime;
+  if (!t || !t.includes(':')) return null;
+  const [h, m] = t.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
+  const now = new Date();
+  const dep = new Date(now);
+  dep.setHours(h, m, 0, 0);
+  let diffMs = dep.getTime() - now.getTime();
+  const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+  if (diffMs > TWELVE_HOURS_MS) diffMs -= 24 * 60 * 60 * 1000;
+  else if (diffMs < -TWELVE_HOURS_MS) diffMs += 24 * 60 * 60 * 1000;
+  return Math.floor(diffMs / 60_000);
+}
+
+function isUrgentUnassigned(f: Flight, assigned: boolean): boolean {
+  if (assigned || isTerminated(f)) return false;
+  const mins = minutesUntilDeparture(f);
+  return mins !== null && mins >= 0 && mins <= URGENT_THRESHOLD_MINUTES;
+}
+
 const sortBySTD = (a: Flight, b: Flight) =>
   (a.ScheduledDepartureTime || '').localeCompare(b.ScheduledDepartureTime || '');
 
@@ -125,11 +181,20 @@ const processFlights = (deps: Flight[]) =>
 const todayKey = () => new Date().toISOString().split('T')[0];
 
 // ─────────────────────────────────────────────
-// Stats API helpers — sve ide kroz /api/test/stats
+// Stats API helpers
 // ─────────────────────────────────────────────
+// FIX (KRITIČNO — pravi uzrok crash-a u StatsModal-u, "Cannot convert
+// undefined or null to object"): ovo je RANIJE išlo na /api/test/stats,
+// koja je u međuvremenu prenamijenjena za potpuno drugu svrhu (provjera
+// svježine flight-meta keša — hash/count/lastModified, NE desk/gate
+// sesije). trackStart/trackEnd POST pozivi su otud TIHO padali (405,
+// uhvaćeno u .catch bez vidljive greške) — dnevna statistika NIKAD
+// nije imala stvaran backend. Nova, namjenska ruta:
+// app/api/admin/checkin-stats/route.ts.
+const STATS_API_URL = '/api/admin/checkin-stats';
 
 const statsPost = (body: object) =>
-  fetch('/api/test/stats', {
+  fetch(STATS_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -143,9 +208,17 @@ const trackEnd = (type: 'desk' | 'gate', resourceId: string) =>
 
 const fetchDailyStats = async (date?: string): Promise<DailyStats> => {
   try {
-    const res = await fetch(`/api/test/stats${date ? `?date=${date}` : ''}`);
+    const res = await fetch(`${STATS_API_URL}${date ? `?date=${date}` : ''}`);
     if (!res.ok) return { desks: {}, gates: {} };
-    return res.json();
+    const data = await res.json();
+    // FIX (odbrambeno — dodatna sigurnosna mreža pored ispravke same
+    // rute): čak i da ruta ikad ponovo vrati neočekivan oblik, ovdje se
+    // to normalizuje na ispravan { desks: {}, gates: {} } umjesto da
+    // StatsModal padne na Object.entries(undefined).
+    return {
+      desks: data?.desks && typeof data.desks === 'object' ? data.desks : {},
+      gates: data?.gates && typeof data.gates === 'object' ? data.gates : {},
+    };
   } catch {
     return { desks: {}, gates: {} };
   }
@@ -277,11 +350,20 @@ const ResourceCell: React.FC<{
 
 const FlightRow: React.FC<{
   flight: Flight;
-  assigned: boolean;
+  assignedTo: string | null;
   selected: boolean;
   onSelect: () => void;
   isDark: boolean;
-}> = ({ flight, assigned, selected, onSelect, isDark }) => {
+  resourceLabel: string;
+}> = ({ flight, assignedTo, selected, onSelect, isDark, resourceLabel }) => {
+  const assigned = assignedTo !== null;
+  // FIX (UX poboljšanje — vidi opširan komentar uz isUrgentUnassigned):
+  // nedodijeljen let koji polijeće za manje od 60 min dobija jasno
+  // uočljiv crveni tretman, RAZLIČIT od običnog "nedodijeljen" (bijela/
+  // siva kartica) i od "dodijeljen" (zelena) — da odmah upadne u oči pod
+  // pritiskom, prije nego što se let uopšte selektuje.
+  const urgent = !selected && isUrgentUnassigned(flight, assigned);
+  const urgentMins = urgent ? minutesUntilDeparture(flight) : null;
   let cc = 'cursor-pointer rounded-xl border transition-all duration-150 select-none relative overflow-hidden min-h-[85px] ';
   let fc = '', tc = '', dc = '', ac = '';
 
@@ -289,9 +371,18 @@ const FlightRow: React.FC<{
     if (selected) {
       cc += 'ring-2 ring-amber-400 bg-amber-500/20 border-amber-400/70 shadow-lg shadow-amber-500/30';
       fc = 'text-amber-200'; tc = 'text-amber-400/80'; dc = 'text-amber-300/90'; ac = 'text-amber-400/60';
+    } else if (urgent) {
+      cc += 'bg-red-500/15 border-red-500/60 shadow-lg shadow-red-500/20 animate-pulse-subtle';
+      fc = 'text-red-200'; tc = 'text-red-300/90'; dc = 'text-red-200/90'; ac = 'text-red-300/60';
     } else if (assigned) {
-      cc += 'bg-white/5 border-white/15 opacity-60';
-      fc = 'text-white/70'; tc = 'text-white/40'; dc = 'text-white/60'; ac = 'text-white/30';
+      // FIX (uočljivija oznaka "već dodijeljen"): ranije je dodijeljen let
+      // dobijao samo tanku belu ivicu i sitan siv "dodijeljen" tekst — lako
+      // se gubi pri brzom skrolovanju pod pritiskom. Sad ima jasnu ZELENU
+      // ivicu/pozadinu (univerzalno prepoznatljiva boja za "urađeno") uz
+      // istaknutu značku sa konkretnim resursom (npr. "✓ Gate 21"), ne samo
+      // generičko "dodijeljen".
+      cc += 'bg-emerald-500/10 border-emerald-400/40';
+      fc = 'text-white/80'; tc = 'text-white/40'; dc = 'text-white/60'; ac = 'text-white/30';
     } else {
       cc += 'bg-white/8 border-white/20 hover:bg-white/15';
       fc = 'text-white'; tc = 'text-white/40'; dc = 'text-white/70'; ac = 'text-white/35';
@@ -300,8 +391,11 @@ const FlightRow: React.FC<{
     if (selected) {
       cc += 'ring-2 ring-amber-500 bg-amber-100 border-amber-500 shadow-md';
       fc = 'text-amber-900'; tc = 'text-amber-700'; dc = 'text-amber-800'; ac = 'text-amber-700/70';
+    } else if (urgent) {
+      cc += 'bg-red-50 border-red-500 shadow-md';
+      fc = 'text-red-900'; tc = 'text-red-700'; dc = 'text-red-800'; ac = 'text-red-700/80';
     } else if (assigned) {
-      cc += 'bg-gray-100 border-gray-300 opacity-70';
+      cc += 'bg-emerald-50 border-emerald-300';
       fc = 'text-gray-700'; tc = 'text-gray-500'; dc = 'text-gray-600'; ac = 'text-gray-500';
     } else {
       cc += 'bg-white border-gray-200 hover:bg-gray-100';
@@ -313,6 +407,8 @@ const FlightRow: React.FC<{
     <TouchFeedback onTap={onSelect}>
       <div className={cc} style={{ padding: '12px 16px' }}>
         {selected && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-amber-400 rounded-l-xl" />}
+        {!selected && urgent && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-red-500 rounded-l-xl" />}
+        {!selected && !urgent && assigned && <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-400 rounded-l-xl" />}
         <div className="flex items-center justify-between gap-3">
           <span className={`font-mono font-bold text-base tracking-tight ${fc}`}>{flight.FlightNumber}</span>
           <div className={`flex items-center gap-1.5 ${tc}`}>
@@ -330,9 +426,16 @@ const FlightRow: React.FC<{
               ✓ ODABRAN
             </span>
           )}
-          {!selected && assigned && (
-            <span className={`text-[10px] font-medium flex-shrink-0 ${isDark ? 'text-white/35' : 'text-gray-500'}`}>
-              dodijeljen
+          {!selected && urgent && (
+            <span className="text-[11px] font-bold text-white bg-red-600 px-2.5 py-1 rounded-full flex-shrink-0 shadow-sm">
+              ⚠ HITNO {urgentMins !== null ? `${urgentMins}m` : ''}
+            </span>
+          )}
+          {!selected && !urgent && assigned && (
+            <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full flex-shrink-0 shadow-sm ${
+              isDark ? 'text-emerald-100 bg-emerald-600/80' : 'text-emerald-900 bg-emerald-200'
+            }`}>
+              ✓ {resourceLabel} {assignedTo}
             </span>
           )}
         </div>
@@ -471,7 +574,10 @@ const StatsModal: React.FC<{
     sessions.reduce((s, x) => s + x.minutes, 0);
 
   const currentActive = tab === 'desks' ? currentCheckin : currentGates;
-  const data          = tab === 'desks' ? stats.desks    : stats.gates;
+  // FIX: odbrambena zaštita — treći sloj (uz ispravku same rute i
+  // normalizaciju u fetchDailyStats) protiv "Cannot convert undefined
+  // or null to object" ako stats prop ikad stigne malformiran.
+  const data          = (tab === 'desks' ? stats.desks : stats.gates) ?? {};
 
   const activeOnlyIds = currentActive
     .filter(a => !data[a.resourceId])
@@ -667,6 +773,33 @@ export default function AssignPanel() {
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(true);
   const [showStats,              setShowStats]              = useState(false);
+
+  // FIX (pretraga/filter letova): sa 40+ letova dnevno, scroll kroz cijelu
+  // listu da se nađe jedan konkretan let usporava rad pod pritiskom. Pretraga
+  // je namjerno client-side (bez mrežnog poziva) — filtrira već učitanu
+  // listu letova, pa je trenutna, bez ikakvog kašnjenja.
+  const [flightSearch, setFlightSearch] = useState('');
+
+  // FIX (UX poboljšanje — brzi filter "Samo hitni"): dopunjuje search —
+  // kad je uključen, prikazuje SAMO letove koji ispunjavaju
+  // isUrgentUnassigned (nedodijeljen, polijeće za ≤60 min). Korisno kad
+  // ima puno letova na listi i osoblje želi brzo da vidi šta ODMAH treba
+  // pažnju, bez kucanja bilo čega u pretragu.
+  const [urgentOnly, setUrgentOnly] = useState(false);
+
+  // ── Toast obavještenja (FIX: staff sada dobija vizuelnu potvrdu uspjeha/
+  // neuspjeha dodjele ili uklanjanja gate-a/šaltera — vidi components/toast.tsx
+  // za puno objašnjenje zašto je ovo dodato) ──
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  // FIX (po zahtjevu — "korisnije za osoblje"): treći, opcioni parametar
+  // za akciju (npr. "Poništi" dugme unutar toast-a) — vidi opširan
+  // komentar u components/toast.tsx.
+  const showToast = useCallback((message: string, type: ToastType, action?: ToastMessage['action']) => {
+    setToasts(list => [...list, { id: nextToastId(), message, type, action }]);
+  }, []);
+  const dismissToast = useCallback((id: number) => {
+    setToasts(list => list.filter(t => t.id !== id));
+  }, []);
   const [dailyStats,             setDailyStats]             = useState<DailyStats>({ desks: {}, gates: {} });
   const [loadingStats,           setLoadingStats]           = useState(false);
 
@@ -692,42 +825,36 @@ export default function AssignPanel() {
   // Tema
   useEffect(() => {
     const stored      = localStorage.getItem('theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const shouldBeDark = stored === 'dark' || (stored === null && prefersDark);
+    // FIX (default tema = LIGHT, po zahtjevu): ranije se, kad ništa nije
+    // eksplicitno sačuvano u localStorage (prvi ikad posjet, ili očišćen
+    // browser), tema birala prema OS/browser podešavanju
+    // (prefers-color-scheme). To je značilo da administrator sa tamnim
+    // sistemskim temom dobija tamnu admin temu bez da je ikad to tražio.
+    // Sad je default UVIJEK light — tamna tema se koristi ISKLJUČIVO ako
+    // je admin eksplicitno kliknuo na toggle (što upisuje 'dark' u
+    // localStorage).
+    const shouldBeDark = stored === 'dark';
     setIsDark(shouldBeDark);
     document.documentElement.classList.toggle('dark', shouldBeDark);
   }, []);
-  // ─── Zajednička logout funkcija — briše i cookie i localStorage ──
+  // ─── Zajednička logout funkcija — briše httpOnly cookie na serveru
+  // (vidi app/api/admin/logout/route.ts) i lokalne "brzi-check" flagove ──
 const performLogout = useCallback(async () => {
   await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
   localStorage.removeItem('adminAuthenticated');
   localStorage.removeItem('adminLoginTime');
-  document.cookie = 'admin-authenticated=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  // NAPOMENA: document.cookie brisanje OVDJE više nema efekta (cookie je
+  // httpOnly od izmjene u app/api/admin/login/route.ts — JS ga ne može ni
+  // čitati ni pisati). Ostavljeno uklonjeno namjerno, ne greškom: pravo
+  // brisanje se dešava na serveru u pozivu iznad.
   router.push('/admin/login');
 }, [router]);
 
-// ─── Auto-logout nakon 240s neaktivnosti ──────────────────────
-useEffect(() => {
-  const IDLE_LOGOUT_MS = 240_000;
-  let idleTimer: ReturnType<typeof setTimeout>;
-
-  const resetIdleTimer = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(performLogout, IDLE_LOGOUT_MS);
-  };
-
-  const activityEvents = ['mousedown', 'touchstart', 'keydown', 'click'];
-  activityEvents.forEach(evt =>
-    window.addEventListener(evt, resetIdleTimer, { passive: true })
-  );
-
-  resetIdleTimer(); // pokreni odmah pri učitavanju stranice
-
-  return () => {
-    clearTimeout(idleTimer);
-    activityEvents.forEach(evt => window.removeEventListener(evt, resetIdleTimer));
-  };
-}, [performLogout]);
+// ─── Auto-logout nakon neaktivnosti — sad zajednički hook (vidi
+// hooks/use-idle-logout.ts), usklađeno sa svim ostalim admin ekranima na
+// 3 min + 30s upozorenje. Ranije: 240s, bez upozorenja, samo na ovoj
+// stranici. ──
+const { secondsLeft: idleWarningSeconds } = useIdleLogout();
 
   const toggleTheme = () => {
     const newDark = !isDark;
@@ -736,9 +863,15 @@ useEffect(() => {
     localStorage.setItem('theme', newDark ? 'dark' : 'light');
   };
 
-  // Učitavanje statistike
+  // FIX (po zahtjevu — "korisnije za osoblje"): cijela StatsModal
+  // funkcija (dnevna statistika zauzetosti šaltera/gate-ova) je bila
+  // potpuno IZGRAĐENA — modal, tabovi, agregacija po resursu, sve — ali
+  // NEDOSTUPNA osoblju, jer je ova funkcija (jedino mjesto koje bi
+  // ikad postavilo showStats na true) bila zakomentarisana, i nigdje
+  // drugdje u fajlu nije postojalo dugme koje je poziva. Vraćeno u
+  // funkciju + dodato dugme u header (vidi JSX niže).
   const openStats = useCallback(async () => {
-    setShowStats(true);const handleLogout =
+    setShowStats(true);
     setLoadingStats(true);
     const data = await fetchDailyStats();
     setDailyStats(data);
@@ -824,6 +957,14 @@ useEffect(() => {
       }
 
       const gateList: Assignment[] = [];
+      // FIX (uklonjeno po zahtjevu — vidi komentar uz Assignment interfejs):
+      // ranije se ovdje odvojeno pratilo status:'closed' (da bi se
+      // isključilo iz natural fallback-a) i gradio natural fallback preko
+      // buildNaturalGateAssignments. Gate monitor sad NIKAD ne prikazuje
+      // ništa bez ručne dodjele, pa je 'closed' funkcionalno identično
+      // "nema override-a" — nema više razloga da se posebno prati, i nema
+      // više natural fallback-a koji bi trebalo isključivati iz njega.
+      // gateList sad sadrži ISKLJUČIVO prave, ručne ('open') dodjele.
       for (const [gateNumber, entry] of Object.entries<any>(data.gateEntries ?? {})) {
         if (entry?.flightNumber && entry.status === 'open') {
           const flight = currentFlights.find(f => f.FlightNumber === entry.flightNumber);
@@ -1009,6 +1150,9 @@ if (resourceType === 'desk' && isBAFlight(flight.FlightNumber)) {
  const [res] = await Promise.all([assignPromise, trackPromise]);
 if (!res.ok) throw new Error('HTTP ' + res.status);
 
+const resourceLabel = resourceType === 'desk' ? `Šalter ${resourceId}` : `Gate ${resourceId}`;
+showToast(`${resourceLabel} → ${flight.FlightNumber} dodijeljen`, 'success');
+
 if (autoClass) {
   const classEndpoint = resourceType === 'desk'
     ? `${API_PREFIX}/desk-status-override`
@@ -1032,17 +1176,28 @@ if (autoClass) {
     return true;
   } catch (err) {
     console.error('Greška pri dodjeli:', err);
+    const resourceLabel = resourceType === 'desk' ? `Šalter ${resourceId}` : `Gate ${resourceId}`;
+    showToast(`Greška pri dodjeli — ${resourceLabel} nije dodijeljen letu ${flight.FlightNumber}. Pokušajte ponovo.`, 'error');
     // Rollback — ukloni optimistički dodatu stavku
     setAssignments(list => list.filter(a => a.resourceId !== resourceId));
     return false;
   }
-}, [rebalanceEasyJetPlus]);
+}, [rebalanceEasyJetPlus, showToast]);
 
   const handleResourceTouchAssign = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate',
   ) => {
     const flight = selectedFlightRef.current;
-    if (!flight) return;
+
+    // FIX (tap na gate/šalter nije davao nikakvu povratnu informaciju):
+    // ako admin nije prvo izabrao let sa liste, funkcija se ranije tiho
+    // vraćala (`if (!flight) return`) bez ikakve poruke — sad jasno kaže
+    // šta nedostaje.
+    if (!flight) {
+      showToast('Prvo izaberi let sa liste, pa tapni gate/šalter.', 'error');
+      return;
+    }
+
     const assignments = resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
     const existing    = assignments.find(a => a.resourceId === resourceId);
     if (existing) {
@@ -1052,7 +1207,7 @@ if (autoClass) {
     await assignFlightToResource(flight, resourceId, resourceType);
     setSelectedFlight(null);
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
-  }, [assignFlightToResource, setSelectedFlight]);
+  }, [assignFlightToResource, setSelectedFlight, showToast]);
 
 const handleConfirmOverride = useCallback(async () => {
   const p = pendingOverride;
@@ -1076,7 +1231,7 @@ const handleConfirmOverride = useCallback(async () => {
     touchTimeoutRef.current = setTimeout(() => setSelectedFlight(null), TOUCH_TIMEOUT_MS);
   }, [setSelectedFlight]);
 
-const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
+const handleRemoveCheckin = useCallback(async (deskNumber: string, opts?: { silent?: boolean }) => {
   if (removingResources.has(`desk:${deskNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`desk:${deskNumber}`));
 
@@ -1094,9 +1249,25 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
       rebalanceEasyJetPlus(removed.flightNumber, 'desk');
     }
-   // isDirty = true;
+    // FIX (po zahtjevu — "korisnije za osoblje"): uklanjanje je do sad
+    // bilo TIHO na uspjehu (samo greška je prikazivala toast) — jedan
+    // slučajan tap na kantu za smeće je odmah, bez ikakve potvrde ili
+    // mogućnosti povratka, brisao aktivnu dodjelu. Sad se prikazuje
+    // potvrda SA dugmetom "Poništi" (osim kad je ovo AUTOMATSKO
+    // uklanjanje zbog poletanja leta — opts.silent — tamo undo nema
+    // smisla, i taj poziv već ima svoju posebnu poruku, vidi efekat
+    // niže koji zove ovu funkciju).
+    if (!opts?.silent) {
+      const flightForUndo = removed ? flightsRef.current.find(f => f.FlightNumber === removed.flightNumber) : undefined;
+      showToast(
+        `Šalter ${deskNumber} uklonjen${removed ? ` (${removed.flightNumber})` : ''}.`,
+        'success',
+        flightForUndo ? { label: 'Poništi', onClick: () => { void assignFlightToResource(flightForUndo, deskNumber, 'desk'); } } : undefined,
+      );
+    }
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
+    showToast(`Greška pri uklanjanju šaltera ${deskNumber}. Pokušajte ponovo.`, 'error');
     // Rollback — vrati stavku nazad ako je poziv pao
     if (removed) {
       setCheckinAssignments(list =>
@@ -1110,9 +1281,9 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources, rebalanceEasyJetPlus]);
+}, [removingResources, rebalanceEasyJetPlus, showToast, assignFlightToResource]);
 
-const handleRemoveGate = useCallback(async (gateNumber: string) => {
+const handleRemoveGate = useCallback(async (gateNumber: string, opts?: { silent?: boolean }) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`gate:${gateNumber}`));
 
@@ -1130,9 +1301,19 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
     if (removed && isEasyJetFlight({ AirlineName: removed.airlineName, FlightNumber: removed.flightNumber } as Flight)) {
       rebalanceEasyJetPlus(removed.flightNumber, 'gate');
     }
- //   isDirty = true;
+    // FIX (po zahtjevu — vidi identičan, opširan komentar u
+    // handleRemoveCheckin iznad).
+    if (!opts?.silent) {
+      const flightForUndo = removed ? flightsRef.current.find(f => f.FlightNumber === removed.flightNumber) : undefined;
+      showToast(
+        `Gate ${gateNumber} uklonjen${removed ? ` (${removed.flightNumber})` : ''}.`,
+        'success',
+        flightForUndo ? { label: 'Poništi', onClick: () => { void assignFlightToResource(flightForUndo, gateNumber, 'gate'); } } : undefined,
+      );
+    }
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
+    showToast(`Greška pri uklanjanju gate-a ${gateNumber}. Pokušajte ponovo.`, 'error');
     if (removed) {
       setGateAssignments(list =>
         list.some(a => a.resourceId === gateNumber) ? list : [...list, removed]
@@ -1145,7 +1326,66 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources, rebalanceEasyJetPlus]);
+}, [removingResources, rebalanceEasyJetPlus, showToast, assignFlightToResource]);
+
+// FIX (uklonjeno po zahtjevu): handleCloseGate (action:'closed') je ovdje
+// ranije služio da suzbije prikaz "iz rasporeda" na gate-u koji admin ne
+// želi da vidi. Gate monitor sad NIKAD ne prikazuje ništa bez ručne
+// dodjele — "zatvoren" i "nema override-a" su vizuelno IDENTIČNI (prazan
+// ekran), pa eksplicitno zatvaranje više ne postiže ništa što obično
+// "ukloni" (handleRemoveGate, action:'clear') već ne postiže. Uklonjeno
+// zajedno sa pratećom "🚫 Sakrij (zatvori gate)" dugmadi u AssignmentCard.
+
+// ─────────────────────────────────────────────
+// FIX (automatsko čišćenje dodjela za DEPARTED letove): ako osoblje
+// zaboravi da ručno ukloni gate/šalter nakon što je let stvarno poletio,
+// dodjela ostaje "zaglavljena" na monitoru — može zbuniti sledeći let koji
+// treba isti gate/šalter. Ovo NAMJERNO reaguje SAMO na status "Departed"
+// (poletio) — ne na cancelled/diverted/itd, tačno po zahtjevu, jer ti
+// slučajevi mogu zahtijevati ručnu pažnju osoblja (npr. otkazan let možda
+// treba ostati vidljiv radi rada sa putnicima).
+//
+// Pokreće se automatski svaki put kad se `flights` osvježi (glavni poll
+// ciklus na 2 min, vidi REFRESH_INTERVAL_MS) — dok je admin panel otvoren.
+// Kao dodatnu sigurnosnu mrežu za slučaj da panel NIJE otvoren kad let
+// poletī, isti mehanizam postoji i server-side u
+// app/api/admin/cleanup-overrides/route.ts (cron na svaka 4h).
+const departedAutoCleanupRef = useRef<Set<string>>(new Set());
+
+useEffect(() => {
+  if (flights.length === 0) return;
+
+  const isDeparted = (statusEN: string | undefined): boolean => {
+    const s = (statusEN || '').toLowerCase();
+    return s.includes('departed') || s.includes('poletio') || s.includes('poletjelo');
+  };
+
+  const flightByNumber = new Map(flights.map(f => [f.FlightNumber, f]));
+
+  for (const a of checkinAssignmentsRef.current) {
+    const dedupeKey = `desk:${a.resourceId}:${a.flightNumber}`;
+    if (departedAutoCleanupRef.current.has(dedupeKey)) continue;
+    const flight = flightByNumber.get(a.flightNumber);
+    if (flight && isDeparted(flight.StatusEN)) {
+      departedAutoCleanupRef.current.add(dedupeKey);
+      showToast(`Automatski uklonjeno (let poletio): Šalter ${a.resourceId} — ${a.flightNumber}`, 'success');
+      // FIX: { silent: true } — ovaj poziv već ima sopstvenu poruku
+      // iznad, i "Poništi" nema smisla za let koji je stvarno poletio.
+      handleRemoveCheckin(a.resourceId, { silent: true });
+    }
+  }
+
+  for (const a of gateAssignmentsRef.current) {
+    const dedupeKey = `gate:${a.resourceId}:${a.flightNumber}`;
+    if (departedAutoCleanupRef.current.has(dedupeKey)) continue;
+    const flight = flightByNumber.get(a.flightNumber);
+    if (flight && isDeparted(flight.StatusEN)) {
+      departedAutoCleanupRef.current.add(dedupeKey);
+      showToast(`Automatski uklonjeno (let poletio): Gate ${a.resourceId} — ${a.flightNumber}`, 'success');
+      handleRemoveGate(a.resourceId, { silent: true });
+    }
+  }
+}, [flights, showToast, handleRemoveCheckin, handleRemoveGate]);
 
   const handleClassToggle = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate', next: ClassType,
@@ -1182,10 +1422,53 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
 
 const handleLogout = performLogout;
 
-  const isFlightAssigned = (flightNumber: string, tab: TabType) =>
-    tab === 'checkin'
-      ? checkinAssignments.some(a => a.flightNumber === flightNumber)
-      : gateAssignments.some(a => a.flightNumber === flightNumber);
+  // FIX (vizuelna oznaka "već dodijeljen"): ranije je isFlightAssigned()
+  // vraćala samo boolean, pa je FlightRow mogao prikazati samo generičko
+  // "dodijeljen" — sitan, lako propustljiv tekst. Sad vraća i KOJI resurs
+  // (npr. "Gate 21" / "Šalter 5"), pa značka može biti mnogo konkretnija i
+  // uočljivija (osoblje odmah vidi GDJE je let već dodijeljen, bez potrebe
+  // da otvara drugi tab).
+  const getFlightAssignment = useCallback((flightNumber: string, tab: TabType): string | null => {
+    const list = tab === 'checkin' ? checkinAssignments : gateAssignments;
+    const found = list.find(a => a.flightNumber === flightNumber);
+    return found ? found.resourceId : null;
+  }, [checkinAssignments, gateAssignments]);
+
+  // FIX (pretraga/filter letova): filtrira po broju leta, destinaciji ili
+  // aviokompaniji — case-insensitive, bez dijakritike-osjetljivosti za
+  // brojeve/kodove (ionako su uglavnom latinica/brojevi).
+  //
+  // FIX (dodano — "Samo hitni" toggle): ovo je premješteno IZ globalnog
+  // (dijeljenog) izraza U flightList(tab) ispod, jer "hitno" zavisi od
+  // toga da li je let dodijeljen NA TOM KONKRETNOM tabu (isti let može
+  // biti dodijeljen šalteru ali ne gate-u, ili obrnuto) — getFlightAssignment
+  // je već tab-svjestan po istom principu.
+  const filterFlights = useCallback((tab: TabType): Flight[] => {
+    let list = flights;
+    if (flightSearch.trim()) {
+      const q = flightSearch.trim().toLowerCase();
+      list = list.filter(f =>
+        f.FlightNumber?.toLowerCase().includes(q) ||
+        f.DestinationCityName?.toLowerCase().includes(q) ||
+        f.DestinationAirportCode?.toLowerCase().includes(q) ||
+        f.AirlineName?.toLowerCase().includes(q)
+      );
+    }
+    if (urgentOnly) {
+      list = list.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, tab) !== null));
+    }
+    return list;
+  }, [flights, flightSearch, urgentOnly, getFlightAssignment]);
+
+  // FIX (po zahtjevu — "jasnije osoblju"): broj hitnih letova PO TABU,
+  // vidljiv na samom dugmetu taba — osoblje ne mora ući u "Gate" tab da
+  // bi saznalo da tamo nešto hitno čeka dok gleda "Check-in". Namjerno
+  // NEZAVISNO od trenutne pretrage/"Samo hitni" filtera (uvijek pokazuje
+  // STVARNO stanje, ne filtrirani prikaz).
+  const urgentCounts = {
+    checkin: flights.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, 'checkin') !== null)).length,
+    gate:    flights.filter(f => isUrgentUnassigned(f, getFlightAssignment(f.FlightNumber, 'gate')    !== null)).length,
+  };
 
   if (loadingFlights) {
     return (
@@ -1198,26 +1481,78 @@ const handleLogout = performLogout;
     );
   }
 
-  const flightList = (tab: TabType) => (
-    <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-1 scrollbar-thin">
-      {flights.length === 0 && (
-        <div className={`text-center py-12 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
-          <Plane size={36} className="mx-auto mb-3 opacity-30" />
-          Nema aktivnih letova
+  const flightList = (tab: TabType) => {
+    const searchedFlights = filterFlights(tab);
+    const hasActiveFilter = !!flightSearch.trim() || urgentOnly;
+    return (
+    <div className="space-y-2">
+      {/* FIX (pretraga/filter letova): input iznad liste, filtrira po broju
+          leta, destinaciji ili aviokompaniji. Client-side, bez kašnjenja. */}
+      <div className="relative mb-1">
+        <Search size={15} className={`absolute left-3 top-1/2 -translate-y-1/2 ${isDark ? 'text-white/30' : 'text-gray-400'}`} />
+        <input
+          type="text"
+          value={flightSearch}
+          onChange={(e) => setFlightSearch(e.target.value)}
+          placeholder="Pretraži broj leta, destinaciju, aviokompaniju…"
+          className={`w-full pl-9 pr-8 py-2.5 rounded-xl text-sm border transition-all outline-none ${
+            isDark
+              ? 'bg-white/5 border-white/15 text-white placeholder-white/30 focus:border-sky-400/60 focus:bg-white/10'
+              : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400 focus:border-sky-500/60 focus:bg-white'
+          }`}
+        />
+        {flightSearch && (
+          <button
+            onClick={() => setFlightSearch('')}
+            className={`absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-full ${isDark ? 'text-white/40 hover:text-white/80 hover:bg-white/10' : 'text-gray-400 hover:text-gray-700 hover:bg-gray-200'}`}
+            aria-label="Očisti pretragu"
+          >
+            <X size={13} />
+          </button>
+        )}
+      </div>
+      <TouchFeedback onTap={() => setUrgentOnly(v => !v)}>
+        <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition-all ${
+          urgentOnly
+            ? 'bg-red-600 border-red-500 text-white'
+            : isDark ? 'bg-white/5 border-white/15 text-white/60' : 'bg-gray-50 border-gray-200 text-gray-600'
+        }`}>
+          <span>⚠ Samo hitni (nedodijeljen, ≤{URGENT_THRESHOLD_MINUTES} min do polaska)</span>
+        </div>
+      </TouchFeedback>
+      {hasActiveFilter && (
+        <div className={`text-[11px] px-1 ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+          {searchedFlights.length} od {flights.length} letova
         </div>
       )}
-      {flights.map(flight => (
-        <FlightRow
-          key={flight.FlightNumber + flight.ScheduledDepartureTime}
-          flight={flight}
-          assigned={isFlightAssigned(flight.FlightNumber, tab)}
-          selected={selectedFlightForTouch?.FlightNumber === flight.FlightNumber}
-          onSelect={() => handleFlightTouchSelect(flight)}
-          isDark={isDark}
-        />
-      ))}
+      <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1 scrollbar-thin">
+        {flights.length === 0 && (
+          <div className={`text-center py-12 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
+            <Plane size={36} className="mx-auto mb-3 opacity-30" />
+            Nema aktivnih letova
+          </div>
+        )}
+        {flights.length > 0 && searchedFlights.length === 0 && (
+          <div className={`text-center py-12 text-sm ${isDark ? 'text-white/30' : 'text-gray-400'}`}>
+            <Search size={36} className="mx-auto mb-3 opacity-30" />
+            {urgentOnly && !flightSearch.trim() ? 'Nema hitnih letova 🎉' : `Nema letova za "${flightSearch}"`}
+          </div>
+        )}
+        {searchedFlights.map(flight => (
+          <FlightRow
+            key={flight.FlightNumber + flight.ScheduledDepartureTime}
+            flight={flight}
+            assignedTo={getFlightAssignment(flight.FlightNumber, tab)}
+            selected={selectedFlightForTouch?.FlightNumber === flight.FlightNumber}
+            onSelect={() => handleFlightTouchSelect(flight)}
+            isDark={isDark}
+            resourceLabel={tab === 'checkin' ? 'Šalter' : 'Gate'}
+          />
+        ))}
+      </div>
     </div>
-  );
+    );
+  };
 
   const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignment[]) => (
     <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-3">
@@ -1235,6 +1570,8 @@ const handleLogout = performLogout;
 
   return (
     <div className={`min-h-screen p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-gray-900'}`}>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       {pendingOverride && (
         <ConfirmOverlay pending={pendingOverride} onConfirm={handleConfirmOverride}
           onCancel={() => setPendingOverride(null)} isDark={isDark} />
@@ -1264,31 +1601,49 @@ const handleLogout = performLogout;
               <span className={isDark ? 'text-white/30' : 'text-gray-500'}>🕐 Ažurirano: {lastUpdate || '—'}</span>
               <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
               <span className={`tabular-nums ${isDark ? 'text-white/25' : 'text-gray-500'}`}>🔄 Refresh za {tickSec}s</span>
+              {/* FIX (po zahtjevu — "jasnije osoblju"): ukupan broj
+                  hitnih letova (oba taba zajedno), vidljiv ODMAH u
+                  header-u — bez potrebe da se čak ni pogleda ka
+                  tabovima. Prikazuje se SAMO kad ima šta da se prikaže. */}
+              {(urgentCounts.checkin + urgentCounts.gate) > 0 && (
+                <>
+                  <span className={isDark ? 'text-white/15' : 'text-gray-300'}>|</span>
+                  <span className="flex items-center gap-1 font-bold text-red-500">
+                    ⚠ {urgentCounts.checkin + urgentCounts.gate} hitno
+                  </span>
+                </>
+              )}
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={handleRefresh} disabled={refreshing}
+            {/* FIX (po zahtjevu — vraćena nedostupna funkcija + jasnoća):
+                dugme za statistiku je ranije bilo potpuno nedostupno
+                (vidi opširan komentar uz openStats). title atributi
+                dodati na SVA dugmad ispod — ranije su bila samo golе
+                ikonice bez ikakvog objašnjenja funkcije. */}
+            <button onClick={openStats} title="Dnevna statistika zauzetosti"
+              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
+              <BarChart2 size={16} className={isDark ? 'text-white/60' : 'text-gray-600'} />
+            </button>
+
+            <button onClick={handleRefresh} disabled={refreshing} title="Osvježi sada"
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               <RefreshCw size={16} className={`${isDark ? 'text-white/60' : 'text-gray-600'} ${refreshing ? 'animate-spin' : ''}`} />
             </button>
 
-            <button onClick={openStats} title="Dnevna statistika"
-              className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
-              <BarChart2 size={16} className={isDark ? 'text-sky-400' : 'text-sky-600'} />
-            </button>
 
-            <button onClick={() => router.push('/admin')}
+            <button onClick={() => router.push('/admin')} title="Nazad na admin početnu"
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               <Home size={16} className={isDark ? 'text-white/60' : 'text-gray-600'} />
             </button>
 
-            <button onClick={toggleTheme}
+            <button onClick={toggleTheme} title={isDark ? 'Prebaci na svijetlu temu' : 'Prebaci na tamnu temu'}
               className={`p-2.5 rounded-xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'}`}>
               {isDark ? <Sun size={16} className="text-yellow-400" /> : <Moon size={16} className="text-slate-700" />}
             </button>
 
-            <button onClick={handleLogout}
+            <button onClick={handleLogout} title="Odjava sa panela"
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 border border-red-500/25 text-red-400 text-xs font-medium transition-all active:scale-95">
               <LogOut size={14} /> Odjava
             </button>
@@ -1298,13 +1653,13 @@ const handleLogout = performLogout;
         {/* Tabovi */}
         <div className="flex gap-3 mb-6">
           {([
-            { id: 'checkin' as TabType, label: '🏷️ Check-in', icon: CheckSquare, count: checkinAssignments.length },
-            { id: 'gate'    as TabType, label: '🚪 Gate-ovi', icon: GitBranch,   count: gateAssignments.length    },
+            { id: 'checkin' as TabType, label: '🏷️ Check-in', icon: CheckSquare, count: checkinAssignments.length, urgent: urgentCounts.checkin },
+            { id: 'gate'    as TabType, label: '🚪 Gate-ovi', icon: GitBranch,   count: gateAssignments.length,    urgent: urgentCounts.gate    },
           ] as const).map(tab => {
             const isActive = activeTab === tab.id;
             return (
               <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${
+                className={`relative flex items-center gap-2 px-5 py-3 rounded-xl border text-sm font-semibold transition-all active:scale-95 ${
                   isActive
                     ? isDark ? 'bg-sky-500/20 border-sky-500/50 text-sky-300 shadow-lg'
                              : 'bg-sky-200 border-sky-500 text-sky-900 shadow-md'
@@ -1318,14 +1673,32 @@ const handleLogout = performLogout;
                     ? isDark ? 'bg-white/20 text-white' : 'bg-white/80 text-gray-800'
                     : isDark ? 'bg-white/10 text-white/40' : 'bg-gray-300 text-gray-600'
                 }`}>{tab.count}</span>
+                {/* FIX (po zahtjevu — "jasnije osoblju"): vidi opširan
+                    komentar uz urgentCounts iznad. Prikazuje se SAMO kad
+                    ima hitnih letova na tom tabu, bez obzira da li je
+                    tab trenutno aktivan — osoblje treba da vidi ovo i
+                    dok gleda DRUGI tab. */}
+                {tab.urgent > 0 && (
+                  <span className="absolute -top-2 -right-2 flex items-center justify-center min-w-[22px] h-[22px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold shadow-lg animate-pulse-subtle ring-2 ring-white dark:ring-slate-950">
+                    {tab.urgent}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
 
         {/* Selected Flight Banner */}
+        {/* FIX (po zahtjevu — "jasnije osoblju"): sticky umjesto
+            običnog — na dužoj listi gate-ova/šaltera (npr. Terminal 1 +
+            Terminal 2 zajedno), skrolovanje nadole je ranije guralo ovaj
+            baner van vidokruga, i osoblje bi izgubilo iz vida KOJI je
+            let trenutno izabran dok traži pravi gate. Sad ostaje
+            zalijepljen za vrh dok se skroluje. Dodat i kratak tekst
+            uputstva ("Tapni...") — jasnije šta je sledeći korak za
+            nekog ko prvi put koristi panel. */}
         {selectedFlightForTouch && (
-          <div className="mb-5 p-4 rounded-xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20">
+          <div className="sticky top-2 z-30 mb-5 p-4 rounded-xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20 backdrop-blur-md">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-3">
                 <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse" />
@@ -1334,6 +1707,9 @@ const handleLogout = performLogout;
                 </span>
                 <span className={`text-base ${isDark ? 'text-amber-400/80' : 'text-amber-800'}`}>
                   → {selectedFlightForTouch.DestinationCityName || selectedFlightForTouch.DestinationAirportCode}
+                </span>
+                <span className={`text-xs hidden sm:inline ${isDark ? 'text-amber-300/60' : 'text-amber-700/70'}`}>
+                  · Tapni {activeTab === 'checkin' ? 'šalter' : 'gate'} ispod da dodijeliš
                 </span>
               </div>
               <button onClick={() => setSelectedFlight(null)}

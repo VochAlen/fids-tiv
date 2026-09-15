@@ -6,9 +6,51 @@ import {
 } from 'react';
 import type { Flight } from '@/types/flight';
 import { fetchFlightData } from '@/lib/flight-service';
+import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
+// FIX (po zahtjevu — noćni režim + Vercel trošak): isNightHours() je
+// već korišćena na svim ostalim kiosk stranicama (isti princip — Intl
+// sa eksplicitnom Europe/Podgorica zonom, ne zavisi od sistemskog sata
+// uređaja). Ovdje je NOVO — ova stranica ranije nije imala noćni režim
+// uopšte, znači je 24/7 pozivala /api/flights bez potrebe (niko ne
+// prolazi kroz security noću kad nema letova).
+import { isNightHours } from '@/lib/night-hours';
 
 // REFRESH INTERVAL (podaci)
-const REFRESH_INTERVAL_MS = 60_000;
+// FIX (po zahtjevu — Vercel Active CPU/trošak): 60s → 90s. Ovo NE
+// utiče na sam countdown (koji je već potpuno klijentski, otkucava
+// svake sekunde preko currentTime state-a, bez mreže) — samo na to
+// koliko često se OSVJEŽAVA sam spisak letova/gate-ova/vremena sa
+// servera. Za prioritetni red čekanja ne treba sub-minutna svježina;
+// 30s manje poziva dnevno po ekranu je čist dobitak bez ikakvog
+// gubitka funkcionalnosti.
+const REFRESH_INTERVAL_MS = 90_000;
+
+// FIX (po zahtjevu — "immediately obriši departed"): dodatni,
+// isključivo VREMENSKI prag za uklanjanje leta sa ekrana, NEZAVISNO od
+// toga da li je StatusEN tekst sa servera stigao da kaže "Departed".
+// Bez ovoga, ako se live feed status ažurira sporije nego što
+// realno vrijeme prolazi, let bi ostao vidljiv sa negativnim
+// countdown-om sve dok server ne pošalje "Departed" tekst — sad se
+// klijentski FILTRIRA (vidi currentTime-driven filter niže) čim
+// prođe efektivno vrijeme polaska + ova mala margina, bez čekanja na
+// sledeći poll ciklus.
+const DEPARTED_GRACE_MS = 60_000; // 1 minut nakon efektivnog vremena
+
+// FIX (po zahtjevu — request koji visi ne smije zaglaviti stranicu
+// zauvijek): fetchFlightData() (lib/flight-service.ts, dijeljen sa
+// više stranica) nema sopstveni timeout — ovaj wrapper ga dodaje SAMO
+// na nivou poziva u ovoj stranici (Promise.race), bez diranja
+// dijeljenog servisa koji koriste i druge stranice.
+const FETCH_TIMEOUT_MS = 20_000;
+
+function fetchFlightDataWithTimeout(ms: number, force = false): Promise<Awaited<ReturnType<typeof fetchFlightData>>> {
+  return Promise.race([
+    fetchFlightData(force),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`fetchFlightData timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
 
 // ==========================================
 // ERROR BOUNDARY
@@ -50,6 +92,19 @@ const parseDepartureTime = (t: string): Date | null => {
     return d;
   } catch { return null; }
 };
+
+// FIX (po zahtjevu — "poboljšaj logiku prioriteta"): PRAVI bug —
+// countdown/prioritet/sortiranje su računati ISKLJUČIVO preko
+// ScheduledDepartureTime, nikad ne uzimajući EstimatedDepartureTime u
+// obzir. Ako je let kasnio (npr. novo procijenjeno vrijeme 30 minuta
+// kasnije od planiranog), ova stranica bi ga i dalje tretirala kao da
+// treba da poleti u PLANIRANO vrijeme — prikazujući ga kao "URGENT"
+// ili čak "DEPARTED" sa dubokim negativnim countdown-om, iako let
+// stvarno još nije ni blizu polijetanja. Isti princip (estimated ako
+// postoji, inače scheduled) se već koristi na SVIM ostalim kiosk
+// stranicama (getEffectiveFlightTime/referenceTime obrazac).
+const getEffectiveDepartureTime = (flight: Flight): Date | null =>
+  parseDepartureTime(flight.EstimatedDepartureTime || flight.ScheduledDepartureTime || '');
 
 const formatCountdown = (ms: number): string => {
   const totalSeconds = Math.floor(ms / 1000);
@@ -94,7 +149,7 @@ const getPriorityConfig = (minutesLeft: number): { color: string; label: string;
   };
 };
 
-function LiveClock() {
+function LiveClock({ style, className = 'sec-clock' }: { style?: React.CSSProperties; className?: string }) {
   const [time, setTime] = useState('');
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
@@ -102,7 +157,7 @@ function LiveClock() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
-  return <span style={styles.clock} className="sec-clock">{time}</span>;
+  return <span style={style ?? styles.clock} className={className}>{time}</span>;
 }
 
 function Divider() { return <div style={styles.divider} className="sec-divider" />; }
@@ -116,7 +171,7 @@ interface PriorityFlightRowProps {
 }
 
 const PriorityFlightRow = memo(function PriorityFlightRow({ flight, currentTime }: PriorityFlightRowProps) {
-  const depTime = parseDepartureTime(flight.ScheduledDepartureTime || '');
+  const depTime = getEffectiveDepartureTime(flight);
   
   if (!depTime) return null;
 
@@ -197,36 +252,90 @@ function SecurityDisplay() {
   const [lastUpdate, setLastUpdate] = useState('');
   const [nextUpdate, setNextUpdate] = useState('');
   const [currentTime, setCurrentTime] = useState(new Date());
+  // FIX (po zahtjevu — noćni režim): kad je aktivan, prikazuje se
+  // SAMO sat na sredini ekrana (vidi render granu niže) — nema letova
+  // noću na malom regionalnom aerodromu, pa nema ni razloga da se
+  // /api/flights poziva tokom tih sati.
+  const [nightMode, setNightMode] = useState(false);
   const isMountedRef = useRef(true);
+  const nightModeRef = useRef(false);
+  useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
+
+  // FIX (24/7 rad bez nadzora): security stranica ranije nije imala
+  // NIŠTA od heartbeat/memory-cleanup/error-handler/hard-reset zaštite
+  // koju ostali kiosk ekrani već imaju — vidi opširan komentar u
+  // hooks/use-kiosk-resilience.ts.
+  useKioskResilience({
+    pageName: 'security',
+  });
 
   const loadPriorityFlights = useCallback(async () => {
     if (!isMountedRef.current) return;
+
+    // FIX (po zahtjevu — Vercel trošak): provjera je lokalna,
+    // sinhrona, besplatna (Intl sa eksplicitnom zonom, ne mreža) —
+    // ako je noć, NE zovemo /api/flights uopšte, samo upalimo noćni
+    // prikaz i zakažemo sledeću provjeru. Ovo je najveća pojedinačna
+    // ušteda za ovu stranicu — tokom noćnih sati (kad realno nema
+    // putnika/letova na malom regionalnom aerodromu) potrošnja pada na
+    // nulu za ovu stranicu.
+    if (isNightHours()) {
+      if (isMountedRef.current) {
+        setNightMode(true);
+        setLoading(false);
+      }
+      return;
+    }
+    const wasNightMode = nightModeRef.current;
+    if (isMountedRef.current) setNightMode(false);
+
     try {
-      const data = await fetchFlightData();
+      // FIX: force=true tačno na noć→dan prelaz — isti princip kao
+      // ostale kiosk stranice (forceRefresh nakon "justExitedNightMode")
+      // — bez ovoga bi se prvi prikaz nakon buđenja iz noćnog režima
+      // mogao osloniti na potencijalno satima-star in-memory keš unutar
+      // fetchFlightData().
+      const data = await fetchFlightDataWithTimeout(FETCH_TIMEOUT_MS, wasNightMode);
       const now = new Date();
 
       // 1. FILTRIRANJE: Uzmi samo polaske, NIJE otkazan, NIJE departed, NIJE preusmjeren
+      // FIX (po zahtjevu — "poboljšaj logiku"): dodat francuski obrazac
+      // (annulé/dévié) radi dosljednosti sa ostatkom aplikacije — izvor
+      // podataka ponekad koristi taj jezik za pojedine kompanije.
       const activeFlights = data.departures.filter((f: Flight) => {
         const s = (f.StatusEN || '').toLowerCase();
-        if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-        if (s.includes('diverted') || s.includes('preusmjeren')) return false;
-        if (s.includes('departed') || s.includes('poletio')) return false;
+        if (s.includes('cancelled') || s.includes('canceled') || s.includes('annulé') || s.includes('otkazan')) return false;
+        if (s.includes('diverted') || s.includes('dévié') || s.includes('preusmjeren')) return false;
+        if (s.includes('departed') || s.includes('poletio') || s.includes('take off')) return false;
         return true;
       });
 
-      // 2. Parsiraj vrijeme
+      // 2. Parsiraj EFEKTIVNO vrijeme (estimated ako postoji, inače
+      // scheduled — vidi opširan komentar uz getEffectiveDepartureTime).
       const withParsedTime = activeFlights
-        .map(f => ({ ...f, depTime: parseDepartureTime(f.ScheduledDepartureTime || '') }))
+        .map(f => ({ ...f, depTime: getEffectiveDepartureTime(f) }))
         .filter(f => f.depTime !== null) as (Flight & { depTime: Date })[];
-      
-      // 3. Sortiraj po rastućem vremenu
-      const sorted = withParsedTime.sort((a, b) => a.depTime.getTime() - b.depTime.getTime());
 
-      // 4. Uzmi prvih 3 (promijenjeno sa 5 na 3)
-      const top3 = sorted.slice(0, 3);
+      // FIX (po zahtjevu — "departed letove odmah obriši"): dodatni
+      // VREMENSKI backstop, nezavisan od toga da li je StatusEN tekst
+      // sa servera stigao da kaže "Departed" — ako je efektivno vrijeme
+      // već prošlo za više od DEPARTED_GRACE_MS, let se ne prikazuje,
+      // bez obzira šta piše u statusu. (Dodatni, BRŽI, čisto klijentski
+      // filter — reaguje na svaki sekundni tick, ne čeka sledeći poll —
+      // je primijenjen niže, u samom renderu; ovo je "prvi sloj" na
+      // nivou fetch-a.)
+      const stillRelevant = withParsedTime.filter(
+        f => f.depTime.getTime() - now.getTime() > -DEPARTED_GRACE_MS
+      );
+
+      // 3. Sortiraj po rastućem (efektivnom) vremenu
+      const sorted = stillRelevant.sort((a, b) => a.depTime.getTime() - b.depTime.getTime());
+
+      // 4. Uzmi prva 4 (po zahtjevu — promijenjeno sa 3 na 4)
+      const top4 = sorted.slice(0, 4);
 
       if (isMountedRef.current) {
-        setFlights(top3);
+        setFlights(top4);
         setLoading(false);
         setLastUpdate(now.toLocaleTimeString('en-GB'));
         setNextUpdate(new Date(now.getTime() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
@@ -255,6 +364,33 @@ function SecurityDisplay() {
     return () => clearInterval(id);
   }, []);
 
+  // FIX (po zahtjevu — "departed letove odmah obriši iz liste, čim
+  // postanu departed"): DRUGI, brži sloj filtriranja — dok fetch-nivo
+  // filter (iznad, u loadPriorityFlights) osvježava listu samo svakih
+  // REFRESH_INTERVAL_MS (90s), OVAJ filter se ponovo izračunava na
+  // SVAKI sekundni tick (currentTime već otkucava svake sekunde za
+  // countdown prikaz — ovo je isključivo klijentska, već-postojeća
+  // vrijednost, bez ikakvog dodatnog mrežnog poziva). Rezultat: let
+  // nestaje sa ekrana u roku od SEKUNDE od trenutka kad njegovo
+  // efektivno vrijeme polaska + margina prođe, ne do 90 sekundi kasnije.
+  const visibleFlights = flights.filter(f => {
+    const eff = getEffectiveDepartureTime(f);
+    if (!eff) return true;
+    return eff.getTime() - currentTime.getTime() > -DEPARTED_GRACE_MS;
+  });
+
+  // FIX (po zahtjevu — noćni režim): SAMO sat na sredini ekrana, ništa
+  // drugo — nema letova/reklama/panela. Font namjerno veliki (vidi
+  // styles.nightClockValue) za vidljivost sa udaljenosti kroz staklena
+  // vrata prije security kontrole.
+  if (nightMode) {
+    return (
+      <div style={styles.nightRoot} className="sec-night-root">
+        <LiveClock style={styles.nightClockValue} className="sec-night-clock" />
+      </div>
+    );
+  }
+
   return (
     <div style={styles.root} className="sec-root">
       
@@ -263,7 +399,8 @@ function SecurityDisplay() {
         <div style={{...styles.topBarLeft, color: '#f97316'}} className="sec-topbar-left">
           <span style={styles.topBarLabel}>PREBOARDING & SECURITY CONTROL</span>
           <span style={styles.topBarSep}>|</span>
-          <span style={styles.topBarLabel}>PRIORITY SCREENING (TOP 3)</span>
+          <span style={styles.topBarLabel}>PRIORITY SCREENING (TOP 4)</span>
+
         </div>
         <LiveClock />
       </div>
@@ -281,12 +418,18 @@ function SecurityDisplay() {
                <div style={styles.spinner} />
                <div style={{ color: '#64748b', marginTop: '1rem', fontSize: '1.5rem' }}>Loading flights...</div>
             </div>
-          ) : flights.length === 0 ? (
+          ) : visibleFlights.length === 0 ? (
              <div style={styles.noFlights}>No priority flights found.</div>
           ) : (
             <div style={styles.flightList}>
-              {flights.map((f, i) => (
-                <PriorityFlightRow key={`${f.FlightNumber}-${i}`} flight={f} currentTime={currentTime} />
+              {visibleFlights.map((f, i) => (
+                // FIX (dosljednost sa ostalim kiosk stranicama — vidi
+                // opširan komentar u app/border/ArrivalsPageClient.tsx):
+                // key sa indeksom uzrokuje nepotrebno uništavanje/
+                // ponovno pravljenje reda kad redosled letova promijeni
+                // poziciju. Ova stranica nema slike u redu, pa je rizik
+                // manji nego drugdje, ali princip je isti.
+                <PriorityFlightRow key={`${f.FlightNumber}-${f.ScheduledDepartureTime}`} flight={f} currentTime={currentTime} />
               ))}
             </div>
           )}
@@ -418,6 +561,17 @@ const styles: Record<string, React.CSSProperties> = {
   topBarLabel: { fontSize: '1.5rem', fontWeight: 700, letterSpacing: '.15em', fontFamily: FONT_MONO, textShadow: '0 0 10px rgba(249,115,22,0.4)' },
   topBarSep: { color: C.border, fontSize: '2rem', margin: '0 0.4rem' },
   clock: { fontFamily: FONT_MONO, fontSize: '2.5rem', fontWeight: 700, color: C.accent, letterSpacing: '.08em' },
+
+  // FIX (po zahtjevu — noćni režim, "font 100 ili koji smatram
+  // vidljivim"): clamp() umjesto fiksnog px — skalira se sa širinom
+  // ekrana (min 5rem, cilja ~10rem/160px na standardnom kiosk
+  // monitoru, max 14rem na vrlo širokim ekranima) umjesto da se
+  // oslanja na jednu fiksnu vrijednost koja bi izgledala različito na
+  // različitim rezolucijama. Share Tech Mono (isti font kao dnevni
+  // sat) — monospace cifre se čitaju čisto izdaleka kroz staklena
+  // vrata prije security kontrole.
+  nightRoot: { width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.bg },
+  nightClockValue: { fontFamily: FONT_MONO, fontSize: 'clamp(5rem, 16vw, 14rem)', fontWeight: 700, color: C.accent, letterSpacing: '.05em', textShadow: `0 0 40px ${C.accent}55` },
 
   divider: { height: '2px', background: `linear-gradient(90deg, transparent 0%, ${C.border} 20%, ${C.border} 80%, transparent 100%)`, flexShrink: 0 },
 

@@ -1,4 +1,6 @@
 // lib/override-ttl.ts
+import { getPodgoricaEpochMsForTime } from '@/lib/night-hours';
+
 export function computeOverrideTTL(
   field: string,
   scheduledTime: string | null,
@@ -16,13 +18,16 @@ export function computeOverrideTTL(
 
   const now = Date.now();
 
-  const parseHHMM = (t: string): number | null => {
-    const m = t.match(/^(\d{1,2}):(\d{2})$/);
-    if (!m) return null;
-    const d = new Date();
-    d.setHours(parseInt(m[1]), parseInt(m[2]), 0, 0);
-    return d.getTime();
-  };
+  // FIX (override-i živjeli u Redis-u 1-2h duže nego što je dizajnirano):
+  // bilo je `new Date(); d.setHours(h, m, 0, 0)` — server (Vercel) radi u
+  // UTC, a scheduledTime/estimatedTime su LOKALNO (Podgorica) vrijeme.
+  // setHours(h, m) je te brojeve protumačio kao UTC sate, pa je izračunati
+  // "trenutak zatvaranja/polijetanja" bio 1-2h kasniji nego stvarno — TTL
+  // (closeMs - now) je zbog toga bio precijenjen za tačno taj iznos.
+  // getPodgoricaEpochMsForTime (lib/night-hours.ts) radi isključivo u
+  // "minuta od sada" prostoru, potpuno imuno na server-vs-Podgorica
+  // razliku. Ime parseHHMM zadržano da poziv ispod ostane čitljiv.
+  const parseHHMM = (t: string): number | null => getPodgoricaEpochMsForTime(t);
 
   const stdMs = parseHHMM(scheduledTime);
   if (!stdMs) return SIX_HOURS;

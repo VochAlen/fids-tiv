@@ -1,20 +1,41 @@
 // app/api/test/desk-status-override/route.ts
 import { NextResponse } from 'next/server';
-import { safeRedisGet, safeRedisSet } from '@/lib/redis';
-import { createHash } from 'crypto'; // ← DODANO
-import { revalidatePath } from 'next/cache';
+import { safeRedisHGetAll, safeRedisHGet, safeRedisHSet, safeRedisHDel, safeRedisExpire } from '@/lib/redis';
+import { invalidateRawAssignmentsCache } from '@/lib/assignments-service';
+import { createHash } from 'crypto';
+import { revalidateTag } from 'next/cache';
 
+// ── FIX — RACE CONDITION (isti problem kao u gate-status-override, vidi pun
+// komentar tamo i u lib/redis.ts iznad safeRedisHSet): ALL_KEY je bio JEDAN
+// JSON string; POST je čitao cijeli objekat, mijenjao samo svoj desk, i
+// upisivao cijeli objekat nazad. Dva istovremena zahtjeva za RAZLIČITE
+// deskove su se mogla sudariti — drugi write tiho prepiše izmjenu prvog.
+// Sad je ALL_KEY Redis HASH (HSET po polju) — atomarno po desku. ──────────
 
 export const revalidate = 30;
+// FIX (Vercel Edge Requests/Active CPU trošak na 18 check-in monitora ×
+// 10-12s poll = ~4.24M poziva/mjesec, GOTOVO SVI stvarna izvršavanja
+// funkcije): identičan problem i identično rješenje kao
+// GATE_STATUS_CACHE_CONTROL u app/api/test/gate-status-override/route.ts
+// — pun kontekst i rollback uputstvo su tamo, ne duplira se ovdje.
+// VAŽNA RAZLIKA: CheckInPageClient.tsx je do sad slao `cache: 'no-store'`
+// na fetch() poziv ove rute, što je poništavalo bilo kakvu korist od
+// ovog Cache-Control header-a (browser/CDN keš se eksplicitno
+// zaobilazio) — ta linija je uklonjena da bi produženi keš prozor
+// stvarno imao efekta, isto kao što GatePageClient.tsx već radi.
+const DESK_STATUS_CACHE_CONTROL =
+  'public, max-age=2, s-maxage=20, stale-while-revalidate=20';
+
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
+const TTL_SECONDS = 4 * 60 * 60;       // 4h
 const ALL_KEY = 'test:desk-status:all';
 
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, DeskEntry> | null = null;
 let cachedAllExpiry = 0;
 let cacheRefreshing = false;
-const CACHE_TTL_MS = 30_000; // ← povećano sa 10s na 30s
+const CACHE_TTL_MS = 30_000;
 
 type DeskEntry = {
   status: 'open' | 'closed' | null;
@@ -23,18 +44,49 @@ type DeskEntry = {
   setAt: number | null;
 };
 
-async function readAll(): Promise<Record<string, DeskEntry>> {
-  const raw = await safeRedisGet(ALL_KEY);
+function parseHashEntries(raw: Record<string, string> | null): Record<string, DeskEntry> {
   if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  const out: Record<string, DeskEntry> = {};
+  for (const [field, json] of Object.entries(raw)) {
+    try {
+      out[field] = JSON.parse(json) as DeskEntry;
+    } catch {
+      // izolovano oštećeno polje — preskoči, ne ruši ostatak
+    }
   }
+  return out;
 }
 
-async function writeAll(data: Record<string, DeskEntry>): Promise<void> {
-  await safeRedisSet(ALL_KEY, JSON.stringify(data), 4 * 60 * 60);
+async function readAll(): Promise<Record<string, DeskEntry>> {
+  const raw = await safeRedisHGetAll(ALL_KEY);
+  return parseHashEntries(raw);
+}
+
+async function touchExpiry(): Promise<void> {
+  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
+}
+
+// Piše TAČNO JEDNO polje (jedan desk) — atomarno, ne dira ostale deskove.
+// FIX (assign-checkin ne prikazuje dodijeljene šaltere — isti bug kao na
+// gate-status-override): vraća boolean iz safeRedisHSet — ako Redis
+// circuit breaker otvori ili komanda padne, vraćamo false, pa POST handler
+// može vratiti 503 i admin zna da treba ponovo kliknuti. Bez ovog,
+// admin bi vidio success toast a zapis ne bi bio u Redis-u — poslije
+// /api/test/assignments i check-in monitori ne bi vidjeli dodjelu.
+async function writeOne(deskNumber: string, entry: DeskEntry): Promise<boolean> {
+  const ok = await safeRedisHSet(ALL_KEY, deskNumber, JSON.stringify(entry));
+  if (!ok) return false;
+  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
+  return true;
+}
+
+async function deleteOne(deskNumber: string): Promise<void> {
+  await safeRedisHDel(ALL_KEY, deskNumber);
+}
+
+// Briše SAMO stara polja — pojedinačni HDEL po polju, ne prepisuje cijeli hash.
+async function cleanupStale(fields: string[]): Promise<void> {
+  await Promise.all(fields.map(f => safeRedisHDel(ALL_KEY, f)));
 }
 
 async function readAllCached(): Promise<Record<string, DeskEntry>> {
@@ -67,22 +119,20 @@ export async function GET(request: Request) {
 
     const all = await readAllCached();
 
-    // ── ČIŠĆENJE STARIH ZAPISA (ostavljeno nepromijenjeno) ──
-    let changed = false;
+    // ── ČIŠĆENJE STARIH ZAPISA — sad HDEL po polju (vidi cleanupStale) ──
+    const staleFields: string[] = [];
     for (const key of Object.keys(all)) {
       const entry = all[key];
       if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
         delete all[key];
-        changed = true;
+        staleFields.push(key);
       }
     }
-    if (changed) {
-await writeAll(all);
-
-cachedAll = all;
-cachedAllExpiry = Date.now() + CACHE_TTL_MS;
-
-
+    if (staleFields.length > 0) {
+      await cleanupStale(staleFields);
+      cachedAll = all;
+      cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+      console.log(`[desk-cleanup] Total cleaned: ${staleFields.length} old desk-status keys`);
     }
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
@@ -97,27 +147,37 @@ cachedAllExpiry = Date.now() + CACHE_TTL_MS;
 
     // ── PROVJERA If-None-Match ──────────────────────────────
     const ifNoneMatch = request.headers.get('if-none-match');
-if (ifNoneMatch && ifNoneMatch === etag) {
-
-  return new NextResponse(null, {
-    status: 304,
-    headers: {
-      'ETag': etag,
-'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-    },
-  });
-}
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, {
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': DESK_STATUS_CACHE_CONTROL,
+          'CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
+          'Vercel-CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
+          // FIX (klasa/status vidljiviji na check-in ekranu): isto kao na
+          // gate-status-override ruti — bez ovog tag-a, revalidateTag(
+          // 'flight-status') iz POST handlera nije probijao CDN keš ove
+          // rute, pa je check-in monitor čekao do 5s da vidi novu dodjelu/
+          // klasu iako je server već znao za nju.
+          'Cache-Tag': 'flight-status',
+          'Vercel-Cache-Tag': 'flight-status',
+        },
+      });
+    }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
-const headers = {
-'Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-'Vercel-CDN-Cache-Control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=8',
-
-  'ETag': etag,
-};
+    const headers = {
+      'Cache-Control': DESK_STATUS_CACHE_CONTROL,
+      'CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
+      'Vercel-CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
+      'ETag': etag,
+      // FIX (vidi komentar gore kod 304 grane): tag-based invalidacija
+      // CDN keša — bez ovoga, check-in monitori ne bi vidjeli promjene
+      // klase/statusa do isteka max-age=2 s-maxage=2 SWR=3 (max 5s).
+      'Cache-Tag': 'flight-status',
+      'Vercel-Cache-Tag': 'flight-status',
+    };
 
     if (deskNumber) {
       const entry = all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null };
@@ -137,35 +197,64 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'deskNumber required' }, { status: 400 });
   }
 
-  const all = await readAll();
-  const existing = all[deskNumber];
+  // ── FIX (race condition): čitamo SAMO polje ovog deska (HGET), pišemo
+  // SAMO njega nazad (HSET) — vidi objašnjenje na vrhu fajla.
+  const existingRaw = await safeRedisHGet(ALL_KEY, deskNumber);
+  let existing: DeskEntry | undefined;
+  if (existingRaw) {
+    try { existing = JSON.parse(existingRaw) as DeskEntry; } catch { existing = undefined; }
+  }
 
   if (action === 'open' && flightNumber) {
-    all[deskNumber] = {
+    const entry: DeskEntry = {
       status: 'open',
       flightNumber,
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
+    if (!(await writeOne(deskNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else if (action === 'closed') {
-    all[deskNumber] = {
+    const entry: DeskEntry = {
       status: 'closed',
       flightNumber: flightNumber || '',
       classType: existing?.classType ?? null,
       setAt: Date.now(),
     };
+    if (!(await writeOne(deskNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else if (action === 'clear') {
-    delete all[deskNumber];
+    await deleteOne(deskNumber);
   } else if (action === 'setClass') {
     if (!existing) return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
-    all[deskNumber] = { ...existing, classType: classType ?? null };
+    const entry: DeskEntry = { ...existing, classType: classType ?? null };
+    if (!(await writeOne(deskNumber, entry))) {
+      return NextResponse.json(
+        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
+        { status: 503 }
+      );
+    }
   } else {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   }
 
-await writeAll(all);
-cachedAll = all;
-cachedAllExpiry = Date.now() + CACHE_TTL_MS;
+  // FIX (assign-checkin ne prikazuje dodijeljene šaltere — vidi komentar
+  // u app/api/test/gate-status-override/route.ts za potpuni kontekst):
+  // invalidate i assignments-service modul-level keš — bez ovoga,
+  // /api/test/assignments vraća STARI cachedRaw do 8s (RAW_CACHE_TTL_MS)
+  // nakon dodjele, pa assign-checkin panel ne prikazuje novu dodjelu.
+  cachedAll = null;
+  cachedAllExpiry = 0;
+  invalidateRawAssignmentsCache();
 
-return NextResponse.json({ success: true });
+  revalidateTag('flight-status');
+  return NextResponse.json({ success: true });
 }
