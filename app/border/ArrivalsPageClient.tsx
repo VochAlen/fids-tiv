@@ -1049,7 +1049,27 @@ useEffect(() => {
                   <div>No arrivals scheduled</div>
                 </div>
               ) : sorted.map((f, i) => (
-                <FlightRow key={`${f.FlightNumber}-${f.ScheduledDepartureTime}-${i}`} flight={f} index={i} tick={tick} />
+                // FIX (KRITIČNO — vjerovatan uzrok povremenog Chromium
+                // "Aw, Snap!" pada nakon nekoliko sati rada): key je
+                // RANIJE sadržao indeks u nizu (`-${i}`). Redosled letova
+                // se mijenja svaki poll ciklus (180s) kako novi dolasci
+                // stižu i stari nestaju — kad se pozicija ISTOG leta u
+                // sortiranoj listi promijeni, React je (zbog indeksa u
+                // ključu) tretirao taj red kao POTPUNO NOVU komponentu,
+                // uništavajući i ponovo praveći cio DOM podstablo REDA —
+                // uključujući <img> avio-logo unutar njega (vidi
+                // FlightRow niže), umjesto da samo ažurira postojeći.
+                // Kroz sate rada, na skromnijem kiosk mini-PC-ju, ovo
+                // neprekidno uništavanje/pravljenje <img> elemenata
+                // (svaki novi decode + GPU teksturu) postepeno gomila
+                // pritisak na memoriju/GPU dok tab ne padne. Ključ sad
+                // zavisi ISKLJUČIVO od identiteta leta (broj + planirano
+                // vrijeme) — isti obrazac koji CombinedPageClient.tsx već
+                // ispravno koristi — React sad ispravno prepoznaje "ovo
+                // je isti let, samo mu se promijenila pozicija" i samo
+                // premjesti postojeći DOM čvor, bez ponovnog učitavanja
+                // slike.
+                <FlightRow key={`${f.FlightNumber}-${f.ScheduledDepartureTime}`} flight={f} index={i} tick={tick} />
               ))}
             </div>
           </div>

@@ -1221,8 +1221,16 @@ else setTimeout(() => { if (isMountedRef.current) setErrorMessage(null) }, 5_000
                 </div>
               ) : (
                 sortedFlights.map((flight, index) => (
+                  // FIX (isti bug kao app/border/ArrivalsPageClient.tsx —
+                  // vidi opširan komentar tamo za pun kontekst): key je
+                  // sadržao indeks u nizu, uzrokujući nepotrebno
+                  // uništavanje i ponovno pravljenje DOM podstabla
+                  // (uključujući <img> avio-logo) svaki put kad se
+                  // redosled letova promijeni na poll-u — vjerovatan
+                  // uzrok povremenih Chromium padova nakon više sati
+                  // rada. Ključ sad zavisi isključivo od identiteta leta.
                   <FlightRow
-                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`}
+                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
                     flight={flight}
                     index={index}
                     autoStatusTick={autoStatusTick}

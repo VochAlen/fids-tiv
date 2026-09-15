@@ -965,8 +965,12 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
               </div>
             ) : (
      sortedArrivals.map((flight, idx) => (
+  // FIX (isti bug kao app/border/ArrivalsPageClient.tsx — vidi opširan
+  // komentar tamo): key sa indeksom uzrokuje nepotrebno uništavanje/
+  // ponovno pravljenje reda (uključujući <img> avio-logo) kad redosled
+  // letova promijeni poziciju na poll-u.
   <FlightRow
-    key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
+    key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
     flight={flight}
     index={idx}
     isArrival={true}
@@ -993,8 +997,9 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
               </div>
             ) : (
       sortedDepartures.map((flight, idx) => (
+  // FIX (isti bug — vidi komentar uz arrivals listu iznad).
   <FlightRow
-    key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${idx}`}
+    key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
     flight={flight}
     index={idx}
     isArrival={false}

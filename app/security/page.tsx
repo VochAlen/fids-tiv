@@ -23,7 +23,7 @@ import { isNightHours } from '@/lib/night-hours';
 // servera. Za prioritetni red čekanja ne treba sub-minutna svježina;
 // 30s manje poziva dnevno po ekranu je čist dobitak bez ikakvog
 // gubitka funkcionalnosti.
-const REFRESH_INTERVAL_MS = 150_000;
+const REFRESH_INTERVAL_MS = 90_000;
 
 // FIX (po zahtjevu — "immediately obriši departed"): dodatni,
 // isključivo VREMENSKI prag za uklanjanje leta sa ekrana, NEZAVISNO od
@@ -423,7 +423,13 @@ function SecurityDisplay() {
           ) : (
             <div style={styles.flightList}>
               {visibleFlights.map((f, i) => (
-                <PriorityFlightRow key={`${f.FlightNumber}-${i}`} flight={f} currentTime={currentTime} />
+                // FIX (dosljednost sa ostalim kiosk stranicama — vidi
+                // opširan komentar u app/border/ArrivalsPageClient.tsx):
+                // key sa indeksom uzrokuje nepotrebno uništavanje/
+                // ponovno pravljenje reda kad redosled letova promijeni
+                // poziciju. Ova stranica nema slike u redu, pa je rizik
+                // manji nego drugdje, ali princip je isti.
+                <PriorityFlightRow key={`${f.FlightNumber}-${f.ScheduledDepartureTime}`} flight={f} currentTime={currentTime} />
               ))}
             </div>
           )}

@@ -482,7 +482,17 @@ useEffect(() => {
             <div className="flex-1 overflow-y-auto">
               {sortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center"><Plane className="w-16 h-16 mx-auto mb-4 opacity-50" /><div className="text-2xl font-semibold">No arrivals scheduled</div></div>
-              ) : sortedFlights.map((flight, index) => <FlightRow key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}-${index}`} flight={flight} index={index} autoStatusTick={autoStatusTick} />)}
+              ) : sortedFlights.map((flight, index) => (
+                // FIX (isti bug kao app/border/ArrivalsPageClient.tsx —
+                // vidi opširan komentar tamo za pun kontekst): key je
+                // sadržao indeks u nizu, uzrokujući nepotrebno uništavanje
+                // i ponovno pravljenje DOM podstabla (uključujući <img>
+                // avio-logo) svaki put kad se redosled letova promijeni
+                // na poll-u — vjerovatan uzrok povremenih Chromium
+                // padova nakon više sati rada. Ključ sad zavisi
+                // isključivo od identiteta leta.
+                <FlightRow key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`} flight={flight} index={index} autoStatusTick={autoStatusTick} />
+              ))}
             </div>
           </div>
         )}
