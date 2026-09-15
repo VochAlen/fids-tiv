@@ -895,10 +895,22 @@ const load = useCallback(async () => {
       headers["If-None-Match"] = etagRef.current;
     }
 
-    // ✅ KORISTI fetchWithTimeout S cache opcijom
-const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
+    // FIX (KRITIČNO — pravi uzrok "prikazuje jučerašnje letove, ni
+    // restart browsera ne pomaže"): cache: 'force-cache' je eksplicitno
+    // govorio BROWSERU (ne CDN-u — ime opcije zavarava) da, ako IKAD
+    // ima BILO KAKAV keširan odgovor za ovaj URL u svom disk kešu,
+    // koristi GA BEZ IKAKVE provjere sa serverom — čak i ako je star
+    // danima. Ovo je potpuno zaobilazilo If-None-Match header koji kod
+    // eksplicitno postavlja par linija iznad (mrežni poziv se nikad
+    // nije ni slao, pa server nije ni stigao da kaže "ovo je zastarjelo").
+    // Browser disk keš PREŽIVLJAVA restart browsera (nije isto što i
+    // localStorage koji ova stranica ima svoj, poseban, kraći TTL) —
+    // otud simptom da ni restart nije pomagao. Uklonjeno — sad se
+    // koristi podrazumijevano fetch keširanje, koje ispravno poštuje
+    // server-ov Cache-Control (s-maxage=45) i ETag/304, isto kao sve
+    // ostale kiosk stranice u projektu.
+    const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
   headers,
-  cache: 'force-cache',  // ← Vercel edge cache
 });
 
     // ✅ 304 - ništa se nije promijenilo

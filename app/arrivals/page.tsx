@@ -386,10 +386,13 @@ useEffect(() => {
         headers["If-None-Match"] = etagRef.current;
       }
  
+      // FIX (isti bug kao app/border/ArrivalsPageClient.tsx — vidi
+      // opširan komentar tamo): cache: 'force-cache' je zaobilazio
+      // If-None-Match/ETag proveru u potpunosti, koristeći browser-ov
+      // disk keš (preživljava restart) bez ikakve provjere sa serverom.
       const res = await fetchWithTimeout("/api/flights", FETCH_TIMEOUT_MS, {
         headers,
         signal: controller.signal,
-        cache: 'force-cache',
       });
  
       if (res.status === 304) {
