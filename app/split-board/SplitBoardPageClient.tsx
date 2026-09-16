@@ -878,7 +878,14 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
     isFetchingRef.current = false;
     if (isMountedRef.current) setLoading(false);
   }
-}, []);
+  // FIX (ESLint react-hooks/exhaustive-deps): applyAssignmentsOnly je
+  // korišćen unutar ovog callback-a (linija ~810) ali nije bio naveden
+  // kao zavisnost. applyAssignmentsOnly sam ima prazan niz zavisnosti
+  // ([], vidi definiciju iznad) — njegova referenca se NIKAD ne mijenja
+  // kroz život komponente, pa dodavanje ovdje ne mijenja PONAŠANJE
+  // (ovaj callback ostaje jednako stabilan kao i prije), samo ispravno
+  // dokumentuje stvarnu zavisnost i uklanja lažno upozorenje.
+}, [applyAssignmentsOnly]);
 
   useEffect(() => {
     isMountedRef.current = true;

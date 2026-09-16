@@ -1006,7 +1006,7 @@ export default function PaPageClient(): JSX.Element {
                   <div className={isDark ? 'text-amber-300/80 mb-3' : 'text-amber-700/80 mb-3'}>
                     Najave na lokalnom jeziku se trenutno čitaju ENGLESKIM glasom,
                     fonetski — mogu zvučati nerazumljivo putnicima. Provjeri
-                    "Test lokalnog glasa" ispod i instaliraj hrvatski/srpski glas.
+                    &ldquo;Test lokalnog glasa&rdquo; ispod i instaliraj hrvatski/srpski glas.
                   </div>
                   {/* FIX (po zahtjevu — link ka podešavanju kad glas nedostaje):
                       ms-settings:regionlanguage i ms-settings:speech su stvarni,
@@ -1032,8 +1032,8 @@ export default function PaPageClient(): JSX.Element {
                   </div>
                   <div className={`text-[11px] leading-relaxed ${isDark ? 'text-amber-300/60' : 'text-amber-700/70'}`}>
                     Ako klik ne otvori ništa: Windows Settings → Time &amp; Language
-                    → Language &amp; region → "Add a language" → izaberi Hrvatski
-                    ili Srpski → tokom instalacije uključi opciju "Text-to-speech"
+                    → Language &amp; region → &ldquo;Add a language&rdquo; → izaberi Hrvatski
+                    ili Srpski → tokom instalacije uključi opciju &ldquo;Text-to-speech&rdquo;
                     (Speech). Nakon instalacije, osvježi (F5) ovu stranicu.
                   </div>
                 </div>

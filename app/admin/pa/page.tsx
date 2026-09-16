@@ -630,7 +630,7 @@ export default function AdminPaPage() {
             <div className="text-indigo-300/60 text-xs mt-2 pt-2 border-t border-indigo-500/20">
               Ova stranica <span className="font-semibold text-indigo-200">šalje</span> poruke —
               stvarno ih <span className="font-semibold text-indigo-200">izgovara</span> odvojen
-              ekran (razglas terminala, na drugom uređaju). Uključi &quot;Lokalni pregled&quot; gore
+              ekran (razglas terminala, na drugom uređaju). Uključi &ldquo;Lokalni pregled&rdquo; gore
               desno da odmah čuješ i ovdje šta si poslao.
             </div>
           </div>
