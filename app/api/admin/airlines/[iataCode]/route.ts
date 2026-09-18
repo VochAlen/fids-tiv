@@ -1,73 +1,50 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
-import { airlinesTable } from '@/lib/db/schema';
-import { eq } from 'drizzle-orm';
+// app/api/admin/airlines/[iataCode]/route.ts
+// FIX (migracija sa SQLite na Redis) — vidi lib/business-class-store.ts.
+import { NextResponse } from 'next/server';
+import { revalidateTag } from 'next/cache';
+import {
+  getAirlineFromStore, updateAirlineInStore, deleteAirlineFromStore,
+} from '@/lib/business-class-store';
+
+const BUSINESS_CLASS_CACHE_CONTROL =
+  'public, max-age=60, s-maxage=3600, stale-while-revalidate=600';
 
 export async function GET(
-  request: NextRequest,
+  request: Request,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
   try {
     const { iataCode } = await params;
-    
-    const [airline] = await db.select()
-      .from(airlinesTable)
-      .where(eq(airlinesTable.iataCode, iataCode));
-
+    const airline = await getAirlineFromStore(iataCode);
     if (!airline) {
-      return NextResponse.json(
-        { error: 'Avio kompanija nije pronađena' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Avio kompanija nije pronađena' }, { status: 404 });
     }
-
-    return NextResponse.json(airline);
+    return NextResponse.json(airline, {
+      headers: {
+        'Cache-Control': BUSINESS_CLASS_CACHE_CONTROL,
+        'Cache-Tag': 'business-class',
+        'Vercel-Cache-Tag': 'business-class',
+      },
+    });
   } catch (error) {
     console.error('Error fetching airline:', error);
-    return NextResponse.json(
-      { error: 'Greška pri učitavanju avio kompanije' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Greška pri učitavanju avio kompanije' }, { status: 500 });
   }
 }
 
 export async function PUT(
-  request: NextRequest,
+  request: Request,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
   try {
     const { iataCode } = await params;
     const body = await request.json();
-    
-    console.log('Updating airline:', iataCode, 'with data:', body);
-
-    // Proveri da li avio kompanija postoji
-    const [existing] = await db.select()
-      .from(airlinesTable)
-      .where(eq(airlinesTable.iataCode, iataCode));
-
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Avio kompanija nije pronađena' },
-        { status: 404 }
-      );
+    const result = await updateAirlineInStore(iataCode, body);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: result.status });
     }
-
-    // Ažuriraj
-    const [airline] = await db.update(airlinesTable)
-      .set({
-        airlineName: body.airlineName,
-        hasBusinessClass: body.hasBusinessClass,
-        winterSchedule: body.winterSchedule,
-        summerSchedule: body.summerSchedule,
-        updatedAt: new Date()
-      })
-      .where(eq(airlinesTable.iataCode, iataCode))
-      .returning();
-
-    console.log('Updated airline:', airline);
-
-    return NextResponse.json(airline);
+    revalidateTag('business-class');
+    return NextResponse.json(result.airline);
   } catch (error) {
     console.error('Error updating airline:', error);
     return NextResponse.json(
@@ -78,29 +55,19 @@ export async function PUT(
 }
 
 export async function DELETE(
-  request: NextRequest,
+  request: Request,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
   try {
     const { iataCode } = await params;
-
-    const [deleted] = await db.delete(airlinesTable)
-      .where(eq(airlinesTable.iataCode, iataCode))
-      .returning();
-
+    const deleted = await deleteAirlineFromStore(iataCode);
     if (!deleted) {
-      return NextResponse.json(
-        { error: 'Avio kompanija nije pronađena' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Avio kompanija nije pronađena' }, { status: 404 });
     }
-
+    revalidateTag('business-class');
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting airline:', error);
-    return NextResponse.json(
-      { error: 'Greška pri brisanju avio kompanije' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Greška pri brisanju avio kompanije' }, { status: 500 });
   }
 }

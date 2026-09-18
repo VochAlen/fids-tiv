@@ -1,0 +1,57 @@
+# .github/workflows/ci.yml
+#
+# FIX (24/7/365 self-recovery audit — preporuka #4): kroz cijelu ovu
+# konverzaciju, svaka izmjena koda je ručno provjeravana preko TS
+# transpile-only provjere prije isporuke — dobro, ali NIJE automatski
+# gate koji spriječava da build-breaking greška ikad stigne do
+# produkcije (npr. neko drugi radi na projektu, ili se izmjena radi
+# direktno na GitHub-u bez lokalne provjere). Ovaj workflow to
+# automatizuje: svaki push/PR na main mora PROĆI typecheck + pravi
+# `next build` prije nego što se smatra "zelenim" — Vercel-ov Git
+# integration i dalje radi svoj deploy nezavisno, ali ovo daje jasan,
+# vidljiv signal (✅/❌ na GitHub-u) PRIJE nego neko ručno pokrene
+# `vercel --prod` ili spoji PR koji bi pokvario build.
+#
+# Namjerno NE pokušava da pokrene aplikaciju uživo niti da se poveže na
+# pravi Redis/ngrok izvor — to bi zahtijevalo prave produkcijske
+# tajne u CI okruženju (rizik), i nije potrebno da bi se provjerilo da
+# se kod ISPRAVNO KOMPajlira. FIDS_REDIS_URL ispod je lažna,
+# neupotrebljiva vrijednost — dovoljna da spriječi da build padne ako
+# neka ruta greškom pokuša da pristupi Redis-u tokom build-a (ne
+# treba za normalan `next build`, ali je jeftina sigurnosna mreža).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Build (next build)
+        run: npm run build
+        env:
+          # Lažne/plejsholder vrijednosti — DOVOLJNE da next build ne
+          # padne, NE koriste se za stvaran pristup ičemu. Stvarne
+          # produkcijske vrijednosti žive ISKLJUČIVO u Vercel Environment
+          # Variables, nikad ovdje.
+          FIDS_REDIS_URL: 'redis://localhost:6379'
+          ADMIN_PASSWORD: 'ci-build-placeholder'
+          PA_PASSWORD: 'ci-build-placeholder'
+          NODE_ENV: 'production'

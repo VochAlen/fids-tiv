@@ -186,3 +186,70 @@ h3 {
 .pulse-clean {
     animation: 2s ease-in-out infinite cleanPulse;
 }
+
+/* ── components/toast.tsx: ulazna animacija za toast obavještenja ── */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* FIX (2026 UI/UX prolaz — otkrivena "tiha" mrtva klasa): app/admin/
+   assign-checkin/page.tsx i app/pa/PaPageClient.tsx koriste
+   `animate-pulse-subtle` na mjestima gdje gate/šalter/red čekanja
+   treba da "diše" (blago pulsirajući indikator da je nešto spremno za
+   akciju) — ali ta klasa NIJE nikad postojala ni ovdje ni kao Tailwind
+   ugrađena klasa (Tailwind ima `animate-pulse`, ne `animate-pulse-
+   subtle`). Efekat je bio potpuno bez efekta — element bi dobio
+   klasu, browser bi je ignorisao (nepoznato ime), bez greške, bez
+   ikakvog vizuelnog traga. Definisano ovdje, blaže i sporije od
+   Tailwind-ovog ugrađenog animate-pulse (koji je namijenjen za
+   skeleton loadere, prenaporan za "spreman za tap" indikator). */
+@keyframes pulseSubtle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.75; transform: scale(1.015); }
+}
+.animate-pulse-subtle {
+  animation: pulseSubtle 1.8s ease-in-out infinite;
+}
+
+/* FIX (ista kategorija — nedefinisana klasa): `scrollbar-thin` se
+   koristi na više mjesta (assign-checkin, PA istorija) za tanji,
+   manje upadljiv scrollbar unutar ograničenih (max-h-*) regiona —
+   nikad nije bio definisan, pa su ti regioni imali OBIČAN (deblji,
+   podrazumijevani) scrollbar cijelo vrijeme. Webkit prefiks pokriva
+   Chrome/Edge (jedini browser koji je ovoj aplikaciji stvarno bitan —
+   svi fizički ekrani i operativni računari su Windows+Chrome/Edge,
+   vidi napomenu o Web Speech API-ju u PA sistemu). */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35); /* slate-400 @ 35% — dovoljno vidljivo, ne upadljivo */
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+
+/* FIX (2026 UI/UX prolaz — nježan ulaz za novi sadržaj): opšta
+   fade-in-up klasa za kartice/sekcije koje se pojavljuju (npr. nova
+   stavka u tabeli letova, novi red u istoriji najava) — suptilno,
+   kratko (200ms), ne usporava percepciju brzine kod čestog
+   osvježavanja podataka na kiosk ekranima. */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.2s ease-out;
+}
