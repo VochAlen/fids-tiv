@@ -23,8 +23,12 @@ export const revalidate = 30;
 // ovog Cache-Control header-a (browser/CDN keš se eksplicitno
 // zaobilazio) — ta linija je uklonjena da bi produženi keš prozor
 // stvarno imao efekta, isto kao što GatePageClient.tsx već radi.
+//
+// FIX (po zahtjevu — analiza Vercel računa, avg-sep 2026): ponovo
+// udvostručeno (20s → 40s), isti razlog i rollback uputstvo kao u
+// GATE_STATUS_CACHE_CONTROL — vidi tamo za pun kontekst.
 const DESK_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=20, stale-while-revalidate=20';
+  'public, max-age=2, s-maxage=40, stale-while-revalidate=40';
 
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata

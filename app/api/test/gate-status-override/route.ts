@@ -56,8 +56,24 @@ const CACHE_TTL_MS = 10_000;
 // uklanjanja gate-ova i dalje vide u očekivanom roku. Ako se bilo šta
 // vidi sporije nego prije, vrati na 'public, max-age=2, s-maxage=2,
 // stale-while-revalidate=3' — to je jedina promjena za rollback.
+//
+// FIX (po zahtjevu — analiza Vercel računa, avg-sep 2026: Edge Requests
+// 81.5% ukupnog troška): keš pogodak ove rute (50.4%) bio je znatno
+// lošiji od desk-status-override ekvivalenta (89.6%), iako su
+// Cache-Control vrijednosti već bile IDENTIČNE — razlog je manji obim
+// saobraćaja po resursu (90K/dan gate vs 416K/dan desk), ne greška u
+// kodu. PONOVO UDVOSTRUČENO (20s → 40s), isti obrazac rasuđivanja kao
+// gore — revalidateTag('flight-status') (potvrđeno ispravno tagovan na
+// SVIM granama odgovora ispod, vidi 'Cache-Tag'/'Vercel-Cache-Tag')
+// ostaje PRIMARNI, skoro-trenutan put propagacije; s-maxage je i dalje
+// samo GORNJA GRANICA za rijedak slučaj da ta invalidacija ikad zakaže
+// (worst-case sad ~80s umjesto ~40s — i dalje razumno za operativni
+// ekran, s obzirom da je ovo isključivo fallback, ne normalan put).
+// ROLLBACK: vrati na 'public, max-age=2, s-maxage=20,
+// stale-while-revalidate=20' ako se bilo šta vidi sporije nego prije
+// nakon par dana praćenja.
 const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=20, stale-while-revalidate=20';
+  'public, max-age=2, s-maxage=40, stale-while-revalidate=40';
 
 
 type GateEntry = {
