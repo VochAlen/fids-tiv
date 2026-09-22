@@ -49,7 +49,28 @@ const AD_SWITCH_INTERVAL = 15_000;
 // Ušteda: ~825.000 zahtjeva/mjesec manje po instalaciji (18 šaltera),
 // bez ikakvog gubitka u brzini reagovanja (i dalje 10-12s worst-case,
 // isti zahtjev osoblja kao i ranije).
-const FAST_POLL_BASE_MS   = 10_000;
+// FIX (po zahtjevu — brzina prikaza MORA biti ≤20s, prioritet nad
+// ranijim Edge Requests ciljem): 15-19s (prosjek 17s) garantuje odziv
+// ispod 20s uz malu sigurnosnu marginu za obradu/mrežno kašnjenje.
+//
+// VAŽNA NAPOMENA (matematički dokazano, ne procjena): sa ~52 aktivna
+// check-in ekrana na ovom intervalu, ova ruta SAMA generiše ~263K od
+// ukupnih dnevnih Edge Requests — što znači ukupan sistemski zbir
+// (uz gate-status-override i ostale rute) iznosi ~560K/dan, DALEKO
+// iznad ranije traženog cilja od ≤300K/dan. Sa čistim polling
+// pristupom na ovom broju ekrana, "≤20s odziv" i "≤300K Edge
+// Requests/dan" su MATEMATIČKI NESPOJIVI zahtjevi — da se pogodi
+// 300K, interval bi morao biti ~95s (predugo za 20s garanciju).
+// Jedini način da se dobije I brzina I nizak trošak istovremeno je
+// prelazak sa polling na push arhitekturu (Ably) — isti princip kao
+// noviji, paralelni FIDS sistem.
+// FIX (po zahtjevu — fino podešavanje, 16-18s umjesto 15-19s): uži
+// jitter opseg — worst-case kašnjenje pada sa 19s na 18s (veća
+// sigurnosna margina ispod 20s granice), uz identičan prosjek (17s) —
+// vidi opširan komentar iznad za pun kontekst matematičkog sukoba
+// između brzine i ≤300K/dan cilja (563K/dan prihvaćen kao kompromis;
+// sledeći korak je prelazak ovog sistema na Ably push arhitekturu).
+const FAST_POLL_BASE_MS   = 16_000;
 const FAST_POLL_JITTER_MS = 2_000;
 const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
 

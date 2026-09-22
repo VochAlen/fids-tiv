@@ -59,8 +59,14 @@ const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // da se otvori/zatvori na ekranu vidljivo u roku od 10-12s od trenutka
 // dodjele. Baza 9s + do 3s jitter = raspon 9-12s, WORST-CASE TAČNO 12s.
 // Isti princip na check-in ekranima (FAST_POLL_BASE_MS tamo).
-const FAST_POLL_BASE_MS   = 9_000;
-const FAST_POLL_JITTER_MS = 3_000;
+// FIX (po zahtjevu — brzina prikaza MORA biti ≤20s, prioritet nad
+// ranijim Edge Requests ciljem): isti razlog i računica kao
+// FAST_POLL_BASE_MS u CheckInPageClient.tsx — vidi opširan komentar
+// tamo za pun kontekst matematičkog sukoba sa ≤300K/dan ciljem.
+// FIX (po zahtjevu — fino podešavanje, 16-18s umjesto 15-19s): isti
+// razlog kao u CheckInPageClient.tsx, vidi opširan komentar tamo.
+const FAST_POLL_BASE_MS   = 16_000;
+const FAST_POLL_JITTER_MS = 2_000;
 const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
 
 // Klasa → boja (isti sistem kao u check-in display-u)

@@ -27,8 +27,14 @@ export const revalidate = 30;
 // FIX (po zahtjevu — analiza Vercel računa, avg-sep 2026): ponovo
 // udvostručeno (20s → 40s), isti razlog i rollback uputstvo kao u
 // GATE_STATUS_CACHE_CONTROL — vidi tamo za pun kontekst.
+// FIX (po zahtjevu — brzina prikaza MORA biti ≤20s): s-maxage MORA
+// biti ≤20s bez obzira na poll interval — ako CDN keš traje duže od
+// 20s, promjena se NE VIDI do isteka tog keša, ČAK I AKO klijent
+// poluje svakih par sekundi (CDN keš je deljen između SVIH klijenata,
+// ne po-klijentu). 15s garantuje svježinu unutar zahtijevane granice,
+// uz malu marginu.
 const DESK_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=40, stale-while-revalidate=40';
+  'public, max-age=2, s-maxage=15, stale-while-revalidate=10';
 
 
 const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata

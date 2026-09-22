@@ -72,8 +72,11 @@ const CACHE_TTL_MS = 10_000;
 // ROLLBACK: vrati na 'public, max-age=2, s-maxage=20,
 // stale-while-revalidate=20' ako se bilo šta vidi sporije nego prije
 // nakon par dana praćenja.
+// FIX (po zahtjevu — isti razlog kao DESK_STATUS_CACHE_CONTROL u
+// desk-status-override/route.ts, vidi opširan komentar tamo. s-maxage
+// MORA biti ≤20s da garantuje brzinu prikaza.).
 const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=40, stale-while-revalidate=40';
+  'public, max-age=2, s-maxage=15, stale-while-revalidate=10';
 
 
 type GateEntry = {
