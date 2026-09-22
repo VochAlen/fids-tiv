@@ -58,6 +58,27 @@ let cachedRaw: RawAssignments | null = null;
 let cachedRawExpiry = 0;
 const RAW_CACHE_TTL_MS = 8_000;
 
+// FIX (KRITIČNO — pravi uzrok prijavljenog "i nakon reload-a let i
+// dalje stoji dodijeljen"): ovaj in-process keš (cachedRaw) živi u
+// memoriji JEDNE serverless instance. desk/gate-status-override rute
+// (koje upisuju promjene) RANIJE nisu uopšte znale za ovaj keš, pa ga
+// nikad nisu invalidirale na upis — ako bi GET zahtjev (npr. reload
+// kiosk stranice) pogodio ISTU, "toplu" instancu koja je NEDAVNO
+// (unutar prethodnih 8s) već pozvala getRawAssignments(), dobijao bi
+// STAR podatak iz memorije, čak i kad je Redis već ispravno ažuriran.
+// Vercel-ov Fluid Compute često rutira uzastopne zahtjeve na istu
+// "toplu" instancu, pa je ovaj scenario stvaran, ne teoretski.
+//
+// Izloženo da ga desk/gate-status-override rute pozovu ODMAH nakon
+// uspješnog upisa (isti princip kao njihov sopstveni `cachedAll =
+// null` za sopstveni GET keš) — ovo pokriva "ista instanca" slučaj u
+// potpunosti; kratak TTL (8s) ostaje kao zaštita za rijeđi slučaj gdje
+// upis i naredno čitanje pogode RAZLIČITE instance.
+export function invalidateAssignmentsCache(): void {
+  cachedRaw = null;
+  cachedRawExpiry = 0;
+}
+
 export async function getRawAssignments(): Promise<RawAssignments> {
   const now = Date.now();
   if (cachedRaw && now < cachedRawExpiry) return cachedRaw;

@@ -24,6 +24,7 @@ import { NextResponse, after } from 'next/server';
 import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
+import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -315,8 +316,12 @@ export async function POST(request: Request) {
       console.log(`[gate-status-override] Cleanup: removed ${result.cleanedCount} expired entries (during ${action} on ${gateNumber})`);
     }
 
-    // Invalidiraj in-process GET cache — novi GET će pročitati svježi blob.
+    // Invalidiraj in-process GET cache (ova ruta) — novi GET će pročitati svježi blob.
     cachedAll = null;
+    // FIX (po zahtjevu — isti razlog kao u desk-status-override/route.ts,
+    // vidi opširan komentar tamo i uz invalidateAssignmentsCache u
+    // lib/assignments-service.ts).
+    invalidateAssignmentsCache();
 
     // ── 📡 ABLY PUBLISH — fire-and-forget, ALI garantovano dovršen.
     // after() kazuje Vercel runtime-u da ne zamrzava/gasi funkciju dok

@@ -22,6 +22,7 @@ import { NextResponse, after } from 'next/server';
 import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
+import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -344,8 +345,16 @@ export async function POST(request: Request) {
       console.log(`[desk-status-override] Cleanup: removed ${result.cleanedCount} expired entries (during ${action} on ${deskNumber})`);
     }
 
-    // Invalidiraj in-process GET cache
+    // Invalidiraj in-process GET cache (ova ruta)
     cachedAll = null;
+    // FIX (po zahtjevu — vidi opširan komentar uz
+    // invalidateAssignmentsCache u lib/assignments-service.ts): ovaj
+    // keš je SASVIM ODVOJEN od cachedAll iznad — koristi ga
+    // /api/test/assignments (glavni izvor stanja pri mount-u/reload-u
+    // kiosk ekrana). Bez ove linije, ta ruta bi mogla vratiti stare
+    // podatke ako pogodi istu, toplu instancu koja je nedavno
+    // keširala staro stanje — čak i kad je Redis već ispravno ažuriran.
+    invalidateAssignmentsCache();
 
     // ── 📡 ABLY PUBLISH — fire-and-forget, ALI garantovano dovršen
     // (after() — vidi objašnjenje u gate-status-override/route.ts).
