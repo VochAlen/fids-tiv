@@ -309,21 +309,6 @@ const { gateEntries, connectionState: assignConnState } = useRealtimeAssignments
 
 
   // ------------------------------------------------------------
-  // Provjera da li let odgovara gate-u
-  // ------------------------------------------------------------
-  const flightMatchesGate = useCallback((f: Flight, gate: string): boolean => {
-    if (!f.GateNumber) return false;
-    const gates   = f.GateNumber.split(',').map((g: string) => g.trim());
-    const gNorm   = gate.replace(/^0+/, '');
-    const gPadded = gate.padStart(2, '0');
-    return gates.some(g =>
-      g === gate   ||
-      g === gNorm  ||
-      g === gPadded ||
-      g.replace(/^0+/, '') === gNorm
-    );
-  }, []);
-
   // ------------------------------------------------------------
   // Odluka da li se let prikazuje
   // ------------------------------------------------------------
@@ -404,9 +389,21 @@ const computeDisplay = useCallback(async () => {
   if (overrideStatus === 'open' && overrideFlightNumber) {
     const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
     if (overriddenFlight) candidates = [overriddenFlight];
-  } else {
-    candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
   }
+  // FIX (po zahtjevu — potpuno uklonjena automatska detekcija leta
+  // preko GateNumber polja iz sirovog aerodromskog izvora podataka):
+  // RANIJE je ovdje, u 'else' grani, stajalo
+  // `candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber))`
+  // — ovo je prikazivalo LET NA GATE EKRANU čak i kad NIKO nije ručno
+  // dodijelio taj let preko assign-checkin panela, ako je sirovi
+  // aerodromski izvor (ngrok/montenegroairports, vjerovatno stariji
+  // AODB podatak) sam navodio GateNumber polje za taj let. Osoblje je
+  // ovo vidjelo kao "let koji nije dodijeljen" — jer u assign-checkin
+  // panelu (koji prati ISKLJUČIVO ručne dodjele) taj let nije bio
+  // vidljiv. Gate ekran sad prikazuje ISKLJUČIVO ono što je ručno
+  // dodijeljeno preko admin panela — prazan ekran u svakom drugom
+  // slučaju (funkcija flightMatchesGate je uklonjena u potpunosti,
+  // više se nigdje ne koristi).
 
   const withStatus = await Promise.all(
     candidates.map(async f => ({ ...f, checkInStatus: await getFlightCheckInStatus(f) }))
@@ -455,7 +452,7 @@ const computeDisplay = useCallback(async () => {
   setLastUpdate(new Date().toLocaleTimeString('en-GB'));
   setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
   setLoading(false);
-}, [gateNumber, gateEntries, liveFlightData, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
+}, [gateNumber, gateEntries, liveFlightData, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
 // Reaguj na promjenu Ably podataka umjesto poll-a
 useEffect(() => {
