@@ -24,10 +24,18 @@ export default function SecurityLayout({
     videoPreloadRef.current = video;
     
     // Opciono: kada se video učita, možete ga zaustaviti
+    // FIX (memory leak): { once: true } garantuje da browser SAM ukloni
+    // listener nakon prvog okidanja — ranije je listener bio trajno
+    // zakačen na anonimnu funkciju, bez čuvane reference za ručno
+    // uklanjanje. Za jedan <video> element po mount-u ovo je mala stvar,
+    // ali kod dugotrajnog rada (dani/nedelje bez restarta) i mogućih
+    // re-mount-ova (npr. Fast Refresh tokom razvoja, ili ako se layout
+    // ikad ponovo montira), bilo je nepotrebno gomilanje listenera na
+    // svaki novo-kreirani <video> element.
     video.addEventListener('canplaythrough', () => {
       console.log('Security video preloaded successfully');
       video.pause(); // Pauziraj nakon učitavanja
-    });
+    }, { once: true });
     
     return () => {
       // Cleanup
