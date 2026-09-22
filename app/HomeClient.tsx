@@ -157,6 +157,9 @@ const FEATURE_ICONS = [Zap, DoorOpen, Radio, MonitorSmartphone, ShieldCheck, Clo
 function useAdminAuthHint() {
   const [isAdmin, setIsAdmin] = useState(false);
   useEffect(() => {
+    // NAPOMENA — isti obrazac i razlog kao u hooks/use-theme.ts (vidi
+    // opširan komentar tamo): namjerna, bezbjedna sinhronizacija sa
+    // localStorage pri mount-u.
     try {
       setIsAdmin(localStorage.getItem('adminAuthenticated') === 'true');
     } catch {
@@ -169,6 +172,9 @@ function useAdminAuthHint() {
 function useLang(): [Lang, (l: Lang) => void] {
   const [lang, setLangState] = useState<Lang>('me');
   useEffect(() => {
+    // NAPOMENA — isti obrazac i razlog kao u hooks/use-theme.ts (vidi
+    // opširan komentar tamo): namjerna, bezbjedna sinhronizacija sa
+    // localStorage pri mount-u.
     try {
       const stored = localStorage.getItem(LANG_STORAGE_KEY);
       if (stored === 'en' || stored === 'me') setLangState(stored);

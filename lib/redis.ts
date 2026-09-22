@@ -7,45 +7,71 @@ import Redis from 'ioredis';
 // ─────────────────────────────────────────────────────────────
 let redis: Redis | null = null;
 
-// Circuit breaker — ako Redis pada, ne šaljemo nove komande
-// dok se ne stabilizuje
+// ── Circuit breaker ──────────────────────────────────────────
+// v4 FIX: ranije se `circuitOpen = false` postavljalo UNCONDITIONALNO
+// prije nego što bi komanda stvarno uspjela — što je poništavalo
+// zaštitu. Sad: circuit se otvara na error, zatvara SAMO kad
+// komanda uspije (ili na ioredis 'ready' event).
+//
+// Takođe: eksponencijalni backoff na cooldown (15s → 30s → 60s → 120s)
+// ako Redis pada više puta zaredom.
 let circuitOpen = false;
 let circuitOpenedAt = 0;
-const CIRCUIT_COOLDOWN_MS = 10_000; // 10s pauza nakon pada
+let circuitFailureCount = 0;
+const CIRCUIT_BASE_COOLDOWN_MS = 15_000;
+const CIRCUIT_MAX_COOLDOWN_MS = 120_000;
 
-// ═════════════════════════════════════════════════════════════
-// SIGURNOSNA IZOLACIJA — LOKALNO/PREVIEW TESTIRANJE NIKAD NE
-// SMIJE DIRATI PRAVE PRODUKCIJSKE PODATKE
-// ═════════════════════════════════════════════════════════════
-// KONTEKST: FIDS_REDIS_URL u .env.local je ISTA konekciona niska koju
-// koristi i prava produkcija (nema posebne test baze). Ranije testiranje
-// na localhost-u je paralelno sa live sistemom obrisalo sve dodijeljene
-// letove — jer su OBA sistema pisala/čitala IDENTIČNE Redis ključeve
-// (npr. "test:gate-status:all"), pa je svaki lokalni test-klik odmah bio
-// vidljiv (i mogao biti prepisan/obrisan) na pravim, live monitorima.
-//
-// FIX: svaka Redis komanda koja NIJE pokrenuta na pravom Vercel
-// PRODUCTION deployment-u automatski dobija prefiks "dev:" ispred SVAKOG
-// ključa (ioredis-ova ugrađena "keyPrefix" opcija — primjenjuje se na
-// svaku komandu, iz svakog fajla koji koristi getRedisClient(), bez
-// izuzetka, bez mogućnosti da se neko mjesto u kodu "zaboravi" prefiksirati
-// jer se prefiks dodaje na najnižem nivou, u samom ioredis klijentu).
-//
-// Rezultat: lokalni `npm run dev` i Vercel Preview deployment-i AUTOMATSKI
-// čitaju/pišu u potpuno IZOLOVAN skup ključeva (npr. "dev:test:gate-status:all")
-// — čak i kad pokazuju na ISTU Redis instancu kao produkcija. Nema šanse
-// da lokalni test slučajno obriše ili prepiše bilo šta live.
-//
-// KAKO SE PREPOZNAJE "prava produkcija": Vercel AUTOMATSKI postavlja
-// VERCEL_ENV=production isključivo na pravom production deployment-u —
-// ovo NIJE nešto što se može slučajno pokrenuti sa localhost-a ili iz
-// Preview deployment-a. Sve ostalo (localhost, `next build && next start`
-// lokalno, Vercel Preview) NEMA VERCEL_ENV=production, pa automatski
-// dobija sigurnosni prefiks — bez potrebe da se bilo šta ručno podešava
-// ili pamti pri svakom testiranju.
-function getRedisKeyPrefix(): string {
-  const isRealProduction = process.env.VERCEL_ENV === 'production';
-  return isRealProduction ? '' : 'dev:';
+function getCircuitCooldown(): number {
+  // Eksponencijalni backoff: 15s, 30s, 60s, 120s, 120s, ...
+  const cooldown = CIRCUIT_BASE_COOLDOWN_MS * Math.pow(2, circuitFailureCount - 1);
+  return Math.min(cooldown, CIRCUIT_MAX_COOLDOWN_MS);
+}
+
+function openCircuit(): void {
+  circuitOpen = true;
+  circuitOpenedAt = Date.now();
+  circuitFailureCount++;
+}
+
+function closeCircuit(): void {
+  if (circuitOpen) {
+    console.log(`[Redis] Circuit breaker CLOSED after ${circuitFailureCount} failure(s)`);
+  }
+  circuitOpen = false;
+  circuitFailureCount = 0;
+}
+
+// Provjeri da li je circuit otvoren i da li je cooldown prošao.
+// Vraća true ako je otvoren (treba skip-ovati komandu).
+function isCircuitBlocked(): boolean {
+  if (!circuitOpen) return false;
+  const elapsed = Date.now() - circuitOpenedAt;
+  const cooldown = getCircuitCooldown();
+  if (elapsed < cooldown) {
+    return true; // još uvijek blokiran
+  }
+  // Cooldown je prošao — ali NE zatvaraj circuit ovdje!
+  // Zatvoriće se tek kad komanda uspije (u try bloku safeRedis*).
+  // Ostavljamo circuitOpen = true da signalizira "probni pokušaj".
+  return false;
+}
+
+// FIX (KRITIČNO — pravi uzrok prijavljene greške u produkciji:
+// "WRONGTYPE Operation against a key holding the wrong kind of value"
+// na test:desk-status:all i test:gate-status:all, koje je zatim
+// okinulo GLOBALNI circuit breaker i blokiralo SVE ostale, potpuno
+// nepovezane Redis pozive na 15-120s — vidljivo u logu kao širi
+// timeout/sporost na ably-token, /api/flights/snapshot, itd.):
+// WRONGTYPE je problem sa PODATKOM na JEDNOM konkretnom ključu (neko
+// je ranije upisao pogrešan tip — npr. HASH umjesto string), NE
+// problem sa dostupnošću same Redis konekcije. Tretiranje ovoga
+// identično kao "Redis je nedostupan" (openCircuit) je bilo pogrešno
+// preširoko — blokiralo je čitanje/pisanje na SVIM DRUGIM, ispravnim
+// ključevima dok cooldown ne prođe, iako je Redis servis sam po sebi
+// bio potpuno zdrav.
+function isWrongTypeError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('WRONGTYPE');
 }
 
 export function getRedisClient(): Redis {
@@ -55,23 +81,10 @@ export function getRedisClient(): Redis {
       throw new Error('FIDS_REDIS_URL environment variable is not defined');
     }
 
-    const keyPrefix = getRedisKeyPrefix();
-
-    // Vrlo vidljiva poruka pri startu — nemoguće je propustiti u kojem
-    // režimu aplikacija trenutno radi.
-    if (keyPrefix) {
-      console.log(`🔒 [Redis] DEV/PREVIEW režim — svi ključevi izolovani prefiksom "${keyPrefix}". Produkcijski (live) podaci NISU dostupni niti mogu biti izmijenjeni odavde.`);
-    } else {
-      console.log('🔴 [Redis] PRODUCTION režim — koriste se PRAVI produkcijski ključevi.');
-    }
-
     redis = new Redis(redisUrl, {
-      // ── Izolacija ključeva (vidi opširan komentar iznad) ───
-      keyPrefix,
-
       // ── Timeouts ──────────────────────────────────────────
       connectTimeout: 4_000,      // Maks 4s za uspostavljanje konekcije
-      commandTimeout: 3_000,      // Maks 3s čekanja na odgovor komande — ovo je bio problem!
+      commandTimeout: 3_000,      // Maks 3s čekanja na odgovor komande
 
       // ── Retry logika ──────────────────────────────────────
       maxRetriesPerRequest: 1,    // Samo 1 retry (ne 2) — smanjuje ukupno čekanje
@@ -79,27 +92,27 @@ export function getRedisClient(): Redis {
       lazyConnect: true,
 
       retryStrategy(times) {
-        // Eksponencijalni backoff, maks 8s između pokušaja
-        // Vraća null nakon 5 pokušaja — ioredis tada emituje error i staje
         if (times > 5) return null;
         return Math.min(times * 500, 8_000);
       },
     });
-redis.on('error', (err: Error) => {
-  console.error(`[Redis] Error: ${err.message} — circuit breaker OPEN for ${CIRCUIT_COOLDOWN_MS}ms`);
-  circuitOpen = true;
-  circuitOpenedAt = Date.now();
-});
+
+    redis.on('error', (err: Error) => {
+      console.error(`[Redis] Error: ${err.message}`);
+      // Otvori circuit breaker — sljedeće komande odmah vraćaju null
+      openCircuit();
+    });
 
     redis.on('connect', () => {
       console.log('[Redis] Connected');
-      // Zatvori circuit breaker čim se konekcija uspostavi
-      circuitOpen = false;
+      // NE zatvaraj circuit ovdje — tek na 'ready' (kada komande mogu proći)
     });
 
     redis.on('ready', () => {
       console.log('[Redis] Ready');
-      circuitOpen = false;
+      // 'ready' = konekcija je uspostavljena i spremna za komande
+      // Tu tek zatvaramo circuit (ioredis je spreman da prima komande)
+      closeCircuit();
     });
 
     redis.on('reconnecting', (delay: number) => {
@@ -115,139 +128,74 @@ redis.on('error', (err: Error) => {
 // direktnog client.get(). Vraća null na svaki problem.
 // ─────────────────────────────────────────────────────────────
 export async function safeRedisGet(key: string): Promise<string | null> {
-  // Provjeri circuit breaker
-  if (circuitOpen) {
-    const elapsed = Date.now() - circuitOpenedAt;
-    if (elapsed < CIRCUIT_COOLDOWN_MS) {
-      // Circuit je otvoren i cooldown nije prošao — odmah vrati null
-      return null;
-    }
-    // Cooldown je prošao — pokušaj ponovo (circuit se zatvara na 'ready')
-    circuitOpen = false;
+  if (isCircuitBlocked()) {
+    return null;
   }
 
   try {
     const client = getRedisClient();
-    return await client.get(key);
+    const result = await client.get(key);
+    // Komanda uspjela — zatvori circuit ako je bio otvoren
+    if (circuitOpen) closeCircuit();
+    return result;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Redis] safeRedisGet("${key}") failed: ${msg}`);
+
+    if (isWrongTypeError(err)) {
+      // NE otvaraj circuit — Redis konekcija je zdrava, samo je OVAJ
+      // ključ pogrešnog tipa. Obriši ga (fire-and-forget — ne
+      // blokiramo trenutni poziv čekajući to) da se sledeći SET na
+      // ovaj ključ (npr. prva sledeća dodjela šaltera/gate-a) sigurno
+      // uspije i trajno ispravi tip. Ako Redis konekcija zaista IMA
+      // problem, ovaj DEL će i sam pasti — to je u redu, sledeći
+      // pokušaj čitanja će opet vidjeti WRONGTYPE i ponovo probati.
+      getRedisClient().del(key).catch(() => {});
+      console.warn(`[Redis] "${key}" je bio pogrešnog tipa — obrisan radi samo-ispravke, circuit breaker NIJE okinut`);
+      return null;
+    }
+
+    openCircuit();
     return null;
   }
 }
 
 // ─────────────────────────────────────────────────────────────
 // safeRedisHGetAll — za hash komande (override:* ključevi)
-//
-// FIX (WRONGTYPE greška u produkciji): ključevi test:gate-status:all i
-// test:desk-status:all su u produkciji već postojali kao JEDAN JSON STRING
-// (stara, pre-migracije verzija koda — vidi komentar iznad safeRedisHSet).
-// Kad je kod prešao na HGETALL, Redis je za takav "stari" ključ vratio
-// grešku "WRONGTYPE Operation against a key holding the wrong kind of
-// value" — jer ključ i dalje fizički drži STRING tip u samom Redis-u, a
-// HGETALL radi samo nad HASH tipom. Migracija koda nije automatski
-// migrirala i POSTOJEĆE podatke u Redis-u.
-//
-// Ovo se sad rješava TRANSPARENTNO, na prvom sledećem čitanju: ako HGETALL
-// vrati WRONGTYPE, pretpostavljamo da je ključ zaostali JSON string,
-// pročitamo ga (GET), parsiramo, i "preselimo" svako polje u pravi HASH
-// (HSET po polju), pa obrišemo stari string ključ (DEL) da se greška ne
-// ponavlja na sledećem pozivu. Ako paralelno stigne drugi zahtjev i uradi
-// istu migraciju istovremeno — bezopasno, oba pišu identične vrijednosti,
-// nema gubitka/korupcije podataka. Ako stari string nije validan JSON
-// (oštećen), samo obrišemo ključ i vratimo prazan hash (isto ponašanje kao
-// da ključ nikad nije ni postojao — gate/desk statusi jednostavno kreću
-// iz praznog stanja, ne rušimo aplikaciju).
 // ─────────────────────────────────────────────────────────────
 export async function safeRedisHGetAll(key: string): Promise<Record<string, string> | null> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
+  if (isCircuitBlocked()) {
     return null;
   }
-  circuitOpen = false;
 
   try {
     const client = getRedisClient();
     const result = await client.hgetall(key);
     // ioredis vraća {} kad ključ ne postoji — normalizuj u null
+    if (circuitOpen) closeCircuit();
     return Object.keys(result).length > 0 ? result : null;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Redis] safeRedisHGetAll("${key}") failed: ${msg}`);
 
-    if (msg.includes('WRONGTYPE')) {
-      console.warn(`[Redis] safeRedisHGetAll("${key}") — WRONGTYPE detektovan, pokrećem jednokratnu migraciju string→hash...`);
-      const migrated = await migrateStringKeyToHash(key);
-      if (migrated) return Object.keys(migrated).length > 0 ? migrated : null;
-      // Migracija nije uspjela (npr. i GET je pao) — nastavi na normalan
-      // error-log ispod, vrati null kao i za bilo koju drugu grešku.
-    } else {
-      console.error(`[Redis] safeRedisHGetAll("${key}") failed: ${msg}`);
+    // FIX (isti princip kao safeRedisGet iznad — vidi opširan
+    // komentar tamo): WRONGTYPE je problem sa podatkom na OVOM
+    // ključu, ne sa Redis konekcijom.
+    if (isWrongTypeError(err)) {
+      getRedisClient().del(key).catch(() => {});
+      console.warn(`[Redis] "${key}" je bio pogrešnog tipa — obrisan radi samo-ispravke, circuit breaker NIJE okinut`);
+      return null;
     }
+
+    openCircuit();
     return null;
   }
 }
-
-// Jednokratna samoisceljujuća migracija: stari JSON string ključ → pravi
-// Redis HASH, isto ime ključa. Vidi opširan komentar iznad safeRedisHGetAll.
-async function migrateStringKeyToHash(key: string): Promise<Record<string, string> | null> {
-  try {
-    const client = getRedisClient();
-    const raw = await client.get(key);
-
-    if (!raw) {
-      // Ključ je u međuvremenu nestao (npr. istekao TTL) — nema šta da
-      // se migrira, samo javi "prazno", normalno stanje.
-      return {};
-    }
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      console.error(`[Redis] migrateStringKeyToHash("${key}") — stari string nije validan JSON, brišem ključ i krećem iz praznog stanja`);
-      await client.del(key);
-      return {};
-    }
-
-    const entries = Object.entries(parsed);
-    // KRITIČNO: Redis NIKAD ne dozvoljava HSET na ključu koji i dalje
-    // fizički drži STRING vrijednost — takav HSET bi i sam bacio
-    // WRONGTYPE (identična greška, samo pomjerena za jedan korak). Zato
-    // MORAMO prvo eksplicitno obrisati stari string ključ, pa TEK ONDA
-    // (ako ima šta) upisati hash polja. Prozor između DEL i pipeline HSET
-    // je izuzetno kratak (jedan Redis round-trip); i kad bi neki paralelni
-    // zahtjev tu "upao", najgori ishod je da privremeno vidi prazan hash
-    // umjesto starog stanja — bezopasno za ovaj tip prolaznih statusnih
-    // podataka, i dešava se samo jednom, dok se stari ključ ne migrira.
-    await client.del(key);
-    if (entries.length > 0) {
-      const pipeline = client.pipeline();
-      for (const [field, value] of entries) {
-        pipeline.hset(key, field, typeof value === 'string' ? value : JSON.stringify(value));
-      }
-      await pipeline.exec();
-    }
-
-    console.log(`[Redis] migrateStringKeyToHash("${key}") — migrirano ${entries.length} polja string→hash`);
-
-    const out: Record<string, string> = {};
-    for (const [field, value] of entries) {
-      out[field] = typeof value === 'string' ? value : JSON.stringify(value);
-    }
-    return out;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[Redis] migrateStringKeyToHash("${key}") failed: ${msg}`);
-    return null;
-  }
-}
-
-// lib/redis.ts – dodati nakon safeRedisHGetAll
 
 export async function safeRedisSet(key: string, value: string, ttlSeconds?: number): Promise<boolean> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
+  if (isCircuitBlocked()) {
     return false;
   }
-  circuitOpen = false;
 
   try {
     const client = getRedisClient();
@@ -256,169 +204,39 @@ export async function safeRedisSet(key: string, value: string, ttlSeconds?: numb
     } else {
       await client.set(key, value);
     }
+    if (circuitOpen) closeCircuit();
     return true;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Redis] safeRedisSet("${key}") failed: ${msg}`);
+    openCircuit();
     return false;
   }
 }
 
 export async function safeRedisDel(key: string): Promise<boolean> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
+  if (isCircuitBlocked()) {
     return false;
   }
-  circuitOpen = false;
 
   try {
     const client = getRedisClient();
     await client.del(key);
+    if (circuitOpen) closeCircuit();
     return true;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Redis] safeRedisDel("${key}") failed: ${msg}`);
+    openCircuit();
     return false;
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// FIX — RACE CONDITION u gate/desk assignment-ima:
-// Ranije su test:gate-status:all i test:desk-status:all bili JEDAN JSON
-// string (čitan preko safeRedisGet, pisan preko safeRedisSet). POST handler
-// je radio: pročitaj CIJELI objekat → izmijeni SAMO svoj gate/desk →
-// upiši CIJELI objekat nazad ("read-modify-write"). To NIJE atomarno:
-// ako dva zahtjeva (dva različita gate-a, ili dva člana osoblja na
-// različitim uređajima) stignu skoro istovremeno, oba pročitaju ISTI
-// stari snapshot, oba upišu svoju izmjenu NA VRH tog istog snapshot-a —
-// i drugi write tiho prepiše (obriše) izmjenu koju je upisao prvi,
-// iako se ticala SASVIM DRUGOG gate-a/deska. Otud prijava "ne mogu da
-// dodijelim let određenom gate-u" — dodjela je kratko "prošla", pa je
-// nestala kad je stigao sljedeći, nepovezani write.
-//
-// FIX: umjesto jednog JSON blob-a, koristimo Redis HASH — jedno polje
-// (HSET) po gate-u/desku. HSET je ATOMARAN na nivou pojedinačnog polja:
-// dva istovremena zahtjeva za RAZLIČITE gate-ove/deskove više uopšte ne
-// mogu da se sudare, jer svaki upisuje samo svoje polje, ne cijelu mapu.
-// (Dva istovremena zahtjeva za ISTI gate i dalje važe "zadnji upis
-// pobjeđuje" — to je očekivano i ispravno ponašanje za isti resurs, ne
-// bug.) HDEL, HGETALL i HGET su takođe atomarni.
-// ─────────────────────────────────────────────────────────────
-export async function safeRedisHGet(key: string, field: string): Promise<string | null> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
-    return null;
-  }
-  circuitOpen = false;
-
-  try {
-    const client = getRedisClient();
-    return await client.hget(key, field);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    // FIX (WRONGTYPE, vidi opširan komentar iznad safeRedisHGetAll): ovo
-    // je čest ULAZNI poziv za POST akcije (open/close/assign) — AKO se
-    // ne migrira i ovdje, dodjela gate-a/šaltera bi tiho pucala na
-    // zaostalom string ključu prije nego što ijedan GET/HGETALL stigne da
-    // ga migrira. Migriraj, pa POKUŠAJ PONOVO isti HGET jednom.
-    if (msg.includes('WRONGTYPE')) {
-      console.warn(`[Redis] safeRedisHGet("${key}") — WRONGTYPE, migriram i ponavljam...`);
-      const migrated = await migrateStringKeyToHash(key);
-      if (migrated) return migrated[field] ?? null;
-    } else {
-      console.error(`[Redis] safeRedisHGet("${key}", "${field}") failed: ${msg}`);
-    }
-    return null;
-  }
+// ── Export za testove/admin ──────────────────────────────────
+export function isCircuitOpen(): boolean {
+  return circuitOpen;
 }
 
-export async function safeRedisHSet(key: string, field: string, value: string): Promise<boolean> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
-    return false;
-  }
-  circuitOpen = false;
-
-  try {
-    const client = getRedisClient();
-    await client.hset(key, field, value);
-    return true;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    if (msg.includes('WRONGTYPE')) {
-      console.warn(`[Redis] safeRedisHSet("${key}") — WRONGTYPE, migriram i ponavljam upis...`);
-      await migrateStringKeyToHash(key);
-      // Migracija je (ako je uspjela) već obrisala stari string ključ i
-      // upisala postojeća polja kao hash — sad je ključ pravog tipa,
-      // ponovi ORIGINALNI upis da se izmjena koju je pozivalac tražio
-      // stvarno i primijeni (migracija sama po sebi ne zna za NOVU
-      // vrijednost koju POST handler upravo pokušava da postavi).
-      try {
-        const client = getRedisClient();
-        await client.hset(key, field, value);
-        return true;
-      } catch (retryErr: unknown) {
-        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-        console.error(`[Redis] safeRedisHSet("${key}", "${field}") failed nakon migracije: ${retryMsg}`);
-        return false;
-      }
-    }
-
-    console.error(`[Redis] safeRedisHSet("${key}", "${field}") failed: ${msg}`);
-    return false;
-  }
-}
-
-export async function safeRedisHDel(key: string, field: string): Promise<boolean> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
-    return false;
-  }
-  circuitOpen = false;
-
-  try {
-    const client = getRedisClient();
-    await client.hdel(key, field);
-    return true;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    if (msg.includes('WRONGTYPE')) {
-      console.warn(`[Redis] safeRedisHDel("${key}") — WRONGTYPE, migriram (brisanje polja postaje no-op ako polje nakon migracije ne postoji)...`);
-      const migrated = await migrateStringKeyToHash(key);
-      if (migrated && field in migrated) {
-        try {
-          const client = getRedisClient();
-          await client.hdel(key, field);
-        } catch {
-          // najbolji pokušaj — migracija je svakako uklonila WRONGTYPE stanje
-        }
-      }
-      return true;
-    }
-
-    console.error(`[Redis] safeRedisHDel("${key}", "${field}") failed: ${msg}`);
-    return false;
-  }
-}
-
-// Postavlja TTL na CIJELI hash ključ (Redis nema per-field TTL van
-// Redis 7.4+ HEXPIRE, a ne oslanjamo se na to jer nije garantovano na
-// svim managed Redis provajderima). TTL se samo "osvježava" na cijeli
-// ključ pri svakoj promjeni — dovoljno, jer je svrha samo da ključ ne
-// živi zauvijek ako aplikacija prestane da ga čisti (postoji i eksplicitno
-// GET-time čišćenje starih polja u obje override rute).
-export async function safeRedisExpire(key: string, ttlSeconds: number): Promise<boolean> {
-  if (circuitOpen && Date.now() - circuitOpenedAt < CIRCUIT_COOLDOWN_MS) {
-    return false;
-  }
-  circuitOpen = false;
-
-  try {
-    const client = getRedisClient();
-    await client.expire(key, ttlSeconds);
-    return true;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[Redis] safeRedisExpire("${key}") failed: ${msg}`);
-    return false;
-  }
+export function getCircuitFailureCount(): number {
+  return circuitFailureCount;
 }

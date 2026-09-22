@@ -1,7 +1,41 @@
-import { NextResponse } from 'next/server';
+// app/api/admin/flight-override/route.ts
+//
+// v3 FIX (2026-08-24):
+// ─────────────────────────────────────────────────────────────
+// 1. REDIS LOCK (per-flight) — ranije je hset+expire i hdel+hlen+del
+//    radio bez lock-a. Race condition:
+//      Request A: assign GateNumber=5 → hset → expire(3min)
+//      Request B: clear GateNumber → hdel → hlen=0 → del
+//    Ako B uskoči između A-ovog hset i expire, A-ov expire pada
+//    na nepostojeći ključ (no-op), a B-ov del briše cijeli hash.
+//    Rezultat: A-ova dodjela je izgubljena, a A korisnik to ne vidi.
+//
+//    Sad: SET lock:flight-override:{flightNumber} NX EX 5 oko cijelog
+//    ciklusa. Per-flight granularnost — dva različita leta mogu biti
+//    editovana paralelno bez blokade.
+//
+// 2. AUTO-RESET UKLONJEN IZ GET — ranije je GET ?action=getAllOverrides
+//    radio write (hdel + del) na read-only putanji da bi auto-reset-ovao
+//    CheckInDesk za letove koji se približavaju STD. To je:
+//      a) write na read-only putanji (CPU na GET-u)
+//      b) trka ako dva GET-a istovremeno pokušaju auto-reset
+//    Sad: auto-reset se radi isključivo preko cron job-a
+//    /api/admin/cleanup-overrides (svaka 4h u vercel.json). GET
+//    ?action=getAllOverrides vraća samo trenutno stanje, bez write-a.
+//
+// 3. ABLY PUBLISH — kada admin promijeni GateNumber ili CheckInDesk
+//    preko ove rute (ne preko test/desk-status-override ili
+//    test/gate-status-override), kiosci moraju biti obaviješteni.
+//    Publish na odgovarajući Ably kanal (fire-and-forget).
+// ─────────────────────────────────────────────────────────────
+
+import { NextResponse, after } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { resetExpiredCheckInOverrides } from '@/lib/override-utils';
-import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
+import { getCurrentFlightData } from '@/lib/flight-data-service';
+import { publishToChannel } from '@/lib/ably-server';
+import { requireAdmin } from '@/lib/admin-auth';
+import type { Flight } from '@/types/flight';
 
 // ============================================================
 // SIGURNOSNA LISTA: Dozvoljava samo ova polja za upis u Redis
@@ -15,6 +49,56 @@ const ALLOWED_FIELDS = [
   'EstimatedDepartureTime',
   'Terminal'
 ];
+
+// ── Lock konstante (per-flight) ──────────────────────────────
+const LOCK_TTL_SECONDS = 5;
+const LOCK_WAIT_POLL_MS = 200;
+const LOCK_WAIT_MAX_MS = 2_000;
+
+function lockKey(flightNumber: string): string {
+  return `lock:flight-override:${flightNumber}`;
+}
+
+function generateLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+const UNLOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
+async function acquireLock(flightNumber: string): Promise<string | null> {
+  const client = getRedisClient();
+  const token = generateLockToken();
+  const key = lockKey(flightNumber);
+  const deadline = Date.now() + LOCK_WAIT_MAX_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      const got = await client.set(key, token, 'EX', LOCK_TTL_SECONDS, 'NX');
+      if (got === 'OK') return token;
+    } catch (err) {
+      console.warn(`[flight-override] lock acquire error for ${flightNumber}:`, err instanceof Error ? err.message : err);
+      return null;
+    }
+    await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));
+  }
+  return null;
+}
+
+async function releaseLock(flightNumber: string, token: string): Promise<void> {
+  try {
+    const client = getRedisClient();
+    await client.eval(UNLOCK_SCRIPT, 1, lockKey(flightNumber), token);
+  } catch (e) {
+    // Nekritično — lock će isteći sam kroz LOCK_TTL_SECONDS
+    console.warn(`[flight-override] lock release error for ${flightNumber}:`, e instanceof Error ? (e as Error).message : e);
+  }
+}
 
 // Vraća Date za HH:MM, SAMO ako nije stariji od 20 sati
 function parseSTDtoDate(timeStr: string): Date | null {
@@ -57,9 +141,9 @@ function shouldAutoResetCheckIn(scheduledTime: string): boolean {
 // koju ta ruta koristi — nema round-trip-a, nema dodatne invokacije.
 async function getFlightScheduleAndStatus(flightNumber: string): Promise<{ scheduledTime: string | null; status: string | null }> {
   try {
-    const data = await getCurrentFlightDataSafe();
+    const data = await getCurrentFlightData();
     const allFlights = [...(data.departures || []), ...(data.arrivals || [])];
-    const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
+    const flight = allFlights.find((f: Flight) => f.FlightNumber === flightNumber);
     return {
       scheduledTime: flight?.ScheduledDepartureTime || null,
       status: flight?.StatusEN || null,
@@ -76,9 +160,12 @@ async function getFlightScheduledTime(flightNumber: string): Promise<string | nu
 }
 
 // ============================================================
-// POST FUNKCIJA
+// POST FUNKCIJA — sa Redis lock-om i Ably publish-om
 // ============================================================
 export async function POST(request: Request) {
+    // ── v4: Admin auth check ──
+    const auth = await requireAdmin(request);
+    if (auth.error) return auth.error;
   let client;
   try {
     const body = await request.json();
@@ -112,6 +199,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: 'Vrijednost (value) je obavezna kod akcije "assign".' }, { status: 400 });
     }
 
+    // ── Validacija (prije lock-a — ne mora biti atomarna) ──
     // CheckInDesk logika
     if (field === 'CheckInDesk' && action === 'assign') {
       const { scheduledTime, status: flightStatus } = await getFlightScheduleAndStatus(flightNumber);
@@ -148,43 +236,84 @@ export async function POST(request: Request) {
       }
     }
 
-    client = getRedisClient();
-    const redisKey = `override:${flightNumber}`;
+    // ── Acquire per-flight lock ──────────────────────────────
+    const lockToken = await acquireLock(flightNumber);
+    if (!lockToken) {
+      return NextResponse.json(
+        { message: 'Concurrent modification — please retry in a moment', retryable: true },
+        { status: 503 }
+      );
+    }
 
-    if (action === 'assign') {
-      const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
-      await client.hset(redisKey, { [field]: cleanValue });
+    try {
+      client = getRedisClient();
+      const redisKey = `override:${flightNumber}`;
 
-      if (field !== 'Terminal') {
-        try {
-          const { scheduledTime } = await getFlightScheduleAndStatus(flightNumber);
-          if (scheduledTime) {
-            const stdDate = parseSTDtoDate(scheduledTime);
-            if (stdDate) {
-              const secondsUntilSTD = Math.floor((stdDate.getTime() - Date.now()) / 1000);
-              const ttl = Math.max(300, secondsUntilSTD + 7200);
-              await client.expire(redisKey, ttl);
-              console.log(`[flight-override] ${flightNumber} TTL: ${ttl}s (STD: ${scheduledTime}, istekne: ${new Date(Date.now() + ttl * 1000).toLocaleTimeString()})`);
+      if (action === 'assign') {
+        const cleanValue = value === '' ? '__EMPTY__' : value.toString().trim();
+        await client.hset(redisKey, { [field]: cleanValue });
+
+        if (field !== 'Terminal') {
+          try {
+            const { scheduledTime } = await getFlightScheduleAndStatus(flightNumber);
+            if (scheduledTime) {
+              const stdDate = parseSTDtoDate(scheduledTime);
+              if (stdDate) {
+                const secondsUntilSTD = Math.floor((stdDate.getTime() - Date.now()) / 1000);
+                const ttl = Math.max(300, secondsUntilSTD + 7200);
+                await client.expire(redisKey, ttl);
+                console.log(`[flight-override] ${flightNumber} TTL: ${ttl}s (STD: ${scheduledTime}, istekne: ${new Date(Date.now() + ttl * 1000).toLocaleTimeString()})`);
+              } else {
+                await client.expire(redisKey, 300);
+                console.warn(`[flight-override] ${flightNumber} zastarjeli STD "${scheduledTime}" — TTL=300s`);
+              }
             } else {
-              await client.expire(redisKey, 300);
-              console.warn(`[flight-override] ${flightNumber} zastarjeli STD "${scheduledTime}" — TTL=300s`);
+              await client.expire(redisKey, 21600);
             }
-          } else {
+          } catch {
             await client.expire(redisKey, 21600);
           }
-        } catch {
-          await client.expire(redisKey, 21600);
+        } else {
+          await client.expire(redisKey, 86400);
         }
-      } else {
-        await client.expire(redisKey, 86400);
-      }
 
-    } else if (action === 'clear') {
-      await client.hdel(redisKey, field);
-      const remaining = await client.hlen(redisKey);
-      if (remaining === 0) {
-        await client.del(redisKey);
+      } else if (action === 'clear') {
+        await client.hdel(redisKey, field);
+        const remaining = await client.hlen(redisKey);
+        if (remaining === 0) {
+          await client.del(redisKey);
+        }
       }
+    } finally {
+      await releaseLock(flightNumber, lockToken);
+    }
+
+    // ── 📡 ABLY PUBLISH — pomjeren u after(), garantovano dovršen.
+    // Ako je promijenjen GateNumber ili CheckInDesk, obavijesti kioske
+    // preko Ably-ja da odmah refresh-uju prikaz. Ostale izmjene
+    // (StatusEN, EstimatedDepartureTime, itd.) će kiosci vidjeti
+    // na sljedećem cron flight-sync ciklusu (svaka 3 min).
+    //
+    // AŽURIRANO (dva poboljšanja odjednom):
+    // 1. after() umjesto gole .catch() bez await-a — garantuje da
+    //    Vercel runtime ne prekine izvršavanje funkcije prije nego
+    //    što se publish stvarno završi (isti fix kao u
+    //    gate-status-override i desk-status-override).
+    // 2. getCurrentFlightData() fetch je SAD TAKOĐE unutar after() —
+    //    ranije se ovaj fetch čekao (await) PRIJE slanja response-a
+    //    admin korisniku, iako je taj podatak potreban SAMO za Ably
+    //    publish, ne za sam response. Admin sad dobija potvrdu odmah.
+    // 3. Dva identična if/else grane (GateNumber i CheckInDesk) su
+    //    spojene u jednu — bile su bukvalno isti kod dupliran dva puta.
+    if (field === 'GateNumber' || field === 'CheckInDesk') {
+      after(async () => {
+        try {
+          const flightData = await getCurrentFlightData().catch(() => null);
+          await publishToChannel('flights:combined', 'update', flightData || null);
+        } catch (err) {
+          console.error('[flight-override] Ably publish (flights:combined) failed:', err);
+        }
+      });
     }
 
     return NextResponse.json({
@@ -199,13 +328,19 @@ export async function POST(request: Request) {
 }
 
 // ============================================================
-// GET FUNKCIJA
+// GET FUNKCIJA — bez write-a (auto-reset premješten u cron)
 // ============================================================
 export async function GET(request: Request) {
+    // ── v4: Admin auth check ──
+    const auth = await requireAdmin(request);
+    if (auth.error) return auth.error;
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
 
   if (action === 'getAllOverrides') {
+    // ── v3 FIX: samo čitanje, bez auto-reset write-a ──
+    // Auto-reset se radi preko cron job-a /api/admin/cleanup-overrides
+    // (svaka 4h u vercel.json). Ovdje samo vraćamo trenutno stanje.
     try {
       const client = getRedisClient();
 
@@ -217,22 +352,12 @@ export async function GET(request: Request) {
         keys.push(...foundKeys);
       } while (cursor !== '0');
 
-      const overrides: Record<string, any> = {};
+      const overrides: Record<string, Record<string, string>> = {};
 
       if (keys.length > 0) {
         const pipeline = client.pipeline();
         keys.forEach(key => pipeline.hgetall(key));
         const results = await pipeline.exec();
-
-        let allFlights: any[] = [];
-        try {
-          const data = await getCurrentFlightDataSafe(); // ← direktan poziv, bez fetch-a
-          allFlights = [...(data.departures || []), ...(data.arrivals || [])];
-        } catch (e) {
-          console.error('Could not fetch flights for auto-reset check:', e);
-        }
-
-        const keysToResetCheckIn: string[] = [];
 
         results?.forEach((result, i) => {
           const key = keys[i];
@@ -240,44 +365,8 @@ export async function GET(request: Request) {
           if (!Object.keys(data).length) return;
 
           const flightNumber = key.replace('override:', '');
-
-          if (data.CheckInDesk !== undefined && allFlights.length > 0) {
-            const flight = allFlights.find((f: any) => f.FlightNumber === flightNumber);
-            if (flight?.ScheduledDepartureTime) {
-              const minsUntil = minutesUntilSTD(flight.ScheduledDepartureTime);
-              const statusLower = (flight.StatusEN || '').toLowerCase();
-              const isTerminated =
-                statusLower.includes('departed') || statusLower.includes('poletio') ||
-                statusLower.includes('cancelled') || statusLower.includes('otkazan') ||
-                statusLower.includes('diverted') || statusLower.includes('preusmjeren');
-
-              if ((minsUntil === null || minsUntil <= 30) && !isTerminated) {
-                keysToResetCheckIn.push(key);
-                delete data.CheckInDesk;
-                console.log(`Auto-reset CheckInDesk za ${flightNumber} (STD: ${flight.ScheduledDepartureTime})`);
-              }
-            }
-          }
-
-          if (Object.keys(data).length > 0) overrides[flightNumber] = data;
+          overrides[flightNumber] = data;
         });
-
-        if (keysToResetCheckIn.length > 0) {
-          const resetPipeline = client.pipeline();
-          keysToResetCheckIn.forEach(key => resetPipeline.hdel(key, 'CheckInDesk'));
-          await resetPipeline.exec();
-
-          const lenPipeline = client.pipeline();
-          keysToResetCheckIn.forEach(key => lenPipeline.hlen(key));
-          const lenResults = await lenPipeline.exec();
-
-          const emptyKeys = keysToResetCheckIn.filter((_, i) => lenResults?.[i]?.[1] === 0);
-          if (emptyKeys.length > 0) {
-            const delPipeline = client.pipeline();
-            emptyKeys.forEach(key => delPipeline.del(key));
-            await delPipeline.exec();
-          }
-        }
       }
 
       return NextResponse.json(overrides);

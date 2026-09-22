@@ -1,31 +1,30 @@
 // app/baggage/[beltNumber]/page.tsx
-// Server komponenta — BEZ 'use client'.
-//
-// Baggage stranica ima dinamički segment ([beltNumber]), pa je za
-// force-static neophodan generateStaticParams — bez njega Next.js
-// ne zna unaprijed koje sve /baggage/X rute postoje, pa bi ih morao
-// renderovati on-demand na Vercel funkciji pri svakom prvom posjetu.
-//
-// dynamicParams: true znači da AKO neko otvori belt broj koji NIJE
-// u listi ispod (npr. dodaš treći belt kasnije, a zaboraviš ažurirati
-// ovu listu), Next.js će tu jednu rutu ipak renderovati on-demand
-// (ne baca 404) — samo neće biti unaprijed statički generisana.
-//
-// Svi podaci (letovi, hash-check, keš) i dalje dolaze isključivo
-// klijentski kroz BaggagePageClient.tsx — force-static utiče SAMO
-// na HTML okvir stranice, ne na podatke.
+// Server komponenta — BEZ 'use client'. Isti princip kao kod
+// gate/[gateNumber] i checkin/[deskNumber]: HTML shell se
+// pre-renderuje u build-u, stvarni podaci dolaze isključivo preko
+// Ably real-time feeda u BaggagePageClient.tsx.
 import BaggagePageClient from './BaggagePageClient';
 
-export const dynamic = 'force-static';
-export const dynamicParams = true;
+// ── TAČAN SPISAK TRAKA ZA PRTLJAG ──────────────────────────────
+// Pretpostavka: 2 trake ('1', '2') — applyDefaultBaggageBelt()
+// u lib/flight-data-service.ts već koristi '2' kao fallback za
+// dolaske bez eksplicitno dodijeljene trake, što implicira da
+// tačno te dvije trake fizički postoje. Ako Tivat ima više traka,
+// samo dodaj brojeve u ovaj niz — isti obrazac kao GATE_NUMBERS u
+// app/ver2/ver2/gate/[gateNumber]/page.tsx.
+const BELT_NUMBERS: string[] = ['1', '2'];
 
-export async function generateStaticParams() {
-  // TODO: prilagodi listu ako postoji više/drugačiji beltovi
-  return [
-    { beltNumber: '1' },
-    { beltNumber: '2' },
-  ];
+export function generateStaticParams() {
+  return BELT_NUMBERS.map((beltNumber) => ({ beltNumber }));
 }
+
+// Fiksan spisak fizičkih traka — onemogući on-demand SSR fallback.
+export const dynamicParams = false;
+
+// NAPOMENA: 'revalidate' NIJE dodat namjerno — isti razlog kao kod
+// gate/checkin stranica: sav sadržaj dolazi klijentski (Ably +
+// /api/flights/snapshot), server-side revalidate bi samo trošio
+// nepotrebne serverless invocations.
 
 export default function Page() {
   return <BaggagePageClient />;

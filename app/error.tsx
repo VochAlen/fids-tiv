@@ -17,13 +17,21 @@
 // dovijeka). Za te rute, ovaj boundary se SAM automatski reload-uje
 // nakon kratke pauze. Za admin/PA rute (gdje JE čovjek prisutan), radi
 // standardno — ručno dugme "Pokušaj ponovo".
+//
+// FIX (prilagođeno rutama OVOG — Ably — projekta, različitim od
+// starog FIDS-a): /checkin i /gate ovdje NISU krajnje rute — middleware.ts
+// ih redirect-uje na /ver2/ver2/checkin/[deskNumber] i
+// /ver2/ver2/gate/[gateNumber] PRIJE nego što stranica uopšte
+// renderuje, pa usePathname() ovdje vidi već-preusmjerenu putanju —
+// zato je '/ver2' prefiks ovdje, ne '/checkin'/'/gate' pojedinačno.
+// Nema '/security' rute u ovom projektu (za razliku od starog FIDS-a).
 import { useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import { AlertTriangle, RotateCw } from 'lucide-react';
 
 const KIOSK_PATH_PREFIXES = [
-  '/gate', '/checkin', '/departures', '/arrivals', '/combined',
-  '/border', '/baggage', '/split-board', '/security', '/ver2', '/pa',
+  '/ver2', '/departures', '/arrivals', '/combined',
+  '/border', '/baggage', '/split-board', '/pa',
 ];
 
 const AUTO_RELOAD_DELAY_MS = 5000;

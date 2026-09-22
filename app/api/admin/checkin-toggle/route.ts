@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export async function POST(request: Request) {
+    // ── v4: Admin auth check ──
+    const auth = await requireAdmin(request);
+    if (auth.error) return auth.error;
   try {
     const { flightNumber, deskNumber, action } = await request.json();
 

@@ -1,255 +1,35 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-.no-drag {
-    -webkit-app-region: no-drag;
-}
-.drag {
-    -webkit-app-region: drag;
-}
+@import "tailwindcss";
+
 :root {
-    --foreground-rgb: 0, 0, 0;
-    --background-start-rgb: 214, 219, 220;
-    --background-end-rgb: 255, 255, 255;
+  --background: #ffffff;
+  --foreground: #171717;
 }
-@media (prefers-color-scheme: dark) {
-    :root {
-        --foreground-rgb: 255, 255, 255;
-        --background-start-rgb: 0, 0, 0;
-        --background-end-rgb: 0, 0, 0;
-    }
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
-@keyframes snow {
-    0% {
-        transform: translateY(-30px) rotate(0);
-        opacity: 0;
-    }
-    10% {
-        opacity: 0.8;
-    }
-    90% {
-        opacity: 0.6;
-    }
-    100% {
-        transform: translateY(100vh) rotate(360deg);
-        opacity: 0;
-    }
-}
-@keyframes bounce {
-    0%,
-    100% {
-        transform: translateY(0);
-    }
-    50% {
-        transform: translateY(-8px);
-    }
-}
-.animate-snow {
-    animation: 8s linear infinite snow;
-    pointer-events: none;
-}
-.animate-bounce {
-    animation: 2s ease-in-out infinite bounce;
-}
-.border-gold {
-    border-color: gold;
-    box-shadow:
-        0 0 20px rgba(255, 215, 0, 0.3),
-        inset 0 0 20px rgba(255, 215, 0, 0.1);
-}
-#__next,
-body,
-html {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: 100vw;
-    height: 100vh;
-    overflow: hidden !important;
-    scrollbar-width: none !important;
-    -ms-overflow-style: none !important;
-}
-#__next::-webkit-scrollbar,
-body::-webkit-scrollbar,
-html::-webkit-scrollbar {
-    display: none !important;
-    width: 0 !important;
-    height: 0 !important;
-}
-@layer base {
-    .dark,
-    :root {
-        --destructive-foreground: 0 0% 98%;
-    }
-    :root {
-        --background: 0 0% 100%;
-        --foreground: 0 0% 3.9%;
-        --card: 0 0% 100%;
-        --card-foreground: 0 0% 3.9%;
-        --popover: 0 0% 100%;
-        --popover-foreground: 0 0% 3.9%;
-        --primary: 0 0% 9%;
-        --primary-foreground: 0 0% 98%;
-        --secondary: 0 0% 96.1%;
-        --secondary-foreground: 0 0% 9%;
-        --muted: 0 0% 96.1%;
-        --muted-foreground: 0 0% 45.1%;
-        --accent: 0 0% 96.1%;
-        --accent-foreground: 0 0% 9%;
-        --destructive: 0 84.2% 60.2%;
-        --border: 0 0% 89.8%;
-        --input: 0 0% 89.8%;
-        --ring: 0 0% 3.9%;
-        --radius: 0.5rem;
-    }
-    .dark {
-        --background: 0 0% 3.9%;
-        --foreground: 0 0% 98%;
-        --card: 0 0% 3.9%;
-        --card-foreground: 0 0% 98%;
-        --popover: 0 0% 3.9%;
-        --popover-foreground: 0 0% 98%;
-        --primary: 0 0% 98%;
-        --primary-foreground: 0 0% 9%;
-        --secondary: 0 0% 14.9%;
-        --secondary-foreground: 0 0% 98%;
-        --muted: 0 0% 14.9%;
-        --muted-foreground: 0 0% 63.9%;
-        --accent: 0 0% 14.9%;
-        --accent-foreground: 0 0% 98%;
-        --destructive: 0 62.8% 30.6%;
-        --border: 0 0% 14.9%;
-        --input: 0 0% 14.9%;
-        --ring: 0 0% 83.1%;
-    }
-    * {
-        @apply border-border;
-    }
-    body {
-        @apply bg-background text-foreground;
-    }
-}
+
+/* FIX (KRITIČNO — pravi uzrok prijavljenog "Light tema uopšte nije
+   light" na app/admin/assign-checkin): ovaj blok je ranije mijenjao
+   --background na skoro-crnu boju na osnovu OS/browser podešavanja
+   uređaja (prefers-color-scheme: dark) — POTPUNO NEZAVISNO od stranice
+   sopstvene isDark logike. Na mobilnom (Moto G34, Redmi i sl.),
+   "elastic" bounce-skrolovanje (uobičajeno na Android/iOS) na trenutak
+   otkriva SIROVU body pozadinu ispod stranice — ako je korisnikov
+   uređaj imao uključen sistemski tamni režim, to je davalo utisak
+   trenutnog "bljeska" u tamno, čak i dok je stranica ispravno bila u
+   Light modu. Uklonjeno u potpunosti — --background je sad UVIJEK
+   bijela, dosljedno "podrazumijevano Light" principu koji stranica i
+   sama prati. Kiosk ekrane (check-in/gate/itd., koji su NAMJERNO
+   uvijek tamni) ovo ne dira — one imaju sopstvenu, eksplicitnu tamnu
+   pozadinu na svom korjenskom elementu, koja i dalje potpuno prekriva
+   ovaj podrazumijevani body sloj u normalnom prikazu. */
+
 body {
-    @apply bg-black text-gray-100 antialiased;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: geometricPrecision;
-}
-h1,
-h2,
-h3 {
-    @apply font-extrabold tracking-tight;
-}
-.departures-container {
-    @apply p-4 rounded-3xl border-4 border-yellow-400 shadow-lg 
-         bg-gradient-to-br from-blue-950 via-blue-900 to-blue-950;
-}
-.departures-title {
-    @apply text-yellow-400 text-[5rem] font-extrabold mb-4 tracking-tight;
-}
-.arrivals-table,
-.departures-table {
-    @apply w-full text-gray-200 border-collapse;
-}
-.departures-table thead {
-    @apply bg-blue-800 text-white;
-}
-.arrivals-table td,
-.arrivals-table th,
-.departures-table td,
-.departures-table th {
-    @apply p-3 text-center;
-}
-.arrivals-container {
-    @apply p-4 rounded-3xl border-4 border-green-400 shadow-lg 
-         bg-gradient-to-br from-indigo-950 via-indigo-900 to-indigo-950;
-}
-.arrivals-title {
-    @apply text-green-400 text-[5rem] font-extrabold mb-4 tracking-tight;
-}
-.arrivals-table thead {
-    @apply bg-indigo-800 text-white;
-}
-.text-clean {
-    @apply text-gray-100;
-}
-.text-dim {
-    @apply text-gray-400;
-}
-@keyframes cleanPulse {
-    0%,
-    100% {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.85;
-    }
-}
-.pulse-clean {
-    animation: 2s ease-in-out infinite cleanPulse;
-}
-
-/* ── components/toast.tsx: ulazna animacija za toast obavještenja ── */
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* FIX (2026 UI/UX prolaz — otkrivena "tiha" mrtva klasa): app/admin/
-   assign-checkin/page.tsx i app/pa/PaPageClient.tsx koriste
-   `animate-pulse-subtle` na mjestima gdje gate/šalter/red čekanja
-   treba da "diše" (blago pulsirajući indikator da je nešto spremno za
-   akciju) — ali ta klasa NIJE nikad postojala ni ovdje ni kao Tailwind
-   ugrađena klasa (Tailwind ima `animate-pulse`, ne `animate-pulse-
-   subtle`). Efekat je bio potpuno bez efekta — element bi dobio
-   klasu, browser bi je ignorisao (nepoznato ime), bez greške, bez
-   ikakvog vizuelnog traga. Definisano ovdje, blaže i sporije od
-   Tailwind-ovog ugrađenog animate-pulse (koji je namijenjen za
-   skeleton loadere, prenaporan za "spreman za tap" indikator). */
-@keyframes pulseSubtle {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.75; transform: scale(1.015); }
-}
-.animate-pulse-subtle {
-  animation: pulseSubtle 1.8s ease-in-out infinite;
-}
-
-/* FIX (ista kategorija — nedefinisana klasa): `scrollbar-thin` se
-   koristi na više mjesta (assign-checkin, PA istorija) za tanji,
-   manje upadljiv scrollbar unutar ograničenih (max-h-*) regiona —
-   nikad nije bio definisan, pa su ti regioni imali OBIČAN (deblji,
-   podrazumijevani) scrollbar cijelo vrijeme. Webkit prefiks pokriva
-   Chrome/Edge (jedini browser koji je ovoj aplikaciji stvarno bitan —
-   svi fizički ekrani i operativni računari su Windows+Chrome/Edge,
-   vidi napomenu o Web Speech API-ju u PA sistemu). */
-.scrollbar-thin::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
-}
-.scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.35); /* slate-400 @ 35% — dovoljno vidljivo, ne upadljivo */
-  border-radius: 9999px;
-}
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.55);
-}
-
-/* FIX (2026 UI/UX prolaz — nježan ulaz za novi sadržaj): opšta
-   fade-in-up klasa za kartice/sekcije koje se pojavljuju (npr. nova
-   stavka u tabeli letova, novi red u istoriji najava) — suptilno,
-   kratko (200ms), ne usporava percepciju brzine kod čestog
-   osvježavanja podataka na kiosk ekranima. */
-@keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.animate-fade-in-up {
-  animation: fadeInUp 0.2s ease-out;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
 }

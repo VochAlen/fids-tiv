@@ -1,29 +1,13 @@
-// app/api/admin/airlines/route.ts
-//
-// FIX (migracija sa SQLite na Redis): vidi opširan kontekst u
-// lib/business-class-store.ts. Cache-Control koristi isti obrazac kao
-// app/api/weather/route.ts — podaci se mijenjaju rijetko (par puta
-// mjesečno preko admin panela), pa dugačak CDN keš + revalidateTag() na
-// svaku izmjenu eliminiše skoro sve Function Invocations za GET (koji
-// javni kiosk ekrani čitaju preko lib/business-class-service.ts →
-// lib/flight-service.ts za business class prikaz, bez logina).
-import { NextResponse } from 'next/server';
-import { revalidateTag } from 'next/cache';
-import { getAllAirlinesFromStore, createAirlineInStore } from '@/lib/business-class-store';
-
-const BUSINESS_CLASS_CACHE_CONTROL =
-  'public, max-age=60, s-maxage=3600, stale-while-revalidate=600';
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { airlinesTable } from '@/lib/db/schema';
+import { eq } from 'drizzle-orm';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export async function GET() {
   try {
-    const airlines = await getAllAirlinesFromStore();
-    return NextResponse.json(airlines, {
-      headers: {
-        'Cache-Control': BUSINESS_CLASS_CACHE_CONTROL,
-        'Cache-Tag': 'business-class',
-        'Vercel-Cache-Tag': 'business-class',
-      },
-    });
+    const airlines = await db.select().from(airlinesTable);
+    return NextResponse.json(airlines);
   } catch (error) {
     console.error('Error fetching airlines:', error);
     return NextResponse.json(
@@ -33,15 +17,25 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const result = await createAirlineInStore(body);
-    if (!result.ok) {
-      return NextResponse.json({ error: result.error }, { status: result.status });
+    
+    // Provera da li IATA kod već postoji
+    const existing = await db.select()
+      .from(airlinesTable)
+      .where(eq(airlinesTable.iataCode, body.iataCode))
+      .limit(1);
+    
+    if (existing.length > 0) {
+      return NextResponse.json(
+        { error: 'Avio kompanija sa ovim IATA kodom već postoji' },
+        { status: 400 }
+      );
     }
-    revalidateTag('business-class');
-    return NextResponse.json(result.airline);
+    
+    const [airline] = await db.insert(airlinesTable).values(body).returning();
+    return NextResponse.json(airline);
   } catch (error) {
     console.error('Error creating airline:', error);
     return NextResponse.json(

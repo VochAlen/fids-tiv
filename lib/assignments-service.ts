@@ -1,14 +1,24 @@
 // lib/assignments-service.ts
-import { safeRedisHGetAll } from '@/lib/redis';
+import { safeRedisGet } from '@/lib/redis';
 
-const DESK_ALL_KEY = 'test:desk-status:all';
-const GATE_ALL_KEY = 'test:gate-status:all';
+// FIX (vidi opširan komentar u
+// app/api/test/desk-status-override/route.ts): preimenovano da nikad
+// ne kolidira sa glavnim (polling) sistemom, koji koristi identična
+// stara imena ('test:desk-status:all'/'test:gate-status:all') ali kao
+// Redis HASH umjesto string.
+const DESK_ALL_KEY = 'ably-fids:desk-status:all';
+const GATE_ALL_KEY = 'ably-fids:gate-status:all';
 
 export type DeskEntry = {
   status: 'open' | 'closed' | null;
   flightNumber: string;
   classType: string | null;
   setAt: number | null;
+  // FIX (dosljednost sa app/api/test/desk-status-override/route.ts —
+  // vidi opširan komentar tamo za pun kontekst): ova stranica čita
+  // ISTI Redis ključ direktno, pa tip mora pratiti stvaran oblik
+  // podatka koji se tamo sad upisuje.
+  seq: number;
 };
 
 export type GateEntry = {
@@ -16,6 +26,7 @@ export type GateEntry = {
   flightNumber: string | null;
   classType: string | null;
   setAt: number | null;
+  seq: number;
 };
 
 export type RawAssignments = {
@@ -24,7 +35,6 @@ export type RawAssignments = {
 };
 
 export type SimpleAssignments = {
-  [x: string]: any;
   desks: Record<string, string>;
   gates: Record<string, string>;
   // Već izračunat fingerprint (isti onaj koji buildSimpleMaps interno
@@ -48,59 +58,23 @@ let cachedRaw: RawAssignments | null = null;
 let cachedRawExpiry = 0;
 const RAW_CACHE_TTL_MS = 8_000;
 
-// ── FIX (race condition): DESK_ALL_KEY/GATE_ALL_KEY su sada Redis HASH-evi
-// (jedno polje po desku/gate-u), ne više jedan JSON string. safeRedisHGetAll
-// vraća Record<string, string> (svako polje je JSON-enkodiran DeskEntry/
-// GateEntry) — parsiramo polje po polje, umjesto JSON.parse cijelog bloba.
-// Vidi opširan komentar u lib/redis.ts iznad safeRedisHSet za PUN kontekst
-// bug-a koji je ovo rješavalo. ─────────────────────────────────────────
-function parseHashEntries<T>(raw: Record<string, string> | null): Record<string, T> {
-  if (!raw) return {};
-  const out: Record<string, T> = {};
-  for (const [field, json] of Object.entries(raw)) {
-    try {
-      out[field] = JSON.parse(json) as T;
-    } catch {
-      // Pojedinačno oštećeno polje ne smije srušiti čitanje svih ostalih —
-      // samo ga preskačemo (isto ponašanje kao ranije kad bi cijeli JSON
-      // blob bio nevalidan, samo sad izolovano na jedno polje).
-    }
-  }
-  return out;
-}
-
 export async function getRawAssignments(): Promise<RawAssignments> {
   const now = Date.now();
   if (cachedRaw && now < cachedRawExpiry) return cachedRaw;
 
   const [deskRaw, gateRaw] = await Promise.all([
-    safeRedisHGetAll(DESK_ALL_KEY),
-    safeRedisHGetAll(GATE_ALL_KEY),
+    safeRedisGet(DESK_ALL_KEY),
+    safeRedisGet(GATE_ALL_KEY),
   ]);
 
-  const desks = parseHashEntries<DeskEntry>(deskRaw);
-  const gates = parseHashEntries<GateEntry>(gateRaw);
+  let desks: Record<string, DeskEntry> = {};
+  let gates: Record<string, GateEntry> = {};
+  if (deskRaw) { try { desks = JSON.parse(deskRaw); } catch { desks = {}; } }
+  if (gateRaw) { try { gates = JSON.parse(gateRaw); } catch { gates = {}; } }
 
   cachedRaw = { desks, gates };
   cachedRawExpiry = now + RAW_CACHE_TTL_MS;
   return cachedRaw;
-}
-
-// FIX (build je pucao: "invalidateRawAssignmentsCache is not exported from
-// '@/lib/assignments-service'"): app/api/test/gate-status-override/route.ts
-// i app/api/test/desk-status-override/route.ts oba importuju i pozivaju ovu
-// funkciju POSLIJE uspješnog write-a u Redis (da assign-checkin panel i
-// /api/test/assignments ODMAH vide novu dodjelu, umjesto da čekaju da
-// istekne RAW_CACHE_TTL_MS/8s) — ali funkcija ovdje nikad nije postojala.
-// Bez nje, `getRawAssignments()` gore zna vratiti do 8s star `cachedRaw`
-// čak i odmah nakon što je admin dodijelio/uklonio gate ili šalter.
-export function invalidateRawAssignmentsCache(): void {
-  cachedRaw = null;
-  cachedRawExpiry = 0;
-  // Resetuj i simple maps keš — njegov fingerprint je izveden iz raw
-  // podataka, pa kad raw više ne važi, ni simple ne važi.
-  cachedSimple = null;
-  cachedSimpleFingerprint = '';
 }
 
 // ======================================================
@@ -120,25 +94,14 @@ function createFingerprint(raw: RawAssignments): string {
   // VAŽNO: ključ (broj deska/gate-a) MORA biti u fingerprint-u.
   // Bez njega, zamjena stanja između dva deska sa istim
   // setAt/status/flightNumber ne bi bila detektovana kao promjena.
-  //
-  // FIX (klasa se ne prikazuje na gate ekranu nakon "setClass" akcije —
-  // pravi korijenski uzrok): classType NIJE bio uključen u fingerprint.
-  // POST 'setClass' akcija (vidi app/api/test/gate-status-override/route.ts)
-  // mijenja SAMO classType polje, ne dira setAt/status/flightNumber — pa je
-  // fingerprint prije i poslije klika bio IDENTIČAN. Pošto se ovaj
-  // fingerprint koristi u ETag izračunu u app/api/flights/route.ts, server
-  // je vraćao 304 Not Modified na sledeći poll (misleći da se ništa nije
-  // promijenilo), a klijent je nastavljao da prikazuje KEŠIRANU (staru,
-  // bez klase) verziju — TRAJNO, ne samo kratko kašnjenje, sve dok neko
-  // drugo polje (npr. nova dodjela) ne bi promijenilo fingerprint slučajno.
   for (const [deskNumber, value] of Object.entries(raw.desks)) {
-    fingerprint += `${deskNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}-${value.classType ?? ''}|`;
+    fingerprint += `${deskNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}|`;
   }
 
   fingerprint += '#';
 
   for (const [gateNumber, value] of Object.entries(raw.gates)) {
-    fingerprint += `${gateNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}-${value.classType ?? ''}|`;
+    fingerprint += `${gateNumber}:${value.setAt ?? 0}-${value.status}-${value.flightNumber}|`;
   }
 
   return fingerprint;

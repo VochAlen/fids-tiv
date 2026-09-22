@@ -8,6 +8,7 @@ import {
   sortFlightsByTime,
   filterTodayFlights
 } from '@/lib/flight-api-helpers';
+import { requireAdmin } from '@/lib/admin-auth';
 
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
 

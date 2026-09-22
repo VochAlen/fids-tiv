@@ -371,27 +371,6 @@ function getCheckInConfig(airlineIata: string): CheckInConfig | null {
   return AIRLINE_CONFIG_MAP.get(airlineIata.toUpperCase()) || null;
 }
 
-// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera na
-// combined/split-board ekranima): CombinedPageClient.tsx i
-// SplitBoardPageClient.tsx su imali SVOJU odvojenu, hardkodiranu
-// CHECKIN_OFFSETS tabelu, potpuno nezavisnu od settings.ini — kad bi
-// se settings.ini ažurirao (npr. JU/4O sa 180/150 na 120), te dvije
-// stranice bi i dalje prikazivale STARE, zastarjele brojeve, jer
-// nikad nisu ni pozivale ovaj servis niti /api/checkin-config.
-//
-// Ova funkcija je NAMJERNO sinhrona (ne async kao loadCheckInConfig)
-// — getAutoStatus() u tim komponentama se poziva sinhrono, unutar
-// useMemo u render putanji, ne može čekati Promise. Čita iz VEĆ
-// popunjene AIRLINE_CONFIG_MAP (populisane pozivom loadCheckInConfig()
-// jednom pri mount-u komponente — vidi upotrebu u CombinedPageClient/
-// SplitBoardPageClient). Prije nego što se taj async poziv završi
-// (obično ispod sekunde), vraća default 120 — bezopasno tranzientno
-// stanje, ispravlja se samo na sledeći periodični re-render (već
-// postojeći autoStatusTick, svakih 60s).
-export function getCheckInOffsetMinutes(airlineIata: string): number {
-  return getCheckInConfig(airlineIata)?.checkInOpenMinutes ?? 120;
-}
-
 // Postavi ručni status check-in-a
 export function setManualCheckInStatus(
   flightNumber: string,

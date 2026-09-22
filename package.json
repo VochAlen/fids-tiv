@@ -1,117 +1,36 @@
 {
-  "name": "nextjs",
+  "name": "fids",
   "version": "0.1.0",
-  "description": "Flight Information Display System for Tivat Airport",
-  "author": "Tivat Airport",
-  "main": "main.js",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "postbuild": "node scripts/postbuild.js",
-    "lint": "next lint",
-    "typecheck": "tsc --noEmit",
-    "electron": "npm run build && electron .",
-    "electron:dev": "cross-env NODE_ENV=development electron .",
-    "electron:prod": "npm run build && cross-env NODE_ENV=production electron .",
-    "electron:checkin04": "node -e \"require('fs').writeFileSync('settings.ini', '[app]\\npath=checkin/04\\nfullscreen=true\\nkiosk=true')\" && npm run electron",
-    "electron:gate03": "node -e \"require('fs').writeFileSync('settings.ini', '[app]\\npath=gate/03\\nfullscreen=true\\nkiosk=true')\" && npm run electron",
-    "electron:checkin07": "node -e \"require('fs').writeFileSync('settings.ini', '[app]\\npath=checkin/07\\nfullscreen=true\\nkiosk=true')\" && npm run electron",
-    "electron:kill": "taskkill /F /IM electron.exe",
-    "dist:win": "npm run build && electron-builder build --win --x64",
-    "dist:win32": "npm run build && electron-builder build --win --ia32",
-    "dist:both": "npm run build && electron-builder build --win --x64 --ia32"
-  },
-  "build": {
-    "appId": "com.tivatairport.fids-tiv",
-    "productName": "FIDS TIV",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "main.js",
-      "package.json",
-      "loading.html",
-      "node_modules/**/*",
-      "settings.ini"
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64",
-            "ia32"
-          ]
-        }
-      ],
-      "icon": "public/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": true,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "FIDS TIV",
-      "runAfterFinish": false
-    },
-    "extraResources": [
-      {
-        "from": "node.exe",
-        "to": "../node.exe",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": ".next/standalone/",
-        "to": "app",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": ".next/standalone/public/",
-        "to": "app/public",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "data/",
-        "to": "data",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ]
+    "start": "next start",
+    "lint": "eslint"
   },
   "dependencies": {
-    "@types/node": "20.6.2",
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "date-fns": "^3.6.0",
-    "eslint": "8.49.0",
-    "eslint-config-next": "13.5.1",
+    "@libsql/client": "^0.18.0",
+    "ably": "^2.24.0",
+    "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.3",
     "ini": "^6.0.0",
-    "ioredis": "^5.10.1",
-    "lucide-react": "^0.446.0",
-    "next": "^14.2.35",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "tailwindcss-animate": "^1.0.7",
-    "typescript": "5.2.2"
+    "ioredis": "^5.11.1",
+    "jose": "^6.2.3",
+    "lucide-react": "^1.24.0",
+    "next": "16.2.10",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4",
     "@types/ini": "^4.1.1",
-    "autoprefixer": "^10.4.27",
-    "concurrently": "^8.2.2",
-    "cross-env": "^7.0.3",
-    "electron": "21.3.3",
-    "electron-builder": "^26.8.1",
-    "postcss": "^8.5.8",
-    "tailwindcss": "^3.4.19",
-    "wait-on": "^7.2.0"
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "tailwindcss": "^4",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,124 +1,93 @@
 // app/api/test/gate-status-override/route.ts
-import { NextResponse } from 'next/server';
-import { safeRedisHGetAll, safeRedisHGet, safeRedisHSet, safeRedisHDel, safeRedisExpire } from '@/lib/redis';
-import { invalidateRawAssignmentsCache } from '@/lib/assignments-service';
+//
+// v3 FIX (2026-08-24):
+// ─────────────────────────────────────────────────────────────
+// 1. REDIS LOCK — ranije read-modify-write nad 'test:gate-status:all'
+//    blobom je otvarao race condition: dva istovremena POST-a bi
+//    oboje pročitala isto stanje, izmijenila i prepisali — drugi
+//    write tiho briše prvi. Sad: SET lock:test:gate-status NX EX 5
+//    oko cijelog read-modify-write ciklusa.
+//
+// 2. CLEANUP PREMJESTEN — ranije je GET handler radio writeAll() ako
+//    nađe stare unose (starije od 6h), što je:
+//      a) write na read-only putanji (CPU na GET-u)
+//      b) još jedna trka ako dva GET-a istovremeno pokušaju cleanup
+//    Sad: cleanup se radi samo u POST handleru, pod lock-om.
+//
+// 3. FIRE-AND-FORGET PUBLISH — publish na Ably ide preko .then()/.catch(),
+//    response se vraća odmah, ne čeka se Ably round-trip. Ako publish
+//    padne (Ably outage), kiosci će dobiti promjenu preko fallback
+//    polling-a na 20s (vidi useRealtimeAssignments hook).
+// ─────────────────────────────────────────────────────────────
+
+import { NextResponse, after } from 'next/server';
+import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
-import { revalidateTag } from 'next/cache';
+import { publishToChannel } from '@/lib/ably-server';
 
-// ── FIX — RACE CONDITION (izvještaj: "ne mogu da dodijelim let određenom
-// gate-u"): ALL_KEY je bio JEDAN JSON string. POST je radio readAll() →
-// izmijeni SAMO svoj gate → writeAll(cijeli objekat) — nije atomarno. Dva
-// istovremena zahtjeva za RAZLIČITE gate-ove su mogla da se sudare, jer oba
-// čitaju isti stari snapshot pa drugi write tiho prepiše (obriše) izmjenu
-// koju je upisao prvi, iako se ticala drugog gate-a. Sad je ALL_KEY Redis
-// HASH — jedno polje (HSET) po gate-u, atomarno nezavisno od svih ostalih
-// polja. Pun kontekst: vidi komentar u lib/redis.ts iznad safeRedisHSet.
+export const dynamic = 'force-dynamic';
 
-//  export const dynamic = 'force-dynamic';
+const MAX_AGE_MS = 6 * 60 * 60 * 1000;   // 6 sati — unosi stariji se brišu
+const TTL_SECONDS = 21_600;              // 6h — TTL na blob ključu
+// FIX (isti uzrok kao app/api/test/desk-status-override/route.ts —
+// vidi opširan komentar tamo za pun kontekst): preimenovano da nikad
+// ne kolidira sa glavnim (polling) sistemom.
+const ALL_KEY = 'ably-fids:gate-status:all';
+const LOCK_KEY = 'ably-fids:lock:gate-status:override';
+const LOCK_TTL_SECONDS = 5;
+const LOCK_WAIT_POLL_MS = 200;
+const LOCK_WAIT_MAX_MS = 2_000;
 
-const MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 sati
-const TTL_SECONDS = 21_600;            // 6h
-const ALL_KEY = 'test:gate-status:all';
+// ── In-process cache za GET — sprečava da paralelni GET-ovi svi
+// udare Redis. 30s je dovoljno kratko da admin akcija propagira
+// unutar istog ciklusa (POST invalidira cache), a dovoljno dugo da
+// pokrije N kioska koji istovremeno pingaju ovu rutu.
 let cachedAll: Record<string, GateEntry> | null = null;
 let cachedAllExpiry = 0;
 let cacheRefreshing = false;
-const CACHE_TTL_MS = 10_000;
-
-// ── AŽURIRANO (optimizacija Edge Requests): klijentski "brzi poll"
-// koji je gađao ovu rutu na svakih 2-4s je UKLONJEN iz
-// GatePageClient.tsx (vidi komentar "UKLONJENO" u tom fajlu) — gate
-// override podatak sad stiže isključivo kroz gateEntries polje u
-// odgovoru glavnog /api/flights poziva. Ova GET ruta trenutno nema
-// aktivnog klijenta (provjereno grep-om kroz cijeli repo), ali je
-// ostavljena netaknuta funkcionalno (samo je keš prozor produžen sa
-// 2s na 10s) za slučaj da se u budućnosti ponovo poveže neki
-// dashboard/admin prikaz na nju. Ako se to desi, GATE_STATUS_CACHE_
-// CONTROL treba uskladiti sa stvarnim interval-om tog novog klijenta,
-// isto kao što je ranije bilo usklađeno sa FAST_POLL_BASE_MS.
-// FIX (Vercel Edge Requests/Active CPU trošak na 12 gate monitora × 9-12s
-// poll = ~2.96M poziva/mjesec, GOTOVO SVI stvarna izvršavanja funkcije):
-// prethodni keš prozor (2-3s) je bio KRAĆI od poll intervala (9-12s), pa
-// CDN keš NIKAD nije stigao da "pogodi" — svaki poll je bio garantovano
-// stvarno izvršavanje funkcije, iako POST handler ispod već poziva
-// `revalidateTag('flight-status')` + šalje Vercel-Cache-Tag header, što
-// je dokumentovana Vercel funkcija (radi na SVIM planovima, uključujući
-// Pro) za TRENUTNU invalidaciju keša čim se nešto stvarno promijeni —
-// kratak TTL kao jedini mehanizam propagacije bio je nepotreban.
-// Sad je s-maxage=20s (duplo duže od poll intervala) — kad se NIŠTA ne
-// promijeni, CDN servira keširan odgovor umjesto da pokreće funkciju, pa
-// stvarna izvršavanja padaju otprilike 2x. Kad se NEŠTO promijeni,
-// revalidateTag() odmah invalidira keš — sledeći poll (isti 9-12s
-// interval kao i prije) i dalje vidi promjenu, propagacija ostaje ista
-// kao prije. stale-while-revalidate=20 je SAMO fallback ako iz bilo kog
-// razloga tag-invalidacija ne bi radila (worst-case do ~40s umjesto ~5s)
-// — nakon deploy-a provjeri Vercel dashboard (Functions → Invocations za
-// ovu rutu) da potvrdiš stvaran pad, i prati par dana da li se dodjele/
-// uklanjanja gate-ova i dalje vide u očekivanom roku. Ako se bilo šta
-// vidi sporije nego prije, vrati na 'public, max-age=2, s-maxage=2,
-// stale-while-revalidate=3' — to je jedina promjena za rollback.
-//
-// FIX (po zahtjevu — analiza Vercel računa, avg-sep 2026: Edge Requests
-// 81.5% ukupnog troška): keš pogodak ove rute (50.4%) bio je znatno
-// lošiji od desk-status-override ekvivalenta (89.6%), iako su
-// Cache-Control vrijednosti već bile IDENTIČNE — razlog je manji obim
-// saobraćaja po resursu (90K/dan gate vs 416K/dan desk), ne greška u
-// kodu. PONOVO UDVOSTRUČENO (20s → 40s), isti obrazac rasuđivanja kao
-// gore — revalidateTag('flight-status') (potvrđeno ispravno tagovan na
-// SVIM granama odgovora ispod, vidi 'Cache-Tag'/'Vercel-Cache-Tag')
-// ostaje PRIMARNI, skoro-trenutan put propagacije; s-maxage je i dalje
-// samo GORNJA GRANICA za rijedak slučaj da ta invalidacija ikad zakaže
-// (worst-case sad ~80s umjesto ~40s — i dalje razumno za operativni
-// ekran, s obzirom da je ovo isključivo fallback, ne normalan put).
-// ROLLBACK: vrati na 'public, max-age=2, s-maxage=20,
-// stale-while-revalidate=20' ako se bilo šta vidi sporije nego prije
-// nakon par dana praćenja.
-// FIX (po zahtjevu — isti razlog kao DESK_STATUS_CACHE_CONTROL u
-// desk-status-override/route.ts, vidi opširan komentar tamo. s-maxage
-// MORA biti ≤20s da garantuje brzinu prikaza.).
-const GATE_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=15, stale-while-revalidate=10';
-
+const CACHE_TTL_MS = 30_000;
 
 type GateEntry = {
   status: 'open' | 'closed' | null;
   flightNumber: string;
   classType: string | null;
   setAt: number | null;
+  // FIX (isti uzrok kao app/api/test/desk-status-override/route.ts —
+  // vidi opširan komentar tamo za pun kontekst): strogo rastući
+  // brojač, imun na varijacije u brzini obrade između serverless
+  // poziva.
+  seq: number;
 };
 
-function parseHashEntries(raw: Record<string, string> | null): Record<string, GateEntry> {
+type GateMap = Record<string, GateEntry>;
+
+async function readAllUncached(): Promise<GateMap> {
+  const raw = await safeRedisGet(ALL_KEY);
   if (!raw) return {};
-  const out: Record<string, GateEntry> = {};
-  for (const [field, json] of Object.entries(raw)) {
-    try {
-      out[field] = JSON.parse(json) as GateEntry;
-    } catch {
-      // izolovano oštećeno polje — preskoči, ne ruši ostatak
+  try {
+    const parsed = JSON.parse(raw) as GateMap;
+    // ── Ne čistimo ovdje — cleanup je u POST-u pod lock-om. Samo
+    // filtriramo starije od MAX_AGE da klijent ne vidi zastarjele unose.
+    const now = Date.now();
+    const result: GateMap = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) continue;
+      result[k] = v;
     }
+    return result;
+  } catch {
+    return {};
   }
-  return out;
 }
 
-async function readAll(): Promise<Record<string, GateEntry>> {
-  const raw = await safeRedisHGetAll(ALL_KEY);
-  return parseHashEntries(raw);
-}
-
-// ── 2) Dodaj ODMAH ISPOD postojeće readAll() funkcije ──
- 
-async function readAllCached(): Promise<Record<string, GateEntry>> {
+async function readAllCached(): Promise<GateMap> {
   const now = Date.now();
- 
-  if (cachedAll && now < cachedAllExpiry) {
-    return cachedAll;
-  }
-  if (cacheRefreshing && cachedAll) {
-    return cachedAll;
-  }
- 
+  if (cachedAll && now < cachedAllExpiry) return cachedAll;
+  if (cacheRefreshing && cachedAll) return cachedAll;
+
   cacheRefreshing = true;
   try {
-    const fresh = await readAll();
+    const fresh = await readAllUncached();
     cachedAll = fresh;
     cachedAllExpiry = now + CACHE_TTL_MS;
     return fresh;
@@ -126,78 +95,121 @@ async function readAllCached(): Promise<Record<string, GateEntry>> {
     cacheRefreshing = false;
   }
 }
- 
 
-// Više se NE koristi za pisanje pojedinačnih izmjena (to sad ide preko
-// writeOne/deleteOne ispod, atomarno po polju). Ostavljeno samo za GET-time
-// batch čišćenje starih zapisa (gdje je već potreban cijeli snapshot da bi
-// se znalo šta treba obrisati), i to preko individualnih HDEL poziva —
-// vidi cleanupStale() ispod, ne prepisuje cijeli hash.
-async function touchExpiry(): Promise<void> {
-  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
+async function writeAll(data: GateMap): Promise<void> {
+  await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
 }
 
-// Piše TAČNO JEDNO polje (jedan gate) — atomarno, ne dira ostale gate-ove.
-// FIX (assign-checkin ne prikazuje dodijeljene gate-ove): vraća boolean iz
-// safeRedisHSet — ako je Redis circuit breaker otvoren ili je došlo do
-// greške, safeRedisHSet vraća false. Bez ovog check-a, POST handler bi
-// vratio `{ success: true }` iako zapis NIJE upisan — admin vidi toast
-// "Gate 21 → W61234 dodijeljen" ali zapis u Redis-u ne postoji, pa
-// /api/test/assignments i gate monitor ne vide ništa. Sada vraćamo 500
-// da admin zna da nešto nije u redu i da ponovi akciju.
-async function writeOne(gateNumber: string, entry: GateEntry): Promise<boolean> {
-  const ok = await safeRedisHSet(ALL_KEY, gateNumber, JSON.stringify(entry));
-  if (!ok) return false;
-  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
-  return true;
+// ── Token + unlock skripta — spriječi brisanje tuđeg lock-a ──
+function generateLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function deleteOne(gateNumber: string): Promise<void> {
-  await safeRedisHDel(ALL_KEY, gateNumber);
+const UNLOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
+async function acquireLock(): Promise<string | null> {
+  const client = getRedisClient();
+  const token = generateLockToken();
+  const deadline = Date.now() + LOCK_WAIT_MAX_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      const got = await client.set(LOCK_KEY, token, 'EX', LOCK_TTL_SECONDS, 'NX');
+      if (got === 'OK') return token;
+    } catch (err) {
+      console.warn('[gate-status-override] lock acquire error:', err instanceof Error ? err.message : err);
+      return null;
+    }
+    await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));
+  }
+  return null;
 }
 
-// Briše SAMO stara polja (identifikovana u pozivaocu) — pojedinačni HDEL po
-// polju, ne prepisuje cijeli hash. Manji je rizik od namjerno prihvaćenog:
-// ako se neko polje osvježi TAČNO između čitanja i ovog brisanja, obrisaće se
-// ta (svježa) vrijednost — isti, zanemarljivo mali prozor koji je postojao i
-// u staroj implementaciji, ali sad ograničen na POJEDINAČNO polje umjesto da
-// cijeli hash rizikuje da bude prepisan.
-async function cleanupStale(fields: string[]): Promise<void> {
-  await Promise.all(fields.map(f => safeRedisHDel(ALL_KEY, f)));
+async function releaseLock(token: string): Promise<void> {
+  try {
+    const client = getRedisClient();
+    await client.eval(UNLOCK_SCRIPT, 1, LOCK_KEY, token);
+  } catch (e) {
+    // Nekritično — lock će isteći sam kroz LOCK_TTL_SECONDS
+    console.warn('[gate-status-override] lock release error:', e instanceof Error ? (e as Error).message : e);
+  }
 }
 
+// ── Atomic read-modify-write pod lock-om ──
+// FIX (vidi opširan komentar uz GateEntry.seq iznad).
+const SEQ_KEY = 'ably-fids:seq:gate-status';
+async function nextSeq(): Promise<number> {
+  const client = getRedisClient();
+  return client.incr(SEQ_KEY);
+}
+
+async function mutateAll(
+  mutate: (all: GateMap) => { changed: boolean; publishedEntry?: { gateNumber: string; entry: GateEntry } | null } | null
+): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { gateNumber: string; entry: GateEntry } | null }> {
+  const token = await acquireLock();
+  if (!token) {
+    return { success: false, conflict: true };
+  }
+
+  try {
+    const all = await readAllUncached();
+
+    // Cleanup starih unosa pod lock-om
+    const now = Date.now();
+    let cleaned = 0;
+    for (const k of Object.keys(all)) {
+      const v = all[k];
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
+        delete all[k];
+        cleaned++;
+      }
+    }
+
+    const result = mutate(all);
+    if (!result) {
+      if (cleaned > 0) await writeAll(all);
+      return { success: true, cleanedCount: cleaned };
+    }
+
+    // FIX (vidi opširan komentar uz GateEntry.seq).
+    if (result.changed && result.publishedEntry) {
+      result.publishedEntry.entry.seq = await nextSeq();
+    }
+
+    if (result.changed || cleaned > 0) {
+      await writeAll(all);
+    }
+    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry };
+  } finally {
+    await releaseLock(token);
+  }
+}
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const gateNumber = searchParams.get('gateNumber');
-    const now = Date.now();
 
-const all = await readAllCached();
-
-    // ── ČIŠĆENJE STARIH ZAPISA — sad HDEL po polju (vidi cleanupStale) ──
-    const staleFields: string[] = [];
-    for (const key of Object.keys(all)) {
-      const entry = all[key];
-      if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
-        delete all[key]; // ukloni i iz lokalne kopije koja se vraća/keš-uje
-        staleFields.push(key);
-      }
-    }
-    if (staleFields.length > 0) {
-      await cleanupStale(staleFields);
-      console.log(`[gate-cleanup] Total cleaned: ${staleFields.length} old gate-status keys`);
-    }
+    const all = await readAllCached();
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
     const payload = gateNumber
       ? { gateNumber, entry: all[gateNumber] ?? { status: null, flightNumber: null, classType: null, setAt: null } }
       : { all };
+
     const hash = createHash('md5')
       .update(JSON.stringify(payload))
       .digest('hex')
       .substring(0, 16);
     const etag = `"${hash}"`;
+
+    const cacheControl = 'public, max-age=30, s-maxage=40, stale-while-revalidate=90';
 
     // ── PROVJERA If-None-Match ──────────────────────────────
     const ifNoneMatch = request.headers.get('if-none-match');
@@ -206,38 +218,18 @@ const all = await readAllCached();
         status: 304,
         headers: {
           'ETag': etag,
-          // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-          'Cache-Control': GATE_STATUS_CACHE_CONTROL,
-          'CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
-          'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
-          // FIX (klasa/status vidljiviji na gate ekranu): bilo je samo
-          // Cache-Control bez Cache-Tag-a. revalidateTag('flight-status')
-          // koji POST handler poziva nakon dodjele/uklanjanja/klase NIJE
-          // probijao CDN keš ove rute jer CDN nije znao da je ovaj odgovor
-          // tagiran sa 'flight-status'. Dodajemo i 'Cache-Tag' i
-          // 'Vercel-Cache-Tag' — Vercel-CDN-Cache-Tag je onaj koji Vercel
-          // CDN stvarno prepoznaje za tag-based invalidaciju, 'Cache-Tag'
-          // je ostavljen radi šire kompatibilnosti.
-          'Cache-Tag': 'flight-status',
-          'Vercel-Cache-Tag': 'flight-status',
+          'Cache-Control': cacheControl,
+          'CDN-Cache-Control': cacheControl,
+          'Vercel-CDN-Cache-Control': cacheControl,
         },
       });
     }
 
-    // ── NORMALAN ODGOVOR ────────────────────────────────────
     const headers: Record<string, string> = {
-      // I u 304 grani i u normalnom odgovoru, sve tri header linije:
-      'Cache-Control': GATE_STATUS_CACHE_CONTROL,
-      'CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
-      'Vercel-CDN-Cache-Control': GATE_STATUS_CACHE_CONTROL,
-
+      'Cache-Control': cacheControl,
+      'CDN-Cache-Control': cacheControl,
+      'Vercel-CDN-Cache-Control': cacheControl,
       'ETag': etag,
-      // FIX (vidi komentar gore kod 304 grane): bez ovog tag-a,
-      // revalidateTag('flight-status') koji POST handler poziva nije
-      // probijao CDN keš ove rute — gate monitor čekao do 5s da vidi
-      // novu dodjelu iako je server već znao za nju.
-      'Cache-Tag': 'flight-status',
-      'Vercel-Cache-Tag': 'flight-status',
     };
 
     if (gateNumber) {
@@ -252,92 +244,108 @@ const all = await readAllCached();
   }
 }
 
+// FIX (po zahtjevu — strict TypeScript, bez any): vidi isti obrazac i
+// obrazloženje u app/api/test/desk-status-override/route.ts.
+interface GateStatusRequestBody {
+  gateNumber?: string;
+  action?: 'open' | 'closed' | 'clear' | 'setClass';
+  flightNumber?: string;
+  classType?: string | null;
+}
+
 export async function POST(request: Request) {
-  const { gateNumber, action, flightNumber, classType } = await request.json();
+  let body: GateStatusRequestBody;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
+
+  const { gateNumber, action, flightNumber, classType } = body;
 
   if (!gateNumber) {
     return NextResponse.json({ error: 'gateNumber required' }, { status: 400 });
   }
 
-  // ── FIX (race condition): čitamo SAMO polje ovog gate-a (HGET), i pišemo
-  // SAMO njega nazad (HSET) — ne cijeli objekat. Dva istovremena zahtjeva za
-  // RAZLIČITE gate-ove sad ne mogu da se sudare, jer je svaki HSET izolovan
-  // na svoje polje. Usput i jeftinije od HGETALL — prenosi se samo jedno
-  // polje umjesto svih gate-ova pri svakom POST-u.
-  const existingRaw = await safeRedisHGet(ALL_KEY, gateNumber);
-  let existing: GateEntry | undefined;
-  if (existingRaw) {
-    try { existing = JSON.parse(existingRaw) as GateEntry; } catch { existing = undefined; }
+  try {
+    const result = await mutateAll((all) => {
+      const existing = all[gateNumber];
+      let entry: GateEntry;
+
+      if (action === 'open' && flightNumber) {
+        entry = { status: 'open', flightNumber, classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        all[gateNumber] = entry;
+        return { changed: true, publishedEntry: { gateNumber, entry } };
+      }
+
+      if (action === 'closed') {
+        entry = { status: 'closed', flightNumber: flightNumber || '', classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        all[gateNumber] = entry;
+        return { changed: true, publishedEntry: { gateNumber, entry } };
+      }
+
+      if (action === 'clear') {
+        if (!existing) return { changed: false };
+        delete all[gateNumber];
+        // Publish "cleared" — entry sa status=null signalizira kioscima da uklone taj gate.
+        entry = { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        return { changed: true, publishedEntry: { gateNumber, entry } };
+      }
+
+      if (action === 'setClass') {
+        if (!existing) {
+          return { changed: false };
+        }
+        entry = { ...existing, classType: classType ?? null };
+        all[gateNumber] = entry;
+        return { changed: true, publishedEntry: { gateNumber, entry } };
+      }
+
+      return null; // Invalid action — ne radi ništa
+    });
+
+    if (result.conflict) {
+      return NextResponse.json(
+        { error: 'Concurrent modification — please retry in a moment', retryable: true },
+        { status: 503 }
+      );
+    }
+
+    if (result.cleanedCount && result.cleanedCount > 0) {
+      console.log(`[gate-status-override] Cleanup: removed ${result.cleanedCount} expired entries (during ${action} on ${gateNumber})`);
+    }
+
+    // Invalidiraj in-process GET cache — novi GET će pročitati svježi blob.
+    cachedAll = null;
+
+    // ── 📡 ABLY PUBLISH — fire-and-forget, ALI garantovano dovršen.
+    // after() kazuje Vercel runtime-u da ne zamrzava/gasi funkciju dok
+    // se ovaj posao ne završi — bez toga postoji rizik da Vercel
+    // prekine izvršavanje čim se response pošalje, tiho odbacujući
+    // publish koji je još "u letu" (poznat gotcha kod fire-and-forget
+    // na serverless platformama). Response se i dalje vraća odmah
+    // (after() ne blokira response). Ako publish ipak padne (Ably
+    // outage), kiosci će dobiti promjenu preko fallback polling-a na
+    // 20s (vidi useRealtimeAssignments hook).
+    if (result.publishedEntry) {
+      after(() =>
+        publishToChannel('assignments:gates', 'update', result.publishedEntry)
+          .then(() => {
+            console.log(`📤 Ably (assignments:gates): gate ${gateNumber} -> ${result.publishedEntry?.entry.flightNumber || 'CLOSED'}`);
+          })
+          .catch(err => {
+            console.error('[gate-status-override] Ably publish to assignments:gates failed:', err);
+          })
+      );
+    }
+
+    const ttl = action === 'clear' ? undefined : TTL_SECONDS;
+    return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });
+  } catch (err) {
+    console.error('[gate-status-override] POST error:', err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: 'Failed to update gate status — try again in a few seconds', retryable: true },
+      { status: 503 }
+    );
   }
-
-  if (action === 'open' && flightNumber) {
-    const entry: GateEntry = {
-      status: 'open',
-      flightNumber,
-      classType: existing?.classType ?? null,
-      setAt: Date.now(),
-    };
-    if (!(await writeOne(gateNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else if (action === 'closed') {
-    const entry: GateEntry = {
-      status: 'closed',
-      flightNumber: flightNumber || '',
-      classType: existing?.classType ?? null,
-      setAt: Date.now(),
-    };
-    if (!(await writeOne(gateNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else if (action === 'clear') {
-    await deleteOne(gateNumber);
-  } else if (action === 'setClass') {
-    if (!existing) {
-      return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
-    }
-    const entry: GateEntry = { ...existing, classType: classType ?? null };
-    if (!(await writeOne(gateNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else {
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-  }
-
-  // FIX (assign-checkin ne prikazuje dodijeljene gate-ove): bilo je
-  // samo `cachedAll = null; cachedAllExpiry = 0;` — to čisti samo
-  // OVU rutinu-local keš, NE i cachedRaw u lib/assignments-service.ts.
-  // Posljedica: assign-checkin panel ne vidi novu dodjelu do 8s kasnije.
-  // Sada invalidate i assignments-service modul-level keš — sledeći GET
-  // /api/test/assignments ODMAH čita svježe iz Redisa.
-  cachedAll = null;
-  cachedAllExpiry = 0;
-  invalidateRawAssignmentsCache();
-
-  // ── Odmah probij CDN keš na /api/flights/status — isti razlog kao
-  // kod desk-status-override.
-  //
-  // NAPOMENA: ovo NE utiče na CDN keš OVOG GET handlera (onaj koristi
-  // sirova HTTP Cache-Control zaglavlja / Vercel Edge keš, ne Next-ov
-  // Data Cache sistem tagova koji revalidateTag() cilja). To znači da
-  // nakon admin akcije, /api/test/gate-status-override i dalje može
-  // servirati keširan odgovor do isteka gornjeg GATE_STATUS_CACHE_CONTROL
-  // prozora (sad ~4s) — to je namjerno i očekivano, ne bug. Ako ikad
-  // zatreba INSTANT propagacija bez ikakvog čekanja, trebalo bi ili
-  // dodatno pozvati Vercel-ov CDN purge API za ovu specifičnu putanju,
-  // ili prebaciti ovaj GET na Next-ov tag-based cache (unstable_cache +
-  // revalidateTag) umjesto sirovih headera — veća promjena, po potrebi.
-  revalidateTag('flight-status');
-
-  const ttl = action === 'clear' ? undefined : TTL_SECONDS;
-  return NextResponse.json({ success: true, ...(ttl ? { ttl } : {}) });
 }

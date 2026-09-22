@@ -1,70 +1,137 @@
-// app/api/admin/destinations/[destinationCode]/[airlineIata]/route.ts
-// FIX (migracija sa SQLite na Redis) — vidi lib/business-class-store.ts.
-import { NextResponse } from 'next/server';
-import { revalidateTag } from 'next/cache';
-import {
-  getDestinationFromStore, updateDestinationInStore, deleteDestinationFromStore,
-} from '@/lib/business-class-store';
-
-const BUSINESS_CLASS_CACHE_CONTROL =
-  'public, max-age=60, s-maxage=3600, stale-while-revalidate=600';
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { destinationsTable } from '@/lib/db/schema';
+import { and, eq } from 'drizzle-orm';
+import { requireAdmin } from '@/lib/admin-auth';
 
 export async function GET(
-  request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
   try {
     const { destinationCode, airlineIata } = await params;
-    const destination = await getDestinationFromStore(destinationCode, airlineIata);
+    
+    const [destination] = await db.select()
+      .from(destinationsTable)
+      .where(
+        and(
+          eq(destinationsTable.destinationCode, destinationCode),
+          eq(destinationsTable.airlineIata, airlineIata)
+        )
+      )
+      .limit(1);
+
     if (!destination) {
-      return NextResponse.json({ error: 'Destinacija nije pronađena' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Destinacija nije pronađena' },
+        { status: 404 }
+      );
     }
-    return NextResponse.json(destination, {
-      headers: {
-        'Cache-Control': BUSINESS_CLASS_CACHE_CONTROL,
-        'Cache-Tag': 'business-class',
-        'Vercel-Cache-Tag': 'business-class',
-      },
-    });
+
+    // Parse JSON schedule objekte
+    const parsedDestination = {
+      ...destination,
+      winterSchedule: typeof destination.winterSchedule === 'string' 
+        ? JSON.parse(destination.winterSchedule) 
+        : destination.winterSchedule,
+      summerSchedule: typeof destination.summerSchedule === 'string'
+        ? JSON.parse(destination.summerSchedule)
+        : destination.summerSchedule
+    };
+
+    return NextResponse.json(parsedDestination);
   } catch (error) {
     console.error('Error fetching destination:', error);
-    return NextResponse.json({ error: 'Greška pri učitavanju destinacije' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Greška pri učitavanju destinacije' },
+      { status: 500 }
+    );
   }
 }
 
 export async function PUT(
-  request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
   try {
     const { destinationCode, airlineIata } = await params;
     const body = await request.json();
-    const result = await updateDestinationInStore(destinationCode, airlineIata, body);
-    if (!result.ok) {
-      return NextResponse.json({ error: result.error }, { status: result.status });
+    
+    // Pripremi podatke - schedule objekte pretvori u JSON string
+    const updateData = {
+      ...body,
+      winterSchedule: body.winterSchedule ? JSON.stringify(body.winterSchedule) : '{"hasBusinessClass":false,"startDate":null,"endDate":null}',
+      summerSchedule: body.summerSchedule ? JSON.stringify(body.summerSchedule) : '{"hasBusinessClass":false,"startDate":null,"endDate":null}',
+      updatedAt: new Date()
+    };
+
+    const [destination] = await db.update(destinationsTable)
+      .set(updateData)
+      .where(
+        and(
+          eq(destinationsTable.destinationCode, destinationCode),
+          eq(destinationsTable.airlineIata, airlineIata)
+        )
+      )
+      .returning();
+
+    if (!destination) {
+      return NextResponse.json(
+        { error: 'Destinacija nije pronađena' },
+        { status: 404 }
+      );
     }
-    revalidateTag('business-class');
-    return NextResponse.json(result.destination);
+
+    // Parse JSON stringove nazad u objekte
+    const parsedDestination = {
+      ...destination,
+      winterSchedule: typeof destination.winterSchedule === 'string' 
+        ? JSON.parse(destination.winterSchedule) 
+        : destination.winterSchedule,
+      summerSchedule: typeof destination.summerSchedule === 'string'
+        ? JSON.parse(destination.summerSchedule)
+        : destination.summerSchedule
+    };
+
+    return NextResponse.json(parsedDestination);
   } catch (error) {
     console.error('Error updating destination:', error);
-    return NextResponse.json({ error: 'Greška pri ažuriranju destinacije' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Greška pri ažuriranju destinacije' },
+      { status: 500 }
+    );
   }
 }
 
 export async function DELETE(
-  request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
   try {
     const { destinationCode, airlineIata } = await params;
-    const deleted = await deleteDestinationFromStore(destinationCode, airlineIata);
+
+    const [deleted] = await db.delete(destinationsTable)
+      .where(
+        and(
+          eq(destinationsTable.destinationCode, destinationCode),
+          eq(destinationsTable.airlineIata, airlineIata)
+        )
+      )
+      .returning();
+
     if (!deleted) {
-      return NextResponse.json({ error: 'Destinacija nije pronađena' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Destinacija nije pronađena' },
+        { status: 404 }
+      );
     }
-    revalidateTag('business-class');
+
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting destination:', error);
-    return NextResponse.json({ error: 'Greška pri brisanju destinacije' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Greška pri brisanju destinacije' },
+      { status: 500 }
+    );
   }
 }

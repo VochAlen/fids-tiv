@@ -6,7 +6,7 @@ import {
 } from 'react';
 import { useParams } from 'next/navigation';
 import type { Flight } from '@/types/flight';
-import { fetchFlightData } from '@/lib/flight-service';
+
 import {
   getEnhancedCheckInStatus, checkFlightStatus,
   type CheckInStatus,
@@ -14,81 +14,38 @@ import {
 import { useWeather } from '@/hooks/use-weather';
 import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
-import { useKioskResilience } from '@/hooks/use-kiosk-resilience';
 import Image from 'next/image';
+import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
+import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 
 // ------------------------------------------------------------
-// ═══════════════════════════════════════════════════════════
-// ARHITEKTURA POLLING-A NA OVOJ STRANICI (ažurirano — prethodna dva
-// komentara na ovom mjestu i dalje niže u fajlu opisivala su DVIJE
-// MEĐUSOBNO ISKLJUČIVE verzije arhitekture iz različitih iteracija,
-// od kojih nijedna više tačno ne opisuje kod ispod — ispravljeno da
-// odražava STVARNO stanje):
-//
-//   1) SPORI ciklus (30-45s, vidi getGateNextInterval niže) →
-//      loadFlights() → puni /api/flights (cijeli raspored + gateEntries).
-//   2) BRZI ciklus (9-12s, FAST_POLL_BASE_MS/JITTER ispod) → mali
-//      /api/test/gate-status-override?gateNumber=X (ETag, jedan Redis
-//      HGET) — JEDINI izvor istine za status/klasu/broj leta, patch-uje
-//      display ODMAH kad se nešto promijeni, bez čekanja na sledeći
-//      loadFlights() ciklus.
-//
-// Ovo NIJE "jedan spojen ciklus" (ranija verzija ovog komentara je to
-// tvrdila, ali ta verzija koda više ne postoji) — namjerno su DVA
-// ciklusa, jer je jeftinije da mali status endpoint radi na brzoj
-// kadenci nego da to radi cijeli /api/flights payload. Vidi
-// FIX (Vercel Edge Requests/Active CPU trošak) komentar uz
-// GATE_STATUS_CACHE_CONTROL u app/api/test/gate-status-override/route.ts
-// za najnoviju optimizaciju (CDN keš prozor produžen sa 2-3s na 20s,
-// uz revalidateTag() za trenutnu invalidaciju na stvarnu promjenu).
-//
-// FIX (po zahtjevu — uklonjen prikaz "iz rasporeda"): ova stranica je
-// RANIJE (kad nije bilo ručnog override-a) prikazivala let čiji je
-// flight.GateNumber prirodno odgovarao ovom gate-u ("SLUČAJ B"). To je
-// NAMJERNO UKLONJENO — gate sad prikazuje ISKLJUČIVO let koji je neko
-// ručno dodijelio preko assign-checkin panela (/api/test/gate-status-override,
-// status:'open'). Bez override-a, ekran je prazan — identično kao ranije
-// eksplicitno "zatvoren" stanje. Ovo pojednostavljuje i loadFlights()
-// (nema više sortiranja/filtriranja kandidata, nema "next flight" panela,
-// nema "gate promijenjen" detekcije — svi ti koncepti su imali smisla
-// SAMO kod prirodnog poklapanja).
-// ═══════════════════════════════════════════════════════════
+// Konstante
+// ------------------------------------------------------------
+const REFRESH_INTERVAL_MS    = 25_000;
 const HARD_RESET_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-// ── BRZI poll (status/klasa/broj leta) — zahtjev osoblja: gate treba
-// da se otvori/zatvori na ekranu vidljivo u roku od 10-12s od trenutka
-// dodjele. Baza 9s + do 3s jitter = raspon 9-12s, WORST-CASE TAČNO 12s.
-// Isti princip na check-in ekranima (FAST_POLL_BASE_MS tamo).
-// FIX (po zahtjevu — brzina prikaza MORA biti ≤20s, prioritet nad
-// ranijim Edge Requests ciljem): isti razlog i računica kao
-// FAST_POLL_BASE_MS u CheckInPageClient.tsx — vidi opširan komentar
-// tamo za pun kontekst matematičkog sukoba sa ≤300K/dan ciljem.
-// FIX (po zahtjevu — fino podešavanje, 16-18s umjesto 15-19s): isti
-// razlog kao u CheckInPageClient.tsx, vidi opširan komentar tamo.
-const FAST_POLL_BASE_MS   = 16_000;
-const FAST_POLL_JITTER_MS = 2_000;
-const getFastPollInterval = () => FAST_POLL_BASE_MS + Math.floor(Math.random() * FAST_POLL_JITTER_MS);
+const getIntervalWithJitter = () => REFRESH_INTERVAL_MS + Math.floor(Math.random() * 5_000);
+
 
 // Klasa → boja (isti sistem kao u check-in display-u)
 const CLASS_STYLES: Record<string, { bg: string; border: string; text: string }> = {
-  ECONOMY:      { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
-  BUSINESS:     { bg: 'rgba(194,65,12,0.25)',  border: '#f97316', text: '#fdba74' },
-  PREMIUM:      { bg: 'rgba(109,40,217,0.25)', border: '#a855f7', text: '#d8b4fe' },
-  PRIORITY:     { bg: 'rgba(22,101,52,0.25)',  border: '#22c55e', text: '#86efac' },
-  EASYJET_PLUS: { bg: 'rgba(234,88,12,0.25)',  border: '#f97316', text: '#fdba74' },
+  ECONOMY:  { bg: 'rgba(37,99,235,0.20)',  border: '#3b82f6', text: '#93c5fd' },
+  BUSINESS: { bg: 'rgba(194,65,12,0.25)',  border: '#f97316', text: '#fdba74' },
+  PREMIUM:  { bg: 'rgba(109,40,217,0.25)', border: '#a855f7', text: '#d8b4fe' },
+  PRIORITY: { bg: 'rgba(22,101,52,0.25)',  border: '#22c55e', text: '#86efac' },
+  EASYJET_PLUS: { bg: 'rgba(234,88,12,0.25)', border: '#f97316', text: '#fdba74' },
 };
 
 const CLASS_EMOJI: Record<string, string> = {
-  ECONOMY:      '💺',
-  BUSINESS:     '💼',
-  PREMIUM:      '👑',
-  PRIORITY:     '⭐',
+  ECONOMY:  '💺',
+  BUSINESS: '💼',
+  PREMIUM:  '👑',
+  PRIORITY: '⭐',
   EASYJET_PLUS: '🟠',
 };
-
-const CLASS_LABELS: Record<string, string> = {
-  EASYJET_PLUS: 'EASYJET PLUS',
-};
+ const CLASS_LABELS: Record<string, string> = {
+   EASYJET_PLUS: 'EASYJET PLUS',
+ };
 
 
 // ------------------------------------------------------------
@@ -143,7 +100,7 @@ const ClassBadge = memo(function ClassBadge({ classType }: { classType: string |
       lineHeight:     1,
     }} className="fids-class-badge">
       <span style={{ fontSize: 'clamp(1.5rem, 3vw, 2.5rem)', lineHeight: 1 }}>{emoji}</span>
-      <span>{CLASS_LABELS[key] ?? key}</span>
+     <span>{CLASS_LABELS[key] ?? key}</span>
     </div>
   );
 });
@@ -158,8 +115,34 @@ const AirlineLogo = memo(function AirlineLogo(
   const [src, setSrc] = useState('');
   const [errored, setErrored] = useState(false);
 
+  // useEffect(() => {
+  //   if (!code) return;
+  //   let cancelled = false;
+  //   const checkImg = (url: string): Promise<boolean> =>
+  //     new Promise(resolve => {
+  //       const img = new window.Image();
+  //       img.onload  = () => resolve(true);
+  //       img.onerror = () => resolve(false);
+  //       setTimeout(() => resolve(false), 1500);
+  //       img.src = url;
+  //     });
+  //   (async () => {
+  //     const [hasJpg, hasPng] = await Promise.all([
+  //       checkImg(`/airlines/${code}.jpg`),
+  //       checkImg(`/airlines/${code}.png`),
+  //     ]);
+  //     if (cancelled) return;
+  //     if (hasJpg)      setSrc(`/airlines/${code}.jpg`);
+  //     else if (hasPng) setSrc(`/airlines/${code}.png`);
+  //     else             setSrc(`https://www.flightaware.com/images/airline_logos/180px/${code}.png`);
+  //   })();
+  //   return () => { cancelled = true; };
+  // }, [code]);
+
+
   useEffect(() => {
   if (!code) return;
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   setSrc(getInitialAirlineLogoSrc(code, ''));
 }, [code]);
 
@@ -205,6 +188,11 @@ const parseDepartureTime = (t: string): Date | null => {
 const getEffectiveDepartureTime = (flight: Flight): Date | null => {
   const t = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
   return t ? parseDepartureTime(t) : null;
+};
+
+const getEffectiveDepartureMs = (flight: Flight): number => {
+  const d = getEffectiveDepartureTime(flight);
+  return d ? d.getTime() : Infinity;
 };
 
 const formatTimeRemaining = (min: number): string => {
@@ -312,39 +300,50 @@ const currentFlightRef    = useRef<Flight | null>(null);
 const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
-const etagStatusRef = useRef<string | null>(null);
-// FIX (klasa se ne prikazuje/kasni): ovo je sad JEDINI izvor istine za
-// status/klasu/broj leta ovog gate-a — puni ga poseban brzi poll (vidi
-// efekat "Brzi status/klasa poll" niže), ne loadFlights()/api/flights.
-const authoritativeGateStatusRef = useRef<{ status: string | null; flightNumber: string | null; classType: string | null } | null>(null);
-const etagGateStatusRef = useRef<string | null>(null);
+const { data: liveFlightData, connectionState: flightsConnState } = useRealtimeFlightData('gate');
+const { gateEntries, connectionState: assignConnState } = useRealtimeAssignments('gate');
 
-// ── NOVO: hash-check da se izbjegne nepotreban /api/flights fetch ──
-const lastKnownHashRef  = useRef<string | null>(null);
-const lastFlightsDataRef = useRef<{ departures: Flight[]; arrivals: Flight[] } | null>(null);
-const etagGateRef = useRef<string | null>(null);
-// FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): vidi
-// opširan komentar uz identičnu ref u CheckInPageClient.tsx. Ovdje se
-// NE traži poseban dodatan poziv — loadFlights() ionako već poziva
-// /api/flights svakih 30-45s, pa se isNightMode iz TOG odgovora samo
-// zapamti ovdje (vidi hvatanje niže, gdje se parsira statusData).
-const dynamicNightModeRef = useRef(false);
-const loadFlightsRef = useRef(false);
-// Ref za setTimeout handle glavnog (jedinog) poll ciklusa — potreban
-// za cleanup u effect-u koji ga postavlja.
-const mainTidRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-// ── FIX: AbortController za /api/flights poziv unutar loadFlights.
-// Kreira se jednom po lifecycle-u glavnog polling efekta i abort-uje
-// se u njegovom cleanup-u — sprječava da fetch koji je "u letu" pri
-// unmountu (ili promjeni gateNumber-a) i dalje završi i pozove
-// setState na već odjavljenoj komponenti.
-const abortControllerRef = useRef<AbortController | null>(null);
+
+
+
 
   // ------------------------------------------------------------
-  // (fetchGateStatusOverride uklonjen — bio je mrtav kod, nikad
-  // pozvan. Gate override podatak dolazi iz gateEntries polja u
-  // odgovoru glavnog /api/flights poziva unutar loadFlights().)
+  // Provjera da li let odgovara gate-u
+  // ------------------------------------------------------------
+  const flightMatchesGate = useCallback((f: Flight, gate: string): boolean => {
+    if (!f.GateNumber) return false;
+    const gates   = f.GateNumber.split(',').map((g: string) => g.trim());
+    const gNorm   = gate.replace(/^0+/, '');
+    const gPadded = gate.padStart(2, '0');
+    return gates.some(g =>
+      g === gate   ||
+      g === gNorm  ||
+      g === gPadded ||
+      g.replace(/^0+/, '') === gNorm
+    );
+  }, []);
+
+  // ------------------------------------------------------------
+  // Odluka da li se let prikazuje
+  // ------------------------------------------------------------
+  const shouldDisplayFlight = useCallback((f: Flight): boolean => {
+    const s = (f.StatusEN || '').toLowerCase().trim();
+    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
+    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+    if (manualGateStatusRef.current === 'open') {
+      if (s.includes('departed') || s.includes('poletio')) return false;
+      return true;
+    }
+    if (s.includes('departed') || s.includes('poletio')) return false;
+    const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
+    if (stdDep) {
+      const ONE_MIN_MS = 60 * 1000;
+      if (Date.now() >= stdDep.getTime() - ONE_MIN_MS) return false;
+    }
+    return true;
+  }, []);
+
   // ------------------------------------------------------------
   // Check-in status za let
   // ------------------------------------------------------------
@@ -369,384 +368,129 @@ const abortControllerRef = useRef<AbortController | null>(null);
   // ------------------------------------------------------------
   // Glavna funkcija za učitavanje podataka
   // ------------------------------------------------------------
-// ------------------------------------------------------------
-// Glavna funkcija za učitavanje podataka
-// ------------------------------------------------------------
-const loadFlights = useCallback(async () => {
+
+  // Polling interval (glavni)
+  // ------------------------------------------------------------
+const computeDisplay = useCallback(async () => {
   if (!isMountedRef.current) return;
-  // FIX (namjerno SAMO statička provjera ovdje, ne i dynamicNightModeRef):
-  // ovaj poziv je JEDINI izvor koji osvježava dynamicNightModeRef (vidi
-  // hvatanje statusData.isNightMode niže) — kad bi se i on gasio na
-  // osnovu iste dinamičke vrijednosti, ta vrijednost bi se zaglavila i
-  // NIKAD ne bi mogla da se ispravi (npr. ako se pojavi nov/preusmjeren
-  // let nakon što je dinamički noćni režim već okinut). Dinamička
-  // vrijednost gasi SAMO brzi poll (gate-status-override) ispod, ne i
-  // ovaj, sporiji izvor istine.
-  if (isNightHours()) {
-    setLoading(false);
-    return;
-  }
+  if (isNightHours()) { setLoading(false); return; }
+  if (!liveFlightData) return; // čekaj prvi Ably/snapshot podatak
 
-  // ⚠️ ZAŠTITA OD KONKURENTNIH POZIVA
-  if (loadFlightsRef.current) {
-    console.log('[gate] loadFlights već u toku, preskačem');
-    if (isMountedRef.current) setLoading(false);   // ← DODATO: ne ostavljaj UI na spinneru
-                                                     // dok se u pozadini već izvršava
-                                                     // legitiman fetch — kad taj drugi
-                                                     // poziv završi, on će ionako
-                                                     // ažurirati display state
-    return;
-  }
-  loadFlightsRef.current = true;
+  const gateEntry = gateEntries[gateNumber];
+  const overrideStatus = gateEntry?.status ?? null;
+  const overrideFlightNumber = gateEntry?.flightNumber ?? null;
+  const classType = gateEntry?.classType ?? null;
 
-  try {
-    // FIX (klasa se ne prikazuje/kasni — trošak-svjesno rješenje): status/
-    // klasa/broj leta za OVAJ gate sad dolaze iz POSEBNOG, jeftinog, brzog
-    // poll-a (vidi authoritativeGateStatusRef i efekat "Brzi status/klasa
-    // poll" niže) koji cilja /api/test/gate-status-override?gateNumber=X —
-    // mali, već kešrandom (max-age=10) endpoint, isti princip kao
-    // CheckInPageClient.tsx (koji NIKAD nije imao ovaj bug jer je uvijek
-    // koristio ovaj obrazac). /api/flights se i dalje poziva ovdje, ali
-    // SAMO za PUN raspored leta (destinacija, vrijeme) — ne više za
-    // status/klasu, pa /api/flights može ostati na dugom (45s), jeftinom
-    // CDN kešu bez štete po brzinu prikaza klase.
-    let data: { departures: Flight[]; arrivals: Flight[] } | null = null;
-    const gateOverrideFromStatus = authoritativeGateStatusRef.current;
+  manualGateStatusRef.current = overrideStatus;
 
-    const headers: HeadersInit = {};
-    if (etagStatusRef.current) {
-      headers['If-None-Match'] = etagStatusRef.current;
-    }
-
-    // FIX: fetch sada koristi eksterni AbortSignal (iz efekta koji
-    // pokreće polling) + interni timeout, po istom principu kao na
-    // ostalim stranicama (departures/arrivals/combined). Ovo
-    // osigurava da fetch koji je u toku bude stvarno prekinut pri
-    // unmountu/promjeni gate-a, a ne samo da mu se rezultat ignoriše.
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), 10_000);
-    const externalSignal = abortControllerRef.current?.signal;
-    if (externalSignal) {
-      if (externalSignal.aborted) timeoutController.abort();
-      else externalSignal.addEventListener('abort', () => timeoutController.abort(), { once: true });
-    }
-
-    let statusRes: Response;
-    try {
-      statusRes = await fetch('/api/flights', { headers, signal: timeoutController.signal });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    if (statusRes.status === 304) {
-      data = lastFlightsDataRef.current;
-    } else if (statusRes.ok) {
-      const statusData = await statusRes.json();
-      const newEtag = statusRes.headers.get('ETag');
-      if (newEtag) etagStatusRef.current = newEtag;
-      // FIX: hvata kombinovanu (statička ILI dinamička) noćnu odluku
-      // iz servisa — vidi opširan komentar uz deklaraciju
-      // dynamicNightModeRef.
-      dynamicNightModeRef.current = !!statusData.isNightMode;
-
-      data = { departures: statusData.departures ?? [], arrivals: statusData.arrivals ?? [] };
-      lastFlightsDataRef.current = data;
-    }
-
-    // 2. Ako nema podataka - izađi
-    if (!data) {
-      console.error('[gate] Nema podataka');
-      setLoading(false);
-      return;
-    }
-
-    // 3. Override - KORISTI PODATKE IZ BRZOG STATUS POLL-A (vidi gore)
-    let overrideStatus: string | null = gateOverrideFromStatus?.status ?? null;
-    let overrideFlightNumber: string | null = gateOverrideFromStatus?.flightNumber ?? null;
-    let classType: string | null = gateOverrideFromStatus?.classType ?? null;
-
-    manualGateStatusRef.current = overrideStatus;
-
-    // FIX (po zahtjevu — gate NIKAD ne prikazuje let "iz rasporeda", SAMO
-    // let koji je NEKO RUČNO dodijelio preko assign-checkin panela):
-    // SLUČAJ B (flightMatchesGate/shouldDisplayFlight — prirodno
-    // poklapanje sa flight.GateNumber kad NEMA override-a) je UKLONJEN u
-    // potpunosti. Prazan gate (bez override-a) i eksplicitno zatvoren gate
-    // (status:'closed') sad prikazuju POTPUNO ISTO — ništa. Te dvije grane
-    // su zato spojene u jednu.
-    //
-    // Praktična posljedica: `flightMatchesGate`, `shouldDisplayFlight` i
-    // `getEffectiveDepartureMs` su bile potrebne SAMO za SLUČAJ B — sad su
-    // u potpunosti obrisane iz ovog fajla (ne samo neiskorišćene).
-    if (overrideStatus !== 'open' || !overrideFlightNumber) {
-      if (!isMountedRef.current) return;
-      currentFlightRef.current = null;
-      currentStatusRef.current = null;
-      setDisplay({
-        flight: null,
-        checkInStatus: null,
-        nextFlight: null,
-        gateChangedAt: undefined,
-        manualGateStatus: overrideStatus,
-        overrideFlightNumber: null,
-        classType,
-      });
-      setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-      setLoading(false);
-      return;
-    }
-
-    // Od ovdje nadalje: overrideStatus === 'open' && overrideFlightNumber
-    // postoji — jedini preostali scenario (bivši "SLUČAJ A").
-    const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-
-    if (!overriddenFlight) {
-      console.warn(`[gate] Let ${overrideFlightNumber} nije pronađen u keširanim podacima`);
-      if (!isMountedRef.current) return;
-      currentFlightRef.current = null;
-      currentStatusRef.current = null;
-      setDisplay({
-        flight: null,
-        checkInStatus: null,
-        nextFlight: null,
-        gateChangedAt: undefined,
-        manualGateStatus: 'open',
-        overrideFlightNumber,
-        classType,
-      });
-      setLoading(false);
-      return;
-    }
-
-    const checkInStatus = await getFlightCheckInStatus(overriddenFlight);
-    const current = { ...overriddenFlight, checkInStatus };
-
-    // "Next flight" i "gate changed" (žuta traka "GATE PROMIJENJEN") su
-    // imali smisla SAMO kod prirodnog poklapanja (više letova moglo je
-    // dijeliti isti gate tokom dana, ili se let mogao "prirodno" pomjeriti
-    // na drugi gate promjenom rasporeda). Kod isključivo ručne dodjele oba
-    // koncepta više ne postoje — gate prikazuje TAČNO jedan let, i taj let
-    // se ne mijenja dok ga admin ručno ne promijeni (što je već "novi"
-    // let, ne "promjena gate-a" istog leta). Zato su oba UVIJEK
-    // null/undefined ispod — namjerno, ne propust.
-    const nextFlight = null;
-    const gateChangedAt: number | undefined = undefined;
-
-    if (!isMountedRef.current) return;
-
-    // 11. Ažuriranje state-a
-    const hasChanged = flightChanged(current, currentFlightRef.current);
-
-    if (hasChanged) {
-      currentFlightRef.current = current;
-      currentStatusRef.current = current.checkInStatus ?? null;
-      setDisplay({
-        flight: current,
-        checkInStatus: current.checkInStatus ?? null,
-        nextFlight,
-        gateChangedAt,
-        manualGateStatus: overrideStatus,
-        overrideFlightNumber,
-        classType,
-      });
-      updateCountdown(current);
-    } else {
-      setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
-    }
-
+  // Ručno zatvoren -> prazan ekran
+  if (overrideStatus === 'closed') {
+    currentFlightRef.current = null;
+    currentStatusRef.current = null;
+    setDisplay({
+      flight: null, checkInStatus: null, nextFlight: null,
+      gateChangedAt: undefined, manualGateStatus: 'closed',
+      overrideFlightNumber: null, classType,
+    });
     setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+    setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
     setLoading(false);
-
-  } catch (err) {
-    // FIX: ako je greška zbog abort-a pri unmountu/gašenju komponente,
-    // ne loguj kao "critical" i ne diraj state — komponenta se gasi.
-    if ((err as Error)?.name === 'AbortError') {
-      return;
-    }
-    console.error('Gate load error:', err);
-    if (isMountedRef.current) setLoading(false);
-  } finally {
-    loadFlightsRef.current = false;
+    return;
   }
-}, [gateNumber, getFlightCheckInStatus, updateCountdown]);
 
+  const data = liveFlightData; // { departures, arrivals }
 
-// ── FIX (troškovno-svjesno vraćanje na 30-45s za PUN raspored leta):
-// klasa/status/broj leta se sad rješavaju kroz poseban, jeftin brzi poll
-// (vidi efekat "Brzi status/klasa poll" niže) — loadFlights() (poziva
-// veći, /api/flights) više ne mora da radi na 9-12s kadenci, jer nije
-// više odgovoran za vremenski osjetljive podatke. Ovo vraća /api/flights
-// pozive na relaksiran tempo, smanjujući Vercel Active CPU trošak, bez
-// gubitka brzine prikaza klase/statusa (to sad garantuje brzi poll ispod).
-const getGateNextInterval = useCallback((): number => {
-  return 30_000 + Math.floor(Math.random() * 15_000); // 30-45s
-}, []);
-
-useEffect(() => {
-  isMountedRef.current = true;
-  abortControllerRef.current = new AbortController();
- 
-  const schedule = () => {
-    const interval = getGateNextInterval();
-    setNextUpdate(new Date(Date.now() + interval).toLocaleTimeString('en-GB'));
-    mainTidRef.current = setTimeout(async () => {
-      if (isMountedRef.current) {
-        // FIX: samo statička provjera — vidi opširan komentar u
-        // loadFlights() iznad.
-        if (!isNightHours()) {
-          await loadFlights();
-        }
-        schedule();
-      }
-    }, interval);
-  };
- 
-  // FIX: samo statička provjera — vidi opširan komentar u loadFlights() iznad.
-  if (!isNightHours()) {
-    loadFlights().then(schedule);
+  let candidates: Flight[] = [];
+  if (overrideStatus === 'open' && overrideFlightNumber) {
+    const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
+    if (overriddenFlight) candidates = [overriddenFlight];
   } else {
-    setLoading(false);
-    schedule();
+    candidates = data.departures.filter(f => flightMatchesGate(f, gateNumber));
   }
- 
-  return () => {
-    isMountedRef.current = false;
-    if (mainTidRef.current) clearTimeout(mainTidRef.current);
-    abortControllerRef.current?.abort();
-  };
-}, [loadFlights, getGateNextInterval]);
 
-// ------------------------------------------------------------
-// FIX (klasa se ne prikazuje/kasni — pravo rješenje bez dodatnog
-// Vercel Active CPU troška): BRZI STATUS/KLASA POLL — cilja mali, već
-// jeftin /api/test/gate-status-override?gateNumber=X (per-gate, ETag,
-// max-age=10 CDN keš), IDENTIČAN princip kao CheckInPageClient.tsx koji
-// NIKAD nije imao ovaj bug. Ovo je sad JEDINI izvor istine za
-// status/klasu/broj leta (loadFlights() gore samo dopunjava PUNE detalje
-// rasporeda za taj flightNumber). Kad detektuje promjenu, ODMAH patch-uje
-// display state — bez čekanja na sledeći loadFlights() ciklus — garantuje
-// vidljivost promjene u roku od 9-12s (FAST_POLL kadenca), sigurno ispod
-// tražene granice od 15s.
-// ------------------------------------------------------------
+  const withStatus = await Promise.all(
+    candidates.map(async f => ({ ...f, checkInStatus: await getFlightCheckInStatus(f) }))
+  );
+
+  const sorted = [...withStatus].sort((a, b) =>
+    overrideStatus === 'open'
+      ? (parseDepartureTime(a.ScheduledDepartureTime || '')?.getTime() ?? Infinity)
+        - (parseDepartureTime(b.ScheduledDepartureTime || '')?.getTime() ?? Infinity)
+      : getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b)
+  );
+
+  const current: (typeof sorted)[number] | null =
+    overrideStatus === 'open' ? (sorted[0] ?? null) : (sorted.find(f => shouldDisplayFlight(f)) ?? null);
+
+  let nextFlight: (typeof sorted)[number] | null = null;
+  const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
+  if (idx >= 0) {
+    for (let i = idx + 1; i < sorted.length; i++) {
+      if (overrideStatus === 'open' || shouldDisplayFlight(sorted[i])) { nextFlight = sorted[i]; break; }
+    }
+  }
+
+  let gateChangedAt: number | undefined;
+  if (overrideStatus !== 'open' && current?.GateNumber &&
+      currentFlightRef.current?.GateNumber !== current.GateNumber) {
+    const prev = currentFlightRef.current?.GateNumber;
+    if (prev && prev !== '-') gateChangedAt = Date.now();
+  }
+
+  if (!isMountedRef.current) return;
+
+  if (flightChanged(current, currentFlightRef.current) || gateChangedAt) {
+    currentFlightRef.current = current;
+    currentStatusRef.current = current?.checkInStatus ?? null;
+    setDisplay({
+      flight: current, checkInStatus: current?.checkInStatus ?? null,
+      nextFlight, gateChangedAt, manualGateStatus: overrideStatus,
+      overrideFlightNumber, classType,
+    });
+    updateCountdown(current);
+  } else {
+    setDisplay(prev => prev.classType !== classType ? { ...prev, classType } : prev);
+  }
+
+  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+  setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
+  setLoading(false);
+}, [gateNumber, gateEntries, liveFlightData, flightMatchesGate, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
+
+// Reaguj na promjenu Ably podataka umjesto poll-a
 useEffect(() => {
-  if (!gateNumber) return;
-
-  let tid: ReturnType<typeof setTimeout>;
-  let cancelled = false;
-  const controller = new AbortController();
-
-  const poll = async () => {
-    if (cancelled) return;
-
-    // FIX (po zahtjevu — dinamički noćni režim, ušteda troškova): ovo
-    // je BRZI, skupi poll (9-12s) — konzument dinamičke odluke koju
-    // loadFlights() (sporiji poll, ~30-45s) osvježava, ne izvor same
-    // vrijednosti — bezbjedno gasi mrežni poziv na osnovu obje
-    // provjere, bez rizika "zaglavljivanja" (vidi opširan komentar uz
-    // dynamicNightModeRef i loadFlights() iznad).
-    if (isNightHours() || dynamicNightModeRef.current) {
-      tid = setTimeout(poll, getFastPollInterval());
-      return;
-    }
-
-    try {
-      const headers: HeadersInit = {};
-      if (etagGateStatusRef.current) headers['If-None-Match'] = etagGateStatusRef.current;
-
-      const res = await fetch(
-        `/api/test/gate-status-override?gateNumber=${gateNumber}`,
-        { headers, signal: controller.signal }
-      );
-
-      if (res.status === 304) {
-        const newEtag = res.headers.get('ETag');
-        if (newEtag) etagGateStatusRef.current = newEtag;
-      } else if (res.ok) {
-        const newEtag = res.headers.get('ETag');
-        if (newEtag) etagGateStatusRef.current = newEtag;
-
-        const entry = await res.json();
-        const fresh = {
-          status: entry?.status ?? null,
-          flightNumber: entry?.flightNumber ?? null,
-          classType: entry?.classType ?? null,
-        };
-        const prev = authoritativeGateStatusRef.current;
-        const changed = !prev
-          || prev.status !== fresh.status
-          || prev.flightNumber !== fresh.flightNumber
-          || prev.classType !== fresh.classType;
-
-        authoritativeGateStatusRef.current = fresh;
-
-        // Ako se SAMO klasa (ili status, bez promjene leta) promijenila,
-        // patch-uj display ODMAH — ne čekaj sledeći loadFlights() ciklus
-        // (koji može biti do 45s daleko). Ako se PROMIJENIO flightNumber,
-        // prepusti puni loadFlights() ciklus (treba mu novi flight detalj).
-        if (changed && fresh.flightNumber === prev?.flightNumber) {
-          setDisplay(d => ({ ...d, classType: fresh.classType }));
-        } else if (changed) {
-          // Novi let na ovom gate-u ili status closed/open promjena —
-          // pokreni pun loadFlights() da povuče detalje novog leta.
-          loadFlights();
-        }
-      }
-    } catch (err) {
-      if ((err as Error)?.name !== 'AbortError') {
-        console.warn('[gate] brzi status/klasa poll greška:', err);
-      }
-    } finally {
-      if (!cancelled) tid = setTimeout(poll, getFastPollInterval());
-    }
-  };
-
-  poll();
-
-  return () => {
-    cancelled = true;
-    clearTimeout(tid);
-    controller.abort();
-  };
-}, [gateNumber, loadFlights]);
-
-
- 
-// ------------------------------------------------------------
-// (Napomena: raniji komentar ovdje je tvrdio da je brzi poll ka
-// /api/test/gate-status-override "UKLONJEN" — to je opisivalo
-// prelaznu verziju koda koja više ne postoji. Brzi poll JESTE aktivan
-// (vidi efekat "BRZI STATUS/KLASA POLL" iznad) i namjerno tako — pun
-// kontekst arhitekture je u komentaru na vrhu fajla.)
-// ------------------------------------------------------------
-
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  computeDisplay();
+}, [computeDisplay]);
   // ------------------------------------------------------------
   // Timer za automatsko prebacivanje na STD-1min
   // ------------------------------------------------------------
-  useEffect(() => {
+useEffect(() => {
+  if (stdSwitchTimerRef.current) {
+    clearTimeout(stdSwitchTimerRef.current);
+    stdSwitchTimerRef.current = null;
+  }
+  if (!display.flight) return;
+  if (manualGateStatusRef.current === 'open') return;
+  const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
+  if (!stdDep) return;
+  const triggerAt = stdDep.getTime() - 60 * 1000;
+  const ms = triggerAt - Date.now();
+  if (ms > 0) {
+    stdSwitchTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) computeDisplay();
+    }, ms);
+} else if (ms > -5 * 60 * 1000) {
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  computeDisplay();   // ← direktan sinhroni poziv u effect body-ju
+}
+  return () => {
     if (stdSwitchTimerRef.current) {
       clearTimeout(stdSwitchTimerRef.current);
       stdSwitchTimerRef.current = null;
     }
-    if (!display.flight) return;
-    if (manualGateStatusRef.current === 'open') return;
-    const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
-    if (!stdDep) return;
-    const triggerAt = stdDep.getTime() - 60 * 1000;
-    const ms = triggerAt - Date.now();
-    if (ms > 0) {
-      stdSwitchTimerRef.current = setTimeout(() => {
-        if (isMountedRef.current) loadFlights();
-      }, ms);
-    } else if (ms > -5 * 60 * 1000) {
-      loadFlights();
-    }
-    return () => {
-      if (stdSwitchTimerRef.current) {
-        clearTimeout(stdSwitchTimerRef.current);
-        stdSwitchTimerRef.current = null;
-      }
-    };
-  }, [display.flight, loadFlights]);
+  };
+}, [display.flight, computeDisplay]);
 
   // ------------------------------------------------------------
   // Countdown ticker
@@ -759,14 +503,90 @@ useEffect(() => {
   // ------------------------------------------------------------
   // Hard reset nakon 6h
   // ------------------------------------------------------------
-// FIX (24/7 rad bez nadzora) — zamijenjen "goli" hard-reset tajmer
-// punim setom zaštita (heartbeat watchdog, globalni error handler,
-// handler za neuhvaćene odbijene promise-e — ranije nije postojao na
-// ovoj stranici). Vidi opširan komentar u hooks/use-kiosk-resilience.ts.
-useKioskResilience({
-  pageName: `gate-${gateNumber}`,
-  hardResetIntervalMs: HARD_RESET_INTERVAL_MS,
-});
+
+  // ── v5: Memory pressure auto-reload ──────────────────────
+  // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
+  // poruke, image cache, DOM čvorovi). Kad usedJSHeapSize pređe
+  // 85% jsHeapSizeLimit (~2GB po tabu), radimo auto-reload prije
+  // nego kiosk postane vidljivo spor/nezgledan.
+  useEffect(() => {
+    const checkMemory = () => {
+      const perf = performance;
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const limit = perf.memory.jsHeapSizeLimit;
+        const pct = used / limit;
+        if (pct > 0.85) {
+          console.warn(`Memory pressure ${Math.round(pct * 100)}% — auto reload`);
+          window.location.reload();
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+
+  // ── v5.3: Network disconnection auto-recovery ────────────
+  // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
+  // (svake 2s), a fallback polling pada. Kad se mreža vrati,
+  // radimo full reload da sinhronizujemo React state sa serverom.
+  useEffect(() => {
+    const handleOnline = () => {
+      console.warn('Network restored — reloading to resync state');
+      window.location.reload();
+    };
+    const handleOffline = () => {
+      console.warn('Network lost — Ably will retry, showing cached data');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // ── v5.3: Visibilitychange — auto-focus kiosk tab ────────
+  // Ako neko otvori drugi prozor preko kiosk taba (Windows update
+  // dialog, notifikacija), kiosk tab ode u pozadinu. Chrome ga
+  // može throttlovati. Ovo vraća fokus, ili radi reload ako ne može.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) {
+        console.warn('Kiosk tab lost focus — attempting to refocus');
+        window.focus();
+        setTimeout(() => {
+          if (document.hidden) {
+            window.location.reload();
+          }
+        }, 2_000);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+// ── Hard reset nakon ~6h (sa jitterom da se izbjegne sinhroni reload svih ekrana) ──
+useEffect(() => {
+  const jitteredResetMs = HARD_RESET_INTERVAL_MS + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
+  const id = setTimeout(() => window.location.reload(), jitteredResetMs);
+  return () => clearTimeout(id);
+}, []);
+
+  // ── v4 FIX: isMountedRef cleanup ────────────────────────────
+  // Ranije je isMountedRef.current bio true zauvijek — provjere
+  // `if (!isMountedRef.current) return` su bile mrtav kod. Sad
+  // postavljamo na false na unmount.
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (stdSwitchTimerRef.current) {
+        clearTimeout(stdSwitchTimerRef.current);
+        stdSwitchTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // ------------------------------------------------------------
   // Kiosk mode
@@ -787,23 +607,24 @@ useKioskResilience({
   // Izvedeni statusi
   // ------------------------------------------------------------
   const { isCancelled, isDiverted } = checkFlightStatus(display.flight?.StatusEN || '');
-  const isGateChanged = !!(display.gateChangedAt && (Date.now() - display.gateChangedAt < 15_000));
-  const hasDel = display.flight?.EstimatedDepartureTime &&
+// eslint-disable-next-line react-hooks/purity
+const isGateChanged = !!(display.gateChangedAt && (Date.now() - display.gateChangedAt < 15_000));  const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
-  const effectiveStatus = useMemo(() => {
-    const raw = display.flight?.StatusEN || '';
-    if (!display.flight || isCancelled || isDiverted) return raw;
-    const s = raw.toLowerCase();
-    if (s.includes('departed') || s.includes('poletio') ||
-        s.includes('final call') || s.includes('boarding') || s.includes('gate open')) return raw;
-    const refTime = display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
-    const dep = parseDepartureTime(refTime);
-    if (!dep) return raw;
-    const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
-    if (minUntil <= 30 && minUntil > 5) return 'Boarding';
-    return raw;
-  }, [display.flight, isCancelled, isDiverted]);
+const effectiveStatus = useMemo(() => {
+  const raw = display.flight?.StatusEN || '';
+  if (!display.flight || isCancelled || isDiverted) return raw;
+  const s = raw.toLowerCase();
+  if (s.includes('departed') || s.includes('poletio') ||
+      s.includes('final call') || s.includes('boarding') || s.includes('gate open')) return raw;
+  const refTime = display.flight.EstimatedDepartureTime || display.flight.ScheduledDepartureTime || '';
+  const dep = parseDepartureTime(refTime);
+  if (!dep) return raw;
+  // eslint-disable-next-line react-hooks/purity
+  const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
+  if (minUntil <= 30 && minUntil > 5) return 'Boarding';
+  return raw;
+}, [display.flight, isCancelled, isDiverted]);
 
   const statusCfg = getStatusConfig(effectiveStatus);
 
@@ -825,94 +646,31 @@ useKioskResilience({
     </div>
   );
 
-// ------------------------------------------------------------
-// RENDER: Nema leta
-// ------------------------------------------------------------
-if (!display.flight) {
-  const closed = display.manualGateStatus === 'closed';
-  return (
-    <div style={styles.splash} className="fids-splash">
-
-      {/* ── Ikona aviona ── */}
-      <div style={{ width: '60px', height: '60px', marginBottom: '0.5rem' }}>
-        <svg viewBox="0 0 24 24" fill="none" style={{ width: '100%', height: '100%' }}>
-          <path
-            d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2.5 1.5V22l4-1 4 1v-1.5L13 19v-5.5l8 2.5z"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-            fill={closed ? '#ef4444' : '#e6a817'}
-            fillOpacity={closed ? 0.10 : 0.06}
-            stroke={closed ? '#ef4444' : '#e6a817'}
-            strokeOpacity={0.5}
-          />
-        </svg>
+  // ------------------------------------------------------------
+  // RENDER: Nema leta
+  // ------------------------------------------------------------
+  if (!display.flight) {
+    const closed = display.manualGateStatus === 'closed';
+    return (
+      <div style={styles.splash} className="fids-splash">
+        <div style={{ ...styles.gateLabel, fontSize: 'clamp(5rem,18vw,14rem)', lineHeight: 1 }}>
+          {gateNumber}
+        </div>
+        <div style={{
+          fontSize: '2rem', fontWeight: 600, letterSpacing: '.08em',
+          color: closed ? '#ef4444' : '#475569', marginTop: '1rem',
+        }}>
+          {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
+        </div>
+        <div style={styles.metaRow}>
+          <span>Updated {lastUpdate}</span>
+          <span style={{ opacity: .4 }}>•</span>
+          <span>Next {nextUpdate}</span>
+        </div>
       </div>
+    );
+  }
 
-      {/* ── Label "GATE" (iznad broja) ── */}
-      <div style={{
-        fontSize: 'clamp(1.2rem, 3vw, 2.5rem)',
-        fontWeight: 600,
-        letterSpacing: '0.2em',
-        color: '#94a3b8',
-        textTransform: 'uppercase',
-        marginBottom: '0.2rem',
-      }}>
-        GATE
-      </div>
-
-      {/* ── Broj gate ── */}
-      <div style={{
-        ...styles.gateLabel,
-        fontSize: 'clamp(6rem, 20vw, 28rem)',
-        lineHeight: 1,
-        marginTop: '-0.2rem',
-      }}>
-        {gateNumber}
-      </div>
-
-      {/* ── Status pill ── */}
-      <div style={{
-        fontSize: '1.2rem',
-        fontWeight: 600,
-        letterSpacing: '.08em',
-        color: closed ? '#ef4444' : '#94a3b8',
-        marginTop: '0.5rem',
-        background: closed ? 'rgba(239,68,68,0.10)' : 'rgba(230,168,23,0.06)',
-        padding: '0.4rem 1.2rem',
-        borderRadius: '999px',
-        border: `1px solid ${closed ? 'rgba(239,68,68,0.25)' : 'rgba(230,168,23,0.15)'}`,
-      }}>
-        {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
-      </div>
-
-      {/* ── REKLAMNI TEKST (english, bez "tranzitne zone") ── */}
-      <div style={{
-        fontSize: 'clamp(0.9rem, 1.4vw, 1.3rem)',
-        fontWeight: 500,
-        color: '#cbd5e1',
-        textAlign: 'center',
-        maxWidth: '600px',
-        marginTop: '1rem',
-        padding: '0.5rem 1rem',
-        borderTop: '1px solid rgba(255,255,255,0.06)',
-        borderBottom: '1px solid rgba(255,255,255,0.06)',
-        letterSpacing: '0.02em',
-        lineHeight: 1.5,
-      }}>
-        ✈️ While you wait for your flight to be assigned to a specific gate,<br />
-        visit our <strong style={{ color: '#e6a817' }}>DUTY FREE SHOP</strong>!
-      </div>
-
-      {/* ── Donja metrika ── */}
-      <div style={styles.metaRow}>
-        <span>Updated {lastUpdate}</span>
-        <span style={{ opacity: .4 }}>•</span>
-        <span>Next {nextUpdate}</span>
-      </div>
-
-    </div>
-  );
-}
   // ------------------------------------------------------------
   // RENDER: Aktivan let
   // ------------------------------------------------------------

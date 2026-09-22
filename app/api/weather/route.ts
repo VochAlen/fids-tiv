@@ -1,120 +1,157 @@
 // app/api/weather/route.ts
 //
-// ── FIX (previše Open-Meteo zahtjeva → 429 Too Many Requests) ──
-// Problem: hooks/use-weather.ts je do sad gađao api.open-meteo.com/v1/forecast
-// DIREKTNO iz browsera, sa keš-om koji živi SAMO kao JS Map unutar TE JEDNE
-// stranice/taba (weatherCache modul-level varijabla u use-weather.ts).
-// Na aerodromu postoji više fizičkih monitora (combined, departures, gate-ovi,
-// checkin ekrani) — svaki je ODVOJEN browser proces, pa svaki ima SVOJ
-// nezavisan in-memory keš. Rezultat: N monitora × M jedinstvenih destinacija
-// = N×M poziva ka Open-Meteo umjesto M, i to sinhronizovano (svi monitori su
-// se upalili otprilike u isto vrijeme, pa im keš ističe u isto vrijeme, na
-// svaka 3h) — klasičan "thundering herd" koji lako probije Open-Meteo
-// free-tier rate limit.
+// v5.11 — Centralizovan weather proxy. RAZLOG: hooks/use-weather.ts je
+// ranije svaki od 41 kioska pozivao Open-Meteo DIREKTNO iz browsera —
+// čak i sa client-side kešom (30 min, po tabu/localStorage), 41 fizički
+// odvojenih uređaja i dalje znači do 41 nezavisnih poziva ka istom
+// besplatnom API-ju svakih 30 min, po destinaciji. To je put ka
+// "Too Many Requests" (429) sa Open-Meteo strane.
 //
-// Rješenje: ova ruta je JEDINO mjesto koje smije zvati Open-Meteo. Rezultat
-// se čuva u Redis-u (dijeljen između SVIH monitora i svih Vercel instanci),
-// sa TTL usklađenim sa CACHE_DURATION u use-weather.ts (3h). Sad je,
-// bez obzira na broj monitora, tačno 1 stvaran Open-Meteo poziv po
-// jedinstvenoj lokaciji na svaka 3h — svi ostali zahtjevi (sa bilo kog
-// monitora) pogode Redis keš i nikad ne stignu do Open-Meteo.
+// Rješenje: SVI kiosci sad zovu OVU rutu (/api/weather?lat=..&lon=..)
+// umjesto Open-Meteo direktno. Ova ruta drži Redis keš sa 3h TTL-om —
+// Open-Meteo se stvarno pozove NAJVIŠE jednom u 3 sata PO LOKACIJI,
+// bez obzira koliko kiosaka u tom periodu traži isti aerodrom.
+//
+// Single-flight brava (isti NX-lock pattern kao FETCH_LOCK_KEY u
+// lib/flight-data-service.ts) sprečava da više kiosaka koji promaše
+// keš TAČNO u istom trenutku (na granici isteka) svi paralelno okinu
+// Open-Meteo za istu lokaciju.
+
 import { NextResponse } from 'next/server';
-import { safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { getRedisClient, safeRedisGet, safeRedisSet } from '@/lib/redis';
 
-// FIX: lib/redis.ts koristi ioredis (TCP klijent) — NIJE kompatibilan sa
-// Edge Runtime-om (nema raw TCP socket podršku). Mora ostati Node.js
-// runtime (default), inače build/runtime puca čim ova ruta pokuša da
-// pozove getRedisClient(). Cold start je ovdje zanemarljiv trošak jer se
-// ruta poziva rijetko (keš pogodak je čest slučaj).
+export const dynamic = 'force-dynamic';
 
-const CACHE_TTL_SECONDS = 3 * 60 * 60; // 3h — MORA biti usklađeno sa
-// CACHE_DURATION u hooks/use-weather.ts. Ne diraj jedno bez drugog.
-const WEATHER_CACHE_CONTROL =
-  'public, s-maxage=10800, stale-while-revalidate=1800';
+const CACHE_TTL_SECONDS = 3 * 60 * 60;   // 3h — tačno traženo, svježi podaci
+const STALE_TTL_SECONDS = 48 * 60 * 60;  // 48h — fallback ako Open-Meteo odbije i nakon retry-a
+const LOCK_TTL_SECONDS = 20;             // koliko dugo brava traje dok jedan request radi fetch
+const LOCK_WAIT_MS = 1500;               // koliko čekaju ostali prije nego i sami probaju
+const RETRY_DELAYS_MS = [1500, 3000, 5000]; // kratak retry na 429 (server-side, jednom po lokaciji)
 
-type WeatherPayload = { temperature: number; weatherCode: number };
-
-// Zaokruživanje koordinata na 2 decimale (~1.1km preciznost na ovoj
-// geografskoj širini) — normalizuje cache key tako da sitne razlike u
-// izvornim koordinatama (npr. zaokruživanje na klijentu) ne prave
-// duplirane cache zapise za istu destinaciju.
-function roundCoord(n: number): string {
-  return n.toFixed(2);
+interface OpenMeteoWeather {
+  temperature: number;
+  weatherCode: number;
+  windSpeed: number;
+  windDirection: number;
 }
 
-// ── DEDUP UNUTAR ISTE INSTANCE ──────────────────────────────────
-// Ako je keš upravo istekao i 10-20 zahtjeva (po jedan po letu na combined
-// boardu) stigne u istom trenutku na ISTU Vercel/Edge instancu, svi dijele
-// JEDAN in-flight Promise umjesto da svaki pojedinačno zove Open-Meteo.
-// Ovo NE pokriva slučaj gdje dvije RAZLIČITE instance istovremeno promaše
-// Redis keš (rijetko, i posljedica je najviše 2-3 dupla poziva umjesto
-// N×M) — potpuno rješavanje toga bi tražilo distribuirani lock (kao
-// FETCH_LOCK_KEY u lib/flight-data-service.ts), što za weather nije
-// vrijedno dodatne kompleksnosti.
-const inFlight = new Map<string, Promise<WeatherPayload>>();
-
-async function fetchFromOpenMeteo(lat: number, lon: number): Promise<WeatherPayload> {
+async function fetchFromOpenMeteo(lat: number, lon: number): Promise<OpenMeteoWeather> {
   const params = new URLSearchParams({
     latitude: lat.toString(),
     longitude: lon.toString(),
-    current: 'temperature_2m,weather_code',
+    current: 'temperature_2m,weather_code,wind_speed_10m,wind_direction_10m',
     timezone: 'auto',
   });
-  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
-  if (!res.ok) {
-    if (res.status === 429) {
-      throw new Error('Rate limit exceeded - too many requests');
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
     }
-    throw new Error(`Weather API request failed: ${res.status}`);
+    const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, {
+      cache: 'no-store',
+    });
+    if (res.status === 429) {
+      lastError = new Error('Open-Meteo 429 rate limit');
+      continue;
+    }
+    if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
+    const data = await res.json();
+    return {
+      temperature: data.current?.temperature_2m ?? 0,
+      weatherCode: data.current?.weather_code ?? 0,
+      windSpeed: data.current?.wind_speed_10m ?? 0,
+      windDirection: data.current?.wind_direction_10m ?? 0,
+    };
   }
-  const data = await res.json();
-  return {
-    temperature: data.current.temperature_2m,
-    weatherCode: data.current.weather_code,
-  };
+  throw lastError ?? new Error('Open-Meteo failed after retries');
 }
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const lat = parseFloat(searchParams.get('lat') || '');
-  const lon = parseFloat(searchParams.get('lon') || '');
+  const latStr = searchParams.get('lat');
+  const lonStr = searchParams.get('lon');
+  const lat = parseFloat(latStr || '');
+  const lon = parseFloat(lonStr || '');
 
-  if (isNaN(lat) || isNaN(lon)) {
-    return NextResponse.json({ error: 'lat i lon su obavezni' }, { status: 400 });
+  if (!latStr || !lonStr || isNaN(lat) || isNaN(lon)) {
+    return NextResponse.json({ error: 'lat i lon su obavezni query parametri' }, { status: 400 });
   }
 
-  const cacheKey = `weather:${roundCoord(lat)},${roundCoord(lon)}`;
+  // Zaokruži na 2 decimale (~1.1km preciznost na ovim geografskim
+  // širinama) — sprečava da sitne float razlike naprave odvojene cache
+  // ključeve za istu lokaciju.
+  const roundedLat = lat.toFixed(2);
+  const roundedLon = lon.toFixed(2);
+  const cacheKey = `cache:weather:${roundedLat}:${roundedLon}`;
+  const staleKey = `${cacheKey}:stale`;
+  const lockKey = `${cacheKey}:lock`;
 
-  // ── 1. REDIS KEŠ (dijeljen između svih monitora/instanci) ──
   try {
-    const cachedRaw = await safeRedisGet(cacheKey);
-    if (cachedRaw) {
-      const cached = JSON.parse(cachedRaw) as WeatherPayload;
-      return NextResponse.json(cached, { headers: { 'Cache-Control': WEATHER_CACHE_CONTROL } });
+    const cached = await safeRedisGet(cacheKey);
+    if (cached) {
+      return NextResponse.json(JSON.parse(cached), {
+        headers: { 'X-Weather-Cache': 'hit' },
+      });
     }
-  } catch {
-    // Oštećen zapis ili Redis nedostupan — nastavi na fresh fetch ispod,
-    // ne ruši odgovor zbog keš problema.
-  }
 
-  // ── 2. FRESH FETCH (sa dedup-om unutar instance) ──
-  let promise = inFlight.get(cacheKey);
-  if (!promise) {
-    promise = fetchFromOpenMeteo(lat, lon).finally(() => {
-      inFlight.delete(cacheKey);
-    });
-    inFlight.set(cacheKey, promise);
-  }
+    // Cache miss — pokušaj single-flight bravu prije nego što sam
+    // pozoveš Open-Meteo, da ne bi 2+ kioska koji su promašili keš u
+    // istom trenutku oba (svi) zvala Open-Meteo za istu lokaciju.
+    const client = getRedisClient();
+    const gotLock = await client.set(lockKey, '1', 'EX', LOCK_TTL_SECONDS, 'NX');
 
-  try {
-    const data = await promise;
-    // Upiši u Redis — ne čekamo da se write završi da bismo brže odgovorili
-    // pozivaocu (weather nije kritičan podatak, best-effort keširanje).
-    safeRedisSet(cacheKey, JSON.stringify(data), CACHE_TTL_SECONDS).catch(() => {});
-    return NextResponse.json(data, { headers: { 'Cache-Control': WEATHER_CACHE_CONTROL } });
+    if (!gotLock) {
+      // Neko drugi (drugi kiosk/request) već radi fetch za ovu lokaciju
+      // — sačekaj kratko i probaj keš ponovo umjesto da i sam pozoveš API.
+      await new Promise(r => setTimeout(r, LOCK_WAIT_MS));
+      const retryCache = await safeRedisGet(cacheKey);
+      if (retryCache) {
+        return NextResponse.json(JSON.parse(retryCache), {
+          headers: { 'X-Weather-Cache': 'hit-after-wait' },
+        });
+      }
+      // I dalje ništa u kešu (rijedak slučaj — onaj koji je držao
+      // bravu je vjerovatno pao) — nastavi i sam uradi fetch. Bolje
+      // povremeni duplirani poziv nego da kiosk ostane bez podataka.
+    }
+
+    const fresh = await fetchFromOpenMeteo(lat, lon);
+    const freshJson = JSON.stringify(fresh);
+    await safeRedisSet(cacheKey, freshJson, CACHE_TTL_SECONDS);
+    // v5.12: STALE fallback — odvojen ključ, mnogo duži TTL (48h).
+    // Ako sljedeći fetch (za 3h) ikad padne (Open-Meteo 429 čak i
+    // nakon retry-a, mrežni ispad i sl.), ovo je ono što se vraća
+    // umjesto greške/0°C — vidi catch blok ispod.
+    await safeRedisSet(staleKey, freshJson, STALE_TTL_SECONDS);
+
+    return NextResponse.json(fresh, { headers: { 'X-Weather-Cache': 'miss' } });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Weather fetch failed';
-    const status = message.includes('Rate limit') ? 429 : 502;
-    return NextResponse.json({ error: message }, { status });
+    console.error('[api/weather] greška:', err);
+
+    // v5.12: Prije nego što vratimo grešku/0°C, probaj STALE fallback
+    // (do 48h star, ali i dalje neuporedivo bolji prikaz od 0°C ili
+    // praznog ekrana). Ovo je namjerno ODVOJENO od glavnog 3h keša —
+    // Redis EXPIRE briše ključ nakon isteka, pa bez posebnog stale
+    // ključa ne bismo imali ŠTA da vratimo kad glavni keš istekne i
+    // svježi fetch istovremeno padne.
+    try {
+      const stale = await safeRedisGet(staleKey);
+      if (stale) {
+        return NextResponse.json(JSON.parse(stale), {
+          headers: { 'X-Weather-Cache': 'stale-fallback' },
+        });
+      }
+    } catch { /* i stale fallback pao — nastavi na 502 ispod */ }
+
+    // Fallback oblik identičan uspješnom odgovoru (temperature: 0, itd.)
+    // da klijent ne mora posebno da parsuje error-shape — samo status
+    // kod signalizira da je nešto pošlo po zlu. Do ovoga dolazi SAMO
+    // ako i glavni fetch I stale fallback oba ne uspiju (npr. sasvim
+    // nova lokacija koja nikad nije uspješno keširana).
+    return NextResponse.json(
+      { temperature: 0, weatherCode: 0, windSpeed: 0, windDirection: 0, error: 'Weather fetch failed' },
+      { status: 502 }
+    );
   }
 }

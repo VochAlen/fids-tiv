@@ -1,0 +1,28 @@
+# public/robots.txt
+#
+# NOVO (po zahtjevu — bezbjednost + kontrola troška): bez ovoga,
+# search-engine crawleri (Googlebot, Bingbot, itd.) bi mogli "hodati"
+# po SVIM javno dostupnim rutama — uključujući desetine kiosk URL-ova
+# (/ver2/ver2/checkin/1, /ver2/ver2/checkin/2, ... /ver2/ver2/gate/1,
+# itd.) i admin login stranicu — generišući NEKONTROLISANE dodatne
+# Edge Requests/Function invocations bez ikakve stvarne koristi (ovo
+# je TAČNO klasa problema koju smo lovili kroz ovu sesiju kod
+# polling troška). Takođe sprečava da admin login URL ili direktan
+# URL pojedinačnog šaltera/gate-a "iscure" u Google/Bing rezultate
+# pretrage.
+#
+# Landing stranica (/) OSTAJE indeksirana — ona je namjerno javna,
+# B2B/informativna.
+User-agent: *
+Disallow: /ver2/
+Disallow: /admin/
+Disallow: /departures
+Disallow: /arrivals
+Disallow: /combined
+Disallow: /border
+Disallow: /baggage
+Disallow: /split-board
+Disallow: /pa
+Disallow: /api/
+
+Allow: /$

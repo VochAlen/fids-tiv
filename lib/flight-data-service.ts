@@ -6,9 +6,7 @@ import type { Flight, FlightData, RawFlightData } from '@/types/flight';
 import {
   mapNgrokFlightToFlight,
   type NgrokFlightRaw,
-  mapAlternateApiFlight,
-  type AlternateApiFlight,
-  type AlternateApiResponse,
+  mapRawFlight,
   expandFlightForMultipleGates,
   sortFlightsByTime,
   filterTodayFlights
@@ -24,28 +22,13 @@ const FLIGHT_CACHE_TTL_SECONDS = 240;
 const FLIGHT_META_KEY = 'cache:flights:meta';
 
 // ── PREKIDAČ ZA BACKUP SISTEM ──────────────────────────────────
-// FIX (24/7/365 self-recovery audit): PROMIJENJENO NA true. Ranije je
-// bilo `false`, što je značilo da kad uživo API (ngrok tunel) padne,
-// SVI kiosk ekrani (42+ fizička monitora) prikazuju PRAZAN raspored
-// ("Backup je isključen — nema podataka za prikaz") umjesto da
-// automatski prebace na poslednji poznati raspored — direktno
-// protivno cilju da sistem radi bez ljudske intervencije. Backup lanac
-// (lib/backup/flight-backup-service.ts, flight-auto-processor.ts) je
-// potpuno izgrađen i testiran (filtriranje zastarjelih/završenih
-// letova, simulacija napretka u realnom vremenu, jasno "warning" polje
-// da se zna da se prikazuje stari podatak) — samo je bio ugašen na
-// ovom jednom mjestu.
-//
-// VAŽNA NAPOMENA ZA TIM: ako je ovo BILO namjerno ugašeno zbog
-// konkretnog incidenta (npr. loš/zastarjeo backup podatak je jednom
-// prikazan kao da je uživo), OBAVEZNO provjeri prije deploy-a da li je
-// taj uzrok otklonjen — inače će se isti problem sad ponovo pojaviti
-// (samo sad tiho, jer je ovo "self-recovery" put, ne vidljiva greška).
+// Promijeni na false da potpuno isključiš korišćenje backup podataka
+// (kad live API padne, prikazaće se prazan/error state umjesto starog rasporeda).
 const BACKUP_ENABLED = true;
 
 // ── IN-PROCESS OVERRIDE CACHE ─────────────────────────────────
-let overrideCacheData: Record<string, Record<string, string>> = {};
-let overrideCacheExpiry = 0;
+const overrideCacheData: Record<string, Record<string, string>> = {};
+const overrideCacheExpiry = 0;
 const OVERRIDE_CACHE_MS = 10_000;
 
 // ── IN-PROCESS FLIGHT DATA CACHE ──────────────────────────────
@@ -63,29 +46,6 @@ const REDIS_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
 // svoje linije (temporal dead zone), pa obrnut redoslijed puca na builds.
 const FLIGHT_API_URL = process.env.FLIGHT_PROXY_URL || 'https://crafty-dumpling-molehill.ngrok-free.dev/schedule';
 const PROXY_SECRET = process.env.FLIGHT_PROXY_SECRET || '';
-
-// FIX (po zahtjevu — nezavisan uživo izvor kad ngrok tunel PADNE, ne
-// samo kad usporI): do sad je CIO uživo lanac (uključujući "emergency"
-// granu, korak 5 ispod) zavisio od ISTOG lanca desktop → ngrok tunel →
-// tiv.nais.aero — ako ngrok padne (računar se restartuje, izgubi
-// struju, tunel istekne), NIJEDAN "uživo" pokušaj ne bi uspio, sistem
-// bi direktno pao na STARI keširan backup (sad opet uključen, ali i
-// dalje zastario podatak, ne stvaran uživo). montenegroairports.com/
-// aerodromixs/cache-flights.php je JAVNO dostupan direktno preko
-// interneta — NE zavisi od bilo kog lokalnog računara/tunela.
-//
-// FIX (ISPRAVLJENO nakon direktnog uživo testa): prvobitna verzija ove
-// izmjene je PRETPOSTAVILA da ovaj URL vraća isti oblik kao
-// RawFlightData/mapRawFlight (TipLeta/BrojLeta/Planirano...) — direktan
-// poziv je pokazao da TRENUTNO vraća SASVIM DRUGAČIJI, OData oblik
-// ({"value":[{"FlightType":"Departure","FlightNumberIATA":"W46450",
-// "Gates":["07"],...}]}). Mapiranje je sad preko mapAlternateApiFlight
-// (lib/flight-api-helpers.ts), koje odgovara STVARNOM, provjerenom
-// obliku odgovora. NAPOMENA ZA BUDUĆNOST: ovo je eksterni, tuđi API —
-// ako ikad promijeni oblik odgovora, ovaj mapper će trebati odgovarajuće
-// ažuriranje; nema garancije da će oblik ostati zauvijek isti.
-const ALTERNATE_FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
-const ALTERNATE_FETCH_TIMEOUT_MS = 8000;
 
 // ── Header-i za poziv ka SOPSTVENOM ngrok proxy-ju. Chrome-spoofing
 // header-i više nisu potrebni jer se poziva vlastiti server, ne tuđi.
@@ -121,6 +81,7 @@ type SlimFlight = Pick<Flight, typeof SLIM_FIELDS[number]>;
 function slimFlight(f: Flight): SlimFlight {
   const out = {} as SlimFlight;
   for (const key of SLIM_FIELDS) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (key in f) (out as any)[key] = (f as any)[key];
   }
   return out;
@@ -318,7 +279,14 @@ async function fetchWithQuickRetry(
       }
       console.error(`❌ HTTP ${response.status} on attempt ${attempt}/${retries} — body: ${bodyPreview}`);
       console.error(`   → URL: ${url}`);
-      console.error(`   → Headers sent:`, JSON.stringify(options.headers));
+      // ── v4 FIX: cenzuriši x-proxy-secret u logovima.
+      // Ranije se cijeli options.headers logovao, što je izlagalo
+      // PROXY_SECRET u Vercel logs.
+      const safeHeaders = {
+        ...options.headers,
+        'x-proxy-secret': '[REDACTED]',
+      };
+      console.error(`   → Headers sent:`, JSON.stringify(safeHeaders));
 
       if (attempt < retries) await new Promise(r => setTimeout(r, RETRY_DELAY));
     } catch (error) {
@@ -331,7 +299,6 @@ async function fetchWithQuickRetry(
 }
 
 async function performEmergencyFetch(): Promise<Flight[] | null> {
-  // Pokušaj 1: ngrok (isti kao ranije).
   try {
     const emergencyResponse = await fetch(FLIGHT_API_URL, {
       method: 'GET',
@@ -339,56 +306,58 @@ async function performEmergencyFetch(): Promise<Flight[] | null> {
       headers: FETCH_HEADERS,
       signal: AbortSignal.timeout(EMERGENCY_FETCH_TIMEOUT_MS),
     });
-    if (emergencyResponse.ok) {
-      const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
-      if (Array.isArray(rawData) && rawData.length > 0) {
-        // FIX (letovi od jučer čak ni greškom): ranije se ovdje mapiralo
-        // prvih 5 SIROVIH stavki i vraćalo BEZ filterTodayFlights()
-        // filtera koji svaki drugi put (live fetch, backup) obavezno
-        // prolazi. Izvor ne vraća podatke ograničene/sortirane po
-        // datumu — ovo je bio jedini put u cijelom sistemu gdje je let
-        // van "danas" teoretski mogao proći nefiltriran, baš u
-        // najkritičnijem trenutku. Sad se filtrira PRIJE rezanja na
-        // prvih 5, dosljedno sa ostatkom sistema.
-        const mapped = await Promise.all(rawData.map(raw => mapNgrokFlightToFlight(raw)));
-        const todayOnly = filterTodayFlights(mapped);
-        if (todayOnly.length > 0) return todayOnly.slice(0, 5);
-      }
-    }
-  } catch {
-    // Padni na alternativni izvor ispod — ne vraćamo null ovdje jer
-    // ngrok pad ne znači da je i montenegroairports.com pao.
-  }
+    if (!emergencyResponse.ok) return null;
 
-  // FIX (po zahtjevu — "šta ako i backup API padne?" analiza otkrila
-  // pravu rupu): ovaj emergency korak je RANIJE pokušavao SAMO ngrok —
-  // ako su i glavni ngrok fetch (korak 3) I alternativni izvor (korak
-  // 3.5) VEĆ pali prije nego što se stiglo dovde, ovaj "poslednji
-  // pokušaj" bi ponovo gađao isti, već-potvrđeno-mrtav ngrok URL, bez
-  // ikakve stvarne šanse za uspjeh — montenegroairports.com nikad nije
-  // ni proban kao stvarna poslednja linija odbrane. Sad, ako ngrok
-  // ovdje (ponovo) padne, probamo montenegroairports.com prije nego
-  // se preda i vrati prazno "critical failure" stanje.
+    const rawData: NgrokFlightRaw[] = await emergencyResponse.json();
+    if (!Array.isArray(rawData) || rawData.length === 0) return null;
+
+    const mapped = await Promise.all(rawData.slice(0, 5).map(raw => mapNgrokFlightToFlight(raw)));
+    return mapped;
+  } catch {
+    return null;
+  }
+}
+
+// ──── SEKUNDARNI (fallback) API ──── javni cache-flights.php endpoint istog
+// aerodroma (montenegroairports.com). Koristi se AUTOMATSKI kad sopstveni
+// ngrok proxy ne radi (403, timeout, tunel pao, desktop ugasen...), PRIJE
+// nego sto se ude u BACKUP MODE (stari, keshiran raspored). Ovo je i dalje
+// SVJEZ, live podatak - samo sa drugog izvora - pa se tretira kao 'live'.
+//
+// VAZNO: oblik podataka ovdje je RawFlightData (Updateovano, Datum, TipLeta,
+// KompanijaNaziv, BrojLeta, Planirano, ...), NE NgrokFlightRaw. Za mapiranje
+// se koristi POSTOJECI mapRawFlight (isti koji vec zna ovaj tacan oblik),
+// ne mapNgrokFlightToFlight.
+const SECONDARY_API_URL =
+  process.env.FLIGHT_SECONDARY_API_URL ||
+  'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
+const SECONDARY_FETCH_TIMEOUT_MS = 8000;
+
+async function fetchFromSecondaryApi(): Promise<Flight[] | null> {
   try {
-    const altEmergencyResponse = await fetch(ALTERNATE_FLIGHT_API_URL, {
+    const response = await fetch(SECONDARY_API_URL, {
       method: 'GET',
       cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(EMERGENCY_FETCH_TIMEOUT_MS),
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(SECONDARY_FETCH_TIMEOUT_MS),
     });
-    if (!altEmergencyResponse.ok) return null;
 
-    // FIX (KRITIČNO — isti ispravljen oblik odgovora kao korak 3.5,
-    // vidi opširan komentar tamo): OData omotač ({"value":[...]}), ne
-    // goli niz.
-    const altRawPayload = await altEmergencyResponse.json() as AlternateApiResponse;
-    const altRawData: AlternateApiFlight[] = Array.isArray(altRawPayload?.value) ? altRawPayload.value : [];
-    if (altRawData.length === 0) return null;
+    if (!response.ok) {
+      console.error(`❌ Secondary API (montenegroairports.com) HTTP ${response.status}`);
+      return null;
+    }
 
-    const altMapped = await Promise.all(altRawData.map((raw: AlternateApiFlight) => mapAlternateApiFlight(raw)));
-    const altTodayOnly = filterTodayFlights(altMapped);
-    return altTodayOnly.length > 0 ? altTodayOnly.slice(0, 5) : null;
-  } catch {
+    const rawPayload: unknown = await response.json();
+    const rawData = normalizeRawFlightArray(rawPayload);
+
+    if (!Array.isArray(rawData) || rawData.length === 0) return null;
+
+    console.log(`✅ Secondary API fetch: ${rawData.length} letova (montenegroairports.com)`);
+
+    const mappedFlights = await Promise.all(rawData.map(raw => mapRawFlight(raw)));
+    return mappedFlights;
+  } catch (err) {
+    console.error('❌ Secondary API fetch failed:', err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -423,17 +392,19 @@ function applyDefaultBaggageBelt(arrivals: Flight[]): Flight[] {
 // ── Računa koliko je minuta prošlo od planiranog/procijenjenog vremena leta,
 // u odnosu na SADAŠNJI trenutak. Handluje prelaz preko ponoći. Vraća null
 // ako vrijeme nije moguće parsirati.
-// FIX (backup/emergency letovi su ostajali "svježi" satima nakon što su
-// stvarno poletjeli/sletjeli — najviše primjetno tačno ujutro nakon noćnog
-// ispada ngrok tunela): bilo je `new Date(); flightDate.setHours(h, m)` —
-// server (Vercel) radi u UTC, a h/m iz rasporeda je LOKALNO (Podgorica)
-// vrijeme. setHours(h, m) je te brojeve tumačio kao UTC sate, pa je
-// izračunata "starost" leta bila pogrešna za tačno UTC↔Podgorica razliku
-// (1h zimi, 2h ljeti) — filterOutStaleFlights (cutoff 30 min) je zbog toga
-// mogao zadržati letove koji su stvarno poletjeli/sletjeli i prije 1-2h.
-// Sad koristi getPodgoricaMinutesOfDay() — čisto brojevno poređenje
-// "minuta od ponoći", bez ijedne Date/timezone operacije, pa je potpuno
-// imuno na razliku između serverskog i lokalnog vremena.
+// FIX (KRITIČNO — portovano iz glavnog/polling sistema, dokazan
+// stvaran uzrok "letovi ostaju svježi satima nakon što su stvarno
+// poletjeli/sletjeli"): bilo je `new Date(); flightDate.setHours(h, m)`
+// — server (Vercel) radi u UTC, a h/m iz rasporeda je LOKALNO
+// (Podgorica) vrijeme. setHours(h, m) je te brojeve tumačio kao UTC
+// sate, pa je izračunata "starost" leta bila pogrešna za tačno
+// UTC↔Podgorica razliku (1h zimi, 2h ljeti). Ovo direktno utiče i na
+// tačnost NOVE computeDynamicNightMode funkcije ispod (koja zavisi od
+// ove funkcije za "koliko je prošlo od poslednjeg leta") — netačna
+// vremenska razlika bi značila da dinamički noćni režim okida u
+// pogrešno vrijeme, za tačno tu istu UTC↔Podgorica razliku. Sad
+// koristi getPodgoricaMinutesOfDay() — čisto brojevno poređenje, bez
+// ijedne Date/timezone operacije.
 function minutesSinceFlightTime(timeStr: string | undefined): number | null {
   if (!timeStr || timeStr === '--:--') return null;
   const [hours, minutes] = timeStr.split(':').map(Number);
@@ -454,6 +425,7 @@ function minutesSinceFlightTime(timeStr: string | undefined): number | null {
   return diffMinutes;
 }
 
+
 // ── Filtrira letove koji su VEĆ poletjeli/sletjeli po tekstu statusa —
 // koristi se SAMO u BACKUP granama (kad ngrok proxy nije dostupan).
 function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
@@ -468,35 +440,49 @@ function filterOutCompletedFlights<T extends Flight>(flights: T[]): T[] {
   });
 }
 
-// FIX (po zahtjevu — dinamičan ulazak u noćni režim, RANIJE od fiksnog
-// sezonskog prozora ako je poslednji let danas stvarno gotov): nalazi
+// FIX (po zahtjevu — portovano iz glavnog/polling sistema, ista,
+// dokazana logika): dinamičan ulazak u noćni režim RANIJE od fiksnog
+// sezonskog prozora, ako je poslednji let danas stvarno gotov. Nalazi
 // let (odlazak ILI dolazak zajedno — koji god je HRONOLOŠKI poslednji
 // po rasporedu danas) i provjerava da li je TAJ KONKRETAN let već
-// dobio STVARAN status "departed"/"poletio" (za odlazak) ili
-// "arrived"/"landed"/"sletio" (za dolazak) — NE bilo koji let sa takvim
-// statusom, jer bi to lažno okinulo noćni režim ako je poslednji let
-// dana KASNI i još nije stvarno otišao, dok je neki RANIJI let već
-// odavno kompletiran. Vraća true tek 15+ minuta NAKON što se taj
-// stvaran status pojavio u podacima (mjereno preko VEĆ postojeće
-// minutesSinceFlightTime — imuna na server-vs-Podgorica vremensku
-// razliku, isti mehanizam kao filterOutStaleFlights).
+// dobio STVARAN status "departed"/"poletio" (odlazak) ili "arrived"/
+// "landed"/"sletio" (dolazak) — NE bilo koji let sa takvim statusom,
+// jer bi to lažno okinulo noćni režim ako poslednji let dana KASNI a
+// neki RANIJI let je već davno kompletiran. Vraća true tek 15+ minuta
+// NAKON što se taj stvaran status pojavio u podacima.
 //
-// Namjerno vraća false (nikad ne uđe u dinamičku noć) ako danas nema
-// NIJEDNOG leta sa poznatim vremenom — bez rasporeda, nema signala na
-// osnovu kog bi se sigurno moglo zaključiti da je "gotovo za danas";
-// statička, sezonska provjera (isNightHours()) ostaje jedina koja
-// garantovano radi u tom slučaju.
+// U OVOM (Ably) sistemu, kombinovan rezultat (isNightHours() ||
+// computeDynamicNightMode(...)) se objavljuje klijentima preko
+// flights:combined kanala kao data.isNightMode (vidi buildFlightData
+// pozive ispod) — lib/ably-client.ts (nightWatcherTick) čita tu
+// vrijednost preko reportDynamicNightMode() da zna da li da zatvori
+// Ably konekciju i PRIJE fiksnog sezonskog prozora.
 const DYNAMIC_NIGHT_GRACE_MINUTES = 15;
 
 function computeDynamicNightMode(flights: Flight[]): boolean {
   let lastFlight: Flight | null = null;
   let lastMinutesOfDay = -1;
+  // FIX (KRITIČNO — pravi uzrok "gate/check-in monitor ne prikazuje
+  // podatke iako je let dodijeljen", prijavljeno u produkciji): PRIJE
+  // ove popravke, let sa nedostajućim/oštećenim vremenom (prazan string,
+  // "--:--", ili neparsibilan format) se jednostavno PRESKAČE (`continue`)
+  // u petlji ispod — ali ako je BAŠ TAJ let stvarno hronološki poslednji
+  // danas (npr. podatak sa izvora još nije stigao/upisan za taj let),
+  // algoritam bi pogrešno izabrao RANIJI, već završen let kao "poslednji"
+  // i lažno okinuo dinamički noćni režim USRED DANA — što zatvara CIJELU
+  // Ably konekciju (vidi lib/ably-client.ts, nightWatcherTick) za SVE
+  // ekrane odjednom, uključujući i gate i check-in, tačno simptom koji je
+  // prijavljen. Sad: ako se NAIĐE na let sa nepoznatim vremenom, ne
+  // možemo biti sigurni da je naš "poslednji let" izbor tačan — ova
+  // funkcija se u tom slučaju bezbjedno vraća na false (ne ulazi u
+  // dinamički noćni režim) umjesto da rizikuje pogrešnu odluku.
+  let hasUnknownTimeFlight = false;
 
   for (const f of flights) {
     const timeStr = f.EstimatedDepartureTime || f.ScheduledDepartureTime;
-    if (!timeStr || timeStr === '--:--') continue;
+    if (!timeStr || timeStr === '--:--') { hasUnknownTimeFlight = true; continue; }
     const [h, m] = timeStr.split(':').map(Number);
-    if (isNaN(h) || isNaN(m)) continue;
+    if (isNaN(h) || isNaN(m)) { hasUnknownTimeFlight = true; continue; }
     const minutesOfDay = h * 60 + m;
     if (minutesOfDay > lastMinutesOfDay) {
       lastMinutesOfDay = minutesOfDay;
@@ -504,6 +490,7 @@ function computeDynamicNightMode(flights: Flight[]): boolean {
     }
   }
 
+  if (hasUnknownTimeFlight) return false;
   if (!lastFlight) return false;
 
   const statusLower = (lastFlight.StatusEN || '').toLowerCase();
@@ -517,11 +504,39 @@ function computeDynamicNightMode(flights: Flight[]): boolean {
   return minutesSince !== null && minutesSince >= DYNAMIC_NIGHT_GRACE_MINUTES;
 }
 
+
 // ── Filtrira letove čije je planirano/procijenjeno vrijeme više od
 // cutoffMinutes U PROŠLOSTI — hvata letove čiji je status u starom
 // backupu ostao zastario (npr. i dalje piše "Scheduled" iako je let
 // odavno otišao dok je tvoj računar bio ugašen).
-function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: number = 30): T[] {
+// FIX (KRITIČNO — drugi, POVEZAN uzrok prijavljenog "neki letovi se ne
+// prikazuju" i "presporo otvara/zatvara šaltere"): cutoffMinutes je
+// bio 30 — ali ta vrijednost je OD POČETKA bila kalibrisana protiv
+// STARE, bagovane verzije minutesSinceFlightTime() (UTC-vs-Podgorica
+// pomak, popravljeno ranije ove sesije), koja je — zbog te greške —
+// PRAKTIČNO davala efektivni prozor vidljivosti od ~95 minuta zimi
+// (CET, +1h) do ~150 minuta ljeti (CEST, +2h) nakon STVARNOG
+// poletanja — NEDOSLJEDNO, zavisno od sezone, iako je NAMJERAVANA
+// vrijednost uvijek bila "30". Kad je taj bug ispravljen, funkcija je
+// počela ispravno primjenjivati BAŠ 30 pravih minuta — što je NAGLO
+// skratilo prozor vidljivosti (posebno ljeti, sa ~150min na 30min),
+// uzrokujući da letovi koji su ranije (greškom) ostajali vidljivi i
+// dalje ne budu odjednom filtrirani iz flights:combined podataka —
+// gubeći svoje detalje (destinacija, vrijeme) sa check-in/gate
+// ekrana čak i dok je dodjela šaltera i dalje aktivna (ta dodjela
+// dolazi kroz ODVOJEN assignments:desks/gates kanal koji NIJE
+// filtriran, pa desk i dalje "zna" da ima let, ali ne može da nađe
+// NJEGOVE detalje — otud "presporo otvara" utisak, u stvari čeka
+// podatak koji je filtriran).
+//
+// Nova vrijednost (120 min) je NAMJERNO fiksna, bez sezonske
+// zavisnosti (za razliku od stare, slučajne varijacije) — dovoljno
+// velikodušna da pokrije i zimski (~95min) i ljetnji (~150min)
+// raspon na koji je osoblje navikло, bez ponovnog uvođenja
+// nedosljednog, DST-zavisnog ponašanja. Napominjem: ovo utiče SAMO
+// na backup/simulacioni put (jedina dva poziva ove funkcije ispod) —
+// live put uopšte ne filtrira letove po starosti.
+function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: number = 120): T[] {
   return flights.filter(flight => {
     const timeStr = flight.EstimatedDepartureTime || flight.ScheduledDepartureTime;
     const minutesSince = minutesSinceFlightTime(timeStr);
@@ -532,7 +547,7 @@ function filterOutStaleFlights<T extends Flight>(flights: T[], cutoffMinutes: nu
 
 async function buildFlightData(
   rawFlights: Flight[],
-  source: 'live' | 'live-alternate' | 'backup' | 'auto-processed' | 'emergency',
+  source: 'live' | 'backup' | 'auto-processed' | 'emergency',
   lastUpdated: string,
   options?: { isOfflineMode?: boolean; warning?: string; backupTimestamp?: string; autoProcessedCount?: number; isNightMode?: boolean }
 ): Promise<FlightData> {
@@ -582,7 +597,7 @@ export async function getCurrentFlightData(): Promise<FlightData> {
 const NIGHT_FETCH_INTERVAL_SECONDS = 3600; // 1 sat
 const NIGHT_CACHE_TTL_SECONDS = NIGHT_FETCH_INTERVAL_SECONDS; // cache noću traje koliko i interval fetch-a
 
-if (nightNow) {
+if (isNightHours()) {
   const client = getRedisClient();
   const nightFetchGateKey = 'night:fetch:gate';
 
@@ -703,82 +718,58 @@ await saveFlightDataAndMetadata(slimmed, 'live', nightNow ? NIGHT_CACHE_TTL_SECO
     console.error('❌ Live API failed:', liveError instanceof Error ? liveError.message : liveError);
   }
 
-// ── 3.5. ALTERNATE LIVE FETCH (montenegroairports.com direktno) ──
-// FIX (po zahtjevu): pokušava se SAMO ako je gornji (ngrok) pokušaj
-// pao — vidi opširan komentar uz ALTERNATE_FLIGHT_API_URL na vrhu
-// fajla za PUN kontekst zašto ovo postoji. Namjerno jednostavniji
-// fetch (bez Promise.race/retry logike gornjeg bloka, koja postoji
-// SPECIFIČNO zbog manje pouzdanog ngrok/desktop lanca) — ovo je VEĆ
-// fallback grana ka JAVNOM, direktno dostupnom API-ju; ako i ona
-// zakaže, nastavlja se dolje na BACKUP MODE kao i ranije (ponašanje
-// prije ove izmjene, netaknuto).
-//
-// FIX (KRITIČNO — ispravljen oblik odgovora): direktan uživo test ovog
-// URL-a je otkrio da vraća OData omotač ({"value": [...]}), NE goli
-// niz kao pretpostavljeno u prvoj verziji ovog koda — normalizeRawFlightArray
-// (namijenjena STAROM RawFlightData obliku) bi ovdje tiho vratila 0
-// letova (payload nije Array na vrhu, pada u "0 letova" granu) umjesto
-// da baci grešku, što bi značilo da ova grana NIKAD stvarno ne bi
-// uspjela a da se to primijeti. Sad se `.value` eksplicitno izvlači, a
-// mapira preko mapAlternateApiFlight (lib/flight-api-helpers.ts) koji
-// odgovara STVARNOM, provjerenom obliku odgovora.
+// ── 3.5 SEKUNDARNI IZVOR (montenegroairports.com cache-flights.php) ───
+// Probaj PRIJE ulaska u backup mod - ovo je i dalje SVJEZ ('live') podatak,
+// samo sa drugog, javnog endpointa, ne stari keshiran backup. Automatski
+// se aktivira kad god sopstveni ngrok proxy padne (403, timeout, tunel...).
 try {
-  const altResponse = await fetch(ALTERNATE_FLIGHT_API_URL, {
-    method: 'GET',
-    cache: 'no-store',
-    headers: { 'Accept': 'application/json' },
-    signal: AbortSignal.timeout(ALTERNATE_FETCH_TIMEOUT_MS),
-  });
+  const secondaryFlights = await fetchFromSecondaryApi();
 
-  if (!altResponse.ok) throw new Error(`HTTP ${altResponse.status}`);
+  if (secondaryFlights && secondaryFlights.length > 0) {
+    let todaySecondaryFlights = filterTodayFlights(secondaryFlights);
+    todaySecondaryFlights = removeDuplicateFlights(todaySecondaryFlights);
 
-  const altPayload = await altResponse.json() as AlternateApiResponse;
-  const altRawData: AlternateApiFlight[] = Array.isArray(altPayload?.value) ? altPayload.value : [];
-
-  if (altRawData.length === 0) throw new Error('Alternate izvor vratio prazan/neočekivan odgovor');
-
-  console.log(`✅ Alternate live fetch (montenegroairports.com): ${altRawData.length} letova`);
-
-  const altMappedFlights = await Promise.all(altRawData.map((raw: AlternateApiFlight) => mapAlternateApiFlight(raw)));
-  let altTodayFlights = filterTodayFlights(altMappedFlights);
-  altTodayFlights = removeDuplicateFlights(altTodayFlights);
-
-  const altExpandedFlights: Flight[] = [];
-  altTodayFlights.forEach(flight => {
-    if ((flight.GateNumber?.includes(',')) || (flight.CheckInDesk?.includes(','))) {
-      altExpandedFlights.push(...expandFlightForMultipleGates(flight));
-    } else {
-      altExpandedFlights.push(flight);
-    }
-  });
-
-  const altFinalFlights = removeDuplicateFlights(altExpandedFlights);
-
-  if (altFinalFlights.length > 0) {
-    // Isti princip kao glavni uživo fetch — osvježi backup i sa OVOG
-    // izvora, da backup uvijek ima najsvježiji dostupan podatak bez
-    // obzira koji je izvor dao poslednji uspješan rezultat.
-    try {
-      await backupService.saveBackup(altFinalFlights);
-    } catch (e) {
-      console.error('⚠️ Backup save failed (alternate source):', e);
-    }
-
-    const altFlightData = await buildFlightData(altFinalFlights, 'live-alternate', new Date().toISOString(), {
-      isNightMode: nightNow || computeDynamicNightMode(altFinalFlights),
-      warning: 'Glavni uživo izvor trenutno nije dostupan. Prikazan podatak sa rezervnog izvora.',
+    const expandedSecondaryFlights: Flight[] = [];
+    todaySecondaryFlights.forEach(flight => {
+      if ((flight.GateNumber?.includes(',')) || (flight.CheckInDesk?.includes(','))) {
+        expandedSecondaryFlights.push(...expandFlightForMultipleGates(flight));
+      } else {
+        expandedSecondaryFlights.push(flight);
+      }
     });
-    const altSlimmed = slimFlightData(altFlightData);
-    await saveFlightDataAndMetadata(altSlimmed, 'live-alternate', nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS);
 
-    console.log(`📊 Alternate live: ${altFlightData.departures.length} dep, ${altFlightData.arrivals.length} arr`);
+    const finalSecondaryFlights = removeDuplicateFlights(expandedSecondaryFlights);
 
-    return altSlimmed;
+    if (finalSecondaryFlights.length > 0) {
+      try {
+        await backupService.saveBackup(finalSecondaryFlights);
+      } catch (e) {
+        console.error('⚠️ Backup save failed (secondary):', e);
+      }
+
+      const secondaryFlightData = await buildFlightData(
+        finalSecondaryFlights,
+        'live',
+        new Date().toISOString(),
+        { isNightMode: nightNow || computeDynamicNightMode(finalSecondaryFlights) }
+      );
+      const slimmedSecondary = slimFlightData(secondaryFlightData);
+
+      await saveFlightDataAndMetadata(
+        slimmedSecondary,
+        'live',
+        nightNow ? NIGHT_CACHE_TTL_SECONDS : FLIGHT_CACHE_TTL_SECONDS
+      );
+
+      console.log(`📊 Secondary (montenegroairports.com): ${secondaryFlightData.departures.length} dep, ${secondaryFlightData.arrivals.length} arr`);
+
+      return slimmedSecondary;
+    }
   } else {
-    console.warn('⚠️ Alternate izvor vratio 0 letova — nastavljam na backup mode');
+    console.warn('⚠️ Sekundarni API takodje nije vratio letove');
   }
-} catch (alternateError) {
-  console.error('❌ Alternate live fetch (montenegroairports.com) takođe pao:', alternateError instanceof Error ? alternateError.message : alternateError);
+} catch (secondaryError) {
+  console.error('❌ Secondary API path failed:', secondaryError instanceof Error ? secondaryError.message : secondaryError);
 }
 
 // ── 4. BACKUP MODE ────────────────────────────────────────
@@ -884,8 +875,30 @@ const flightData = await buildFlightData(
 
 export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   // 1. Keš prvo — najčešći put, bez ikakvog Redis lock overhead-a.
+  //
+  // v4.1 FIX: provjeri da keš NIJE noćni ako smo prešli u dan.
+  // Ranije: `if (cached) return cached;` je rano vraćalo noćni cache
+  // (sa praznim departures/arrivals) iako je prošlo 04:00. Provjera
+  // noć→dan postoji u getCurrentFlightData() (linija ~428), ali se
+  // nikad nije izvršila jer je rano vraćanje preskočilo cijeli taj kod.
+  //
+  // Posljedica: u 04:01, kiosci su i dalje prikazivali prazne ekrane
+  // iako su letovi već bili dostupni u live API-ju. Admin dodjele
+  // gate-a/deska su propadale jer kiosk ne bi našao let u praznom
+  // `liveFlightData.departures`.
   const cached = await getFlightDataFromCache();
-  if (cached) return cached;
+  if (cached) {
+    const nightNow = isNightHours();
+    if (cached.isNightMode && !nightNow) {
+      console.log('🌅 Prelazak iz noći u dan — odbacujem stari noćni cache, radim svjež live fetch');
+      // Ne vraćamo cached — nastavljamo dolje na lock + fresh fetch.
+      // Očistimo i in-process cache da ga ne vratimo opet u while petlji ispod.
+      inProcessFlightData = null;
+      inProcessFlightExpiry = 0;
+    } else {
+      return cached;
+    }
+  }
 
   const client = getRedisClient();
   const token = generateLockToken();
@@ -912,7 +925,15 @@ export async function getCurrentFlightDataSafe(): Promise<FlightData> {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));
     const retryCache = await getFlightDataFromCache();
-    if (retryCache) return retryCache;
+    // v4.1 FIX: i ovdje provjeri noćni cache — ne vraćaj noćni cache u danu.
+    if (retryCache) {
+      const nightNow = isNightHours();
+      if (retryCache.isNightMode && !nightNow) {
+        // Još uvijek čekamo svjež fetch — nastavi čekati.
+        continue;
+      }
+      return retryCache;
+    }
   }
 
   // Predugo čekanje — nosilac locka je vjerovatno spor/zaglavljen.

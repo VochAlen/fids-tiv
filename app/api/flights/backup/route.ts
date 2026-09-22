@@ -1,6 +1,7 @@
 // app/api/flights/backup/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { FlightBackupService } from '@/lib/backup/flight-backup-service';
+import type { Flight } from '@/types/flight';
 
 export async function GET(): Promise<NextResponse> {
   try {
@@ -42,7 +43,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       case 'create':
         // Ovdje trebate fetch-ati live podatke i kreirati backup
         // Za sada ćemo kreirati prazan backup
-        const flights: any[] = []; // Ovdje treba fetch-ati realne podatke
+        // FIX (po zahtjevu — zamjena "any" pravim tipom): NAPOMENA, van
+        // obima ovog zahtjeva — niz je i dalje uvijek prazan (isti
+        // pre-postojeći, neimplementirani "TODO" kao u
+        // app/api/flights/backup/manage/route.ts). Ruta izgleda
+        // neiskorišćena (nema poziva iz klijentskog koda).
+        const flights: Flight[] = []; // Ovdje treba fetch-ati realne podatke
         const backupIdCreated = backupService.saveBackup(flights);
         
         return NextResponse.json({

@@ -78,7 +78,7 @@ export interface CreateAirlineData {
   };
 }
 
-export interface UpdateAirlineData extends Partial<CreateAirlineData> {}
+export type UpdateAirlineData = Partial<CreateAirlineData>;
 
 export interface CreateFlightData {
   flightNumber: string;
@@ -91,7 +91,7 @@ export interface CreateFlightData {
   validUntil: string | null;
 }
 
-export interface UpdateFlightData extends Partial<CreateFlightData> {}
+export type UpdateFlightData = Partial<CreateFlightData>;
 
 export interface CreateDestinationData {
   destinationCode: string;
@@ -110,7 +110,7 @@ export interface CreateDestinationData {
   };
 }
 
-export interface UpdateDestinationData extends Partial<CreateDestinationData> {}
+export type UpdateDestinationData = Partial<CreateDestinationData>;
 
 
 // ============================================================

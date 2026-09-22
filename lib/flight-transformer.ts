@@ -29,6 +29,46 @@ interface FlightData {
   lastUpdated: string;
 }
 
+// FIX (po zahtjevu — zamjena "any" pravim tipom): ova funkcija
+// namjerno prihvata VIŠE mogućih imena polja (razni izvori/formati
+// ulaznog JSON-a) — "any" je skrivao SVE greške pri pristupu poljima
+// (npr. tipfeler u imenu polja bi prošao nezapaženo). Interfejs ispod
+// eksplicitno navodi SVA polja koja kod ispod stvarno pokušava da
+// pročita (uključujući sve varijante imena), sva opciona jer nijedan
+// izvor ne mora imati baš sva polja — zadržava punu fleksibilnost
+// originalnog koda, ali sad sa stvarnom provjerom tipova.
+interface RawFlightInput {
+  // Naš format (montenegroairports.com stil)
+  Kompanija?: string; KompanijaICAO?: string; KompanijaNaziv?: string;
+  BrojLeta?: string; Aerodrom?: string; IATA?: string; Grad?: string;
+  Planirano?: string; Predvidjeno?: string; Aktuelno?: string;
+  StatusEN?: string; Terminal?: string; Gate?: string; CheckIn?: string;
+  Karusel?: string; CodeShare?: string; TipLeta?: string;
+  // Alternativni/generički formati
+  airlineCode?: string; carrierCode?: string;
+  airlineICAO?: string; icaoCode?: string;
+  airlineName?: string; carrierName?: string;
+  airportName?: string; destinationAirport?: string;
+  airportCode?: string; destination?: string;
+  flightNumber?: string; flightNum?: string;
+  scheduledTime?: string; scheduled?: string;
+  estimatedTime?: string; estimated?: string;
+  actualTime?: string; actual?: string;
+  status?: string; statusText?: string;
+  terminal?: string; gate?: string; gateNumber?: string;
+  checkIn?: string; checkInDesk?: string;
+  baggage?: string; baggageClaim?: string;
+  codeShare?: string; codeshare?: string;
+  type?: string; direction?: string;
+  departure?: boolean; arrival?: boolean;
+  destinationCity?: string; city?: string;
+}
+
+interface RawFlightInputWrapper {
+  departures?: RawFlightInput[];
+  arrivals?: RawFlightInput[];
+}
+
 // DeepSeek/OpenRouter configuration
 const DEEPSEEK_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek/deepseek-chat';
@@ -36,7 +76,7 @@ const DEEPSEEK_MODEL = 'deepseek/deepseek-chat';
 /**
  * Transform any JSON flight data to your format using DeepSeek
  */
-async function transformWithDeepSeek(inputData: any, apiKey: string): Promise<FlightData> {
+async function transformWithDeepSeek(inputData: RawFlightInput[] | RawFlightInputWrapper, apiKey: string): Promise<FlightData> {
   const systemPrompt = `You are a flight data transformation expert. Convert any flight data JSON to this exact format:
 
 {
@@ -118,12 +158,12 @@ Return ONLY valid JSON, no other text.`;
 /**
  * Manual transformation with correct flight type mapping
  */
-function manualTransform(inputData: any): FlightData {
+function manualTransform(inputData: RawFlightInput[] | RawFlightInputWrapper): FlightData {
   const departures: Flight[] = [];
   const arrivals: Flight[] = [];
 
   if (Array.isArray(inputData)) {
-    inputData.forEach((item: any) => {
+    inputData.forEach((item: RawFlightInput) => {
       const flight = transformSingleFlight(item);
       if (flight.FlightType === 'departure') {
         departures.push(flight);
@@ -134,12 +174,12 @@ function manualTransform(inputData: any): FlightData {
   } else if (inputData.departures && inputData.arrivals) {
     // If data is already partially structured
     if (Array.isArray(inputData.departures)) {
-      inputData.departures.forEach((item: any) => {
+      inputData.departures.forEach((item: RawFlightInput) => {
         departures.push(transformSingleFlight(item));
       });
     }
     if (Array.isArray(inputData.arrivals)) {
-      inputData.arrivals.forEach((item: any) => {
+      inputData.arrivals.forEach((item: RawFlightInput) => {
         arrivals.push(transformSingleFlight(item));
       });
     }
@@ -152,7 +192,7 @@ function manualTransform(inputData: any): FlightData {
   };
 }
 
-function transformSingleFlight(item: any): Flight {
+function transformSingleFlight(item: RawFlightInput): Flight {
   // Determine flight type - "O" for departure, "I" for arrival
   const flightType = getFlightType(item);
   
@@ -181,7 +221,7 @@ function transformSingleFlight(item: any): Flight {
 /**
  * Determine flight type based on various possible field names
  */
-function getFlightType(item: any): 'departure' | 'arrival' {
+function getFlightType(item: RawFlightInput): 'departure' | 'arrival' {
   // Primary mapping for your specific format
   if (item.TipLeta === 'O') return 'departure';
   if (item.TipLeta === 'I') return 'arrival';
@@ -197,7 +237,7 @@ function getFlightType(item: any): 'departure' | 'arrival' {
 /**
  * Parse code share flights from various formats
  */
-function parseCodeShare(codeShare: string): string[] {
+function parseCodeShare(codeShare: string | undefined): string[] {
   if (!codeShare) return [];
   
   return codeShare
@@ -209,7 +249,7 @@ function parseCodeShare(codeShare: string): string[] {
 /**
  * Get airline logo URL
  */
-function getLogoUrl(icaoCode: string): string {
+function getLogoUrl(icaoCode: string | undefined): string {
   if (!icaoCode) return 'https://via.placeholder.com/180x120?text=No+Logo';
   return `https://www.flightaware.com/images/airline_logos/180px/${icaoCode}.png`;
 }
@@ -217,7 +257,7 @@ function getLogoUrl(icaoCode: string): string {
 /**
  * Format time from various formats to HH:MM
  */
-function formatTime(time: string): string {
+function formatTime(time: string | undefined): string {
   if (!time) return '';
   
   // Remove any non-digit characters

@@ -1,45 +1,49 @@
 // app/api/test/desk-status-override/route.ts
-import { NextResponse } from 'next/server';
-import { safeRedisHGetAll, safeRedisHGet, safeRedisHSet, safeRedisHDel, safeRedisExpire } from '@/lib/redis';
-import { invalidateRawAssignmentsCache } from '@/lib/assignments-service';
-import { createHash } from 'crypto';
-import { revalidateTag } from 'next/cache';
-
-// ── FIX — RACE CONDITION (isti problem kao u gate-status-override, vidi pun
-// komentar tamo i u lib/redis.ts iznad safeRedisHSet): ALL_KEY je bio JEDAN
-// JSON string; POST je čitao cijeli objekat, mijenjao samo svoj desk, i
-// upisivao cijeli objekat nazad. Dva istovremena zahtjeva za RAZLIČITE
-// deskove su se mogla sudariti — drugi write tiho prepiše izmjenu prvog.
-// Sad je ALL_KEY Redis HASH (HSET po polju) — atomarno po desku. ──────────
-
-export const revalidate = 30;
-// FIX (Vercel Edge Requests/Active CPU trošak na 18 check-in monitora ×
-// 10-12s poll = ~4.24M poziva/mjesec, GOTOVO SVI stvarna izvršavanja
-// funkcije): identičan problem i identično rješenje kao
-// GATE_STATUS_CACHE_CONTROL u app/api/test/gate-status-override/route.ts
-// — pun kontekst i rollback uputstvo su tamo, ne duplira se ovdje.
-// VAŽNA RAZLIKA: CheckInPageClient.tsx je do sad slao `cache: 'no-store'`
-// na fetch() poziv ove rute, što je poništavalo bilo kakvu korist od
-// ovog Cache-Control header-a (browser/CDN keš se eksplicitno
-// zaobilazio) — ta linija je uklonjena da bi produženi keš prozor
-// stvarno imao efekta, isto kao što GatePageClient.tsx već radi.
 //
-// FIX (po zahtjevu — analiza Vercel računa, avg-sep 2026): ponovo
-// udvostručeno (20s → 40s), isti razlog i rollback uputstvo kao u
-// GATE_STATUS_CACHE_CONTROL — vidi tamo za pun kontekst.
-// FIX (po zahtjevu — brzina prikaza MORA biti ≤20s): s-maxage MORA
-// biti ≤20s bez obzira na poll interval — ako CDN keš traje duže od
-// 20s, promjena se NE VIDI do isteka tog keša, ČAK I AKO klijent
-// poluje svakih par sekundi (CDN keš je deljen između SVIH klijenata,
-// ne po-klijentu). 15s garantuje svježinu unutar zahtijevane granice,
-// uz malu marginu.
-const DESK_STATUS_CACHE_CONTROL =
-  'public, max-age=2, s-maxage=15, stale-while-revalidate=10';
+// v3 FIX (2026-08-24):
+// ─────────────────────────────────────────────────────────────
+// 1. REDIS LOCK — ranije read-modify-write nad 'test:desk-status:all'
+//    blobom je otvarao race condition: dva istovremena POST-a bi
+//    oboje pročitala isto stanje, izmijenila i prepisali — drugi
+//    write tiho briše prvi. Sad: SET lock:desk-status NX EX 5
+//    oko cijelog read-modify-write ciklusa.
+//
+// 2. CLEANUP PREMJESTEN — ranije je GET handler radio writeAll() ako
+//    nađe stare unose (starije od 4h), što je:
+//      a) write na read-only putanji (CPU na GET-u)
+//      b) još jedna trka ako dva GET-a istovremeno pokušaju cleanup
+//    Sad: cleanup se radi samo u POST handleru, pod lock-om.
+//
+// 3. FIRE-AND-FORGET PUBLISH — publish na Ably ide preko .catch(),
+//    response se vraća odmah, ne čeka se Ably round-trip.
+// ─────────────────────────────────────────────────────────────
 
+import { NextResponse, after } from 'next/server';
+import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
+import { createHash } from 'crypto';
+import { publishToChannel } from '@/lib/ably-server';
 
-const MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 sata
-const TTL_SECONDS = 4 * 60 * 60;       // 4h
-const ALL_KEY = 'test:desk-status:all';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+const MAX_AGE_MS = 4 * 60 * 60 * 1000;   // 4 sata — unosi stariji se brišu
+const TTL_SECONDS = 4 * 60 * 60;          // 4h — TTL na blob ključu
+// FIX (KRITIČNO — pravi, konačan uzrok prijavljenog "neki letovi se
+// ne otvaraju na check-in/gate, radi tek nakon zaobilaznice"):
+// glavni (polling, ne-Ably) FIDS sistem koristi IDENTIČNO ime ključa
+// ('test:desk-status:all'), ali kao Redis HASH (HSET po polju), dok
+// ovaj (Ably) sistem koristi STRING (JSON blob preko GET/SET). Ako
+// oba sistema dijele istu Redis bazu, svaki upis jednog sistema
+// prepisuje tip podatka koji drugi očekuje — otud ponavljajuća
+// "WRONGTYPE" greška i naizgled nasumično "neki letovi rade, neki ne"
+// (u stvari čista slučajnost tajminga koji je sistem poslednji pisao).
+// Ključ je preimenovan da NIKAD ne može da se sudari sa glavnim
+// sistemom, bez obzira da li dijele Redis bazu.
+const ALL_KEY = 'ably-fids:desk-status:all';
+const LOCK_KEY = 'ably-fids:lock:desk-status:override';
+const LOCK_TTL_SECONDS = 5;
+const LOCK_WAIT_POLL_MS = 200;
+const LOCK_WAIT_MAX_MS = 2_000;
 
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, DeskEntry> | null = null;
@@ -52,67 +56,50 @@ type DeskEntry = {
   flightNumber: string;
   classType: string | null;
   setAt: number | null;
+  // FIX (KRITIČNO — pravi uzrok prijavljenog "brzo uklonim pa odmah
+  // dodijelim novi let, novi se ne prikaže"): setAt (Date.now()) se
+  // hvata NEZAVISNO na svakom serverless pozivu — ako "ukloni" (poslat
+  // PRVI od strane korisnika) završi na SPORIJOJ funkcijskoj instanci
+  // (cold start i sl.) od "dodijeli" (poslat DRUGI), setAt za "ukloni"
+  // može ispasti KASNIJI od setAt za "dodijeli" — mergeOne na klijentu
+  // (hooks/useRealtimeAssignments.ts) bi tad POGREŠNO prihvatio
+  // "ukloni" kao noviji i tiho obrisao upravo dodijeljen let. seq je
+  // STROGO rastući brojač, dodijeljen UNUTAR lock-om zaštićene sekcije
+  // (vidi mutateAll niže) — garantovano prati STVARAN redosled kojim
+  // su operacije NA OVOM RESURSU obrađene, imun na varijacije u brzini
+  // obrade između poziva. Klijent sad poredi po seq, ne po setAt.
+  seq: number;
 };
 
-function parseHashEntries(raw: Record<string, string> | null): Record<string, DeskEntry> {
+type DeskMap = Record<string, DeskEntry>;
+
+async function readAllUncached(): Promise<DeskMap> {
+  const raw = await safeRedisGet(ALL_KEY);
   if (!raw) return {};
-  const out: Record<string, DeskEntry> = {};
-  for (const [field, json] of Object.entries(raw)) {
-    try {
-      out[field] = JSON.parse(json) as DeskEntry;
-    } catch {
-      // izolovano oštećeno polje — preskoči, ne ruši ostatak
+  try {
+    const parsed = JSON.parse(raw) as DeskMap;
+    // ── Ne čistimo ovdje — cleanup je u POST-u pod lock-om. Samo
+    // filtriramo starije od MAX_AGE da klijent ne vidi zastarjele unose.
+    const now = Date.now();
+    const result: DeskMap = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) continue;
+      result[k] = v;
     }
+    return result;
+  } catch {
+    return {};
   }
-  return out;
 }
 
-async function readAll(): Promise<Record<string, DeskEntry>> {
-  const raw = await safeRedisHGetAll(ALL_KEY);
-  return parseHashEntries(raw);
-}
-
-async function touchExpiry(): Promise<void> {
-  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
-}
-
-// Piše TAČNO JEDNO polje (jedan desk) — atomarno, ne dira ostale deskove.
-// FIX (assign-checkin ne prikazuje dodijeljene šaltere — isti bug kao na
-// gate-status-override): vraća boolean iz safeRedisHSet — ako Redis
-// circuit breaker otvori ili komanda padne, vraćamo false, pa POST handler
-// može vratiti 503 i admin zna da treba ponovo kliknuti. Bez ovog,
-// admin bi vidio success toast a zapis ne bi bio u Redis-u — poslije
-// /api/test/assignments i check-in monitori ne bi vidjeli dodjelu.
-async function writeOne(deskNumber: string, entry: DeskEntry): Promise<boolean> {
-  const ok = await safeRedisHSet(ALL_KEY, deskNumber, JSON.stringify(entry));
-  if (!ok) return false;
-  await safeRedisExpire(ALL_KEY, TTL_SECONDS);
-  return true;
-}
-
-async function deleteOne(deskNumber: string): Promise<void> {
-  await safeRedisHDel(ALL_KEY, deskNumber);
-}
-
-// Briše SAMO stara polja — pojedinačni HDEL po polju, ne prepisuje cijeli hash.
-async function cleanupStale(fields: string[]): Promise<void> {
-  await Promise.all(fields.map(f => safeRedisHDel(ALL_KEY, f)));
-}
-
-async function readAllCached(): Promise<Record<string, DeskEntry>> {
+async function readAllCached(): Promise<DeskMap> {
   const now = Date.now();
-
-  if (cachedAll && now < cachedAllExpiry) {
-    return cachedAll;
-  }
-
-  if (cacheRefreshing && cachedAll) {
-    return cachedAll;
-  }
+  if (cachedAll && now < cachedAllExpiry) return cachedAll;
+  if (cacheRefreshing && cachedAll) return cachedAll;
 
   cacheRefreshing = true;
   try {
-    const fresh = await readAll();
+    const fresh = await readAllUncached();
     cachedAll = fresh;
     cachedAllExpiry = now + CACHE_TTL_MS;
     return fresh;
@@ -121,39 +108,132 @@ async function readAllCached(): Promise<Record<string, DeskEntry>> {
   }
 }
 
+async function writeAll(data: DeskMap): Promise<void> {
+  await safeRedisSet(ALL_KEY, JSON.stringify(data), TTL_SECONDS);
+}
+
+// ── Token + unlock skripta ──
+function generateLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+const UNLOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
+async function acquireLock(): Promise<string | null> {
+  const client = getRedisClient();
+  const token = generateLockToken();
+  const deadline = Date.now() + LOCK_WAIT_MAX_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      const got = await client.set(LOCK_KEY, token, 'EX', LOCK_TTL_SECONDS, 'NX');
+      if (got === 'OK') return token;
+    } catch (err) {
+      console.warn('[desk-status-override] lock acquire error:', err instanceof Error ? err.message : err);
+      return null;
+    }
+    await new Promise(r => setTimeout(r, LOCK_WAIT_POLL_MS));
+  }
+  return null;
+}
+
+async function releaseLock(token: string): Promise<void> {
+  try {
+    const client = getRedisClient();
+    await client.eval(UNLOCK_SCRIPT, 1, LOCK_KEY, token);
+  } catch (e) {
+    console.warn('[desk-status-override] lock release error:', e instanceof Error ? (e as Error).message : e);
+  }
+}
+
+// ── Atomic read-modify-write pod lock-om ──
+// FIX (vidi opširan komentar uz DeskEntry.seq iznad): atomski,
+// strogo-rastući brojač preko Redis INCR — nezavisan od Date.now(),
+// pa nije podložan varijaciji u brzini obrade između serverless
+// poziva. Jedan dijeljen ključ za sve šaltere (ne treba per-desk
+// preciznost, samo GLOBALNI, strogo rastući redosled operacija).
+const SEQ_KEY = 'ably-fids:seq:desk-status';
+async function nextSeq(): Promise<number> {
+  const client = getRedisClient();
+  return client.incr(SEQ_KEY);
+}
+
+async function mutateAll(
+  mutate: (all: DeskMap) => { changed: boolean; publishedEntry?: { deskNumber: string; entry: DeskEntry } | null } | null
+): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { deskNumber: string; entry: DeskEntry } | null }> {
+  const token = await acquireLock();
+  if (!token) {
+    return { success: false, conflict: true };
+  }
+
+  try {
+    const all = await readAllUncached();
+
+    // Cleanup starih unosa pod lock-om
+    const now = Date.now();
+    let cleaned = 0;
+    for (const k of Object.keys(all)) {
+      const v = all[k];
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
+        delete all[k];
+        cleaned++;
+      }
+    }
+
+    const result = mutate(all);
+    if (!result) {
+      if (cleaned > 0) await writeAll(all);
+      return { success: true, cleanedCount: cleaned };
+    }
+
+    // FIX (vidi opširan komentar uz DeskEntry.seq): entry objekat je
+    // ISTI po referenci i u all[deskNumber] i u result.publishedEntry
+    // (mutate callback-ovi ispod rade `all[x] = entry; return
+    // {publishedEntry: {..., entry}}`) — postavljanje seq ovdje ga
+    // ažurira NA OBA MJESTA odjednom, bez potrebe da se mijenja
+    // potpis/logika svake pojedinačne grane (open/closed/clear/
+    // setClass) iznad.
+    if (result.changed && result.publishedEntry) {
+      result.publishedEntry.entry.seq = await nextSeq();
+    }
+
+    if (result.changed || cleaned > 0) {
+      await writeAll(all);
+    }
+    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry };
+  } finally {
+    await releaseLock(token);
+  }
+}
+
+// ============================================================
+// GET — bez izmjena, samo čitanje + ETag
+// ============================================================
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const deskNumber = searchParams.get('deskNumber');
-    const now = Date.now();
 
     const all = await readAllCached();
-
-    // ── ČIŠĆENJE STARIH ZAPISA — sad HDEL po polju (vidi cleanupStale) ──
-    const staleFields: string[] = [];
-    for (const key of Object.keys(all)) {
-      const entry = all[key];
-      if (entry.setAt && now - entry.setAt > MAX_AGE_MS) {
-        delete all[key];
-        staleFields.push(key);
-      }
-    }
-    if (staleFields.length > 0) {
-      await cleanupStale(staleFields);
-      cachedAll = all;
-      cachedAllExpiry = Date.now() + CACHE_TTL_MS;
-      console.log(`[desk-cleanup] Total cleaned: ${staleFields.length} old desk-status keys`);
-    }
 
     // ── IZRAČUNAVANJE ETag ──────────────────────────────────
     const payload = deskNumber
       ? { deskNumber, entry: all[deskNumber] ?? { status: null, flightNumber: '', classType: null, setAt: null } }
       : { all };
+
     const hash = createHash('md5')
       .update(JSON.stringify(payload))
       .digest('hex')
       .substring(0, 16);
     const etag = `"${hash}"`;
+
+    const cacheControl = 'public, max-age=90, s-maxage=100, stale-while-revalidate=180';
 
     // ── PROVJERA If-None-Match ──────────────────────────────
     const ifNoneMatch = request.headers.get('if-none-match');
@@ -162,31 +242,19 @@ export async function GET(request: Request) {
         status: 304,
         headers: {
           'ETag': etag,
-          'Cache-Control': DESK_STATUS_CACHE_CONTROL,
-          'CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
-          'Vercel-CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
-          // FIX (klasa/status vidljiviji na check-in ekranu): isto kao na
-          // gate-status-override ruti — bez ovog tag-a, revalidateTag(
-          // 'flight-status') iz POST handlera nije probijao CDN keš ove
-          // rute, pa je check-in monitor čekao do 5s da vidi novu dodjelu/
-          // klasu iako je server već znao za nju.
-          'Cache-Tag': 'flight-status',
-          'Vercel-Cache-Tag': 'flight-status',
+          'Cache-Control': cacheControl,
+          'CDN-Cache-Control': cacheControl,
+          'Vercel-CDN-Cache-Control': cacheControl,
         },
       });
     }
 
     // ── NORMALAN ODGOVOR ────────────────────────────────────
-    const headers = {
-      'Cache-Control': DESK_STATUS_CACHE_CONTROL,
-      'CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
-      'Vercel-CDN-Cache-Control': DESK_STATUS_CACHE_CONTROL,
+    const headers: Record<string, string> = {
+      'Cache-Control': cacheControl,
+      'CDN-Cache-Control': cacheControl,
+      'Vercel-CDN-Cache-Control': cacheControl,
       'ETag': etag,
-      // FIX (vidi komentar gore kod 304 grane): tag-based invalidacija
-      // CDN keša — bez ovoga, check-in monitori ne bi vidjeli promjene
-      // klase/statusa do isteka max-age=2 s-maxage=2 SWR=3 (max 5s).
-      'Cache-Tag': 'flight-status',
-      'Vercel-Cache-Tag': 'flight-status',
     };
 
     if (deskNumber) {
@@ -201,70 +269,102 @@ export async function GET(request: Request) {
   }
 }
 
+// ============================================================
+// POST — sa Redis lock-om i fire-and-forget Ably publish-om
+// ============================================================
+// FIX (po zahtjevu — strict TypeScript, bez any): pravi tip umjesto
+// `any` za tijelo zahtjeva — polja odgovaraju onome što se stvarno
+// destrukturira ispod. Svako polje je opciono na ulazu (JSON od
+// klijenta se ne provjerava strukturno prije parsiranja) — validacija
+// da li su OBAVEZNA polja prisutna i dalje se radi eksplicitno ispod
+// (npr. `if (!deskNumber)`), nepromijenjeno.
+interface DeskStatusRequestBody {
+  deskNumber?: string;
+  action?: 'open' | 'closed' | 'clear' | 'setClass';
+  flightNumber?: string;
+  classType?: string | null;
+}
+
 export async function POST(request: Request) {
-  const { deskNumber, action, flightNumber, classType } = await request.json();
+  let body: DeskStatusRequestBody;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
+
+  const { deskNumber, action, flightNumber, classType } = body;
   if (!deskNumber) {
     return NextResponse.json({ error: 'deskNumber required' }, { status: 400 });
   }
 
-  // ── FIX (race condition): čitamo SAMO polje ovog deska (HGET), pišemo
-  // SAMO njega nazad (HSET) — vidi objašnjenje na vrhu fajla.
-  const existingRaw = await safeRedisHGet(ALL_KEY, deskNumber);
-  let existing: DeskEntry | undefined;
-  if (existingRaw) {
-    try { existing = JSON.parse(existingRaw) as DeskEntry; } catch { existing = undefined; }
+  try {
+    const result = await mutateAll((all) => {
+      const existing = all[deskNumber];
+      let entry: DeskEntry;
+
+      // ── AŽURIRANJE ──────────────────────────────────────────
+      if (action === 'open' && flightNumber) {
+        entry = { status: 'open', flightNumber, classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        all[deskNumber] = entry;
+        return { changed: true, publishedEntry: { deskNumber, entry } };
+      }
+
+      if (action === 'closed') {
+        entry = { status: 'closed', flightNumber: flightNumber || '', classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        all[deskNumber] = entry;
+        return { changed: true, publishedEntry: { deskNumber, entry } };
+      }
+
+      if (action === 'clear') {
+        if (!existing) return { changed: false };
+        delete all[deskNumber];
+        entry = { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
+        return { changed: true, publishedEntry: { deskNumber, entry } };
+      }
+
+      if (action === 'setClass') {
+        if (!existing) return { changed: false };
+        entry = { ...existing, classType: classType ?? null };
+        all[deskNumber] = entry;
+        return { changed: true, publishedEntry: { deskNumber, entry } };
+      }
+
+      return null;
+    });
+
+    if (result.conflict) {
+      return NextResponse.json(
+        { error: 'Concurrent modification — please retry in a moment', retryable: true },
+        { status: 503 }
+      );
+    }
+
+    if (result.cleanedCount && result.cleanedCount > 0) {
+      console.log(`[desk-status-override] Cleanup: removed ${result.cleanedCount} expired entries (during ${action} on ${deskNumber})`);
+    }
+
+    // Invalidiraj in-process GET cache
+    cachedAll = null;
+
+    // ── 📡 ABLY PUBLISH — fire-and-forget, ALI garantovano dovršen
+    // (after() — vidi objašnjenje u gate-status-override/route.ts).
+    // Response se vraća odmah. Ako publish ipak padne, kiosci će
+    // dobiti promjenu preko fallback polling-a na 20s.
+    if (result.publishedEntry) {
+      after(() =>
+        publishToChannel('assignments:desks', 'update', result.publishedEntry).catch(err =>
+          console.error('[desk-status-override] Ably publish (assignments:desks) failed:', err)
+        )
+      );
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error('[desk-status-override] POST error:', err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: 'Failed to update desk status — try again in a few seconds', retryable: true },
+      { status: 503 }
+    );
   }
-
-  if (action === 'open' && flightNumber) {
-    const entry: DeskEntry = {
-      status: 'open',
-      flightNumber,
-      classType: existing?.classType ?? null,
-      setAt: Date.now(),
-    };
-    if (!(await writeOne(deskNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else if (action === 'closed') {
-    const entry: DeskEntry = {
-      status: 'closed',
-      flightNumber: flightNumber || '',
-      classType: existing?.classType ?? null,
-      setAt: Date.now(),
-    };
-    if (!(await writeOne(deskNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else if (action === 'clear') {
-    await deleteOne(deskNumber);
-  } else if (action === 'setClass') {
-    if (!existing) return NextResponse.json({ error: 'No active assignment' }, { status: 400 });
-    const entry: DeskEntry = { ...existing, classType: classType ?? null };
-    if (!(await writeOne(deskNumber, entry))) {
-      return NextResponse.json(
-        { error: 'Redis write failed — pokušajte ponovo za nekoliko sekundi' },
-        { status: 503 }
-      );
-    }
-  } else {
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-  }
-
-  // FIX (assign-checkin ne prikazuje dodijeljene šaltere — vidi komentar
-  // u app/api/test/gate-status-override/route.ts za potpuni kontekst):
-  // invalidate i assignments-service modul-level keš — bez ovoga,
-  // /api/test/assignments vraća STARI cachedRaw do 8s (RAW_CACHE_TTL_MS)
-  // nakon dodjele, pa assign-checkin panel ne prikazuje novu dodjelu.
-  cachedAll = null;
-  cachedAllExpiry = 0;
-  invalidateRawAssignmentsCache();
-
-  revalidateTag('flight-status');
-  return NextResponse.json({ success: true });
 }

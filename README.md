@@ -1,65 +1,36 @@
-# Flight Information Display System (FIDS)
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-A Next.js 15.2.4 application for displaying real-time flight information on Android Smart TV browsers (Android 7+).
+## Getting Started
 
-## Features
-
-- **Arrivals Display** - Table view of arriving flights
-- **Departures Display** - Table view of departing flights
-- **Combined Display** - Auto-switches between arrivals and departures every 25 seconds
-- **Gate Display** (Landscape) - Shows flight information for a specific gate
-- **Check-In Display** (Portrait) - Shows flight information for check-in desks with rotating advertisements
-- **Baggage Claim Display** - Shows baggage belt information for arriving flights
-
-## Data Source
-
-Fetches flight data every 60 seconds from:
-```
-https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv
-```
-
-## Pages
-
-- `/` - Home page with navigation links
-- `/arrivals` - Arrivals board
-- `/departures` - Departures board
-- `/combined` - Combined arrivals/departures with auto-switch
-- `/gate/[gateNumber]` - Gate display (e.g., `/gate/1`, `/gate/2`)
-- `/checkin/[deskNumber]` - Check-in display (e.g., `/checkin/1`, `/checkin/2`)
-- `/baggage/[beltNumber]` - Baggage claim display (e.g., `/baggage/1`)
-
-## Check-In Display Behavior
-
-- Shows flight details when `StatusEN` is "Processing"
-- Shows only the desk number on blank screen when flight is not processing
-- Bottom third displays rotating advertisements (15-second intervals)
-
-## Technology Stack
-
-- Next.js 15.2.4 (App Router)
-- React 19
-- TypeScript 5.2.2
-- Tailwind CSS 3.3.3
-- Optimized for Vercel deployment
-
-## Development
+First, run the development server:
 
 ```bash
-npm install
 npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
 ```
 
-## Production Build
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-```bash
-npm run build
-npm run start
-```
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-## Deployment
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-Optimized for Vercel deployment. Simply push to your connected repository.
+## Learn More
 
-## Browser Compatibility
+To learn more about Next.js, take a look at the following resources:
 
-Tested and optimized for Android Smart TV browsers from Android 7 to latest versions.
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

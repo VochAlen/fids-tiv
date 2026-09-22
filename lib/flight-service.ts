@@ -18,10 +18,7 @@ const HASH_CHECK_INTERVAL = 35_000; // 10 sekundi minimalno između provjera
 
 
 // ─────────────────────────────────────────────────────────────
-// NAPOMENA: FLIGHT_API_URL ispod pokazuje direktno na /api/flights.
-// (Stari komentar je ovdje pominjao /api/flights-cached — ta ruta je bila
-// mrtav kod, nijedan klijent je nije pozivao, i imala je pokvarenu
-// NEXT_PUBLIC_BASE_URL self-fetch zavisnost — uklonjena je iz projekta.)
+// IZMJENA 1: Koristi /api/flights-cached umjesto /api/flights
 // Jedan red izmjene — sve ostalo radi identično.
 // Svi kiosci dijele isti server-side cache (45s svježina),
 // umjesto da svaki poziva vanjski API direktno.
@@ -65,87 +62,57 @@ function getCachedData(): FlightData {
     isOfflineMode: true,
   };
 }
-// ── Jedan fetch koji radi i hash-check i vraća pune podatke ─────
-// Umjesto da checkForChanges() i fetchFlightData() rade odvojene
-// pozive na istu rutu, ovdje se podaci iz statusnog poziva PONOVNO
-// KORISTE ako je hash pokazao promjenu — nema drugog fetch-a.
-async function checkForChangesAndFetch(): Promise<{ changed: boolean; data: any | null }> {
+async function checkForChanges(): Promise<boolean> {
+  // Ne provjeravaj prečesto
   if (Date.now() - lastHashCheckTime < HASH_CHECK_INTERVAL) {
-    return { changed: false, data: null };
+    return false;
   }
   lastHashCheckTime = Date.now();
-
+  
   try {
-    const statusRes = await fetch(FLIGHT_API_URL, {
+    const statusRes = await fetch('/api/flights/status', {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
     });
-    if (!statusRes.ok) return { changed: false, data: null };
-
-    const raw = await statusRes.json();
-
-    if (lastKnownHash === raw.hash && lastKnownHash !== null) {
+    if (!statusRes.ok) return false;
+    
+    const status = await statusRes.json();
+    
+    // Ako se hash nije promijenio, nema novih podataka
+    if (lastKnownHash === status.hash && lastKnownHash !== null) {
       console.log('🔄 No changes detected (hash match)');
-      return { changed: false, data: null };
+      return false;
     }
-
-    lastKnownHash = raw.hash;
-    console.log(`🔄 Changes detected! New hash: ${raw.hash?.substring(0, 8)}...`);
-    return { changed: true, data: raw }; // ← raw već sadrži departures/arrivals, ne treba drugi fetch
+    
+    // Hash se promijenio ili je prvi put
+    lastKnownHash = status.hash;
+    console.log(`🔄 Changes detected! New hash: ${status.hash?.substring(0, 8)}...`);
+    return true;
   } catch (err) {
-    console.warn('⚠️ Failed to check /api/flights:', err);
-    return { changed: true, data: null }; // signal za fallback ispod
+    console.warn('⚠️ Failed to check /api/flights/status:', err);
+    return true; // U slučaju greške, dohvati podatke (safe fallback)
   }
 }
 
-export async function fetchFlightData(force = false): Promise<FlightData> {
-  if (!force) {
-    const { changed, data: statusData } = await checkForChangesAndFetch();
 
-    if (!changed && lastKnownData) {
-      console.log('📦 Returning cached flight data (no changes)');
-      return { ...lastKnownData, source: 'cached' };
-    }
-
-    // ── Ako je promjena detektovana I statusData već ima pune podatke,
-    // iskoristi ih direktno — bez drugog fetch-a. ──
-    if (changed && statusData && (Array.isArray(statusData.departures) || Array.isArray(statusData.arrivals))) {
-      const departures = Array.isArray(statusData.departures) ? statusData.departures : [];
-      const arrivals   = Array.isArray(statusData.arrivals)   ? statusData.arrivals   : [];
-
-      const flightData: FlightData = {
-        departures,
-        arrivals,
-        totalFlights:      departures.length + arrivals.length,
-        lastUpdated:       statusData.lastUpdated       || new Date().toISOString(),
-        source:            statusData.source            || 'live',
-        isOfflineMode:     statusData.isOfflineMode     || false,
-        error:             statusData.error,
-        warning:           statusData.warning,
-        backupTimestamp:   statusData.backupTimestamp,
-        autoProcessedCount: statusData.autoProcessedCount,
-      };
-
-      lastFetchTime = Date.now();
-      cacheData(flightData);
-      lastKnownData = flightData;
-
-      console.log(`✅ Flight data reused from status check: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
-      return flightData;
-    }
-
-    const now = Date.now();
-    if (now - lastFetchTime < MIN_FETCH_INTERVAL && lastKnownData) {
-      console.log('⏱️ Skipping fetch - too soon after last request');
-      return { ...lastKnownData, source: 'cached' };
-    }
-  } else {
-    console.log('⚡ Force refresh requested — bypassing hash-check and throttle');
+// ── IZMIJENJENA fetchFlightData FUNKCIJA ────────────────────
+export async function fetchFlightData(): Promise<FlightData> {
+  // Prvo provjeri da li ima promjena preko status endpointa
+  const hasChanges = await checkForChanges();
+  
+  // Ako nema promjena i imamo keširane podatke, vrati ih odmah
+  if (!hasChanges && lastKnownData) {
+    console.log('📦 Returning cached flight data (no changes)');
+    return { ...lastKnownData, source: 'cached' };
+  }
+  
+  // Ograničenje učestalosti fetch-a (dodatna zaštita)
+  const now = Date.now();
+  if (now - lastFetchTime < MIN_FETCH_INTERVAL && lastKnownData) {
+    console.log('⏱️ Skipping fetch - too soon after last request');
+    return { ...lastKnownData, source: 'cached' };
   }
 
-  // ── Fallback: force=true, ili checkForChangesAndFetch nije dao data
-  // (npr. network greška u statusnom pozivu) — jedini preostali put
-  // koji stvarno radi svjež fetch. ──
   try {
     console.log('🛫 Fetching flight data from API...');
 
@@ -181,9 +148,10 @@ export async function fetchFlightData(force = false): Promise<FlightData> {
         autoProcessedCount: data.autoProcessedCount,
       };
 
+      // Sačuvaj u memorijski cache
       cacheData(flightData);
       lastKnownData = flightData;
-
+      
       console.log(`✅ Flight data fetched: ${flightData.departures.length} dep, ${flightData.arrivals.length} arr`);
       return flightData;
     } else {
@@ -213,6 +181,7 @@ export async function fetchFlightData(force = false): Promise<FlightData> {
     };
   }
 }
+
 // ─────────────────────────────────────────────────────────────
 // Helper funkcije za filtriranje letova
 // ─────────────────────────────────────────────────────────────
@@ -441,21 +410,15 @@ export function getUniqueDeparturesWithDeparted(flights: Flight[]): Flight[] {
   const now = new Date();
   const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
 
-  // FIX: bio je uzrok "Unable to load flight data" na departures/combined
-  // stranicama. status.toLowerCase() se ranije zvao DIREKTNO na
-  // flight.StatusEN bez provjere null/undefined — za razliku od SVIH
-  // ostalih sličnih helper funkcija u ovom fajlu (shouldDisplayFlight,
-  // isFlightCompleted, shouldDisplayOnCheckIn), koje sve imaju
-  // "if (!flight.StatusEN) return false" prije .toLowerCase(). Ako je
-  // ijedan let u nizu imao StatusEN kao null/undefined u praksi (TS tip
-  // tvrdi "string", ali to se ne provjerava na runtime-u protiv stvarnih
-  // podataka iz baze/upstream izvora), ovo je bacalo TypeError unutar
-  // .filter() callback-a na liniji 454 ispod — što se propagira do
-  // outer catch-a u departures/page.tsx i CombinedPageClient.tsx
-  // (jedine dvije stranice koje zovu getUniqueDeparturesWithDeparted)
-  // i prikazuje se kao "Unable to load flight data", iako je /api/flights
-  // vratio 200 OK. border/arrivals stranice ovu funkciju uopšte ne
-  // pozivaju, zato tamo nije bilo simptoma.
+  // FIX (KRITIČNO — portovano iz glavnog/polling sistema, provjereno
+  // stvaran uzrok "Unable to load flight data" tamo iako je /api/flights
+  // vraćao 200 OK): status.toLowerCase() se ranije zvao DIREKTNO na
+  // parametru bez provjere null/undefined. TypeScript tip flight.StatusEN
+  // tvrdi "string", ali se to ne provjerava na runtime-u protiv stvarnih
+  // podataka iz izvora — ako je ijedan let imao StatusEN kao null/undefined
+  // u praksi, ovo baca TypeError unutar .filter() poziva ispod, što ruši
+  // CIO poziv ove funkcije za bilo koju stranicu koja je zove (CombinedPageClientV2,
+  // departures/page.tsx, SplitBoardPageClient.tsx — sve tri provjerene).
   const isDeparted = (status: string | null | undefined) => {
     const s = (status ?? '').toLowerCase();
     return s.includes('departed') || s.includes('poletio');

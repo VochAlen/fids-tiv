@@ -19,36 +19,23 @@ import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-s
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react";
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
-// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
-// zamjena za lokalnu, hardkodiranu CHECKIN_OFFSETS tabelu ispod (sad
-// uklonjenu) — vidi identičan, opširniji komentar u
-// app/combined/CombinedPageClient.tsx za pun kontekst bug-a.
-import { loadCheckInConfig, getCheckInOffsetMinutes } from '@/lib/check-in-service';
+import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
+import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 
 // ============================================================
 // KONSTANTE
 // ============================================================
-const REFRESH_INTERVAL_MS          = 150_000;
-// FIX (podaci se ne učitavaju oko 4h ujutro): vidi objašnjenje u
-// app/combined/CombinedPageClient.tsx — server (/api/flights) može
-// legitimno trebati do ~25s na noć→dan prelazu (FETCH_LOCK wait,
-// LOCK_WAIT_MAX_MS=25000 u lib/flight-data-service.ts). Podignuto na 30s.
-const FETCH_TIMEOUT_MS             = 30_000; // 30s (bilo 15s)
-const MAX_RETRIES                  = 3;
-const RETRY_DELAY_MS               = 1_000;
-const CACHE_KEY                    = "flight_board_cache";
-const CACHE_DURATION               = 5 * 60 * 1_000;
-const HEARTBEAT_TIMEOUT_MS         = 150_000;
+
+
+
+const HEARTBEAT_TIMEOUT_MS         = 120_000;
 const HEARTBEAT_CHECK_INTERVAL_MS  = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS   = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY          = 18;
 const MAX_FLIGHTS_MEMORY           = 15;
 const HARD_RESET_INTERVAL_MS       = 6 * 60 * 60 * 1000;
 const HIDDEN_FLIGHT_PATTERNS = ["ZZZ", "G00", "PVT", "TST"];
-// let lastKnownHash: string | null = null; komentarisano 11.08.2026-nakon low end optimizacije
-const IS_LOW_END = typeof navigator !== 'undefined' &&
-  (navigator.hardwareConcurrency ?? 4) < 4;
-const MEMORY_PRESSURE_THRESHOLD = 0.80;
+
 
 // ============================================================
 // ERROR BOUNDARY
@@ -159,31 +146,9 @@ const isValidDisplayTime = (timeStr: string | null | undefined): boolean => {
   return formatted !== "" && formatted !== "00:00";
 };
 
-const saveToCache = (data: { arrivals: Flight[]; departures: Flight[]; lastUpdated: string }) => {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() })); }
-  catch (e) { console.warn("Failed to save to cache:", e); }
-};
-const loadFromCache = (): { arrivals: Flight[]; departures: Flight[]; lastUpdated: string } | null => {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const { data, timestamp } = JSON.parse(raw);
-    return Date.now() - timestamp > CACHE_DURATION ? null : data;
-  } catch { return null; }
-};
 
-const fetchWithTimeout = async (url: string, ms: number, headers?: HeadersInit, externalSignal?: AbortSignal): Promise<Response> => {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
-  if (externalSignal) {
-    if (externalSignal.aborted) ctrl.abort();
-    else externalSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
-  }
-  try {
-    const r = await fetch(url, { signal: ctrl.signal, headers });
-    clearTimeout(id); return r;
-  } catch (e) { clearTimeout(id); throw e; }
-};
+
+
 
 const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] => {
   const now = new Date();
@@ -231,15 +196,17 @@ const filterRecentFlights = (flights: Flight[], isArrivals: boolean): Flight[] =
 // ============================================================
 // AUTO-STATUS (isti)
 // ============================================================
-// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
-// hardkodirana CHECKIN_OFFSETS tabela je OVDJE UKLONJENA — vidi
-// identičan, opširniji komentar u app/combined/CombinedPageClient.tsx.
-// Sad se koristi getCheckInOffsetMinutes() iz lib/check-in-service.ts,
-// koji čita stvarnu konfiguraciju iz settings.ini.
+const CHECKIN_OFFSETS: Record<string, number> = {
+  "6H": 180, "FZ": 180, "LS": 150, "LY": 180, "IZ": 180,"BA": 150,
+};
 
 function getAutoStatus(flight: Flight): string | null {
   const status = (flight.StatusEN ?? "").trim();
-  if (status && status !== "-") return null;
+  // v4.5 FIX: vidi identičan komentar u combined/CombinedPageClientV2.tsx —
+  // raniji uslov je odustajao čim je API vratio bilo kakav tekst, uključujući
+  // generičko "On Time"/"Scheduled", pa se auto-status nikad nije računao.
+  const isGenericStatus = !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status);
+  if (!isGenericStatus) return null;
   const scheduled = parseFlightTimeToDate(flight.ScheduledDepartureTime);
   if (!scheduled) return null;
   const referenceTime = parseFlightTimeToDate(flight.EstimatedDepartureTime) ?? scheduled;
@@ -252,7 +219,7 @@ function getAutoStatus(flight: Flight): string | null {
   if (minsToRef <= 30) return "Go to Gate";
   if (minsToSTD > 30) {
     const iata = (flight.FlightNumber ?? "").replace(/\s/g, "").substring(0, 2).toUpperCase();
-    const checkInMinutesOffset = getCheckInOffsetMinutes(iata);
+    const checkInMinutesOffset = CHECKIN_OFFSETS[iata] ?? 120;
     const checkInDate = new Date(scheduled.getTime() - (checkInMinutesOffset * 60 * 1000));
     const hh = String(checkInDate.getHours()).padStart(2, "0");
     const mm = String(checkInDate.getMinutes()).padStart(2, "0");
@@ -263,7 +230,9 @@ function getAutoStatus(flight: Flight): string | null {
 
 function getAutoArrivalStatus(flight: Flight, fmtTime: (t: string) => string): string | null {
   const status = (flight.StatusEN ?? "").trim();
-  if (status && status !== "-") return null;
+  // v4.5 FIX: isti problem kao u getAutoStatus iznad.
+  const isGenericStatus = !status || status === "-" || /^(on time|na vrijeme|scheduled)$/i.test(status);
+  if (!isGenericStatus) return null;
   const scheduledStr = flight.ScheduledDepartureTime;
   const estimatedStr = flight.EstimatedDepartureTime;
   if (!scheduledStr) return null;
@@ -300,10 +269,12 @@ const LEDIndicator = memo(function LEDIndicator({
 const ClockDisplay = memo(function ClockDisplay() {
   const [time, setTime] = useState("");
   const [mounted, setMounted] = useState(false);
+
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 10_000); return () => clearInterval(id);
+    tick(); const id = setInterval(tick, 1000); return () => clearInterval(id);
   }, []);
   if (!mounted) return <div className="text-5xl font-black text-white leading-none">--:--</div>;
   return <div className="text-5xl font-black text-white drop-shadow-2xl leading-none">{time}</div>;
@@ -314,7 +285,7 @@ const NightClock = memo(function NightClock() {
   const [time, setTime] = useState("");
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
-    tick(); const id = setInterval(tick, 10_000); return () => clearInterval(id);
+    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id);
   }, []);
   return (
     <div className="h-screen w-full flex items-center justify-center bg-black select-none">
@@ -370,10 +341,9 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
 // FlightRow - prilagođena za 1rem font
 // ----------------------------------------------
 const FlightRow = memo(function FlightRow({
-  flight, index, isArrival, titleColor, autoStatusTick, isDesktopLayout,
+  flight, index, isArrival, titleColor, autoStatusTick,
 }: {
   flight: Flight; index: number; isArrival: boolean; titleColor: string; autoStatusTick: number;
-  isDesktopLayout: boolean;
 }) {
   const formatTime = useCallback((t: string) => formatTimeString(t), []);
   const pill = useMemo(
@@ -383,11 +353,6 @@ const FlightRow = memo(function FlightRow({
   const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || '';
 const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const img = e.currentTarget;
-  if (IS_LOW_END) {
-    img.src = PLACEHOLDER_IMAGE;
-    img.onerror = null;
-    return;
-  }
   if (img.dataset.tried === 'local') {
     img.dataset.tried = 'fw';
     const fw = getFlightawareLogoURL(icao);
@@ -397,7 +362,9 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   img.src = PLACEHOLDER_IMAGE; img.onerror = null;
 }, [icao]);
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const gateChangedAt = (flight as any)._gateChangedAt;
+  // eslint-disable-next-line react-hooks/purity
   const isGateChanged = gateChangedAt && (Date.now() - gateChangedAt < 15_000);
   const estimatedDisplay = useMemo(() => {
     const est = flight.EstimatedDepartureTime;
@@ -413,130 +380,127 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const pillCls = `w-[95%] flex items-center justify-center gap-2 text-base font-extrabold rounded-2xl border-2 px-3 py-1.5 transition-colors duration-300 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
   const mobilePillCls = `flex items-center gap-1 text-xs font-bold rounded-xl border px-2 py-1 ${pill.bg} ${pill.border} ${pill.text} ${pill.blinkClass}`;
 
-if (isDesktopLayout) {
   return (
-    <div
-      className={`flex gap-2 p-1 border-b border-white/10 ${rowBg}`}
-      style={{ minHeight: "48px", contain: "layout style paint", contentVisibility: "auto", containIntrinsicSize: "auto 48px" }}
-    >
-      {/* Scheduled */}
-      <div className="flex items-center justify-center w-[140px]">
-        <div className="text-base font-black text-white drop-shadow-lg">
-          {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
-        </div>
-      </div>
-      {/* Estimated */}
-      <div className="flex items-center justify-center w-[140px]">
-        {estimatedDisplay
-          ? <div className={`text-base font-black ${titleColor} drop-shadow-lg`}>{estimatedDisplay}</div>
-          : <div className="text-base text-white/30 font-bold">-</div>
-        }
-      </div>
-      {/* Flight + Logo */}
-      <div className="flex items-center gap-2 w-[240px]">
-        <div className="relative w-[50px] h-8 bg-white rounded-lg p-0.5 shadow-xl flex-shrink-0">
-          <img
-            src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-            alt={`${flight.AirlineName} logo`}
-            className="object-contain w-full h-full"
-            onError={onImgErr}
-            data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-            decoding="async"
-            loading={index < 9 ? "eager" : "lazy"}
-            fetchPriority={index < 8 ? "high" : "auto"}
-          />
-        </div>
-        <div className="text-xl font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
-        {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-          <div className="text-xs text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
-        )}
-      </div>
-      {isArrival ? (
-        <div className="flex items-center w-[500px]">
-          <div className="text-2xl font-black text-white truncate drop-shadow-lg">
-            {flight.DestinationCityName || flight.DestinationAirportName}
+    <>
+      {/* Desktop (min-width 1024px) - SVI FONTOVI 1rem */}
+      <div className={`hidden lg:flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: "48px", contain: "layout style" }}>
+        {/* Scheduled */}
+        <div className="flex items-center justify-center w-[140px]">
+          <div className="text-base font-black text-white drop-shadow-lg">
+            {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
           </div>
         </div>
-      ) : (
-        <div className="flex items-center w-[320px]">
-          <div className="text-2xl font-black text-white truncate drop-shadow-lg">
-            {flight.DestinationCityName || flight.DestinationAirportName}
-          </div>
+        {/* Estimated */}
+        <div className="flex items-center justify-center w-[140px]">
+          {estimatedDisplay
+            ? <div className={`text-base font-black ${titleColor} drop-shadow-lg`}>{estimatedDisplay}</div>
+            : <div className="text-base text-white/30 font-bold">-</div>
+          }
         </div>
-      )}
-      {isArrival ? (
-        <div className="flex items-center justify-center w-[600px]">
-          {pill.hasStatusText ? (
-            <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "1.8rem" : "0.75rem", paddingRight: "0.75rem", width: "95%" }}>
-              {pill.showLEDs && <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
-              <div className="overflow-hidden text-center whitespace-nowrap text-base" style={{ marginLeft: pill.showLEDs ? "1.2rem" : "0", width: "100%" }}>{pill.displayText}</div>
+        {/* Flight + Logo */}
+        <div className="flex items-center gap-2 w-[240px]">
+          <div className="relative w-[50px] h-8 bg-white rounded-lg p-0.5 shadow-xl flex-shrink-0">
+<img
+  src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+  alt={`${flight.AirlineName} logo`}
+  className="object-contain w-full h-full"
+  onError={onImgErr}
+  data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+  decoding="async"
+  loading={index < 9 ? "eager" : "lazy"}
+  fetchPriority={index < 8 ? "high" : "auto"}
+/>
+          </div>
+          <div className="text-xl font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
+            <div className="text-xs text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
+          )}
+        </div>
+        {isArrival ? (
+          <div className="flex items-center w-[500px]">
+            <div className="text-2xl font-black text-white truncate drop-shadow-lg">
+              {flight.DestinationCityName || flight.DestinationAirportName}
             </div>
-          ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
-        </div>
-      ) : (
-        <>
-          <div className="flex items-center justify-center w-[280px]">
-            {flight.CheckInDesk && flight.CheckInDesk !== "-"
-              ? <div className="text-base font-black text-white bg-black/40 py-1 px-2 rounded-lg border border-white/20 shadow-xl">{flight.CheckInDesk}</div>
-              : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
           </div>
-          <div className="flex items-center justify-center w-[180px]">
-            {flight.GateNumber && flight.GateNumber !== "-"
-              ? <div className={`text-base font-black py-1 px-2 rounded-lg border shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>{flight.GateNumber}</div>
-              : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
+        ) : (
+          <div className="flex items-center w-[320px]">
+            <div className="text-2xl font-black text-white truncate drop-shadow-lg">
+              {flight.DestinationCityName || flight.DestinationAirportName}
+            </div>
           </div>
-          <div className="flex items-center justify-center w-[420px]">
+        )}
+        {isArrival ? (
+          <div className="flex items-center justify-center w-[600px]">
             {pill.hasStatusText ? (
-              <div className={`${pillCls} overflow-hidden text-base`}>
-                {pill.showLEDs && <div className="flex items-center gap-1 flex-shrink-0"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
-                <span className="truncate whitespace-nowrap font-extrabold tracking-wide text-base">{pill.displayText}</span>
+              <div className={`${pillCls} overflow-hidden relative`} style={{ paddingLeft: pill.showLEDs ? "1.8rem" : "0.75rem", paddingRight: "0.75rem", width: "95%" }}>
+                {pill.showLEDs && <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
+                <div className="overflow-hidden text-center whitespace-nowrap text-base" style={{ marginLeft: pill.showLEDs ? "1.2rem" : "0", width: "100%" }}>{pill.displayText}</div>
               </div>
             ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
           </div>
-        </>
-      )}
-    </div>
-  );
-}
+        ) : (
+          <>
+            <div className="flex items-center justify-center w-[280px]">
+              {flight.CheckInDesk && flight.CheckInDesk !== "-"
+                ? <div className="text-base font-black text-white bg-black/40 py-1 px-2 rounded-lg border border-white/20 shadow-xl">{flight.CheckInDesk}</div>
+                : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
+            </div>
+            <div className="flex items-center justify-center w-[180px]">
+              {flight.GateNumber && flight.GateNumber !== "-"
+                ? <div className={`text-base font-black py-1 px-2 rounded-lg border shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>{flight.GateNumber}</div>
+                : <div className="text-base font-black text-transparent py-1 px-2">-</div>}
+            </div>
+            <div className="flex items-center justify-center w-[420px]">
+              {pill.hasStatusText ? (
+                <div className={`${pillCls} overflow-hidden text-base`}>
+                  {pill.showLEDs && <div className="flex items-center gap-1 flex-shrink-0"><LEDIndicator color={pill.led1} phase="a" size="w-2.5 h-2.5" /><LEDIndicator color={pill.led2} phase="b" size="w-2.5 h-2.5" /></div>}
+                  <span className="truncate whitespace-nowrap font-extrabold tracking-wide text-base">{pill.displayText}</span>
+                </div>
+              ) : <div className="text-base font-bold text-slate-300">Scheduled</div>}
+            </div>
+          </>
+        )}
+      </div>
 
-return (
-  <div className={`flex flex-col gap-1.5 px-3 py-2 border-b border-white/10 ${rowBg}`}>
-    <div className="flex items-center gap-2">
-      <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
-        <img
-          src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
-          alt="logo"
-          className="object-contain w-full h-full"
-          onError={onImgErr}
-          data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
-          decoding="async"
-        />
-      </div>
-      <span className="text-lg font-black text-white tracking-wide">{flight.FlightNumber}</span>
-      {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && <span className="text-[10px] text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>}
-      <div className="ml-auto flex items-center gap-1">
-        <span className="text-sm font-black text-white tabular-nums">{formatTimeString(flight.ScheduledDepartureTime) || "--:--"}</span>
-        {estimatedDisplay && <><span className="text-white/30 text-[10px]">›</span><span className={`text-sm font-black ${titleColor} tabular-nums`}>{estimatedDisplay}</span></>}
-      </div>
-    </div>
-    <div className="text-sm font-black text-white truncate leading-tight">{flight.DestinationCityName || flight.DestinationAirportName}</div>
-    <div className="flex items-center gap-1.5 flex-wrap">
-      {!isArrival && flight.CheckInDesk && flight.CheckInDesk !== "-" && <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded-md border border-white/20"><Users className="w-2.5 h-2.5 opacity-70" />{flight.CheckInDesk}</span>}
-      {!isArrival && flight.GateNumber && flight.GateNumber !== "-" && <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}><DoorOpen className="w-2.5 h-2.5 opacity-70" />{flight.GateNumber}</span>}
-      {pill.hasStatusText ? (
-        <div className={mobilePillCls}>
-          {pill.showLEDs && <><LEDIndicator color={pill.led1} phase="a" size="w-1.5 h-1.5" /><LEDIndicator color={pill.led2} phase="b" size="w-1.5 h-1.5" /></>}
-          <span className="truncate max-w-[180px] text-[10px]">{pill.displayText}</span>
+      {/* Mobilni prikaz (ispod 1024px) */}
+      <div className={`flex lg:hidden flex-col gap-1.5 px-3 py-2 border-b border-white/10 ${rowBg}`}>
+        <div className="flex items-center gap-2">
+    <div className="relative w-8 h-6 bg-white rounded-md p-0.5 shadow-md flex-shrink-0">
+  <img
+    src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
+    alt="logo"
+    className="object-contain w-full h-full"
+    onError={onImgErr}
+    data-tried={isKnownLocalLogo(icao) ? 'local' : 'fw'}
+    decoding="async"
+  />
+</div>
+          <span className="text-lg font-black text-white tracking-wide">{flight.FlightNumber}</span>
+          {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && <span className="text-[10px] text-white/40 font-bold">+{flight.CodeShareFlights.length}</span>}
+          <div className="ml-auto flex items-center gap-1">
+            <span className="text-sm font-black text-white tabular-nums">{formatTimeString(flight.ScheduledDepartureTime) || "--:--"}</span>
+            {estimatedDisplay && <><span className="text-white/30 text-[10px]">›</span><span className={`text-sm font-black ${titleColor} tabular-nums`}>{estimatedDisplay}</span></>}
+          </div>
         </div>
-      ) : <span className="text-[10px] text-white/40 font-semibold">Scheduled</span>}
-    </div>
-  </div>
-);
+        <div className="text-sm font-black text-white truncate leading-tight">{flight.DestinationCityName || flight.DestinationAirportName}</div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {!isArrival && flight.CheckInDesk && flight.CheckInDesk !== "-" && <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded-md border border-white/20"><Users className="w-2.5 h-2.5 opacity-70" />{flight.CheckInDesk}</span>}
+          {!isArrival && flight.GateNumber && flight.GateNumber !== "-" && <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${isGateChanged ? "text-red-400 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}><DoorOpen className="w-2.5 h-2.5 opacity-70" />{flight.GateNumber}</span>}
+          {pill.hasStatusText ? (
+            <div className={mobilePillCls}>
+              {pill.showLEDs && <><LEDIndicator color={pill.led1} phase="a" size="w-1.5 h-1.5" /><LEDIndicator color={pill.led2} phase="b" size="w-1.5 h-1.5" /></>}
+              <span className="truncate max-w-[180px] text-[10px]">{pill.displayText}</span>
+            </div>
+          ) : <span className="text-[10px] text-white/40 font-semibold">Scheduled</span>}
+        </div>
+      </div>
+    </>
+  );
 }, (prev, next) =>
   prev.autoStatusTick === next.autoStatusTick &&
-  prev.isDesktopLayout === next.isDesktopLayout &&
   prev.flight.FlightNumber === next.flight.FlightNumber &&
   prev.flight.StatusEN === next.flight.StatusEN &&
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (prev.flight as any)._gateChangedAt === (next.flight as any)._gateChangedAt &&
   prev.flight.EstimatedDepartureTime === next.flight.EstimatedDepartureTime &&
   prev.flight.ScheduledDepartureTime === next.flight.ScheduledDepartureTime &&
@@ -567,77 +531,35 @@ function SplitBoard(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autoStatusTick, setAutoStatusTick] = useState(0);
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
-  const [reducedAnimations, setReducedAnimations] = useState(IS_LOW_END);
-
-useEffect(() => {
-  if (IS_LOW_END) return;
-  const checkMemory = () => {
-    const perf = (performance as any);
-    if (perf?.memory) {
-      const used = perf.memory.usedJSHeapSize;
-      const total = perf.memory.totalJSHeapSize;
-      if (total > 0 && used / total > MEMORY_PRESSURE_THRESHOLD) {
-        setReducedAnimations(true);
-        console.warn('⚠️ Memory pressure detected — reducing animations');
-      }
-    }
-  };
-  const id = setInterval(checkMemory, 60_000);
-  return () => clearInterval(id);
-}, []);
 
   // ── Noćni režim — kad je true, prikazuje se samo NightClock,
   // bez ijednog network poziva. Prvi ciklus poslije 04:00 automatski
   // vraća normalan prikaz — self-healing, isti princip kao hash-check.
   const [nightMode, setNightMode] = useState(false);
-  const [isDesktopLayout, setIsDesktopLayout] = useState(true)
-useEffect(() => {
-  if (typeof window === 'undefined' || !window.matchMedia) return
-  const mql = window.matchMedia('(min-width: 1024px)') // pazi: ovdje je lg: = 1024px, ne 640px kao u drugim fajlovima
-  setIsDesktopLayout(mql.matches)
-  const handler = (e: MediaQueryListEvent) => setIsDesktopLayout(e.matches)
-  if (mql.addEventListener) {
-    mql.addEventListener('change', handler)
-    return () => mql.removeEventListener('change', handler)
-  } else {
-    (mql as any).addListener(handler)
-    return () => (mql as any).removeListener(handler)
-  }
-}, [])
 
-  const isMountedRef = useRef(true);
-  // FIX: sprječava konkurentno izvršavanje loadData() — bez ovoga bi
-  // setInterval mogao pokrenuti novi poziv dok prethodni još nije
-  // završen (npr. na sporoj mreži), udvostručujući requeste.
-  const isFetchingRef = useRef(false);
-  // FIX: drži trenutni AbortSignal iz polling efekta, da bi fetchWithTimeout
-  // pozivi unutar loadData() mogli biti stvarno prekinuti pri unmountu
-  // (ne samo da se spriječi sledeći zakazani poziv).
-  const loadDataAbortSignalRef = useRef<AbortSignal | null>(null);
+
+  // eslint-disable-next-line react-hooks/purity
   const lastHeartbeat = useRef(Date.now());
   const prevGatesRef = useRef<Record<string, string>>({});
-  const arrivalsRef = useRef<Flight[]>([]);
-  const nightModeRef = useRef(false);
-const departuresRef = useRef<Flight[]>([]);
-useEffect(() => { arrivalsRef.current = arrivals }, [arrivals]);
-useEffect(() => { departuresRef.current = departures }, [departures]);
-useEffect(() => { nightModeRef.current = nightMode }, [nightMode]);
-
-// FIX (po zahtjevu — pogrešno vrijeme otvaranja check-in šaltera):
-// učitava stvarnu konfiguraciju iz settings.ini jednom pri mount-u —
-// vidi identičan, opširniji komentar u
-// app/combined/CombinedPageClient.tsx.
-useEffect(() => {
-  loadCheckInConfig().catch(() => {})
-}, [])
-
   const isInitialLoad = useRef(true);
   const tickerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
-const etagStatusRef = useRef<string | null>(null);
-const lastKnownHashRef = useRef<string | null>(null);
+  const { data: liveFlightData } = useRealtimeFlightData('board');
+const { deskEntries, gateEntries } = useRealtimeAssignments('board');
 
-  const applyAssignmentsOnly = useCallback((
+const assignments = useMemo(() => {
+  const desks: Record<string, string> = {};
+  const gates: Record<string, string> = {};
+  for (const [deskNumber, entry] of Object.entries(deskEntries)) {
+    if (entry?.status === 'open' && entry.flightNumber) desks[entry.flightNumber] = deskNumber;
+  }
+  for (const [gateNumber, entry] of Object.entries(gateEntries)) {
+    if (entry?.status === 'open' && entry.flightNumber) gates[entry.flightNumber] = gateNumber;
+  }
+  return { desks, gates };
+}, [deskEntries, gateEntries]);
+
+// ── applyAssignmentsOnly MORA biti definisan PRIJE efekata koji ga koriste ──
+const applyAssignmentsOnly = useCallback((
   deps: Flight[],
   assignments: { desks: Record<string, string>; gates: Record<string, string> }
 ): Flight[] => {
@@ -646,6 +568,7 @@ const lastKnownHashRef = useRef<string | null>(null);
     const clone = { ...f };
 
     const adminDesk = assignments.desks[num];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (adminDesk) (clone as any).CheckInDesk = adminDesk;
 
     const adminGate = assignments.gates[num];
@@ -653,6 +576,7 @@ const lastKnownHashRef = useRef<string | null>(null);
     if (effectiveGate && effectiveGate !== '-') {
       const prevGate = prevGatesRef.current[num];
       if (prevGate && prevGate !== effectiveGate) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (clone as any)._gateChangedAt = Date.now();
       }
       clone.GateNumber = effectiveGate;
@@ -662,6 +586,68 @@ const lastKnownHashRef = useRef<string | null>(null);
     return clone;
   });
 }, []);
+  // ── v5: Memory pressure auto-reload ──────────────────────
+  // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
+  // poruke, image cache, DOM čvorovi). Kad usedJSHeapSize pređe
+  // 85% jsHeapSizeLimit (~2GB po tabu), radimo auto-reload prije
+  // nego kiosk postane vidljivo spor/nezgledan.
+  useEffect(() => {
+    const checkMemory = () => {
+      const perf = performance;
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const limit = perf.memory.jsHeapSizeLimit;
+        const pct = used / limit;
+        if (pct > 0.85) {
+          console.warn(`Memory pressure ${Math.round(pct * 100)}% — auto reload`);
+          window.location.reload();
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+
+  // ── v5.3: Network disconnection auto-recovery ────────────
+  // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
+  // (svake 2s), a fallback polling pada. Kad se mreža vrati,
+  // radimo full reload da sinhronizujemo React state sa serverom.
+  useEffect(() => {
+    const handleOnline = () => {
+      console.warn('Network restored — reloading to resync state');
+      window.location.reload();
+    };
+    const handleOffline = () => {
+      console.warn('Network lost — Ably will retry, showing cached data');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // ── v5.3: Visibilitychange — auto-focus kiosk tab ────────
+  // Ako neko otvori drugi prozor preko kiosk taba (Windows update
+  // dialog, notifikacija), kiosk tab ode u pozadinu. Chrome ga
+  // može throttlovati. Ovo vraća fokus, ili radi reload ako ne može.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) {
+        console.warn('Kiosk tab lost focus — attempting to refocus');
+        window.focus();
+        setTimeout(() => {
+          if (document.hidden) {
+            window.location.reload();
+          }
+        }, 2_000);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
   // Auto-status tick
   useEffect(() => {
     const id = setInterval(() => setAutoStatusTick(t => t + 1), 60_000);
@@ -669,22 +655,73 @@ const lastKnownHashRef = useRef<string | null>(null);
   }, []);
 
   // Hard reset
-  // FIX (24/7/365 self-recovery audit — isti razlog kao CombinedPageClient.tsx):
-  // jitter sprečava da se svi split-board ekrani restartuju u istom
-  // trenutku tokom dana ako su upaljeni približno istovremeno ujutro.
   useEffect(() => {
-    const jitter = Math.floor(Math.random() * 20 * 60_000);
-    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS + jitter);
+    const id = setTimeout(() => window.location.reload(), HARD_RESET_INTERVAL_MS);
     return () => clearTimeout(id);
   }, []);
 
   // Heartbeat
+  useEffect(() => {
+    const update = () => { lastHeartbeat.current = Date.now(); };
+    const check = setInterval(() => {
+      if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
+    }, HEARTBEAT_CHECK_INTERVAL_MS);
+    window.addEventListener("mousemove", update, { passive: true });
+    window.addEventListener("keypress", update, { passive: true });
+    window.addEventListener("touchstart", update, { passive: true });
+    return () => { clearInterval(check); window.removeEventListener("mousemove", update); window.removeEventListener("keypress", update); window.removeEventListener("touchstart", update); };
+  }, []);
+  // ── Sada efekti, ISPOD definicije ──
 useEffect(() => {
-  const check = setInterval(() => {
-    if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
-  }, HEARTBEAT_CHECK_INTERVAL_MS);
-  return () => clearInterval(check);
-}, []);
+  if (!liveFlightData) return;
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  if (isNightHours()) { setNightMode(true); setLoading(false); return; }
+  setNightMode(false);
+
+  const rawArrivals = filterRecentFlights(liveFlightData.arrivals || [], true).slice(0, MAX_FLIGHTS_DISPLAY);
+  const rawDepartures = getUniqueDeparturesWithDeparted(
+    filterRecentFlights(liveFlightData.departures || [], false)
+  ).slice(0, MAX_FLIGHTS_DISPLAY);
+
+  const departuresWithMeta = rawDepartures.map(f => {
+    const clone = { ...f };
+    const num = f.FlightNumber ?? '';
+    const adminDesk = assignments.desks[num];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (adminDesk) (clone as any).CheckInDesk = adminDesk;
+    const adminGate = assignments.gates[num];
+    const effectiveGate = adminGate || f.GateNumber || '';
+    if (effectiveGate && effectiveGate !== '-') {
+      const prevGate = prevGatesRef.current[num];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (prevGate && prevGate !== effectiveGate) (clone as any)._gateChangedAt = Date.now();
+      clone.GateNumber = effectiveGate;
+      prevGatesRef.current[num] = effectiveGate;
+    }
+    return clone;
+  });
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  setArrivals(rawArrivals);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  setDepartures(departuresWithMeta);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  setLoading(false);
+  isInitialLoad.current = false;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [liveFlightData]);
+
+const prevAssignmentsRef = useRef(assignments);
+useEffect(() => {
+  if (prevAssignmentsRef.current === assignments) return;
+  prevAssignmentsRef.current = assignments;
+  if (!liveFlightData) return;
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  setDepartures(prev => applyAssignmentsOnly(prev, assignments));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [assignments]);
 
   // Memory cleanup
   useEffect(() => {
@@ -693,28 +730,6 @@ useEffect(() => {
       setDepartures(p => p.length > 20 ? p.slice(0, MAX_FLIGHTS_MEMORY) : p);
     }, MEMORY_CLEANUP_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
-
-  // ── FIX (24/7 rad bez nadzora): split-board ranije nije imao NI
-  // globalni error handler NI handler za neuhvaćene odbijene promise-e
-  // — vidi identičan obrazac u CombinedPageClient.tsx/departures. ──
-  useEffect(() => {
-    const onErr = (e: ErrorEvent) => {
-      const m = e.error?.message || '';
-      if (m.includes('Out of memory') || m.includes('stack overflow') || m.includes('heap')) {
-        setTimeout(() => window.location.reload(), 2_000);
-      }
-    };
-    window.addEventListener('error', onErr);
-    return () => window.removeEventListener('error', onErr);
-  }, []);
-
-  useEffect(() => {
-    const onRejection = (e: PromiseRejectionEvent) => {
-      console.error('[split-board] Neuhvaćena odbijena promise:', e.reason?.message || e.reason);
-    };
-    window.addEventListener('unhandledrejection', onRejection);
-    return () => window.removeEventListener('unhandledrejection', onRejection);
   }, []);
 
   // Ticker rotacija
@@ -726,184 +741,13 @@ useEffect(() => {
   }, []);
 
   // Učitavanje podataka
-const loadData = useCallback(async () => {
-  if (!isMountedRef.current) return;
-  // FIX: sprječi konkurentno izvršavanje (vidi napomenu kod deklaracije)
-  if (isFetchingRef.current) return;
-  isFetchingRef.current = true;
 
-  // ── NOĆNI REŽIM ──
-  // Noću (21:00-04:00) ne radimo NIKAKAV network poziv — ni hash-check,
-  // ni pun fetch, ni fetchAssignments. Prikazuje se samo NightClock.
-  // Čim isNightHours() vrati false (prvi ciklus poslije 04:00), ovaj
-  // blok se preskače i nastavlja se normalan tok — self-healing.
- const wasNightMode = nightModeRef.current;
 
-  if (isNightHours()) {
-    if (isMountedRef.current) setNightMode(true);
-    setLoading(false);
-     lastHeartbeat.current = Date.now(); // ← dodato
-    isFetchingRef.current = false;
-    return;
-  }
-  if (isMountedRef.current) setNightMode(false);
-
-  // ── Prelaz noć → dan: forsiraj svjež fetch bez obzira na hash-check
-  // ovog ciklusa. Sprečava rubni slučaj gdje bi stari, jučerašnji
-  // podaci u state-u slučajno imali isti hash kao server prije nego
-  // server stigne odbaciti svoj noćni cache. ─────────────────────────
-  const justExitedNightMode = wasNightMode;
-
-  try {
-    if (isInitialLoad.current) setLoading(true);
-    setErrorMessage(null);
-
-// ── HASH CHECK ──
-    // Ako trenutno NEMA prikazanih letova, ne vjeruj hash-u — moguća
-    // desinhronizacija (stale meta, noćni prelaz i sl.). U tom slučaju
-    // UVIJEK radi pun fetch, da se ekran sam "izliječi".
-const boardIsCurrentlyEmpty = arrivalsRef.current.length === 0 && departuresRef.current.length === 0;
-const forceRefresh = boardIsCurrentlyEmpty || justExitedNightMode;
-    let hashChanged = true;
-    let statusAssignments: { desks: Record<string, string>; gates: Record<string, string> } | null = null;
-
-// ── Status ruta sa ETag ──────────────────────────────────────
-try {
-  const headers: HeadersInit = {};
-  if (etagStatusRef.current) {
-    headers['If-None-Match'] = etagStatusRef.current;
-  }
-
-  const statusRes = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, headers, loadDataAbortSignalRef.current ?? undefined);
-  
-  // Ako je 304, nema promjene – ni hash ni dodjele – preskoči sve
-if (statusRes.status === 304) {
-  const newEtag = statusRes.headers.get('ETag');
-  if (newEtag) etagStatusRef.current = newEtag;
-  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-  isInitialLoad.current = false;
-  setLoading(false);
-  lastHeartbeat.current = Date.now(); // ← dodaj
-  return;
-}
-
-  if (statusRes.ok) {
-    const statusData = await statusRes.json();
-    // Sačuvaj novi ETag iz headera
-    const newEtag = statusRes.headers.get('ETag');
-    if (newEtag) etagStatusRef.current = newEtag;
-
-    statusAssignments = { desks: statusData.desks ?? {}, gates: statusData.gates ?? {} };
-
-if (!forceRefresh && statusData.hash === lastKnownHashRef.current && lastKnownHashRef.current !== null) {
-  hashChanged = false;
-} else {
-  lastKnownHashRef.current = statusData.hash;
-}
-  }
-} catch {
-  // ignoriši grešku, nastavi na pun fetch kao fallback
-}
-
-if (!hashChanged) {
-  if (statusAssignments) {
-    setDepartures(prev => applyAssignmentsOnly(prev, statusAssignments!));
-  }
-  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-  isInitialLoad.current = false;
-  setLoading(false);
-  lastHeartbeat.current = Date.now(); // ← dodaj
-  return;
-}
-
-    // ── PUN FETCH ──
-    let data: any = null;
-    let usedCache = false;
-    try {
-      const res = await fetchWithTimeout('/api/flights', FETCH_TIMEOUT_MS, undefined, loadDataAbortSignalRef.current ?? undefined);
-      if (!res.ok) throw new Error('Network error');
-      data = await res.json();
-      if (isMountedRef.current) {
-        saveToCache({ arrivals: data.arrivals || [], departures: data.departures || [], lastUpdated: new Date().toLocaleTimeString('en-GB') });
-      }
-    } catch (err) {
-      setErrorMessage('Network error. Using cached data.');
-      const cached = loadFromCache();
-      if (cached) { data = { arrivals: cached.arrivals, departures: cached.departures }; usedCache = true; }
-      else throw err;
-    }
-    if (!isMountedRef.current || !data) return;
-
-const assignments = statusAssignments ?? { desks: {}, gates: {} };
-
-    let rawArrivals = filterRecentFlights(data.arrivals || [], true);
-    rawArrivals = rawArrivals.slice(0, MAX_FLIGHTS_DISPLAY);
-    let rawDepartures = getUniqueDeparturesWithDeparted(filterRecentFlights(data.departures || [], false));
-    rawDepartures = rawDepartures.slice(0, MAX_FLIGHTS_DISPLAY);
-
-    const departuresWithMeta = rawDepartures.map(f => {
-      const clone = { ...f };
-      const num = f.FlightNumber ?? '';
-
-      const adminDesk = assignments.desks[num];
-      if (adminDesk) {
-        (clone as any).CheckInDesk = adminDesk;
-      }
-
-      const adminGate = assignments.gates[num];
-      const effectiveGate = adminGate || f.GateNumber || '';
-      if (effectiveGate && effectiveGate !== '-') {
-        const prevGate = prevGatesRef.current[num];
-        if (prevGate && prevGate !== effectiveGate) {
-          (clone as any)._gateChangedAt = Date.now();
-        }
-        clone.GateNumber = effectiveGate;
-        prevGatesRef.current[num] = effectiveGate;
-      }
-
-      return clone;
-    });
-
-    setArrivals(rawArrivals);
-    setDepartures(departuresWithMeta);
-    setLastUpdate(new Date().toLocaleTimeString('en-GB'));
-    lastHeartbeat.current = Date.now(); // ← dodato
-    if (!usedCache) setErrorMessage(null);
-    else setTimeout(() => setErrorMessage(null), 5_000);
-  } catch (err) {
-    console.error('Split board load error:', err);
-    setErrorMessage('Unable to load flight data. Check connection.');
-  } finally {
-    isInitialLoad.current = false;
-    isFetchingRef.current = false;
-    if (isMountedRef.current) setLoading(false);
-  }
-  // FIX (ESLint react-hooks/exhaustive-deps): applyAssignmentsOnly je
-  // korišćen unutar ovog callback-a (linija ~810) ali nije bio naveden
-  // kao zavisnost. applyAssignmentsOnly sam ima prazan niz zavisnosti
-  // ([], vidi definiciju iznad) — njegova referenca se NIKAD ne mijenja
-  // kroz život komponente, pa dodavanje ovdje ne mijenja PONAŠANJE
-  // (ovaj callback ostaje jednako stabilan kao i prije), samo ispravno
-  // dokumentuje stvarnu zavisnost i uklanja lažno upozorenje.
-}, [applyAssignmentsOnly]);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    const controller = new AbortController();
-    loadDataAbortSignalRef.current = controller.signal;
-    let intervalId: ReturnType<typeof setInterval>;
-    loadData().then(() => {
-      intervalId = setInterval(loadData, REFRESH_INTERVAL_MS);
-    });
-    return () => {
-      isMountedRef.current = false;
-      if (intervalId) clearInterval(intervalId);
-      controller.abort();
-    };
-  }, [loadData]);
 
   const handleClose = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if ((window as any).electronAPI?.quitApp) { (window as any).electronAPI.quitApp(); return; }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     try { if ((window as any).chrome?.webview) { (window as any).chrome.webview.postMessage("APP_QUIT"); return; } } catch {}
     window.postMessage({ type: "ELECTRON_APP_QUIT" }, "*");
     try { if (window.parent !== window) window.parent.postMessage({ type: "ELECTRON_APP_QUIT" }, "*"); } catch {}
@@ -971,21 +815,20 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
                 <div className="text-lg">No arrivals scheduled</div>
               </div>
             ) : (
-     sortedArrivals.map((flight, idx) => (
-  // FIX (isti bug kao app/border/ArrivalsPageClient.tsx — vidi opširan
-  // komentar tamo): key sa indeksom uzrokuje nepotrebno uništavanje/
-  // ponovno pravljenje reda (uključujući <img> avio-logo) kad redosled
-  // letova promijeni poziciju na poll-u.
-  <FlightRow
-    key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
-    flight={flight}
-    index={idx}
-    isArrival={true}
-    titleColor="text-orange-400"
-    autoStatusTick={autoStatusTick}
-    isDesktopLayout={isDesktopLayout} // ← dodaj
-  />
-))
+              sortedArrivals.map((flight, idx) => (
+                <FlightRow
+                  // ── FIX (Chrome dugotrajan rad): key bez '-${idx}' — vidi
+                  // komentar u app/departures/page.tsx. Prefiks "arr-"
+                  // ostaje (razlikuje arrival/departure red istog leta na
+                  // istoj tabli, što JESTE dio pravog identiteta ovdje).
+                  key={`arr-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
+                  flight={flight}
+                  index={idx}
+                  isArrival={true}
+                  titleColor="text-orange-400"
+                  autoStatusTick={autoStatusTick}
+                />
+              ))
             )}
           </div>
         </div>
@@ -1003,18 +846,17 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
                 <div className="text-lg">No departures scheduled</div>
               </div>
             ) : (
-      sortedDepartures.map((flight, idx) => (
-  // FIX (isti bug — vidi komentar uz arrivals listu iznad).
-  <FlightRow
-    key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
-    flight={flight}
-    index={idx}
-    isArrival={false}
-    titleColor="text-sky-400"
-    autoStatusTick={autoStatusTick}
-    isDesktopLayout={isDesktopLayout}
-  />
-))
+              sortedDepartures.map((flight, idx) => (
+                <FlightRow
+                  // ── FIX (Chrome dugotrajan rad): key bez '-${idx}'.
+                  key={`dep-${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
+                  flight={flight}
+                  index={idx}
+                  isArrival={false}
+                  titleColor="text-sky-400"
+                  autoStatusTick={autoStatusTick}
+                />
+              ))
             )}
           </div>
         </div>
@@ -1031,18 +873,14 @@ const assignments = statusAssignments ?? { desks: {}, gates: {} };
         @keyframes ledBlinkB { 0% { opacity: 1; } 100% { opacity: 0.2; } }
         @keyframes pill-blink { 0%,50%{opacity:1} 51%,100%{opacity:.75} }
         @keyframes pill-blink-fast { 0%,40%{opacity:1} 41%,100%{opacity:.55} }
-   .animate-pill-blink { animation: .8s ease-in-out infinite pill-blink; }
-.animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; }
-.ticker-move { display: inline-block; white-space: nowrap; backface-visibility: hidden; animation: ticker-scroll 45s linear infinite; }
+        .animate-pill-blink { animation: .8s ease-in-out infinite pill-blink; will-change: opacity; }
+        .animate-pill-blink-fast { animation: .4s ease-in-out infinite pill-blink-fast; will-change: opacity; }
         .ticker-wrap { width: 100%; overflow: hidden; position: absolute; top: 0; left: 0; height: 100%; }
-     
+        .ticker-move { display: inline-block; white-space: nowrap; will-change: transform; backface-visibility: hidden; animation: ticker-scroll 45s linear infinite; }
+        @keyframes ticker-scroll { 0% { transform: translate3d(0,0,0); } 100% { transform: translate3d(-50%,0,0); } }
         @media (max-width: 639px) { .ticker-move { animation-duration: 35s; } }
         @media (prefers-reduced-motion: reduce) { .animate-pill-blink, .animate-pill-blink-fast, .ticker-move { animation: none !important; opacity: 1 !important; } }
-      
-      ${reducedAnimations ? `
-.animate-pill-blink, .animate-pill-blink-fast, .ticker-move { animation: none !important; opacity: 1 !important; }
-` : ''}
-`}</style>
+      `}</style>
     </div>
   );
 }

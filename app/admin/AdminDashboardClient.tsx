@@ -1,11 +1,17 @@
 'use client';
 
+// FIX (portovano iz glavnog/polling sistema): NAMJERNO NE koristi
+// useIdleLogout/IdleWarningBanner ovdje — app/admin/layout.tsx u OVOM
+// projektu već primjenjuje idle-logout zaštitu na NIVOU LAYOUT-A, za
+// SVE /admin/* rute odjednom (5 min neaktivnosti, vidi taj fajl za pun
+// kontekst). Dodavanje istog poziva i ovdje bi bilo dupliranje —
+// glavni sistem NEMA tu zajedničku layout zaštitu, pa je tamo svaka
+// admin stranica morala sama da je poziva.
+
 import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useIdleLogout } from '@/hooks/use-idle-logout';
-import { IdleWarningBanner } from '@/components/idle-warning-banner';
 import { Skeleton } from '@/components/ui/skeleton';
+import { logoutAndRedirect } from '@/lib/admin-logout';
 import { 
   Plane,CheckSquare, 
   LogOut, 
@@ -14,7 +20,10 @@ import {
   Users,
   Activity,
   RefreshCw,
-  Radio
+  Radio,
+  HeartPulse,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 
 // Helper funkcije za obradu datuma
@@ -63,8 +72,26 @@ interface FlightStats {
   delayedFlights: number;
 }
 
+// NOVO (FIDS Innovation Harness): tip za odgovor /api/admin/health —
+// vidi opširan komentar u toj ruti za pun kontekst i motivaciju.
+interface StaleAssignment {
+  type: 'desk' | 'gate';
+  resourceId: string;
+  flightNumber: string;
+  openSinceMinutesAgo: number;
+}
+
+interface HealthCheckResult {
+  status: 'healthy' | 'degraded';
+  checks: {
+    redis: { ok: boolean; circuitOpen: boolean; recentFailures: number; latencyMs: number | null };
+    flightData: { ok: boolean; source: string; isOfflineMode: boolean; lastUpdated: string | null; totalFlights: number; warning: string | null };
+    assignments: { openDesks: number; openGates: number; staleAssignments: StaleAssignment[] };
+  };
+  checkedAt: string;
+}
+
 export default function AdminDashboardClient() {
-  const router = useRouter();
   const [stats, setStats] = useState<FlightStats>({
     totalFlights: 0,
     departures: 0,
@@ -80,12 +107,6 @@ export default function AdminDashboardClient() {
   const [recentFlights, setRecentFlights] = useState<Flight[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Učitaj statistiku odmah - middleware će se pobrinuti za autentifikaciju
-    loadFlightStats();
-  }, []);
-  
-
   const loadFlightStats = useCallback(async (showLoading: boolean = true) => {
     try {
       if (showLoading) {
@@ -94,13 +115,10 @@ export default function AdminDashboardClient() {
       setRefreshing(true);
       setError(null);
       
-      // FIX (CPU/trošak revizija): `no-store` je zaobilazio CDN keš koji
-      // /api/flights već ima (s-maxage=45, ETag/304) — bez ikakve
-      // stvarne potrebe za apsolutno svježim podatkom svake sekunde na
-      // admin dashboard-u (staff osvježava ručno ili periodično, ne
-      // opslužuje 40+ kiosk ekrana). Manji uticaj od kiosk-flote
-      // popravki (ovo je jedna admin stranica, ne desetine ekrana), ali
-      // ista, ispravna praksa — koristi normalno HTTP/CDN keširanje.
+      // Koristi normalno HTTP/CDN keširanje koje /api/flights već ima
+      // (s-maxage, ETag/304) — admin dashboard se osvježava ručno ili
+      // periodično, ne opslužuje kiosk ekrane, nema potrebe za
+      // apsolutno svježim podatkom svake sekunde.
       const response = await fetch('/api/flights');
       
       if (!response.ok) {
@@ -184,43 +202,47 @@ export default function AdminDashboardClient() {
     }
   }, []);
 
+  useEffect(() => {
+    // Učitaj statistiku odmah - middleware će se pobrinuti za autentifikaciju
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadFlightStats();
+  }, [loadFlightStats]);
+
   const handleRefresh = useCallback(() => {
     loadFlightStats(false);
   }, [loadFlightStats]);
 
-const handleLogout = useCallback(async () => {
+  // NOVO (FIDS Innovation Harness): health check je NAMJERNO
+  // isključivo "na zahtjev" (dugme), bez ikakvog automatskog
+  // pollinga/interval-a — ovo je administrativna dijagnostika, ne
+  // nešto što treba trošiti mrežu/Redis pozive u pozadini bez razloga.
+  const [health, setHealth] = useState<HealthCheckResult | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
+
+  const checkHealth = useCallback(async () => {
+    setHealthOpen(true);
+    setHealthLoading(true);
     try {
-      const response = await fetch('/api/admin/logout', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-      
-      if (!response.ok) {
-        console.error('Logout failed:', response.status);
+      const res = await fetch('/api/admin/health');
+      if (res.ok) {
+        const data: HealthCheckResult = await res.json();
+        setHealth(data);
       }
-      
-      // Izbriši sve lokalne podatke
-      if (typeof window !== 'undefined') {
-        // Očisti bilo kakve cached podatke
-        sessionStorage.clear();
-        localStorage.clear();
-      }
-      
     } catch (error) {
-      console.error('Logout API error:', error);
+      console.error('Health check error:', error);
     } finally {
-      // Forsuj redirect na login
-      window.location.href = '/admin/login';
+      setHealthLoading(false);
     }
   }, []);
-  // ─── Auto-logout nakon neaktivnosti — sad zajednički hook (vidi
-  // hooks/use-idle-logout.ts), 3 min, sa 30s upozorenjem prije odjave.
-  // Ranije: ručna implementacija bez upozorenja, 180s, samo na ovoj
-  // stranici (usklađeno je sa ostalim admin ekranima). ──
-  const { secondsLeft: idleWarningSeconds } = useIdleLogout();
-  
+
+const handleLogout = useCallback(() => {
+    // FIX (po zahtjevu — "traje predugo" prijavljeno na drugoj admin
+    // stranici, isti obrazac ovdje popravljen preventivno): portovano
+    // u dijeljen, timeout-zaštićen helper — vidi lib/admin-logout.ts.
+    logoutAndRedirect();
+  }, []);
+
   // Računanje vremena od ažuriranja
   const getTimeSinceUpdate = useCallback(() => {
     if (!lastUpdated) return 'Nepoznato';
@@ -254,13 +276,11 @@ const handleLogout = useCallback(async () => {
     year: 'numeric'
   });
 
-  // FIX (po zahtjevu — admin stranice MORAJU da se skroluju): isti
-  // globalni overflow:hidden problem kao app/admin/pa/page.tsx (vidi
-  // opširan komentar tamo) — h-screen (fiksno) + overflow-y-auto na
-  // ovom div-u, umjesto min-h-screen bez skrola.
+  // FIX (isti globalni overflow:hidden problem kao app/admin/pa/page.tsx):
+  // h-screen (fiksno) + overflow-y-auto na ovom div-u, umjesto min-h-screen
+  // bez skrola — admin stranice MORAJU da se skroluju.
   return (
     <div className="h-screen overflow-y-auto bg-gradient-to-br from-slate-900 to-slate-800 p-4 md:p-8">
-      <IdleWarningBanner secondsLeft={idleWarningSeconds} />
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <header className="mb-8">
@@ -422,11 +442,6 @@ const handleLogout = useCallback(async () => {
                 <p className="text-white/70 text-sm">
                   Pošalji ručnu najavu na razglas terminala
                 </p>
-                {/* FIX (po zahtjevu — obavještenje o namjeni na dashboardu):
-                    /admin je dijeljeni login za više funkcija — ova
-                    značka jasno kaže KO treba da koristi ovaj panel
-                    prije nego što uopšte kliknu na karticu. Puno
-                    objašnjenje je na samoj /admin/pa stranici. */}
                 <p className="text-[11px] text-sky-300/70 font-semibold mt-1.5 uppercase tracking-wide">
                   Samo za osoblje Operativnog centra
                 </p>
@@ -579,7 +594,91 @@ const handleLogout = useCallback(async () => {
             </div>
           </div>
         </div>
-        
+
+        {/* NOVO (FIDS Innovation Harness): sistemsko zdravlje — na
+            zahtjev, bez pozadinskog pollinga. Vidi opširan komentar u
+            app/api/admin/health/route.ts za pun kontekst i motivaciju. */}
+        <div className="mt-8 bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <HeartPulse className="w-5 h-5 text-rose-400" />
+              <h3 className="font-bold text-lg text-white">Zdravlje sistema</h3>
+            </div>
+            <button
+              onClick={checkHealth}
+              disabled={healthLoading}
+              className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors"
+              type="button"
+            >
+              {healthLoading ? (
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <HeartPulse size={16} />
+              )}
+              Provjeri stanje
+            </button>
+          </div>
+
+          {healthOpen && health && (
+            <div className="space-y-3">
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold ${
+                health.status === 'healthy' ? 'bg-emerald-900/30 text-emerald-400' : 'bg-amber-900/30 text-amber-400'
+              }`}>
+                {health.status === 'healthy' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                {health.status === 'healthy' ? 'Sve u redu' : 'Provjeri detalje ispod'}
+                <span className="text-white/40 font-normal ml-auto">
+                  {new Date(health.checkedAt).toLocaleTimeString('sr-Latn-RS')}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-white/50 text-xs mb-1">Redis</div>
+                  <div className={health.checks.redis.ok ? 'text-emerald-400' : 'text-red-400'}>
+                    {health.checks.redis.ok ? '✓ Dostupan' : '✗ Problem'}
+                    {health.checks.redis.latencyMs !== null && ` (${health.checks.redis.latencyMs}ms)`}
+                  </div>
+                  {health.checks.redis.circuitOpen && (
+                    <div className="text-amber-400 text-xs mt-1">Circuit breaker otvoren</div>
+                  )}
+                </div>
+
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-white/50 text-xs mb-1">Podaci o letovima</div>
+                  <div className={health.checks.flightData.ok ? 'text-emerald-400' : 'text-amber-400'}>
+                    Izvor: {health.checks.flightData.source}
+                  </div>
+                  <div className="text-white/40 text-xs mt-1">{health.checks.flightData.totalFlights} letova</div>
+                </div>
+
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-white/50 text-xs mb-1">Dodjele</div>
+                  <div className="text-white/80">
+                    {health.checks.assignments.openDesks} šaltera · {health.checks.assignments.openGates} gate-ova otvoreno
+                  </div>
+                </div>
+              </div>
+
+              {health.checks.assignments.staleAssignments.length > 0 && (
+                <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-3">
+                  <div className="text-amber-400 text-sm font-semibold mb-2 flex items-center gap-2">
+                    <AlertTriangle size={14} />
+                    Provjeri — otvoreno neuobičajeno dugo (možda zaboravljeno):
+                  </div>
+                  <div className="space-y-1">
+                    {health.checks.assignments.staleAssignments.map((s) => (
+                      <div key={`${s.type}-${s.resourceId}`} className="text-sm text-white/70">
+                        {s.type === 'desk' ? 'Šalter' : 'Gate'} {s.resourceId} — let {s.flightNumber || '?'},
+                        otvoreno {Math.floor(s.openSinceMinutesAgo / 60)}h {s.openSinceMinutesAgo % 60}min
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* System Status Footer */}
         <div className="mt-8 pt-6 border-t border-white/10">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">

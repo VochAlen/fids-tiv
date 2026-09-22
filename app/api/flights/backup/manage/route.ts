@@ -1,6 +1,7 @@
 // app/api/flights/backup/manage/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { FlightBackupService } from '@/lib/backup/flight-backup-service';
+import type { Flight } from '@/types/flight';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
@@ -25,7 +26,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             const rawData = await response.json();
             // Konvertuj raw podatke u Flight format (koristi logiku iz flight-backup-service)
             // Ovdje treba dodati logiku za konverziju
-            const flights: any[] = []; // Ovo treba popuniti
+            // FIX (po zahtjevu — zamjena "any" pravim tipom): NAPOMENA,
+            // van obima ovog zahtjeva — niz je i dalje uvijek prazan
+            // (komentar "Ovo treba popuniti" ispod je pre-postojeći,
+            // znači konverzija rawData → Flight[] nikad nije
+            // implementirana). Ruta izgleda neiskorišćena (nema poziva
+            // iz klijentskog koda) — popravljam tip radi tražene
+            // dosljednosti, ne diram funkcionalnu nepotpunost.
+            const flights: Flight[] = []; // Ovo treba popuniti
             const backupIdCreated = backupService.saveBackup(flights);
             
             return NextResponse.json({
@@ -39,7 +47,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         } catch (error) {
           console.error('Error creating manual backup:', error);
           // Kreiraj emergency backup ako live data ne radi
-          const emptyFlights: any[] = [];
+          const emptyFlights: Flight[] = [];
           const emergencyBackupId = backupService.saveBackup(emptyFlights);
           
           return NextResponse.json({

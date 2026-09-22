@@ -22,6 +22,7 @@ export interface Flight {
   CodeShareFlights: string[];
   AirlineLogoURL: string;
    _sortTime?: number;  // ← DODAJ OVO (za sortiranje)
+     _gateChangedAt?: number; 
   
   FlightType: 'departure' | 'arrival';
   DestinationCityName: string;
@@ -96,7 +97,7 @@ export interface FlightData {
   isNightMode?: boolean;
   arrivals: Flight[];
   lastUpdated: string;
-  source?: 'live' | 'live-alternate' | 'cached' | 'fallback' | 'backup' | 'auto-processed' | 'emergency';
+  source?: 'live' | 'cached' | 'fallback' | 'backup' | 'auto-processed' | 'emergency';
   error?: string;
   warning?: string;
   backupTimestamp?: string;
@@ -194,6 +195,7 @@ export interface AuditLog {
   action: string;
   entity: 'flight' | 'checkin-desk' | 'system';
   entityId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   details: any;
   timestamp: Date;
   ipAddress: string;
