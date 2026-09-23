@@ -433,9 +433,69 @@ const LEDIndicator = memo(function LEDIndicator({
     />
   )
 })
+// NOVO (po zahtjevu — "Disruption Index" po uzoru na Flightradar24):
+// FR24 NIJE objavio tačnu internu formulu — samo tri faktora (broj
+// otkazanih letova, procenat/broj zakašnjelih letova, prosječno
+// trajanje kašnjenja) i skalu 0.0-5.0. Formula ispod je RAZUMNA,
+// transparentna aproksimacija tih faktora — NIJE identična FR24-ovoj
+// (nepoznatoj) internoj formuli. Kalibrisana da:
+//   - 0 otkazano, ~20% zakašnjelo, prosjek ~15 min -> ~1.1 (Good)
+//   - 10% otkazano, ~40% zakašnjelo, prosjek ~45 min -> ~3.6 (Major)
+// "Zakašnjeo" ovdje ISKLJUČUJE letove bez STVARNE procjene (Estimated
+// === Scheduled, samo placeholder) — isti razlog kao popravka
+// prosječnog kašnjenja ranije ove sesije (vidi computeAverageDelayMinutes/
+// avgDelays useEffect) — inače bi se "nema još procjene" letovi lažno
+// brojali kao "na vrijeme", vještački snižavajući index.
+function computeDisruptionIndex(flights: Flight[]): { score: number; cancelled: number; delayed: number; total: number } {
+  const total = flights.length;
+  if (total === 0) return { score: 0, cancelled: 0, delayed: 0, total: 0 };
+
+  let cancelled = 0;
+  let delayed = 0;
+  let delaySumMin = 0;
+
+  flights.forEach(f => {
+    const s = (f.StatusEN || '').toLowerCase();
+    if (/(cancelled|canceled|otkazan)/.test(s)) {
+      cancelled++;
+      return;
+    }
+    const sch = parseFlightTimeToDate(f.ScheduledDepartureTime);
+    const est = parseFlightTimeToDate(f.EstimatedDepartureTime);
+    if (sch && est && est.getTime() !== sch.getTime()) {
+      const diffMin = (est.getTime() - sch.getTime()) / 60_000;
+      if (diffMin > 0) {
+        delayed++;
+        delaySumMin += diffMin;
+      }
+    }
+  });
+
+  const cancelRatio = cancelled / total;
+  const delayRatio = delayed / total;
+  const avgDelayOfDelayed = delayed > 0 ? delaySumMin / delayed : 0;
+
+  const score = Math.min(5.0,
+    cancelRatio * 100 * 0.05 +
+    delayRatio * 100 * 0.02 +
+    avgDelayOfDelayed * 0.05
+  );
+
+  return { score: Math.round(score * 10) / 10, cancelled, delayed, total };
+}
+
+function disruptionLevel(score: number): { label: string; color: string } {
+  // FIX (po zahtjevu — engleski naziv, tačno prema Flightradar24 skali
+  // koju si naveo): "Good traffic flow" / "Minor problems" / "Major
+  // problems", ne lokalizovan naziv.
+  if (score < 2.0) return { label: 'Good traffic flow', color: 'text-emerald-400' };
+  if (score < 3.5) return { label: 'Minor problems', color: 'text-amber-400' };
+  return { label: 'Major problems', color: 'text-red-400' };
+}
+
 const AirportStatusPill = memo(function AirportStatusPill({
   temperature, weatherCode, windSpeed, windDirection,
-  avgArrivalDelay, avgDepartureDelay,
+  avgArrivalDelay, avgDepartureDelay, disruption,
 }: {
   temperature: number | null
   weatherCode: number | null
@@ -443,25 +503,27 @@ const AirportStatusPill = memo(function AirportStatusPill({
   windDirection: number | null
   avgArrivalDelay: number | null
   avgDepartureDelay: number | null
+  disruption: { score: number; cancelled: number; delayed: number; total: number }
 }) {
   const fmtDelay = (v: number | null) =>
     v === null ? '—' : `${v > 0 ? '+' : ''}${v}m`
+  const level = disruptionLevel(disruption.score)
 
   return (
-<div className="flex flex-col gap-1.5 bg-black/30 backdrop-blur-sm border border-white/10 rounded-2xl px-4 py-2 shadow-xl min-w-[200px]">      <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] font-bold tracking-wider text-white/70 uppercase">Tivat · TIV</span>
+<div className="flex flex-col gap-2 bg-black/30 backdrop-blur-sm border border-white/10 rounded-2xl px-5 py-3 shadow-xl min-w-[260px]">      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-bold tracking-wider text-white/70 uppercase">Tivat · TIV</span>
         <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/15 px-1.5 py-0.5 rounded-full">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> LIVE
         </span>
       </div>
 
       <div className="flex items-center gap-3">
-        <span className="flex items-center gap-1.5 text-white font-bold text-sm">
-          <WeatherIcon code={weatherCode} temperature={temperature} size={20} textSize={14} />
+        <span className="flex items-center gap-1.5 text-white font-bold text-base">
+          <WeatherIcon code={weatherCode} temperature={temperature} size={24} textSize={16} />
         </span>
-        <span className="flex items-center gap-1 text-white/70 text-xs font-mono">
+        <span className="flex items-center gap-1 text-white/70 text-sm font-mono">
           <Wind
-            className="w-3.5 h-3.5"
+            className="w-4 h-4"
             style={{ transform: `rotate(${windDirection ?? 0}deg)` }}
           />
           {windDirection !== null ? `${Math.round(windDirection)}°` : '--'}{' '}
@@ -479,6 +541,15 @@ const AirportStatusPill = memo(function AirportStatusPill({
           <Plane className="w-3.5 h-3.5 text-white/50" />
           <span className="w-1.5 h-1.5 rounded-full bg-red-400 flex-shrink-0" />
           <span className="text-white/80 font-mono font-semibold">{fmtDelay(avgDepartureDelay)}</span>
+        </span>
+      </div>
+
+      {/* NOVO (po zahtjevu — Disruption Index, po uzoru na Flightradar24,
+          vidi opširan komentar uz computeDisruptionIndex iznad) */}
+      <div className="flex items-center justify-between gap-3 pt-1.5 border-t border-white/10">
+        <span className="text-[10px] font-bold tracking-wider text-white/50 uppercase">Disruption Index</span>
+        <span className={`text-sm font-mono font-black ${level.color}`}>
+          {disruption.score.toFixed(1)} <span className="text-[10px] font-semibold">{level.label}</span>
         </span>
       </div>
     </div>
@@ -1004,6 +1075,14 @@ const [avgDelays, setAvgDelays] = useState<{ arrivals: number | null; departures
 })
 const lastDelayComputeRef = useRef(0)
 
+// NOVO (po zahtjevu — Disruption Index): kombinovano iz arrivals I
+// departures (isti princip kao Flightradar24 — jedan indeks za cio
+// aerodrom, ne po smjeru).
+const disruption = useMemo(
+  () => computeDisruptionIndex([...arrivals, ...departures]),
+  [arrivals, departures]
+)
+
 // Bilježi kašnjenje za svaki let čim su i sch i est validni —
 // koristi FlightNumber+ScheduledTime kao ključ da se isti let ne broji duplo,
 // i da se ažurira ako se estimate promijeni prije nego let stvarno krene.
@@ -1081,16 +1160,40 @@ const assignments = useMemo(() => {
   const desks: Record<string, string> = {};
   const gates: Record<string, string> = {};
 
+  // FIX (KRITIČNO — prijavljeno "kad se let dodijeli na 3 šaltera
+  // (npr. 7,8,9), combined/departures ne pokazuje taj podatak, kao da
+  // pokazuje stariji/sirov podatak"): deskEntries je organizovan PO
+  // ŠALTERU (ključ je deskNumber) — kad se let dodijeli na VIŠE
+  // šaltera istovremeno, to su VIŠE ODVOJENIH zapisa u deskEntries
+  // (šalter 7 -> XY456, šalter 8 -> XY456, šalter 9 -> XY456).
+  // RANIJE se ovdje gradila mapa "let -> JEDAN šalter"
+  // (desks[entry.flightNumber] = deskNumber) — svaki naredni zapis je
+  // PREPISIVAO prethodni, pa je na kraju ostajao samo POSLEDNJI šalter
+  // po redoslijedu iteracije, ne sva tri. Popravljeno da AKUMULIRA sve
+  // šaltere/gate-ove za isti let, zarezom odvojene (isti format kao
+  // sirovi aerodromski podatak, npr. "10,11,12") — Set sprečava
+  // duplikate ako isti broj nekako stigne dvaput.
+  const deskSets: Record<string, Set<string>> = {};
+  const gateSets: Record<string, Set<string>> = {};
+
   for (const [deskNumber, entry] of Object.entries(deskEntries)) {
     if (entry?.status === 'open' && entry.flightNumber) {
-      desks[entry.flightNumber] = deskNumber; // pazi na smjer mapiranja — vidi napomenu ispod
+      (deskSets[entry.flightNumber] ??= new Set()).add(deskNumber);
     }
   }
   for (const [gateNumber, entry] of Object.entries(gateEntries)) {
     if (entry?.status === 'open' && entry.flightNumber) {
-      gates[entry.flightNumber] = gateNumber;
+      (gateSets[entry.flightNumber] ??= new Set()).add(gateNumber);
     }
   }
+
+  for (const [flightNumber, set] of Object.entries(deskSets)) {
+    desks[flightNumber] = Array.from(set).sort().join(',');
+  }
+  for (const [flightNumber, set] of Object.entries(gateSets)) {
+    gates[flightNumber] = Array.from(set).sort().join(',');
+  }
+
   return { desks, gates };
 }, [deskEntries, gateEntries]);
 
@@ -1306,7 +1409,18 @@ const handleClose = useCallback(() => {
     position: 'absolute',
     left: '50%',
     top: '50%',
+    // FIX (po zahtjevu — prijavljeno preklapanje "Departures"/"Arrivals"
+    // naslova): AirportStatusPill je centriran preko left:50% na CIJEO
+    // header kontejner, nezavisno od širine lijevog naslova. Kad je
+    // pill nedavno proširen (200px -> 260px, +60px), lijeva ivica se
+    // pomjerila 30px ulijevo (translateX(-50%) širi simetrično u oba
+    // smjera od centralne tačke), prekrivajući dio zadnjeg slova
+    // naslova. marginLeft: 30px (pola dodatne širine) vraća lijevu
+    // ivicu pill-a približno na mjesto gdje je bila PRIJE proširenja —
+    // novi, veći prostor se širi udesno, gdje ima više praznog
+    // prostora prema clock indikatoru.
     transform: 'translate(-50%, -50%)',
+    marginLeft: '30px',
   }}
 >
   <AirportStatusPill
@@ -1316,6 +1430,7 @@ const handleClose = useCallback(() => {
     windDirection={tivWeather.loading ? null : tivWeather.windDirection}
     avgArrivalDelay={avgDelays.arrivals}
     avgDepartureDelay={avgDelays.departures}
+    disruption={disruption}
   />
 </div>
 

@@ -660,11 +660,28 @@ const { deskEntries, gateEntries } = useRealtimeAssignments('board');
 const assignments = useMemo(() => {
   const desks: Record<string, string> = {};
   const gates: Record<string, string> = {};
+  // FIX (KRITIČNO — isti razlog kao u app/combined/CombinedPageClientV2.tsx,
+  // vidi opširan komentar tamo): akumuliraj SVE šaltere/gate-ove po
+  // letu (Set, zarezom odvojeno), ne samo POSLEDNJI po redoslijedu
+  // iteracije — prijavljeno da let dodijeljen na 3 šaltera (npr.
+  // 7,8,9) nije prikazivao tačan podatak.
+  const deskSets: Record<string, Set<string>> = {};
+  const gateSets: Record<string, Set<string>> = {};
   for (const [deskNumber, entry] of Object.entries(deskEntries)) {
-    if (entry?.status === 'open' && entry.flightNumber) desks[entry.flightNumber] = deskNumber;
+    if (entry?.status === 'open' && entry.flightNumber) {
+      (deskSets[entry.flightNumber] ??= new Set()).add(deskNumber);
+    }
   }
   for (const [gateNumber, entry] of Object.entries(gateEntries)) {
-    if (entry?.status === 'open' && entry.flightNumber) gates[entry.flightNumber] = gateNumber;
+    if (entry?.status === 'open' && entry.flightNumber) {
+      (gateSets[entry.flightNumber] ??= new Set()).add(gateNumber);
+    }
+  }
+  for (const [flightNumber, set] of Object.entries(deskSets)) {
+    desks[flightNumber] = Array.from(set).sort().join(',');
+  }
+  for (const [flightNumber, set] of Object.entries(gateSets)) {
+    gates[flightNumber] = Array.from(set).sort().join(',');
   }
   return { desks, gates };
 }, [deskEntries, gateEntries]);

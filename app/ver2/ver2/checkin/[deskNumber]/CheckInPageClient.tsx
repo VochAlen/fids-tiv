@@ -160,6 +160,22 @@ function getFixedHolidayImage(): string | null {
   return match ? match.image : null;
 }
 
+// NOVO (po zahtjevu — "Check-in otvoren XX minuta" indikator): stvarna,
+// tačna informacija (koliko dugo je šalter VEĆ aktivan za ovaj let) —
+// NAMJERNO ne "procijenjeno vrijeme čekanja u redu" (ta procjena bi
+// zahtijevala mjerenje koje sistem trenutno nema — broj putnika u
+// redu — i bila bi obmanjujuća). setAt dolazi iz admin akcije "otvori
+// šalter", pa ovo uvijek odražava stvarno stanje.
+function formatOpenDuration(setAt: number | null, nowMs: number): string | null {
+  if (!setAt) return null;
+  const minutes = Math.max(0, Math.floor((nowMs - setAt) / 60_000));
+  if (minutes < 1) return 'upravo otvoren';
+  if (minutes < 60) return `otvoren ${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `otvoren ${h}h ${m}min`;
+}
+
 
 
 const BA_IMAGES: Record<string, string> = {
@@ -530,6 +546,18 @@ function CheckInDisplay() {
   useBodyBackground('#0f172a');
 
   const [assignment, setAssignment] = useState<DeskAssignment>(EMPTY_ASSIGNMENT);
+  // NOVO (po zahtjevu — "Check-in otvoren XX minuta" indikator): isti
+  // "čist" obrazac kao app/baggage/[beltNumber]/BaggagePageClient.tsx
+  // (react-hooks/purity) — Date.now() se poziva ISKLJUČIVO unutar
+  // useEffect-a, nikad direktno tokom render-a. 0 = efekat još nije
+  // postavio pravu vrijednost (traje mikrosekunde pri mount-u);
+  // formatOpenDuration ignoriše taj slučaj (vidi njenu definiciju).
+  const [nowMs, setNowMs] = useState(0);
+  useEffect(() => {
+    setNowMs(Date.now());
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
@@ -1114,6 +1142,11 @@ useEffect(() => {
                 <div className="text-8xl font-mono font-bold text-white">
                   {assignment.scheduledTime}
                 </div>
+                {formatOpenDuration(assignment.setAt, nowMs) && (
+                  <div className="text-xl text-white/40 mt-2 font-mono">
+                    {formatOpenDuration(assignment.setAt, nowMs)}
+                  </div>
+                )}
               </div>
 
               {assignment.estimatedTime &&
@@ -1314,6 +1347,11 @@ useEffect(() => {
                 CHECK-IN OPEN
               </div>
               <div className="text-4xl text-green-400 mt-2">Please proceed to check-in</div>
+              {formatOpenDuration(assignment.setAt, nowMs) && (
+                <div className="text-2xl text-white/50 mt-3 font-mono">
+                  {formatOpenDuration(assignment.setAt, nowMs)}
+                </div>
+              )}
             </div>
 
             {assignment.gateNumber && (
