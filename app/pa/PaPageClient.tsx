@@ -33,11 +33,12 @@ import {
   useState,
   useCallback,
 } from "react"
-import { Volume2, VolumeX, Radio, CheckCircle2, Moon } from "lucide-react"
+import { Volume2, VolumeX, Radio, CheckCircle2, Moon, Sun, History, Mic } from "lucide-react"
 import type Ably from "ably"
 import { getSharedAbly } from "@/lib/ably-client"
 import { useRealtimeFlightData } from "@/hooks/useRealtimeFlightData"
 import { isNightHours } from "@/lib/night-hours"
+import { useTheme } from "@/hooks/use-theme"
 import type { Flight } from "@/types/flight"
 import {
   DEPARTURE_WINDOWS,
@@ -58,6 +59,11 @@ import {
 
 const HARD_RESET_HOUR = 3
 const SECURITY_INTERVAL_MS = 30 * 60 * 1000
+// NOVO (po zahtjevu — gong prije svake objave): gong.mp3 traje ~1-2s;
+// 4s je velikodušna margina. Ako iz bilo kog razloga ne završi (i
+// 'ended' i 'error' eventovi izostanu), ovaj timeout garantuje da se
+// objava ipak izgovori, umjesto da red trajno stane.
+const GONG_FAILSAFE_MS = 4_000
 // NOVO (proširena PA automatika): koliko minuta VEĆE kašnjenje mora
 // postati (u odnosu na poslednju najavu za taj let) da bi se ponovo
 // najavilo — vidi opširan komentar uz lastAnnouncedDelayRef niže.
@@ -121,25 +127,27 @@ function flightStatusColor(status: string): string {
   return "text-amber-400"
 }
 
-function FlightTable({ flights }: { flights: Flight[] }) {
+function FlightTable({ flights, isDark }: { flights: Flight[]; isDark: boolean }) {
   const sorted = [...flights].sort((a, b) =>
     (a.ScheduledDepartureTime || "99:99").localeCompare(b.ScheduledDepartureTime || "99:99")
   )
   return (
-    <div className="bg-slate-800/40 rounded-2xl border border-slate-700 overflow-hidden">
-      <div className="grid grid-cols-[90px_1fr_90px_90px_90px_90px] gap-2 px-5 py-3 bg-slate-800/80 border-b border-slate-700 text-slate-400 text-xs font-bold uppercase tracking-wider">
+    <div className={`rounded-2xl border overflow-hidden ${isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-slate-200 shadow-sm'}`}>
+      <div className={`grid grid-cols-[90px_1fr_90px_90px_90px_90px] gap-2 px-5 py-3 border-b text-xs font-bold uppercase tracking-wider ${
+        isDark ? 'bg-slate-800/80 border-slate-700 text-slate-400' : 'bg-slate-50 border-slate-200 text-slate-500'
+      }`}>
         <span>Let</span><span>Kompanija / Grad</span><span>Plan</span><span>Oček.</span><span>Gate</span><span>Status</span>
       </div>
-      <div className="max-h-[60vh] overflow-y-auto divide-y divide-slate-700/40 font-mono text-sm">
+      <div className={`max-h-[60vh] overflow-y-auto divide-y font-mono text-sm ${isDark ? 'divide-slate-700/40' : 'divide-slate-100'}`}>
         {sorted.length === 0 ? (
-          <div className="p-10 text-center text-slate-500 font-sans">Nema letova.</div>
+          <div className={`p-10 text-center font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Nema letova.</div>
         ) : sorted.map((f) => (
-          <div key={`${f.FlightNumber}-${f.ScheduledDepartureTime}`} className="grid grid-cols-[90px_1fr_90px_90px_90px_90px] gap-2 px-5 py-3 items-center hover:bg-slate-700/20">
-            <span className="text-white font-bold">{f.FlightNumber}</span>
-            <span className="font-sans text-slate-300 truncate">{f.AirlineName} · {f.DestinationCityName}</span>
-            <span className="text-slate-400">{f.ScheduledDepartureTime || "—"}</span>
-            <span className="text-amber-300">{f.EstimatedDepartureTime || "—"}</span>
-            <span className="text-slate-300">{f.GateNumber || f.CheckInDesk || "—"}</span>
+          <div key={`${f.FlightNumber}-${f.ScheduledDepartureTime}`} className={`grid grid-cols-[90px_1fr_90px_90px_90px_90px] gap-2 px-5 py-3 items-center transition-colors ${isDark ? 'hover:bg-slate-700/20' : 'hover:bg-slate-50'}`}>
+            <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{f.FlightNumber}</span>
+            <span className={`font-sans truncate ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{f.AirlineName} · {f.DestinationCityName}</span>
+            <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>{f.ScheduledDepartureTime || "—"}</span>
+            <span className={isDark ? 'text-amber-300' : 'text-amber-600'}>{f.EstimatedDepartureTime || "—"}</span>
+            <span className={isDark ? 'text-slate-300' : 'text-slate-600'}>{f.GateNumber || f.CheckInDesk || "—"}</span>
             <span className={`font-sans font-semibold ${flightStatusColor(f.StatusEN)}`}>{f.StatusEN || "—"}</span>
           </div>
         ))}
@@ -160,6 +168,9 @@ export default function PaPageClient(): JSX.Element {
   const [nightMode, setNightMode] = useState(isNightHours())
   const [activeTab, setActiveTab] = useState<"pa" | "departures" | "arrivals">("pa")
   const [queueLength, setQueueLength] = useState(0)
+  // FIX (po zahtjevu — default tema je LIGHT, stranica ranije nije
+  // imala nikakav temu koncept, samo tvrdo-kodiran taman stil).
+  const { isDark, toggle: toggleTheme } = useTheme('theme:pa', false)
 
   const enVoiceRef = useRef<SpeechSynthesisVoice | null>(null)
   const localVoiceRef = useRef<SpeechSynthesisVoice | null>(null)
@@ -172,6 +183,51 @@ export default function PaPageClient(): JSX.Element {
   const playingRef = useRef(false)
   const processQueueRef = useRef<() => void>(() => {})
   const speakingKeepAliveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // NOVO (po zahtjevu — gong prije svake objave): učitan JEDNOM pri
+  // mount-u (ne po svakoj objavi — izbjegava ponovan network fetch
+  // istog malog fajla), ponovo koristi ISTI <audio> element za svaku
+  // reprodukciju (currentTime = 0 vraća ga na početak).
+  const gongAudioRef = useRef<HTMLAudioElement | null>(null)
+  useEffect(() => {
+    const audio = new Audio('/sounds/gong.mp3')
+    audio.preload = 'auto'
+    gongAudioRef.current = audio
+  }, [])
+
+  // FIX (po zahtjevu — gong prije svake objave, EN i lokalne podjednako):
+  // vraća Promise koji se rješava kad gong ZAVRŠI (ili odmah, uz
+  // upozorenje u konzoli, ako reprodukcija iz bilo kog razloga ne
+  // uspije — browser autoplay ograničenje, fajl nedostupan, itd.).
+  // Objave NIKAD ne smiju stati/čekati unedogled zbog gong-a — fail-safe
+  // timeout (GONG_FAILSAFE_MS) garantuje da se govor uvijek na kraju
+  // izvrši, čak i ako 'ended'/'error' eventovi iz nekog razloga ne
+  // stignu.
+  const playGong = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      const audio = gongAudioRef.current
+      if (!audio) { resolve(); return }
+
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        audio.removeEventListener('ended', finish)
+        audio.removeEventListener('error', finish)
+        resolve()
+      }
+
+      audio.currentTime = 0
+      audio.addEventListener('ended', finish)
+      audio.addEventListener('error', finish)
+      audio.play().catch((err) => {
+        console.warn('[PA] Gong reprodukcija nije uspjela (nastavljam sa govorom):', err)
+        finish()
+      })
+
+      setTimeout(finish, GONG_FAILSAFE_MS)
+    })
+  }, [])
 
   const announcedRef = useRef<Record<string, boolean>>({})
   // NOVO (FIDS Innovation Harness — "proširena PA automatika"): prati
@@ -194,7 +250,8 @@ export default function PaPageClient(): JSX.Element {
   const pushHistory = useCallback((text: string) => {
     const time = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
     setLastAnnouncement(text)
-    setHistory(prev => [{ id: `${Date.now()}-${Math.random()}`, time, text }, ...prev].slice(0, 30))
+    // FIX (po zahtjevu — "zadnjih 15 objavljenih poziva", ne 30)
+    setHistory(prev => [{ id: `${Date.now()}-${Math.random()}`, time, text }, ...prev].slice(0, 15))
   }, [])
 
   useEffect(() => {
@@ -242,35 +299,43 @@ export default function PaPageClient(): JSX.Element {
     const synth = window.speechSynthesis
     if (!synth) { playingRef.current = false; setSpeaking(false); return }
 
-    const voice = item.voiceURI ? allVoicesRef.current.find(v => v.voiceURI === item.voiceURI) : null
-    const utterance = new SpeechSynthesisUtterance(item.text)
-    if (voice) utterance.voice = voice
-    utterance.lang = voice?.lang || "en-US"
-    utterance.rate = 0.92
-    utterance.pitch = 1
-    utterance.volume = 1
+    // FIX (po zahtjevu — gong prije svake objave): gong se pušta
+    // PRIJE govora, za SVAKU stavku u redu (ručnu i automatsku, EN i
+    // lokalnu podjednako — obje se ovdje obrađuju, jedna po jedna).
+    // Govor kreće tek kad playGong() Promise razriješi (gong završio,
+    // pao, ili istekao fail-safe timeout) — nikad se ne preskače, ali
+    // ni ne blokira trajno.
+    playGong().then(() => {
+      const voice = item.voiceURI ? allVoicesRef.current.find(v => v.voiceURI === item.voiceURI) : null
+      const utterance = new SpeechSynthesisUtterance(item.text)
+      if (voice) utterance.voice = voice
+      utterance.lang = voice?.lang || "en-US"
+      utterance.rate = 0.92
+      utterance.pitch = 1
+      utterance.volume = 1
 
-    const onDone = () => {
-      playingRef.current = false
-      setSpeaking(false)
-      setTimeout(() => processQueueRef.current(), 900)
-    }
-    utterance.onend = onDone
-    utterance.onerror = (e) => {
-      console.error("[PA] speechSynthesis greška:", e.error)
-      onDone()
-    }
+      const onDone = () => {
+        playingRef.current = false
+        setSpeaking(false)
+        setTimeout(() => processQueueRef.current(), 900)
+      }
+      utterance.onend = onDone
+      utterance.onerror = (e) => {
+        console.error("[PA] speechSynthesis greška:", e.error)
+        onDone()
+      }
 
-    synth.speak(utterance)
+      synth.speak(utterance)
 
-    const keepAlive = () => {
-      if (!synth.speaking) { speakingKeepAliveRef.current = null; return }
-      synth.pause(); synth.resume()
+      const keepAlive = () => {
+        if (!synth.speaking) { speakingKeepAliveRef.current = null; return }
+        synth.pause(); synth.resume()
+        speakingKeepAliveRef.current = setTimeout(keepAlive, 5000)
+      }
+      if (speakingKeepAliveRef.current) clearTimeout(speakingKeepAliveRef.current)
       speakingKeepAliveRef.current = setTimeout(keepAlive, 5000)
-    }
-    if (speakingKeepAliveRef.current) clearTimeout(speakingKeepAliveRef.current)
-    speakingKeepAliveRef.current = setTimeout(keepAlive, 5000)
-  }, [])
+    })
+  }, [playGong])
 
   useEffect(() => { processQueueRef.current = processQueue }, [processQueue])
 
@@ -285,8 +350,14 @@ export default function PaPageClient(): JSX.Element {
     const uri = localVoiceRef.current?.voiceURI ?? enVoiceRef.current?.voiceURI ?? null
     queueRef.current.push({ text, voiceURI: uri })
     setQueueLength(queueRef.current.length)
+    // FIX (po zahtjevu — istorija je ranije bilježila SAMO engleske
+    // pozive, jer je pushHistory bio pozvan isključivo iz enqueueEN,
+    // nikad ovdje): svaki poziv (EN ili lokalni) se sad bilježi kao
+    // svoj sopstveni red u istoriji, hronološkim redom kojim se
+    // stvarno izgovaraju.
+    pushHistory(text)
     setTimeout(() => processQueueRef.current(), 0)
-  }, [])
+  }, [pushHistory])
 
   const evaluateFlight = useCallback((f: Flight) => {
     if (isNightHours()) return
@@ -493,6 +564,19 @@ export default function PaPageClient(): JSX.Element {
       primer.volume = 0
       synth.speak(primer)
     }
+    // NOVO (po zahtjevu — gong prije svake objave): isti "primer" princip
+    // kao gore, ali za Audio() element — bez ovoga, browser-ova
+    // autoplay politika bi mogla blokirati PRVI stvaran gong.play()
+    // poziv (koji se dešava mnogo kasnije, van direktnog odgovora na
+    // klik) jer nije direktna posljedica korisničke interakcije. Tih
+    // (volume 0), odigran ODMAH pri kliku — "otključava" ovaj
+    // konkretan <audio> element za sve buduće play() pozive u ovoj
+    // sesiji.
+    const gong = gongAudioRef.current
+    if (gong) {
+      gong.volume = 0
+      gong.play().then(() => { gong.pause(); gong.currentTime = 0; gong.volume = 1 }).catch(() => { gong.volume = 1 })
+    }
   }
 
   const waitThenReload = useCallback((reason: string) => {
@@ -578,51 +662,70 @@ export default function PaPageClient(): JSX.Element {
     )
   }
 
+  const bg        = isDark ? 'bg-slate-950' : 'bg-slate-50';
+  const bgAlt     = isDark ? 'bg-slate-900/80' : 'bg-white/90';
+  const text      = isDark ? 'text-white' : 'text-slate-900';
+  const textMuted = isDark ? 'text-slate-400' : 'text-slate-500';
+  const border    = isDark ? 'border-slate-800' : 'border-slate-200';
+  const cardBg    = isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-slate-200 shadow-sm';
+
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
+    <div className={`min-h-screen transition-colors duration-300 ${bg} ${text}`}>
       {/* ── Kompaktna status traka — sve bitno na jedan pogled, bez
           skrolovanja, konzistentno vidljivo na svim tabovima. ────────── */}
-      <div className="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4">
+      <div className={`sticky top-0 z-20 border-b backdrop-blur px-6 py-4 ${border} ${bgAlt}`}>
         <div className="max-w-6xl mx-auto flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-3">
-            <Radio className="w-7 h-7 text-sky-400" />
+            <div className={`p-2 rounded-xl ${isDark ? 'bg-sky-500/15' : 'bg-sky-100'}`}>
+              <Radio className="w-5 h-5 text-sky-500" />
+            </div>
             <h1 className="text-xl font-black tracking-tight">FIDS TIV — Razglas</h1>
           </div>
-          <div className="flex items-center gap-5 text-sm">
+          <div className="flex items-center gap-4 text-sm">
             <span className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${connectionState === 'connected' ? 'bg-emerald-400 animate-pulse' : 'bg-yellow-500'}`} />
-              <span className="text-slate-400">{connectionState === 'connected' ? 'Povezan' : 'Povezivanje...'}</span>
+              <span className={textMuted}>{connectionState === 'connected' ? 'Povezan' : 'Povezivanje...'}</span>
             </span>
             <span className="flex items-center gap-1.5">
               {speaking ? (
                 <><Volume2 className="w-4 h-4 text-emerald-400 animate-pulse" /><span className="text-emerald-400 font-semibold">Govori</span></>
               ) : (
-                <><VolumeX className="w-4 h-4 text-slate-500" /><span className="text-slate-500">Tiho</span></>
+                <><VolumeX className={`w-4 h-4 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} /><span className={textMuted}>Tiho</span></>
               )}
             </span>
             {queueLength > 0 && (
-              <span className="px-2 py-0.5 bg-sky-500/20 text-sky-300 rounded-md text-xs font-bold">
+              <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>
                 U redu: {queueLength}
               </span>
             )}
-            <span className="text-slate-500 text-xs">EN: {voiceName || "..."} · Lokalni: {localVoiceName || "..."}</span>
+            <span className={`text-xs hidden lg:inline ${textMuted}`}>EN: {voiceName || "..."} · Lokalni: {localVoiceName || "..."}</span>
+            <button
+              onClick={toggleTheme}
+              aria-label="Tema"
+              className={`p-2 rounded-lg border transition-colors ${border} ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
+            >
+              {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-600" />}
+            </button>
           </div>
         </div>
 
         {/* Tabovi */}
-        <div className="max-w-6xl mx-auto flex gap-1 mt-4">
+        <div className="max-w-6xl mx-auto flex gap-2 mt-4">
           {[
-            { id: "pa" as const, label: "Razglas" },
-            { id: "departures" as const, label: `Odlasci (${(liveFlightData?.departures || []).length})` },
-            { id: "arrivals" as const, label: `Dolasci (${(liveFlightData?.arrivals || []).length})` },
+            { id: "pa" as const, label: "Razglas", icon: Mic },
+            { id: "departures" as const, label: `Odlasci (${(liveFlightData?.departures || []).length})`, icon: null },
+            { id: "arrivals" as const, label: `Dolasci (${(liveFlightData?.arrivals || []).length})`, icon: null },
           ].map(t => (
             <button
               key={t.id}
               onClick={() => setActiveTab(t.id)}
-              className={`px-4 py-2 rounded-t-lg text-sm font-semibold transition-colors ${
-                activeTab === t.id ? "bg-slate-800 text-sky-400" : "text-slate-500 hover:text-slate-300"
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${
+                activeTab === t.id
+                  ? isDark ? "bg-sky-500/20 text-sky-300" : "bg-sky-500 text-white shadow-sm"
+                  : isDark ? "text-slate-500 hover:bg-white/5 hover:text-slate-300" : "text-slate-500 hover:bg-black/5 hover:text-slate-700"
               }`}
             >
+              {t.icon && <t.icon className="w-4 h-4" />}
               {t.label}
             </button>
           ))}
@@ -633,27 +736,28 @@ export default function PaPageClient(): JSX.Element {
         {activeTab === "pa" && (
           <div>
             {lastAnnouncement && (
-              <div className="bg-sky-950/40 border border-sky-800/50 rounded-2xl p-6 mb-6">
-                <div className="flex items-center gap-2 text-sky-400 text-sm mb-2">
+              <div className={`rounded-2xl p-6 mb-6 border ${isDark ? 'bg-sky-950/40 border-sky-800/50' : 'bg-sky-50 border-sky-200'}`}>
+                <div className="flex items-center gap-2 text-sky-500 text-sm mb-2 font-semibold">
                   <CheckCircle2 className="w-4 h-4" />
                   Posljednja najava
                 </div>
-                <div className="text-xl">{lastAnnouncement}</div>
+                <div className="text-xl leading-relaxed">{lastAnnouncement}</div>
               </div>
             )}
 
-            <div className="bg-slate-800/40 rounded-2xl border border-slate-700 overflow-hidden">
-              <div className="px-6 py-4 border-b border-slate-700 text-slate-400 text-sm font-semibold uppercase tracking-wider">
+            <div className={`rounded-2xl border overflow-hidden ${cardBg}`}>
+              <div className={`flex items-center gap-2 px-6 py-4 border-b text-sm font-semibold uppercase tracking-wider ${border} ${textMuted}`}>
+                <History className="w-4 h-4" />
                 Istorija (zadnjih {history.length})
               </div>
-              <div className="divide-y divide-slate-700/50 max-h-[55vh] overflow-y-auto">
+              <div className={`divide-y max-h-[55vh] overflow-y-auto ${isDark ? 'divide-slate-700/50' : 'divide-slate-100'}`}>
                 {history.length === 0 ? (
-                  <div className="p-10 text-center text-slate-500">Nema najava još.</div>
+                  <div className={`p-10 text-center ${textMuted}`}>Nema najava još.</div>
                 ) : (
                   history.map((a) => (
                     <div key={a.id} className="px-6 py-4">
-                      <div className="text-sm text-slate-500 mb-1 font-mono">{a.time}</div>
-                      <div>{a.text}</div>
+                      <div className={`text-sm mb-1 font-mono ${textMuted}`}>{a.time}</div>
+                      <div className="leading-relaxed">{a.text}</div>
                     </div>
                   ))
                 )}
@@ -662,15 +766,17 @@ export default function PaPageClient(): JSX.Element {
 
             <button
               onClick={() => enqueueEN("This is a test announcement.")}
-              className="mt-6 px-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-xl text-sm font-semibold transition-colors"
+              className={`mt-6 px-6 py-3 rounded-xl text-sm font-semibold transition-colors border ${
+                isDark ? 'bg-slate-800 hover:bg-slate-700 border-slate-700' : 'bg-white hover:bg-slate-50 border-slate-200 shadow-sm'
+              }`}
             >
               Test glasa (čujno — koristi samo ručno, van radnog vremena šaltera)
             </button>
           </div>
         )}
 
-        {activeTab === "departures" && <FlightTable flights={liveFlightData?.departures || []} />}
-        {activeTab === "arrivals" && <FlightTable flights={liveFlightData?.arrivals || []} />}
+        {activeTab === "departures" && <FlightTable flights={liveFlightData?.departures || []} isDark={isDark} />}
+        {activeTab === "arrivals" && <FlightTable flights={liveFlightData?.arrivals || []} isDark={isDark} />}
       </div>
     </div>
   )

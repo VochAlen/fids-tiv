@@ -81,6 +81,21 @@ export function reportDynamicNightMode(value: boolean): void {
   lastKnownDynamicNightMode = dynamicNightConsecutiveCount >= DYNAMIC_NIGHT_MIN_CONSECUTIVE_REPORTS;
 }
 
+// FIX (po zahtjevu — prijavljeno "ekran povremeno postane crn"):
+// izloženo da kiosk stranice (combined/departures/border/arrivals)
+// mogu koristiti ISTU, već dokazanu hysterezu za VIZUELAN prikaz
+// noćnog ekrana, umjesto da direktno primjenjuju sirov
+// liveFlightData.isNightMode flag (koji je RANIJE bio primjenjivan
+// BEZ ikakve zaštite od jednog, prolaznog pogrešnog/zastarjelog
+// signala — npr. ako fallback REST snapshot vrati kratkotrajno
+// zastarjeli podatak). Isti princip kao nightWatcherTick iznad:
+// jedan "noć" izvještaj nikad sam ne mijenja prikaz, potrebna su dva
+// uzastopna — ali povratak na "nije noć" je odmah, čim stigne samo
+// jedan ispravan izvještaj (brz oporavak, spor okidač).
+export function getLastKnownDynamicNightMode(): boolean {
+  return lastKnownDynamicNightMode;
+}
+
 // ── NOĆNI REŽIM (Edge Requests optimizacija, 2026-08) ──────────────────
 //
 // Problem: Ably konekcija se ranije NIKAD nije gasila osim na

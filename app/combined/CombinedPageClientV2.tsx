@@ -19,6 +19,8 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { isNightHours } from '@/lib/night-hours';
+import { getLastKnownDynamicNightMode } from '@/lib/ably-client';
 import { useWeather } from '@/hooks/use-weather'
 import WeatherIcon from '@/components/weather-icon'
 
@@ -1009,7 +1011,22 @@ useEffect(() => {
   arrivals.forEach(f => {
     const sch = parseFlightTimeToDate(f.ScheduledDepartureTime)
     const est = parseFlightTimeToDate(f.EstimatedDepartureTime)
-    if (sch && est) {
+    // FIX (KRITIČNO — prijavljen bug: "prosječno kašnjenje -1.3 min
+    // kad samo JEDAN let ima stvarno odstupanje, ostali još nemaju
+    // procjenu"): RANIJE je uslov bio samo `if (sch && est)` — ovo
+    // NIJE provjeravalo da li est i sch STVARNO odstupaju. Kad
+    // EstimatedDepartureTime za let još nije stiglo od aerodromskog
+    // izvora, polje jednostavno pokazuje ScheduledDepartureTime kao
+    // placeholder — est je tad VALIDAN datum, JEDNAK sch-u, pa je
+    // prolazio ovaj uslov i upisivao se u prosjek sa "0 min
+    // odstupanja". Svaki takav let (bez stvarnog praćenja) je
+    // RAZBLAŽIVAO pravi signal iz letova koji STVARNO odstupaju —
+    // npr. jedan let -30 min (30 min ranije) usred 22 leta bez
+    // procjene daje prosjek -30/23 ≈ -1.3, umjesto pravih -30 min za
+    // taj jedan let. Dodat eksplicitan uslov da est i sch MORAJU
+    // stvarno odstupati — prosjek se sad računa isključivo iz letova
+    // sa potvrđenim, stvarnim odstupanjem.
+    if (sch && est && est.getTime() !== sch.getTime()) {
       const key = `${f.FlightNumber}-${f.ScheduledDepartureTime}`
       recordDelay(arrivalDelaysRef.current, key, (est.getTime() - sch.getTime()) / 60_000)
     }
@@ -1017,7 +1034,8 @@ useEffect(() => {
   departures.forEach(f => {
     const sch = parseFlightTimeToDate(f.ScheduledDepartureTime)
     const est = parseFlightTimeToDate(f.EstimatedDepartureTime)
-    if (sch && est) {
+    // FIX — isti razlog kao arrivals petlja iznad.
+    if (sch && est && est.getTime() !== sch.getTime()) {
       const key = `${f.FlightNumber}-${f.ScheduledDepartureTime}`
       recordDelay(departureDelaysRef.current, key, (est.getTime() - sch.getTime()) / 60_000)
     }
@@ -1094,7 +1112,20 @@ const assignments = useMemo(() => {
     const { filteredArrivals, departuresWithMeta } = prepareData(liveFlightData, assignments);
     setArrivals(filteredArrivals);
     setDepartures(departuresWithMeta);
-    setNightMode(!!liveFlightData.isNightMode);
+    // FIX (KRITIČNO — prijavljeno "ekran povremeno postane crn na oko
+    // 5 min"): RANIJE se ovdje direktno primjenjivao sirov
+    // liveFlightData.isNightMode flag — jedan prolazan/zastarjeli
+    // signal (npr. ako fallback REST snapshot kratkotrajno vrati
+    // stariji podatak, vidi hooks/useRealtimeFlightData.ts) je odmah,
+    // bez ikakve zaštite, prebacivao CIJEL EKRAN na crn "noćni sat"
+    // prikaz — putnici su to vidjeli kao iznenadan, neobjašnjen
+    // "kvar". getLastKnownDynamicNightMode() koristi ISTU, već
+    // dokazanu 2-uzastopna-izvještaja hysterezu koja se ranije
+    // primjenjivala SAMO za gašenje Ably konekcije (lib/ably-client.ts)
+    // — sad štiti i VIZUELAN prikaz od istog rizika. isNightHours()
+    // (statička, sezonska provjera) ostaje kao siguran fallback koji
+    // nikad ne kasni.
+    setNightMode(isNightHours() || getLastKnownDynamicNightMode());
     setLastUpdate(new Date().toLocaleTimeString("en-GB"));
     setLoading(false);
     isInitialLoad.current = false;

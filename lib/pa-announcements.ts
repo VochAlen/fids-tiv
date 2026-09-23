@@ -267,7 +267,7 @@ export function localCityName(original: string): string {
 
 // ── Builders — EN ──────────────────────────────────────────────────────
 export function buildArrivalEN(f: Flight): string {
-  return `Attention please. ${f.AirlineName} flight ${spokenFlightNumberEN(f)} from ${f.DestinationCityName} has arrived. Thank you.`;
+  return `${f.AirlineName} announces the arrival of the flight number ${spokenFlightNumberEN(f)}, from ${f.DestinationCityName}.`;
 }
 
 export function buildDepartureEN(f: Flight, type: string): string {
@@ -281,8 +281,8 @@ export function buildDepartureEN(f: Flight, type: string): string {
     case 'checkin_120': return `Attention please. ${airline} flight ${num} to ${dest} is now open for check-in. ${checkins} Check-in will close 30 minutes before departure. Thank you.`;
     case 'checkin_90':  return `Attention please. This is a reminder that check-in is open for ${airline} flight ${num} to ${dest}. ${checkins} Please ensure you have checked in before the desk closes. Thank you.`;
     case 'checkin_60':  return `Attention please. Last call for check-in. ${airline} flight ${num} to ${dest}. ${checkins} Check-in closes in 15 minutes. Please proceed immediately. Thank you.`;
-    case 'boarding_30': return `Attention please. ${airline} flight ${num} to ${dest} is now ready for boarding at ${gate}. Please have your boarding pass and identification ready. Thank you.`;
-    case 'boarding_20': return `Attention please. Boarding is in progress for ${airline} flight ${num} to ${dest} at ${gate}. All passengers should now be at the gate. Thank you.`;
+    case 'boarding_30': return `Dear ladies and gentlemen, your ${airline} flight ${num} to ${dest} is ready for boarding. Please proceed to ${gate}. Please have your travel document and boarding pass ready for inspection. We wish you a pleasant flight and thank you for choosing ${airline}.`;
+    case 'boarding_20': return `Dear ladies and gentlemen, boarding is now in progress for ${airline} flight ${num} to ${dest} at ${gate}. Please have your travel document and boarding pass ready for inspection. We thank you for your cooperation.`;
     case 'final_15':    return `Final call. Final call for ${airline} flight ${num} to ${dest}. Please proceed immediately to ${gate}. Thank you.`;
     case 'final_10':    return `Last and final call. ${airline} flight ${num} to ${dest}. The gate is about to close. Report immediately to ${gate} or you will be offloaded. Thank you.`;
     default: return '';
@@ -318,7 +318,7 @@ export function buildGateChangeEN(f: Flight, oldGate: string, newGate: string): 
 
 // ── Builders — lokalni jezik ────────────────────────────────────────────
 export function buildArrivalLocal(f: Flight): string {
-  return `Pažnja molim. Let kompanije ${localAirlineName(f.AirlineName)} broj ${spokenFlightNumberLocal(f)} iz ${localCityName(f.DestinationCityName)} je sletio. Hvala.`;
+  return `${localAirlineName(f.AirlineName)} najavljuje dolazak leta broj ${spokenFlightNumberLocal(f)}, iz ${localCityName(f.DestinationCityName)}.`;
 }
 
 export function buildDepartureLocal(f: Flight, type: string): string {
@@ -332,8 +332,8 @@ export function buildDepartureLocal(f: Flight, type: string): string {
     case 'checkin_120': return `Pažnja molim. Let kompanije ${airline} broj ${num} za ${dest} je otvoren za registraciju putnika. ${checkins} Prijava se zatvara 30 minuta prije polijetanja. Hvala.`;
     case 'checkin_90':  return `Pažnja molim. Podsjetnik – registracija putnika je otvorena za let kompanije ${airline} broj ${num} za ${dest}. ${checkins} Molimo prijavite se na vrijeme. Hvala.`;
     case 'checkin_60':  return `Pažnja molim. Posljednji poziv za registraciju putnika. Let kompanije ${airline} broj ${num} za ${dest}. ${checkins} Registracija se zatvara za 15 minuta. Molimo odmah pristupite šalteru. Hvala.`;
-    case 'boarding_30': return `Pažnja molim. Let kompanije ${airline} broj ${num} za ${dest} spreman je za ukrcavanje na ${gate}. Molimo pripremite Vašu putnu ispravu i kartu za ukrcavanje. Hvala.`;
-    case 'boarding_20': return `Pažnja molim. Ukrcavanje je u toku za let kompanije ${airline} broj ${num} za ${dest} na ${gate}. Svi putnici trebaju biti na izlazu. Hvala.`;
+    case 'boarding_30': return `Poštovani putnici, let kompanije ${airline} broj ${num} za ${dest} je spreman za ukrcavanje. Molimo pristupite ${gate}. Molimo pripremite putnu ispravu i kartu za ukrcavanje na uvid. Želimo vam prijatan let i zahvaljujemo se što ste izabrali kompaniju ${airline}.`;
+    case 'boarding_20': return `Poštovani putnici, ukrcavanje je u toku za let kompanije ${airline} broj ${num} za ${dest} na ${gate}. Molimo pripremite putnu ispravu i kartu za ukrcavanje na uvid. Hvala vam na saradnji.`;
     case 'final_15':    return `Posljednji poziv za putnike leta kompanije ${airline} broj ${num} za ${dest}. Molimo odmah pristupite ${gate}. Hvala.`;
     case 'final_10':    return `Poslednji poziv. Let kompanije ${airline} broj ${num} za ${dest}. Izlaz se zatvara. Odmah pristupite ${gate} ili ćete biti odjavljeni. Hvala.`;
     default: return '';
