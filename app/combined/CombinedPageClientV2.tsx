@@ -19,6 +19,7 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { sortNumericStrings } from '@/lib/sort-utils';
 import { isNightHours } from '@/lib/night-hours';
 import { getLastKnownDynamicNightMode } from '@/lib/ably-client';
 import { useWeather } from '@/hooks/use-weather'
@@ -1188,10 +1189,10 @@ const assignments = useMemo(() => {
   }
 
   for (const [flightNumber, set] of Object.entries(deskSets)) {
-    desks[flightNumber] = Array.from(set).sort().join(',');
+    desks[flightNumber] = sortNumericStrings(Array.from(set)).join(',');
   }
   for (const [flightNumber, set] of Object.entries(gateSets)) {
-    gates[flightNumber] = Array.from(set).sort().join(',');
+    gates[flightNumber] = sortNumericStrings(Array.from(set)).join(',');
   }
 
   return { desks, gates };

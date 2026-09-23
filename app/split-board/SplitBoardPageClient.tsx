@@ -21,6 +21,7 @@ import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { sortNumericStrings } from '@/lib/sort-utils';
 
 // ============================================================
 // KONSTANTE
@@ -566,10 +567,10 @@ const assignments = useMemo(() => {
     }
   }
   for (const [flightNumber, set] of Object.entries(deskSets)) {
-    desks[flightNumber] = Array.from(set).sort().join(',');
+    desks[flightNumber] = sortNumericStrings(Array.from(set)).join(',');
   }
   for (const [flightNumber, set] of Object.entries(gateSets)) {
-    gates[flightNumber] = Array.from(set).sort().join(',');
+    gates[flightNumber] = sortNumericStrings(Array.from(set)).join(',');
   }
   return { desks, gates };
 }, [deskEntries, gateEntries]);
