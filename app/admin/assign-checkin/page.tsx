@@ -751,6 +751,12 @@ const router = useRouter();
   // selekcije je bio potpuno nevidljiv — tap na gate/šalter tad ne bi
   // radio ništa, bez objašnjenja zašto.
   const [selectionExpiredNotice, setSelectionExpiredNotice] = useState(false);
+  // NOVO (po zahtjevu — vidljivo obavještenje kad server-side uklanjanje
+  // šaltera/gate-a NE uspije, npr. lock conflict, vidi opširan
+  // komentar uz handleRemoveCheckin/handleRemoveGate): bez ovoga bi
+  // osoblje vidjelo tiho vraćanje stavke nazad (rollback) i
+  // pomislilo da je UI "glitch", ne znajući da treba da pokuša ponovo.
+  const [removalErrorNotice, setRemovalErrorNotice] = useState<string | null>(null);
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(false);
   const [showStats,              setShowStats]              = useState(false);
@@ -1132,17 +1138,35 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
 
   try {
     // trackEnd i clear idu paralelno, ne sekvencijalno
-    await Promise.all([
+    // FIX (KRITIČNO — drugi, odvojen uzrok prijavljenog "kiosk se ne
+    // može zatvoriti"): fetch() Promise ODBIJA (throw) ISKLJUČIVO na
+    // mrežnim greškama (DNS, prekinuta konekcija) — NIKAD na HTTP
+    // error statusima (4xx/5xx). Ako server vrati 503 (npr. lock
+    // conflict — realan, čest scenario ako dva zahtjeva pogode isti
+    // resurs istovremeno, ili se poklope sa auto-cleanup-om), fetch()
+    // i dalje USPJEŠNO rezolvira — Promise.all iznad NIKAD ne baci
+    // grešku, catch blok se NIKAD ne izvrši, rollback (vraćanje
+    // optimistički uklonjene stavke) se NIKAD ne desi. Admin panel je
+    // pogrešno prikazivao "uspješno uklonjeno" iako server nikad nije
+    // stvarno promijenio stanje — kiosk je ispravno nastavljao da
+    // prikazuje STARO stanje (jer se ništa stvarno nije promijenilo),
+    // što je osoblju izgledalo kao "kiosk se ne može zatvoriti".
+    // Eksplicitna .ok provjera + throw sad garantuje da svaki neuspjeh
+    // (uključujući 503) ispravno pokrene rollback ispod.
+    const [, deskRes] = await Promise.all([
       trackEnd('desk', deskNumber),
       fetch(`${API_PREFIX}/desk-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deskNumber, action: 'clear' }),
       }),
     ]);
+    if (!deskRes.ok) throw new Error(`HTTP ${deskRes.status}`);
    // isDirty = true;
     // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
+    setRemovalErrorNotice(`Šalter ${deskNumber} nije uklonjen — pokušaj ponovo`);
+    setTimeout(() => setRemovalErrorNotice(null), 5_000);
     // Rollback — vrati stavku nazad ako je poziv pao
     if (removed) {
       setCheckinAssignments(list =>
@@ -1166,16 +1190,21 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
   setGateAssignments(list => list.filter(a => a.resourceId !== gateNumber));
 
   try {
-    await Promise.all([
+    // FIX (po zahtjevu — isti razlog kao handleRemoveCheckin, vidi
+    // opširan komentar tamo).
+    const [, gateRes] = await Promise.all([
       trackEnd('gate', gateNumber),
       fetch(`${API_PREFIX}/gate-status-override`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gateNumber, action: 'clear' }),
       }),
     ]);
+    if (!gateRes.ok) throw new Error(`HTTP ${gateRes.status}`);
  //   isDirty = true;
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
+    setRemovalErrorNotice(`Gate ${gateNumber} nije uklonjen — pokušaj ponovo`);
+    setTimeout(() => setRemovalErrorNotice(null), 5_000);
     if (removed) {
       setGateAssignments(list =>
         list.some(a => a.resourceId === gateNumber) ? list : [...list, removed]
@@ -1379,6 +1408,14 @@ const handleClearAll = useCallback(async () => {
       {selectionExpiredNotice && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-5 py-3 rounded-xl shadow-2xl bg-amber-500 text-white font-semibold text-sm flex items-center gap-2 animate-in fade-in">
           ⏱️ Selekcija leta je istekla — izaberi let ponovo
+        </div>
+      )}
+      {/* NOVO — vidi opširan komentar uz removalErrorNotice state.
+          Isti obrazac kao selectionExpiredNotice, crveno umjesto
+          žuto (stvarna greška, ne samo istek selekcije). */}
+      {removalErrorNotice && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-5 py-3 rounded-xl shadow-2xl bg-red-500 text-white font-semibold text-sm flex items-center gap-2 animate-in fade-in">
+          ⚠️ {removalErrorNotice}
         </div>
       )}
       {pendingOverride && (
