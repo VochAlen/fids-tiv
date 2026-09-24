@@ -167,7 +167,7 @@ async function nextSeq(): Promise<number> {
 
 async function mutateAll(
   mutate: (all: DeskMap) => { changed: boolean; publishedEntry?: { deskNumber: string; entry: DeskEntry } | null } | null
-): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { deskNumber: string; entry: DeskEntry } | null }> {
+): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { deskNumber: string; entry: DeskEntry } | null; cleanedEntries?: { deskNumber: string; entry: DeskEntry }[] }> {
   const token = await acquireLock();
   if (!token) {
     return { success: false, conflict: true };
@@ -177,20 +177,45 @@ async function mutateAll(
     const all = await readAllUncached();
 
     // Cleanup starih unosa pod lock-om
+    // FIX (KRITIČNO — pravi uzrok prijavljenog "check-in šalter se ne
+    // može zatvoriti, kiosk i dalje prikazuje let"): ovaj cleanup je
+    // RANIJE tiho brisao istekle unose iz Redis-a (npr. šalter otvoren
+    // duže od MAX_AGE_MS, 4h za desk) BEZ da o tome ikad obavijesti
+    // kiosk ekrane preko Ably-a — kiosk je ostajao zauvijek zaglavljen
+    // na starom, vizuelno "otvorenom" prikazu, jer nikad nije primio
+    // poruku da se stanje promijenilo. Kad bi osoblje kasnije ručno
+    // kliknulo "ukloni" na već (automatski, tiho) obrisan šalter,
+    // `existing` je bio undefined, `action: 'clear'` je vraćao
+    // `{changed: false}` BEZ publishedEntry — ručna akcija je izgledala
+    // uspješna u adminu, ali nikad nije poslala Ably poruku, pa je
+    // kiosk ostajao zaglavljen. Sad se svaki automatski očišćen unos
+    // PRIKUPLJA i objavljuje (isto kao ručna 'clear' akcija) — vidi
+    // pozivno mjesto u POST handleru.
     const now = Date.now();
-    let cleaned = 0;
+    const cleanedEntries: { deskNumber: string; entry: DeskEntry }[] = [];
     for (const k of Object.keys(all)) {
       const v = all[k];
       if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
         delete all[k];
-        cleaned++;
+        cleanedEntries.push({
+          deskNumber: k,
+          entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 },
+        });
       }
+    }
+    const cleaned = cleanedEntries.length;
+
+    // Dodijeli prave seq vrijednosti očišćenim unosima (isti razlog
+    // kao za glavni publishedEntry ispod — vidi komentar uz
+    // DeskEntry.seq).
+    for (const c of cleanedEntries) {
+      c.entry.seq = await nextSeq();
     }
 
     const result = mutate(all);
     if (!result) {
       if (cleaned > 0) await writeAll(all);
-      return { success: true, cleanedCount: cleaned };
+      return { success: true, cleanedCount: cleaned, cleanedEntries };
     }
 
     // FIX (vidi opširan komentar uz DeskEntry.seq): entry objekat je
@@ -207,7 +232,7 @@ async function mutateAll(
     if (result.changed || cleaned > 0) {
       await writeAll(all);
     }
-    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry };
+    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry, cleanedEntries };
   } finally {
     await releaseLock(token);
   }
@@ -359,13 +384,29 @@ export async function POST(request: Request) {
     // ── 📡 ABLY PUBLISH — fire-and-forget, ALI garantovano dovršen
     // (after() — vidi objašnjenje u gate-status-override/route.ts).
     // Response se vraća odmah. Ako publish ipak padne, kiosci će
-    // dobiti promjenu preko fallback polling-a na 20s.
+    // dobiti promjenu preko fallback polling-a.
     if (result.publishedEntry) {
       after(() =>
         publishToChannel('assignments:desks', 'update', result.publishedEntry).catch(err =>
           console.error('[desk-status-override] Ably publish (assignments:desks) failed:', err)
         )
       );
+    }
+
+    // FIX (po zahtjevu — vidi opširan komentar uz cleanedEntries u
+    // mutateAll): automatski očišćeni (istekli) unosi MORAJU se
+    // TAKOĐE objaviti, inače kiosk ekran za taj šalter nikad ne sazna
+    // da se njegovo stanje promijenilo — ostaje zaglavljen na starom
+    // prikazu zauvijek (dok se ne desi neka DRUGA, ručna promjena na
+    // ISTOM šalteru koja bi to "slučajno" ispravila).
+    if (result.cleanedEntries && result.cleanedEntries.length > 0) {
+      for (const cleanedEntry of result.cleanedEntries) {
+        after(() =>
+          publishToChannel('assignments:desks', 'update', cleanedEntry).catch(err =>
+            console.error('[desk-status-override] Ably publish (cleanup) failed:', err)
+          )
+        );
+      }
     }
 
     return NextResponse.json({ success: true });

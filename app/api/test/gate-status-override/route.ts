@@ -152,7 +152,7 @@ async function nextSeq(): Promise<number> {
 
 async function mutateAll(
   mutate: (all: GateMap) => { changed: boolean; publishedEntry?: { gateNumber: string; entry: GateEntry } | null } | null
-): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { gateNumber: string; entry: GateEntry } | null }> {
+): Promise<{ success: boolean; conflict?: boolean; cleanedCount?: number; publishedEntry?: { gateNumber: string; entry: GateEntry } | null; cleanedEntries?: { gateNumber: string; entry: GateEntry }[] }> {
   const token = await acquireLock();
   if (!token) {
     return { success: false, conflict: true };
@@ -162,20 +162,33 @@ async function mutateAll(
     const all = await readAllUncached();
 
     // Cleanup starih unosa pod lock-om
+    // FIX (KRITIČNO — isti razlog kao u desk-status-override/route.ts,
+    // vidi opširan komentar tamo): automatski očišćeni (istekli) unosi
+    // se sad PRIKUPLJAJU i objavljuju preko Ably-a, inače kiosk gate
+    // ekran nikad ne sazna da se stanje automatski promijenilo —
+    // ostaje zaglavljen na starom prikazu.
     const now = Date.now();
-    let cleaned = 0;
+    const cleanedEntries: { gateNumber: string; entry: GateEntry }[] = [];
     for (const k of Object.keys(all)) {
       const v = all[k];
       if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
         delete all[k];
-        cleaned++;
+        cleanedEntries.push({
+          gateNumber: k,
+          entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 },
+        });
       }
+    }
+    const cleaned = cleanedEntries.length;
+
+    for (const c of cleanedEntries) {
+      c.entry.seq = await nextSeq();
     }
 
     const result = mutate(all);
     if (!result) {
       if (cleaned > 0) await writeAll(all);
-      return { success: true, cleanedCount: cleaned };
+      return { success: true, cleanedCount: cleaned, cleanedEntries };
     }
 
     // FIX (vidi opširan komentar uz GateEntry.seq).
@@ -186,7 +199,7 @@ async function mutateAll(
     if (result.changed || cleaned > 0) {
       await writeAll(all);
     }
-    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry };
+    return { success: true, cleanedCount: cleaned, publishedEntry: result.publishedEntry, cleanedEntries };
   } finally {
     await releaseLock(token);
   }
@@ -342,6 +355,20 @@ export async function POST(request: Request) {
             console.error('[gate-status-override] Ably publish to assignments:gates failed:', err);
           })
       );
+    }
+
+    // FIX (po zahtjevu — vidi opširan komentar uz cleanedEntries u
+    // mutateAll iznad): automatski očišćeni (istekli) gate unosi
+    // MORAJU se takođe objaviti, inače taj gate ekran nikad ne sazna
+    // da se stanje promijenilo — ostaje zaglavljen na starom prikazu.
+    if (result.cleanedEntries && result.cleanedEntries.length > 0) {
+      for (const cleanedEntry of result.cleanedEntries) {
+        after(() =>
+          publishToChannel('assignments:gates', 'update', cleanedEntry).catch(err =>
+            console.error('[gate-status-override] Ably publish (cleanup) failed:', err)
+          )
+        );
+      }
     }
 
     const ttl = action === 'clear' ? undefined : TTL_SECONDS;

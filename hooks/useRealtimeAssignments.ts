@@ -145,7 +145,19 @@ function mergeOne(
 // dodatni trošak (ovaj poll radi ISKLJUČIVO dok veza NIJE 'connected'/
 // 'night-sleep', što treba da bude rijedak, kratkotrajan slučaj u
 // normalnom radu).
+// FIX (po zahtjevu — dodatno smanjenje Edge Requests ka
+// /api/test/assignments): 5s je bio POTREBAN da riješi stvaran, ranije
+// prijavljen bug (podatak zastario do 20-30s nakon uklanjanja dodjele)
+// — ali ako veza ostane prekinuta DUŽE (stvarni, produženiji mrežni
+// ispad, ne kratak "blip"), bombardovanje na SVAKIH 5s je nepotrebno
+// skupo bez stvarne koristi (korisnik ionako ne vidi svježe podatke
+// dok je veza dole). Eksponencijalni backoff: prvi pokušaj i dalje na
+// 5s (brz oporavak za kratke prekide), svaki naredni PRODUŽEN pokušaj
+// duplira interval do FALLBACK_POLL_MAX_MS, resetuje se na 5s ČIM se
+// veza vrati (effect se iznova pokreće na svaku promjenu
+// connectionState-a).
 const FALLBACK_POLL_INTERVAL_MS = 5_000;
+const FALLBACK_POLL_MAX_MS = 60_000;
 
 export function useRealtimeAssignments(role: AblyClientRole) {
   const [deskEntries, setDeskEntries] = useState<Record<string, AssignmentEntry>>({});
@@ -258,12 +270,26 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   }, [role]);
 
   // ── 3. Fallback polling kad Ably nije konektovan I nije night-sleep ──
+  // FIX (po zahtjevu — eksponencijalni backoff, vidi opširan komentar
+  // uz FALLBACK_POLL_INTERVAL_MS/FALLBACK_POLL_MAX_MS): setInterval
+  // (fiksan razmak) zamijenjen rekurzivnim setTimeout lancem — svaki
+  // naredni poziv duplira čekanje, do plafona.
   useEffect(() => {
     if (connectionState === 'connected' || connectionState === 'night-sleep') return;
 
-    const id = setInterval(fetchSnapshot, FALLBACK_POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    let delay = FALLBACK_POLL_INTERVAL_MS;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const tick = () => {
+      if (cancelled) return;
+      fetchSnapshot();
+      delay = Math.min(delay * 2, FALLBACK_POLL_MAX_MS);
+      timeoutId = setTimeout(tick, delay);
+    };
+    timeoutId = setTimeout(tick, delay);
+
+    return () => { cancelled = true; clearTimeout(timeoutId); };
   }, [connectionState]);
 
   return { deskEntries, gateEntries, connectionState };

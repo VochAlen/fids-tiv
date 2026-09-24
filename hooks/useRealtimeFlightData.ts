@@ -122,6 +122,9 @@ import { isNightHours } from '@/lib/night-hours';
 // FIX (po zahtjevu — isti razlog i računica kao u
 // hooks/useRealtimeAssignments.ts, vidi opširan komentar tamo).
 const FALLBACK_POLL_INTERVAL_MS = 5_000;
+// FIX (po zahtjevu — dodatno smanjenje Edge Requests, isti razlog kao
+// hooks/useRealtimeAssignments.ts, vidi opširan komentar tamo).
+const FALLBACK_POLL_MAX_MS = 60_000;
 
 export function useRealtimeFlightData(role: AblyClientRole) {
   const [data, setData] = useState<FlightData | null>(null);
@@ -238,11 +241,25 @@ export function useRealtimeFlightData(role: AblyClientRole) {
   }, [role, fetchSnapshot]);
 
   // ── 3. Fallback polling kad Ably nije konektovan I nije night-sleep ──
+  // FIX (po zahtjevu — eksponencijalni backoff, vidi opširan komentar
+  // uz FALLBACK_POLL_MAX_MS): rekurzivan setTimeout lanac umjesto
+  // fiksnog setInterval-a — svaki naredni poziv duplira čekanje.
   useEffect(() => {
     if (connectionState === 'connected' || connectionState === 'night-sleep') return;
 
-    const id = setInterval(fetchSnapshot, FALLBACK_POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let delay = FALLBACK_POLL_INTERVAL_MS;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const tick = () => {
+      if (cancelled) return;
+      fetchSnapshot();
+      delay = Math.min(delay * 2, FALLBACK_POLL_MAX_MS);
+      timeoutId = setTimeout(tick, delay);
+    };
+    timeoutId = setTimeout(tick, delay);
+
+    return () => { cancelled = true; clearTimeout(timeoutId); };
   }, [connectionState, fetchSnapshot]);
 
   // FIX (po zahtjevu — letovi MORAJU se osvježavati svakih 3-4 minuta,
