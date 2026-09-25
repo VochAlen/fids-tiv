@@ -25,6 +25,7 @@ import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
+import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
 
 export const dynamic = 'force-dynamic';
 
@@ -168,17 +169,10 @@ async function mutateAll(
     // ekran nikad ne sazna da se stanje automatski promijenilo —
     // ostaje zaglavljen na starom prikazu.
     const now = Date.now();
-    const cleanedEntries: { gateNumber: string; entry: GateEntry }[] = [];
-    for (const k of Object.keys(all)) {
-      const v = all[k];
-      if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
-        delete all[k];
-        cleanedEntries.push({
-          gateNumber: k,
-          entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 },
-        });
-      }
-    }
+    // NOVO — cleanup logika sad dolazi iz lib/resource-mutations.ts.
+    const cleanedRaw = computeCleanup(all as unknown as Record<string, ResourceEntry>, now, MAX_AGE_MS);
+    const cleanedEntries: { gateNumber: string; entry: GateEntry }[] =
+      cleanedRaw.map(c => ({ gateNumber: c.key, entry: c.entry as GateEntry }));
     const cleaned = cleanedEntries.length;
 
     for (const c of cleanedEntries) {
@@ -283,45 +277,38 @@ export async function POST(request: Request) {
 
   try {
     const result = await mutateAll((all) => {
-      const existing = all[gateNumber];
-      let entry: GateEntry;
-
-      if (action === 'open' && flightNumber) {
-        entry = { status: 'open', flightNumber, classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        all[gateNumber] = entry;
-        return { changed: true, publishedEntry: { gateNumber, entry } };
+      const now = Date.now();
+      // NOVO — odlučivačka logika sad dolazi iz lib/resource-mutations.ts.
+      const outcome = applyResourceAction(
+        all as unknown as Record<string, ResourceEntry>,
+        gateNumber,
+        (action as ResourceAction) ?? 'clear',
+        flightNumber,
+        classType,
+        now
+      );
+      if (!outcome.changed || !outcome.publishedEntry) {
+        return outcome.changed ? { changed: true } : null;
       }
-
-      if (action === 'closed') {
-        entry = { status: 'closed', flightNumber: flightNumber || '', classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        all[gateNumber] = entry;
-        return { changed: true, publishedEntry: { gateNumber, entry } };
-      }
-
-      if (action === 'clear') {
-        if (!existing) return { changed: false };
-        delete all[gateNumber];
-        // Publish "cleared" — entry sa status=null signalizira kioscima da uklone taj gate.
-        entry = { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        return { changed: true, publishedEntry: { gateNumber, entry } };
-      }
-
-      if (action === 'setClass') {
-        if (!existing) {
-          return { changed: false };
-        }
-        entry = { ...existing, classType: classType ?? null };
-        all[gateNumber] = entry;
-        return { changed: true, publishedEntry: { gateNumber, entry } };
-      }
-
-      return null; // Invalid action — ne radi ništa
+      return {
+        changed: true,
+        publishedEntry: { gateNumber: outcome.publishedEntry.key, entry: outcome.publishedEntry.entry as GateEntry },
+      };
     });
 
     if (result.conflict) {
       return NextResponse.json(
         { error: 'Concurrent modification — please retry in a moment', retryable: true },
         { status: 503 }
+      );
+    }
+
+    // FIX (po zahtjevu — isti razlog kao desk-status-override/route.ts,
+    // vidi opširan komentar tamo).
+    if (action === 'setClass' && !result.publishedEntry) {
+      return NextResponse.json(
+        { error: 'Gate nije pronađen — možda je u međuvremenu zatvoren/obrisan', retryable: false },
+        { status: 409 }
       );
     }
 

@@ -23,6 +23,7 @@ import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
+import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -192,17 +193,11 @@ async function mutateAll(
     // PRIKUPLJA i objavljuje (isto kao ručna 'clear' akcija) — vidi
     // pozivno mjesto u POST handleru.
     const now = Date.now();
-    const cleanedEntries: { deskNumber: string; entry: DeskEntry }[] = [];
-    for (const k of Object.keys(all)) {
-      const v = all[k];
-      if (v?.setAt && now - v.setAt > MAX_AGE_MS) {
-        delete all[k];
-        cleanedEntries.push({
-          deskNumber: k,
-          entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 },
-        });
-      }
-    }
+    // NOVO — cleanup logika sad dolazi iz lib/resource-mutations.ts
+    // (testabilna, ista logika za desk i gate).
+    const cleanedRaw = computeCleanup(all as unknown as Record<string, ResourceEntry>, now, MAX_AGE_MS);
+    const cleanedEntries: { deskNumber: string; entry: DeskEntry }[] =
+      cleanedRaw.map(c => ({ deskNumber: c.key, entry: c.entry as DeskEntry }));
     const cleaned = cleanedEntries.length;
 
     // Dodijeli prave seq vrijednosti očišćenim unosima (isti razlog
@@ -325,44 +320,50 @@ export async function POST(request: Request) {
   }
 
   try {
+    // NOVO — odlučivačka logika (open/closed/clear/setClass) sad
+    // dolazi iz lib/resource-mutations.ts (testabilna, ista logika za
+    // desk i gate) — vidi opširan komentar tamo za pun kontekst.
     const result = await mutateAll((all) => {
-      const existing = all[deskNumber];
-      let entry: DeskEntry;
-
-      // ── AŽURIRANJE ──────────────────────────────────────────
-      if (action === 'open' && flightNumber) {
-        entry = { status: 'open', flightNumber, classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        all[deskNumber] = entry;
-        return { changed: true, publishedEntry: { deskNumber, entry } };
+      const now = Date.now();
+      const outcome = applyResourceAction(
+        all as unknown as Record<string, ResourceEntry>,
+        deskNumber,
+        (action as ResourceAction) ?? 'clear',
+        flightNumber,
+        classType,
+        now
+      );
+      if (!outcome.changed || !outcome.publishedEntry) {
+        return outcome.changed ? { changed: true } : null;
       }
-
-      if (action === 'closed') {
-        entry = { status: 'closed', flightNumber: flightNumber || '', classType: existing?.classType ?? null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        all[deskNumber] = entry;
-        return { changed: true, publishedEntry: { deskNumber, entry } };
-      }
-
-      if (action === 'clear') {
-        if (!existing) return { changed: false };
-        delete all[deskNumber];
-        entry = { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq: 0 }; // seq: mutateAll postavlja pravu vrijednost
-        return { changed: true, publishedEntry: { deskNumber, entry } };
-      }
-
-      if (action === 'setClass') {
-        if (!existing) return { changed: false };
-        entry = { ...existing, classType: classType ?? null };
-        all[deskNumber] = entry;
-        return { changed: true, publishedEntry: { deskNumber, entry } };
-      }
-
-      return null;
+      return {
+        changed: true,
+        publishedEntry: { deskNumber: outcome.publishedEntry.key, entry: outcome.publishedEntry.entry as DeskEntry },
+      };
     });
 
     if (result.conflict) {
       return NextResponse.json(
         { error: 'Concurrent modification — please retry in a moment', retryable: true },
         { status: 503 }
+      );
+    }
+
+    // FIX (KRITIČNO — po zahtjevu, prijavljen bug: "klasa se ne mijenja
+    // nakon sat vremena"): ranije se ovdje UVIJEK vraćalo {success:
+    // true}, bez obzira na result.changed — ako je 'setClass'
+    // pokušan na zapisu koji je u međuvremenu obrisan (npr. od strane
+    // runAutoReset cron-a, vidi lib/override-utils.ts), server je
+    // tiho ignorisao zahtjev, ali je ADMIN PANEL i dalje vidio HTTP
+    // 200 (njegov .ok check je prolazio), misleći da je uspjelo —
+    // stvarna promjena se NIKAD nije desila. Za 'setClass' specifično,
+    // "nema šta da se promijeni" je STVARNA greška (osoblje očekuje da
+    // zapis postoji) — za razliku od 'clear' na već-obrisanom, koje je
+    // legitiman, očekivan no-op (ne mijenjamo TO ponašanje ovdje).
+    if (action === 'setClass' && !result.publishedEntry) {
+      return NextResponse.json(
+        { error: 'Šalter nije pronađen — možda je u međuvremenu zatvoren/obrisan', retryable: false },
+        { status: 409 }
       );
     }
 

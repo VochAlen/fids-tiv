@@ -75,20 +75,13 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Ably from 'ably';
 
-export type AssignmentEntry = {
-  status: 'open' | 'closed' | null;
-  flightNumber: string;
-  classType: string | null;
-  setAt: number | null;
-  // FIX (KRITIČNO — pravi uzrok prijavljenog "brzo uklonim pa odmah
-  // dodijelim novi let, novi se ne prikaže"): portovano sa servera —
-  // vidi opširan komentar uz DeskEntry.seq u
-  // app/api/test/desk-status-override/route.ts za pun kontekst. mergeOne/
-  // mergeNewer ispod sad porede po seq (strogo rastući, imun na
-  // varijacije brzine obrade između serverless poziva), ne po setAt
-  // (wall-clock, nepouzdan za ovu svrhu pod brzim uzastopnim akcijama).
-  seq: number;
-};
+// NOVO — izdvojeno u lib/assignment-merge.ts (vidi opširan komentar
+// tamo za pun kontekst) da bi bilo testabilno; hook uvozi ISTI kod.
+// Re-eksportovano ispod (export type { AssignmentEntry }) da
+// app/admin/assign-checkin/page.tsx i dalje može uvoziti tip odavde,
+// bez izmjene tog fajla.
+import { mergeNewer, mergeOne, type AssignmentEntry } from '@/lib/assignment-merge';
+export type { AssignmentEntry };
 
 type AssignmentsResponse = {
   deskEntries?: Record<string, AssignmentEntry>;
@@ -97,38 +90,6 @@ type AssignmentsResponse = {
 
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
-
-// ── Merge helper — NIKAD ne prepisuj noviji zapis starijim.
-// Sprečava race condition gdje REST snapshot (koji je krenuo prije
-// Ably poruke ali mrežno kasnije stigne) prepiše svježe stanje koje
-// je već stiglo preko Ably-ja. Isto štiti i od Ably poruka koje bi
-// eventualno stigle van reda (reconnect/resume scenariji). ──────────
-function mergeNewer(
-  prev: Record<string, AssignmentEntry>,
-  incoming: Record<string, AssignmentEntry>
-): Record<string, AssignmentEntry> {
-  const result = { ...prev };
-  for (const key of Object.keys(incoming)) {
-    const existing = result[key];
-    const incomingEntry = incoming[key];
-    if (!existing || (incomingEntry.seq ?? 0) >= (existing.seq ?? 0)) {
-      result[key] = incomingEntry;
-    }
-  }
-  return result;
-}
-
-function mergeOne(
-  prev: Record<string, AssignmentEntry>,
-  key: string,
-  incomingEntry: AssignmentEntry
-): Record<string, AssignmentEntry> {
-  const existing = prev[key];
-  if (!existing || (incomingEntry.seq ?? 0) >= (existing.seq ?? 0)) {
-    return { ...prev, [key]: incomingEntry };
-  }
-  return prev;
-}
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -187,7 +148,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
 
   const fetchSnapshot = () => {
     // cache: 'no-store' je NAMJERNO — ruta /api/test/assignments ima
-    // Cache-Control (max-age=15, s-maxage=25, stale-while-revalidate=30)
+    // kratak Cache-Control (max-age=2, s-maxage=2, stale-while-revalidate=3)
     // koji je ispravan za CDN/kioske, ali bez ovoga bi admin panel
     // mogao dobiti stale podatak iz browser HTTP keša pri svakom
     // remount-u (npr. nakon logout/login), umjesto svježeg stanja.
@@ -195,6 +156,10 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       .then(res => res.json())
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
+        // NOVO (privremeno — dijagnostika za prijavljen bug "dodijelim
+        // YM152, pojavi se stari YM340"): pokazuje TAČNO šta REST
+        // snapshot vraća za sve šaltere, prije merge-a.
+        console.log('[DIAG assignments]', 'fetchSnapshot deskEntries:', JSON.stringify(data.deskEntries ?? {}));
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}));
       })
@@ -265,6 +230,10 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     const onDeskMsg = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
       const { deskNumber, entry } = msg.data as { deskNumber: string; entry: AssignmentEntry };
+      // NOVO (privremeno — po zahtjevu, dijagnostika za prijavljen bug
+      // "dodijelim YM152, pojavi se stari YM340"): pokazuje TAČNO šta
+      // Ably poruka nosi za taj šalter, prije bilo kakve obrade.
+      console.log('[DIAG assignments]', 'desk', deskNumber, '- primljena poruka:', JSON.stringify(entry));
       setDeskEntries(prev => mergeOne(prev, deskNumber, entry));
     };
     const onGateMsg = (msg: Ably.Message) => {

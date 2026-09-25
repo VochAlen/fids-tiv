@@ -1,5 +1,18 @@
 // lib/override-utils.ts
 import { getRedisClient } from '@/lib/redis';
+import { publishToChannel } from '@/lib/ably-server';
+
+// NOVO (po zahtjevu — isti razlog kao cleanup u
+// app/api/test/desk-status-override/route.ts, ISTA seq brojač kolona
+// da ostanemo u istom, globalnom monotonom nizu): koristi se ispod da
+// se svaki šalter koji ovaj auto-reset obriše ipak ispravno objavi
+// preko Ably-a — bez ovoga, kiosk ekran za taj šalter nikad ne sazna
+// da se stanje automatski promijenilo.
+const AUTO_RESET_SEQ_KEY = 'ably-fids:seq:desk-status';
+async function nextAutoResetSeq(): Promise<number> {
+  const client = getRedisClient();
+  return client.incr(AUTO_RESET_SEQ_KEY);
+}
 
 export interface AutoResetResult {
   flightNumber: string;
@@ -251,6 +264,23 @@ export async function runAutoReset(allFlights: FlightLike[]): Promise<AutoResetR
           if (changed) {
             await redis.set('ably-fids:desk-status:all', JSON.stringify(all), 'EX', 4 * 60 * 60);
             console.log(`[auto-reset] Očišćeno ${deskStatusKeysToDelete.length} desk-status unosa`);
+            // FIX (KRITIČNO — po zahtjevu, prijavljen bug: "dodijelim
+            // let, pojavi se stari let sa jutra" i "klasa se ne mijenja
+            // nakon ~1h"): OVDJE je bio nedostatak — auto-reset je
+            // tiho mijenjao isti Redis blob koji kiosk ekrani prate
+            // (ably-fids:desk-status:all), ali NIKAD nije objavio Ably
+            // poruku o tome. Kiosk je ostajao zaglavljen na starom
+            // prikazu (stari let), a ručne akcije (npr. setClass) su
+            // nailazile na već-obrisan zapis bez ikakvog upozorenja.
+            // Sad se svaki obrisan šalter objavljuje preko Ably-a,
+            // isto kao ručna 'clear' akcija.
+            for (const desk of deskStatusKeysToDelete) {
+              const seq = await nextAutoResetSeq();
+              await publishToChannel('assignments:desks', 'update', {
+                deskNumber: desk,
+                entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq },
+              }).catch(err => console.error('[auto-reset] Ably publish (desk cleanup) failed:', err));
+            }
           }
         }
       } catch (err) {
