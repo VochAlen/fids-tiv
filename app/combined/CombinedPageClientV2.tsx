@@ -20,6 +20,7 @@ import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 import { sortNumericStrings } from '@/lib/sort-utils';
+import { parseFlightTimeToDate, computeDisruptionIndex, disruptionLevel } from '@/lib/disruption-index';
 import { isNightHours } from '@/lib/night-hours';
 import { getLastKnownDynamicNightMode } from '@/lib/ably-client';
 import { useWeather } from '@/hooks/use-weather'
@@ -212,42 +213,8 @@ class FlightBoardErrorBoundary extends Component<{ children: ReactNode; fallback
 const getFlightawareLogoURL = (icao: string): string =>
   icao ? `https://www.flightaware.com/images/airline_logos/180px/${icao}.png` : ""
 
-function parseFlightTimeToDate(timeStr: string | null | undefined): Date | null {
-  if (!timeStr) return null
-  const s = timeStr.trim()
-  if (!s || s === "-" || s === "--:--") return null
-  try {
-    if (s.includes("T") || (s.includes("-") && s.length > 5)) {
-      const d = new Date(s); return isNaN(d.getTime()) ? null : d
-    }
-    const ampm = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
-    if (ampm) {
-      let h = parseInt(ampm[1], 10); const m = parseInt(ampm[2], 10)
-      if (ampm[3].toUpperCase() === "PM" && h !== 12) h += 12
-      if (ampm[3].toUpperCase() === "AM" && h === 12) h = 0
-      const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
-      return d
-    }
-    const sep = s.match(/^(\d{1,2})[:.](\d{2})$/)
-    if (sep) {
-      const h = parseInt(sep[1], 10); const m = parseInt(sep[2], 10)
-      if (h > 23 || m > 59) return null
-      const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
-      return d
-    }
-    const digits = s.replace(/\D/g, "")
-    if (digits.length === 4) {
-      const h = parseInt(digits.substring(0, 2), 10); const m = parseInt(digits.substring(2, 4), 10)
-      if (h > 23 || m > 59) return null
-      const d = new Date(); d.setHours(h, m, 0, 0)
-      if (Date.now() - d.getTime() > 12 * 60 * 60_000) d.setDate(d.getDate() + 1)
-      return d
-    }
-    return null
-  } catch { return null }
-}
+// NOVO — parseFlightTimeToDate izdvojen u lib/disruption-index.ts
+// (testabilno preko vitest-a), uvezen ispod (vidi import na vrhu fajla).
 
 function formatTimeString(timeStr: string | null | undefined): string {
   if (!timeStr) return ""
@@ -434,65 +401,8 @@ const LEDIndicator = memo(function LEDIndicator({
     />
   )
 })
-// NOVO (po zahtjevu — "Disruption Index" po uzoru na Flightradar24):
-// FR24 NIJE objavio tačnu internu formulu — samo tri faktora (broj
-// otkazanih letova, procenat/broj zakašnjelih letova, prosječno
-// trajanje kašnjenja) i skalu 0.0-5.0. Formula ispod je RAZUMNA,
-// transparentna aproksimacija tih faktora — NIJE identična FR24-ovoj
-// (nepoznatoj) internoj formuli. Kalibrisana da:
-//   - 0 otkazano, ~20% zakašnjelo, prosjek ~15 min -> ~1.1 (Good)
-//   - 10% otkazano, ~40% zakašnjelo, prosjek ~45 min -> ~3.6 (Major)
-// "Zakašnjeo" ovdje ISKLJUČUJE letove bez STVARNE procjene (Estimated
-// === Scheduled, samo placeholder) — isti razlog kao popravka
-// prosječnog kašnjenja ranije ove sesije (vidi computeAverageDelayMinutes/
-// avgDelays useEffect) — inače bi se "nema još procjene" letovi lažno
-// brojali kao "na vrijeme", vještački snižavajući index.
-function computeDisruptionIndex(flights: Flight[]): { score: number; cancelled: number; delayed: number; total: number } {
-  const total = flights.length;
-  if (total === 0) return { score: 0, cancelled: 0, delayed: 0, total: 0 };
-
-  let cancelled = 0;
-  let delayed = 0;
-  let delaySumMin = 0;
-
-  flights.forEach(f => {
-    const s = (f.StatusEN || '').toLowerCase();
-    if (/(cancelled|canceled|otkazan)/.test(s)) {
-      cancelled++;
-      return;
-    }
-    const sch = parseFlightTimeToDate(f.ScheduledDepartureTime);
-    const est = parseFlightTimeToDate(f.EstimatedDepartureTime);
-    if (sch && est && est.getTime() !== sch.getTime()) {
-      const diffMin = (est.getTime() - sch.getTime()) / 60_000;
-      if (diffMin > 0) {
-        delayed++;
-        delaySumMin += diffMin;
-      }
-    }
-  });
-
-  const cancelRatio = cancelled / total;
-  const delayRatio = delayed / total;
-  const avgDelayOfDelayed = delayed > 0 ? delaySumMin / delayed : 0;
-
-  const score = Math.min(5.0,
-    cancelRatio * 100 * 0.05 +
-    delayRatio * 100 * 0.02 +
-    avgDelayOfDelayed * 0.05
-  );
-
-  return { score: Math.round(score * 10) / 10, cancelled, delayed, total };
-}
-
-function disruptionLevel(score: number): { label: string; color: string } {
-  // FIX (po zahtjevu — engleski naziv, tačno prema Flightradar24 skali
-  // koju si naveo): "Good traffic flow" / "Minor problems" / "Major
-  // problems", ne lokalizovan naziv.
-  if (score < 2.0) return { label: 'Good traffic flow', color: 'text-emerald-400' };
-  if (score < 3.5) return { label: 'Minor problems', color: 'text-amber-400' };
-  return { label: 'Major problems', color: 'text-red-400' };
-}
+// NOVO — computeDisruptionIndex/disruptionLevel izdvojeni u
+// lib/disruption-index.ts (testabilno preko vitest-a), uvezeni ispod.
 
 const AirportStatusPill = memo(function AirportStatusPill({
   temperature, weatherCode, windSpeed, windDirection,
