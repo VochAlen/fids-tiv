@@ -125,6 +125,18 @@ const FALLBACK_POLL_INTERVAL_MS = 5_000;
 // FIX (po zahtjevu — dodatno smanjenje Edge Requests, isti razlog kao
 // hooks/useRealtimeAssignments.ts, vidi opširan komentar tamo).
 const FALLBACK_POLL_MAX_MS = 60_000;
+// NOVO (po zahtjevu — vidi opširan komentar uz RECONCILE_INTERVAL_MS u
+// hooks/useRealtimeAssignments.ts za pun kontekst, isti razlog
+// primijenjen ovdje): ovaj hook koriste SVI kiosk ekrani (checkin,
+// gate, departures, arrivals, combined, border, baggage, split-board,
+// pa), ali SAMO assign-checkin/page.tsx trenutno poziva izloženi
+// `refetch` na sopstvenom rasporedu (3.5 min) — svi OSTALI potrošači
+// (sami kiosk ekrani) NISU imali nijednu zaštitu od izgubljene Ably
+// poruke o promjeni leta dok je konekcija naizgled stabilna. Ugrađeno
+// direktno ovdje, bezuslovno, da SVI potrošači automatski dobiju istu
+// sigurnosnu mrežu bez potrebe da svaki pojedinačno implementira
+// sopstveni raspored.
+const RECONCILE_INTERVAL_MS = 3 * 60_000;
 
 export function useRealtimeFlightData(role: AblyClientRole) {
   const [data, setData] = useState<FlightData | null>(null);
@@ -270,5 +282,12 @@ export function useRealtimeFlightData(role: AblyClientRole) {
   // dostupnosti) na sopstvenom, dodatnom rasporedu — bez obzira na Ably
   // stanje konekcije. Ne mijenja ništa za postojeće potrošače koji ovu
   // vrijednost ne koriste.
+  // NOVO — periodičan reconciliation fetch, radi UVIJEK (vidi opširan
+  // komentar uz RECONCILE_INTERVAL_MS).
+  useEffect(() => {
+    const id = setInterval(fetchSnapshot, RECONCILE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [fetchSnapshot]);
+
   return { data, connectionState, refetch: fetchSnapshot };
 }

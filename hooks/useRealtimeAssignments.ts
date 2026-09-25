@@ -158,6 +158,26 @@ function mergeOne(
 // connectionState-a).
 const FALLBACK_POLL_INTERVAL_MS = 5_000;
 const FALLBACK_POLL_MAX_MS = 60_000;
+// NOVO (KRITIČNO — treći, arhitektonski uzrok prijavljenog "kiosk se
+// ne može zatvoriti", pronađen NAKON dva ranija, uža fixa —
+// auto-cleanup bez publish-a i admin panel bez .ok provjere — koji su
+// oba bila ispravna i potrebna, ali NISU pokrivala ovaj scenario):
+// fallback polling iznad radi ISKLJUČIVO dok connectionState nije
+// 'connected' — ako je Ably konekcija STABILNA, a SAMO JEDNA,
+// pojedinačna Ably poruka se izgubi (rijedak mrežni packet loss, Ably
+// push je "best effort" po svakoj pojedinačnoj poruci, ne formalna
+// garancija), kiosk NEMA nijedan drugi mehanizam da se ponovo
+// sinhronizuje — ostaje ZAUVIJEK zaglavljen na starom stanju, jer
+// misli da je "povezan" i nikad ne pokreće fallback fetch. Server i
+// REST API su ISPRAVNI u tom trenutku (Redis je ažuran) — kiosk
+// jednostavno nikad ne pita ponovo. Ovaj periodičan "reconciliation"
+// fetch radi UVIJEK, nezavisno od connectionState-a, kao dodatna
+// sigurnosna mreža — čak i u najgorem slučaju (izgubljena poruka),
+// kiosk se sam ispravi u roku od najviše RECONCILE_INTERVAL_MS.
+// 3 min je balans: dovoljno rijetko da ne dodaje značajan trošak
+// (Edge Requests optimizacija ranije ove sesije), dovoljno često da
+// "zaglavljeno" stanje nikad ne traje predugo u praksi.
+const RECONCILE_INTERVAL_MS = 3 * 60_000;
 
 export function useRealtimeAssignments(role: AblyClientRole) {
   const [deskEntries, setDeskEntries] = useState<Record<string, AssignmentEntry>>({});
@@ -291,6 +311,19 @@ export function useRealtimeAssignments(role: AblyClientRole) {
 
     return () => { cancelled = true; clearTimeout(timeoutId); };
   }, [connectionState]);
+
+  // ── 4. Periodičan "reconciliation" fetch — RADI UVIJEK, nezavisno
+  // od connectionState-a (vidi opširan komentar uz
+  // RECONCILE_INTERVAL_MS): dodatna sigurnosna mreža protiv rijetkog,
+  // ali stvarnog slučaja gdje se pojedinačna Ably poruka izgubi dok je
+  // konekcija naizgled stabilna. Server ostaje "istinit izvor" —
+  // fetchSnapshot poziva isti /api/test/assignments koji admin panel i
+  // sam čita, pa se kiosk samostalno usklađuje ako je ikad "zaostao"
+  // bez ijedne izgubljene poruke koja bi ga upozorila.
+  useEffect(() => {
+    const id = setInterval(fetchSnapshot, RECONCILE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   return { deskEntries, gateEntries, connectionState };
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { verifySessionToken } from '@/lib/auth-session';
+import { getClientIp } from '@/lib/get-client-ip';
 
 // const BLOCKED_USER_AGENT_PATTERNS = [
 //   /GPTBot/i,
@@ -76,19 +77,9 @@ const BLOCKED_USER_AGENT_PATTERNS = [
 //   app/HomeClient.tsx), treba da bude dostupna svima. Ako ovo ne
 //   želiš (npr. odlučiš da landing stranica ipak treba da bude
 //   privatna), ukloni "path !== '/' &&" iz uslova ispod.
-function getClientIp(request: NextRequest): string | null {
-  // FIX (KRITIČNO — bezbjednosni detalj): Vercel-ova ivična mreža
-  // DODAJE stvarnu IP adresu klijenta kao POSLEDNJI unos u
-  // x-forwarded-for — sve PRIJE toga je ono što je KLIJENT SAM
-  // poslao (može biti lažirano). Uzimanje PRVOG unosa (čest, naivan
-  // propust) bi omogućilo napadaču (npr. hotel koji hoće da zaobiđe
-  // ovu zaštitu) da jednostavno sam postavi header sa lažnom,
-  // dozvoljenom IP adresom i tako je zaobiđe u potpunosti.
-  const xff = request.headers.get('x-forwarded-for');
-  if (!xff) return null;
-  const parts = xff.split(',').map(p => p.trim()).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : null;
-}
+// FIX (izdvojeno u lib/get-client-ip.ts — vidi opširan komentar tamo
+// za pun kontekst; sad ga koristi i middleware.ts i login rate
+// limiter, umjesto duplirane logike na dva mjesta).
 
 function ipv4ToInt(ip: string): number | null {
   const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -124,7 +115,7 @@ function isAllowedAirportIp(request: NextRequest): boolean {
     return true;
   }
 
-  const clientIp = getClientIp(request);
+  const clientIp = getClientIp(request.headers);
   if (!clientIp) return false; // nema x-forwarded-for uopšte — sumnjivo, ne propuštaj
 
   return allowList.some(entry => ipMatchesEntry(clientIp, entry));
