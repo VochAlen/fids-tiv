@@ -49,11 +49,19 @@ const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5
 // Ako ni Ably poruka ni 3-minutni reconciliation fetch ne uspiju
 // duže od ovoga, kanal je zaglavljen ("zombie") bez obzira šta
 // connectionState javlja — kontrolisan reload je jedini pouzdan
-// oporavak. Prag je namjerno VIŠE od RECONCILE_INTERVAL_MS (3 min) da
-// se ne okida lažno pri normalnom radu — 10 min znači da je fetch
-// promašio bar 2-3 uzastopna pokušaja.
-const DATA_STALE_AFTER_MS = 10 * 60_000;
-const DATA_STALE_CHECK_INTERVAL_MS = 30_000;
+// oporavak.
+// FIX (po zahtjevu — 2026-09-27, skraćeno sa 10 na 5 min): osoblje
+// ponekad mora BRZO zatvoriti let i odmah otvoriti drugi na istom
+// šalteru — 10 min oporavka je predugo za taj radni ritam. 5 min je
+// najniža bezbjedna vrijednost iznad RECONCILE_INTERVAL_MS (3 min u
+// hook-u) — reconciliation fetch dotiče lastSyncAtRef na SVAKIH 3 min
+// BEZ OBZIRA da li se sadržaj promijenio, pa normalan rad nikad ne
+// priđe ovom pragu bliže od ~2 min margine. Manje od ~4-4.5 min bi
+// rizikovalo lažni reload ako jedan reconciliation ciklus kasni
+// (spor Redis/Vercel cold start, kratak mrežni zastoj) — 5 min ostaje
+// siguran razmak uz duplo brži oporavak nego ranije.
+const DATA_STALE_AFTER_MS = 5 * 60_000;
+const DATA_STALE_CHECK_INTERVAL_MS = 20_000;
 
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
@@ -399,7 +407,7 @@ const AdBanner = memo(function AdBanner({
   if (sundorHolidayImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -416,7 +424,7 @@ const AdBanner = memo(function AdBanner({
   if (israirHolidayImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -432,7 +440,7 @@ const AdBanner = memo(function AdBanner({
   if (arkiaHolidayImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -448,7 +456,7 @@ const AdBanner = memo(function AdBanner({
   if (baImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -465,7 +473,7 @@ const AdBanner = memo(function AdBanner({
   if (overrideImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -482,7 +490,7 @@ const AdBanner = memo(function AdBanner({
   if (lufthansaImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -501,7 +509,7 @@ const AdBanner = memo(function AdBanner({
   if (fixedHolidayImageSrc) {
     return (
       <div
-        style={{ flex: '1 1 0%', minHeight: '200px' }}
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
         className="rounded-xl overflow-hidden relative"
       >
         <img
@@ -517,7 +525,7 @@ const AdBanner = memo(function AdBanner({
   if (!adImages.length) return null;
   return (
     <div
-      style={{ flex: '1 1 0%', minHeight: '200px' }}
+      style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
       className="bg-slate-800 rounded-xl overflow-hidden relative"
     >
       <img
@@ -565,7 +573,14 @@ function CheckInDisplay() {
   // formatOpenDuration ignoriše taj slučaj (vidi njenu definiciju).
   const [nowMs, setNowMs] = useState(0);
   useEffect(() => {
-    setNowMs(Date.now());
+    // FIX (build greška — "Calling setState synchronously within an
+    // effect can trigger cascading renders"): isti obrazac kao u
+    // hooks/useRealtimeAssignments.ts (queueMicrotask) — izbacuje
+    // POČETNI setState poziv iz sinhronog tijela efekta, ponašajući se
+    // kao da je stigao kroz event handler/callback, umjesto direktno
+    // tokom commit faze efekta. Interval ispod je već asinhron (poziva
+    // se iz setInterval callback-a), pa njemu ovo nije bilo potrebno.
+    queueMicrotask(() => setNowMs(Date.now()));
     const id = setInterval(() => setNowMs(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
@@ -974,29 +989,35 @@ useEffect(() => {
 
         <div className="relative z-10 min-h-screen flex items-center justify-center p-4 text-white">
           <div
-            className={`text-center bg-slate-800/80 rounded-3xl p-12 border border-white/20 shadow-2xl ${
-              isPortrait ? 'max-w-4xl' : 'max-w-6xl'
+            className={`text-center bg-slate-800/80 rounded-3xl p-6 sm:p-12 border border-white/20 shadow-2xl w-full ${
+              isPortrait ? 'max-w-md sm:max-w-4xl' : 'max-w-6xl'
             } mx-auto`}
           >
             {assignment.isCancelled ? (
-              <XCircle className="w-32 h-32 text-red-500 mx-auto mb-8" />
+              <XCircle className="w-16 h-16 sm:w-32 sm:h-32 text-red-500 mx-auto mb-4 sm:mb-8" />
             ) : assignment.isDiverted ? (
-              <Plane className="w-32 h-32 text-orange-500 mx-auto mb-8" />
+              <Plane className="w-16 h-16 sm:w-32 sm:h-32 text-orange-500 mx-auto mb-4 sm:mb-8" />
             ) : (
-              <CheckCircle className="w-32 h-32 text-white/60 mx-auto mb-8" />
+              <CheckCircle className="w-16 h-16 sm:w-32 sm:h-32 text-white/60 mx-auto mb-4 sm:mb-8" />
             )}
 
-            <div className="text-center mb-8">
+            <div className="text-center mb-4 sm:mb-8">
+              {/* NOVO (po zahtjevu — mobilna optimizacija, 2026-09-27):
+                  mobilna (default) veličina ostaje čitljiva na telefonu
+                  (npr. Motorola G34 5G, Redmi 13/14 — CSS širina ~390-412px);
+                  puna kiosk veličina se aktivira tek od `sm:` (640px) naviše,
+                  što pravi kiosk monitor u portretu (npr. 1080×1920) uvijek
+                  ispunjava — nema potrebe za JS detekcijom uređaja. */}
               <div
-                className={`font-bold text-white/80 mb-4 ${
-                  isPortrait ? 'text-[6rem]' : 'text-[4rem]'
+                className={`font-bold text-white/80 mb-2 sm:mb-4 ${
+                  isPortrait ? 'text-3xl sm:text-[6rem]' : 'text-[4rem]'
                 }`}
               >
                 Check-in
               </div>
               <div
                 className={`font-black text-orange-400 leading-none drop-shadow-2xl ${
-                  isPortrait ? 'text-[20rem]' : 'text-[15rem]'
+                  isPortrait ? 'text-7xl sm:text-[20rem]' : 'text-[15rem]'
                 }`}
               >
                 {deskNumberParam}
@@ -1005,24 +1026,24 @@ useEffect(() => {
 
             {assignment.isCancelled ? (
               <div
-                className={`text-red-500 mb-6 font-semibold ${
-                  isPortrait ? 'text-4xl' : 'text-3xl'
+                className={`text-red-500 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
                 }`}
               >
                 ✈️ Flight {assignment.flightNumber} CANCELLED
               </div>
             ) : assignment.isDiverted ? (
               <div
-                className={`text-orange-500 mb-6 font-semibold ${
-                  isPortrait ? 'text-4xl' : 'text-3xl'
+                className={`text-orange-500 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
                 }`}
               >
                 ✈️ Flight {assignment.flightNumber} DIVERTED
               </div>
             ) : (
               <div
-                className={`text-white/90 mb-6 font-semibold ${
-                  isPortrait ? 'text-4xl' : 'text-3xl'
+                className={`text-white/90 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
                 }`}
               >
                 {hasFlight
@@ -1033,15 +1054,15 @@ useEffect(() => {
 
             {hasFlight && !assignment.isCancelled && !assignment.isDiverted && (
               <div
-                className={`text-orange-300 mb-6 font-medium bg-black/30 py-3 px-6 rounded-2xl ${
-                  isPortrait ? 'text-3xl' : 'text-2xl'
+                className={`text-orange-300 mb-3 sm:mb-6 font-medium bg-black/30 py-2 px-4 sm:py-3 sm:px-6 rounded-2xl ${
+                  isPortrait ? 'text-base sm:text-3xl' : 'text-2xl'
                 }`}
               >
                 <div>
                   Flight: {assignment.flightNumber} → {assignment.destinationCity}
                 </div>
                 {assignment.scheduledTime && (
-                  <div className="text-xl mt-2">
+                  <div className={isPortrait ? 'text-sm sm:text-xl mt-1 sm:mt-2' : 'text-xl mt-2'}>
                     Scheduled: {assignment.scheduledTime}
                   </div>
                 )}
@@ -1049,7 +1070,7 @@ useEffect(() => {
             )}
 
             <div
-              className={`text-white/70 mb-4 ${isPortrait ? 'text-xl' : 'text-lg'}`}
+              className={`text-white/70 mb-2 sm:mb-4 ${isPortrait ? 'text-xs sm:text-xl' : 'text-lg'}`}
             >
               Updated at: {lastUpdate || 'Never'}
             </div>
@@ -1064,29 +1085,30 @@ useEffect(() => {
   // ============================================================
   if (isPortrait) {
     return (
-      <div className="h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="flex-shrink-0 p-2 bg-slate-800/80 border-b border-white/10 mt-[0.3cm] gpu-accelerated">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-white/10 rounded-xl border border-white/20">
-                <CheckCircle className="w-6 h-6 text-green-400" />
+      <div className="min-h-screen sm:h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white sm:overflow-hidden flex flex-col">
+        {/* Header — mobilna veličina (telefon) je default, kiosk-veličina
+            (text-[4rem]) tek od sm: naviše, isti obrazac kao gore. */}
+        <div className="flex-shrink-0 p-2 bg-slate-800/80 border-b border-white/10 sm:mt-[0.3cm] gpu-accelerated">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <div className="p-1.5 sm:p-2 bg-white/10 rounded-xl border border-white/20 flex-shrink-0">
+                <CheckCircle className="w-4 h-4 sm:w-6 sm:h-6 text-green-400" />
               </div>
-              <h1 className="text-[4rem] font-black bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent leading-tight">
+              <h1 className="text-xl sm:text-[4rem] font-black bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent leading-tight truncate">
                 CHECK-IN {deskNumberParam}
               </h1>
             </div>
-            <div className="text-right">
-              <div className="text-xs text-slate-400">Updated</div>
-              <div className="text-sm font-mono text-slate-300">{lastUpdate}</div>
+            <div className="text-right flex-shrink-0">
+              <div className="text-[10px] sm:text-xs text-slate-400">Updated</div>
+              <div className="text-xs sm:text-sm font-mono text-slate-300">{lastUpdate}</div>
             </div>
           </div>
         </div>
 
-        <div className="flex-1 flex flex-col px-2 py-1 min-h-0">
+        <div className="flex-1 flex flex-col px-2 py-1 min-h-0 gap-2">
           {/* Flight info card */}
-          <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
-            <div className="flex flex-col items-center mb-4">
+          <div className="bg-slate-800/80 rounded-xl border border-white/10 p-3 sm:p-4 gpu-accelerated">
+            <div className="flex flex-col items-center mb-2 sm:mb-4">
               <AirlineLogo
                 logoUrl={assignment.logoUrl}
                 airlineName={assignment.airlineName}
@@ -1094,9 +1116,9 @@ useEffect(() => {
               />
 
 {assignment.classType && (
-  <div className="w-full max-w-[90vw] mb-3">
+  <div className="w-full max-w-[90vw] mb-2 sm:mb-3">
     <div
-      className="rounded-xl px-6 py-3 text-center shadow-lg border-2"
+      className="rounded-xl px-3 py-1.5 sm:px-6 sm:py-3 text-center shadow-lg border-2"
       style={
         assignment.classType.toUpperCase() === 'EASYJET_PLUS'
           ? { background: 'linear-gradient(to right, #f97316, #ea580c)', borderColor: '#fb923c' }
@@ -1109,18 +1131,20 @@ useEffect(() => {
           : { background: 'linear-gradient(to right, #2563eb, #1d4ed8)', borderColor: '#60a5fa' }
       }
     >
-      <h1 className="text-5xl font-black text-white tracking-wider">
+      <h1 className="text-lg sm:text-5xl font-black text-white tracking-wider">
         {assignment.classType.toUpperCase() === 'EASYJET_PLUS' ? 'easyJet Plus class' : assignment.classType.toUpperCase()}
       </h1>
     </div>
   </div>
 )}
 
-              {/* Broj leta */}
+              {/* Broj leta — mobilna veličina fiksna (clamp donja granica
+                  bila je 3rem, previše za uzan telefonski ekran), kiosk
+                  veličina (do 13rem preko vh-a) tek od sm: naviše. */}
       <div className="text-center w-full">
   <div
-    className="font-black leading-tight"
-    style={{ fontSize: 'clamp(3rem, 11vh, 13rem)' }}
+    className="font-black leading-tight text-5xl sm:leading-tight"
+    style={typeof window !== 'undefined' && window.innerWidth >= 640 ? { fontSize: 'clamp(3rem, 11vh, 13rem)' } : undefined}
   >
     {(() => {
       const iata = assignment.flightNumber.substring(0, 2);
@@ -1140,26 +1164,36 @@ useEffect(() => {
 
             {/* Codeshare */}
             {assignment.codeshareFlights.length > 0 && (
-              <div className="flex items-center gap-3 bg-blue-500/20 px-4 py-2 rounded-xl border border-blue-500/30 mb-3">
-                <Users className="w-5 h-5 text-blue-400" />
-                <div className="text-sm text-blue-300">
+              <div className="flex items-center gap-2 sm:gap-3 bg-blue-500/20 px-3 py-1.5 sm:px-4 sm:py-2 rounded-xl border border-blue-500/30 mb-2 sm:mb-3">
+                <Users className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400 flex-shrink-0" />
+                <div className="text-xs sm:text-sm text-blue-300">
                   Also: {assignment.codeshareFlights.join(', ')}
                 </div>
               </div>
             )}
 
-            {/* Grad + slika */}
-            <div className="flex items-end gap-4 mb-3">
-              <CityImage
-                cityUrl={assignment.cityUrl}
-                destinationCity={assignment.destinationCity}
-                portrait
-              />
-              <div className="flex-1 text-right min-w-0">
+            {/* Grad + slika — NOVO (po zahtjevu, 2026-09-27): na telefonu
+                nema dovoljno širine za sliku grada pored teksta (narandžasta
+                "pill" oznaka se lomila i preklapala sa nazivom grada) — na
+                mobilnom (default) sakrivamo sliku i pin ikonicu, prikazujemo
+                samo grad + IATA kod, jednostavno i centrirano. Kiosk (sm:
+                naviše) ostaje potpuno nepromijenjen (slika, pill oznaka, pin). */}
+            <div className="flex flex-col sm:flex-row sm:items-end gap-1 sm:gap-4 mb-2 sm:mb-3">
+              <div className="hidden sm:block">
+                <CityImage
+                  cityUrl={assignment.cityUrl}
+                  destinationCity={assignment.destinationCity}
+                  portrait
+                />
+              </div>
+              <div className="flex-1 text-center sm:text-right min-w-0">
                 <div
-                  className="font-bold text-white mb-1 leading-tight"
+                  className="font-bold text-white mb-1 leading-tight text-3xl sm:text-[length:var(--city-size)]"
                   style={{
-                    fontSize:
+                    // Kiosk (sm i naviše) i dalje koristi tačan proračun po
+                    // dužini naziva grada; telefon dobija fiksnu, čitljivu
+                    // veličinu (text-3xl iznad) preko Tailwind klase.
+                    ['--city-size' as string]:
                       assignment.destinationCity.length > 14
                         ? '4rem'
                         : assignment.destinationCity.length > 11
@@ -1174,38 +1208,46 @@ useEffect(() => {
                 >
                   {assignment.destinationCity}
                 </div>
-                <div className="text-6xl font-bold text-cyan-400 flex items-center justify-end gap-3 mb-2">
-                  <span className="text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold">
+                <div className="flex flex-col sm:flex-row items-center sm:items-center justify-center sm:justify-end gap-0.5 sm:gap-3 mb-1 sm:mb-2">
+                  {/* Kiosk verzija oznake — nepromijenjena */}
+                  <span className="hidden sm:inline-block text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold whitespace-nowrap">
                     Airport IATA code:
                   </span>
-                  {assignment.destinationCode}
+                  {/* Mobilna verzija — jednostavan sitan label, bez pill
+                      oblika koji se lomio na uskom ekranu */}
+                  <span className="sm:hidden text-[10px] uppercase tracking-widest text-slate-400 font-semibold">
+                    Airport IATA code
+                  </span>
+                  <span className="text-3xl sm:text-6xl font-bold text-cyan-400">
+                    {assignment.destinationCode}
+                  </span>
                 </div>
               </div>
-              <MapPin className="w-10 h-10 text-cyan-400 flex-shrink-0 mb-3" />
+              <MapPin className="hidden sm:block w-10 h-10 text-cyan-400 flex-shrink-0 mb-3" />
             </div>
 
             {/* Portable chargers upozorenje */}
-            <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2 mx-auto w-fit">
-              <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
-    <div className="text-[1.36rem] font-bold text-yellow-300 text-center">
+            <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-3 py-1.5 sm:px-4 sm:py-2 mx-auto w-fit">
+              <AlertCircle className="w-4 h-4 sm:w-6 sm:h-6 text-yellow-400 flex-shrink-0" />
+    <div className="text-[0.7rem] sm:text-[1.36rem] font-bold text-yellow-300 text-center">
   Power banks: CARRY-ON ONLY, max 2 per person. No charging (of or with) during flight. Terminals must be protected.
 </div>
             </div>
           </div>
 
           {/* Vremena + gate */}
-          <div className="mb-2 bg-slate-800/80 rounded-xl border border-white/10 p-4 gpu-accelerated">
-            <div className="grid grid-cols-2 gap-4">
+          <div className="bg-slate-800/80 rounded-xl border border-white/10 p-3 sm:p-4 gpu-accelerated">
+            <div className="grid grid-cols-2 gap-2 sm:gap-4">
               <div className="text-center">
-                <div className="flex items-center justify-center gap-2 mb-2">
-                  <Clock className="w-5 h-5 text-slate-400" />
-                  <div className="text-sm text-slate-400">Scheduled</div>
+                <div className="flex items-center justify-center gap-1 sm:gap-2 mb-1 sm:mb-2">
+                  <Clock className="w-3 h-3 sm:w-5 sm:h-5 text-slate-400" />
+                  <div className="text-[10px] sm:text-sm text-slate-400">Scheduled</div>
                 </div>
-                <div className="text-8xl font-mono font-bold text-white">
+                <div className="text-3xl sm:text-8xl font-mono font-bold text-white">
                   {assignment.scheduledTime}
                 </div>
                 {formatOpenDuration(assignment.setAt, nowMs) && (
-                  <div className="text-xl text-white/40 mt-2 font-mono">
+                  <div className="text-[10px] sm:text-xl text-white/40 mt-1 sm:mt-2 font-mono">
                     {formatOpenDuration(assignment.setAt, nowMs)}
                   </div>
                 )}
@@ -1214,24 +1256,24 @@ useEffect(() => {
               {assignment.estimatedTime &&
                 assignment.estimatedTime !== assignment.scheduledTime && (
                   <div className="text-center">
-                    <div className="flex items-center justify-center gap-2 mb-2">
-                      <AlertCircle className="w-5 h-5 text-yellow-400" />
-                      <div className="text-sm text-yellow-400">Expected</div>
+                    <div className="flex items-center justify-center gap-1 sm:gap-2 mb-1 sm:mb-2">
+                      <AlertCircle className="w-3 h-3 sm:w-5 sm:h-5 text-yellow-400" />
+                      <div className="text-[10px] sm:text-sm text-yellow-400">Expected</div>
                     </div>
-                    <div className="text-8xl font-mono font-bold text-yellow-400 animate-pulse">
+                    <div className="text-3xl sm:text-8xl font-mono font-bold text-yellow-400 animate-pulse">
                       {assignment.estimatedTime}
                     </div>
                   </div>
                 )}
 
               {assignment.gateNumber && (
-                <div className="col-span-2 text-center mt-2">
-                  <div className="text-3xl text-slate-400 mb-0">Gate Information</div>
-                  <div className="text-5xl font-bold text-white">
+                <div className="col-span-2 text-center mt-1 sm:mt-2">
+                  <div className="text-sm sm:text-3xl text-slate-400 mb-0">Gate Information</div>
+                  <div className="text-2xl sm:text-5xl font-bold text-white">
                     Gate {assignment.gateNumber}
                   </div>
-                  <div className="flex items-center justify-center gap-1 text-3xl text-slate-300 mt-0">
-                    <Info className="w-5 h-5 text-yellow-400" />
+                  <div className="flex items-center justify-center gap-1 text-xs sm:text-3xl text-slate-300 mt-0">
+                    <Info className="w-3 h-3 sm:w-5 sm:h-5 text-yellow-400 flex-shrink-0" />
                     <span>
                       After check-in please proceed to gate {assignment.gateNumber}
                     </span>
