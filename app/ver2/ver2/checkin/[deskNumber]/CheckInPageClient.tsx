@@ -788,6 +788,18 @@ const fixedHolidayImage = getFixedHolidayImage();
     };
   }, []);
 
+  // NOVO (po zahtjevu — prijavljen bug "pojedini check-in monitori
+  // tokom reload-a ostanu zauvijek na 'Loading check-in
+  // information...'", 2026-09-27): vidi opširan komentar uz
+  // CHECKIN_HYDRATION_WATCHDOG_SCRIPT u app/layout.tsx za pun
+  // kontekst. Ovaj flag je "signal života" koji taj watchdog čeka —
+  // čim se ova komponenta STVARNO upali (hidrira) u browseru, javljamo
+  // to odmah, prije bilo kog drugog efekta, da watchdog zna da React
+  // radi i da NE treba da radi reload zbog spore hidratacije.
+  useEffect(() => {
+    (window as unknown as { __CHECKIN_APP_MOUNTED__?: boolean }).__CHECKIN_APP_MOUNTED__ = true;
+  }, []);
+
   // ── Reset praćenja leta pri promjeni šaltera ────────────────
   useEffect(() => {
     lastFlightNumberRef.current = '';
