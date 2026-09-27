@@ -146,6 +146,22 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'night-sleep'>('connecting');
   const mountedRef = useRef(true);
 
+  // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
+  // se zaglavi na jednom letu i ne može se zatvoriti", jutro 2026-09-27):
+  // svi mehanizmi ispod (Ably poruke, fallback poll, 3min reconciliation)
+  // TREBALO BI da spriječe ovo — ali ako Ably kanal postane "zombie"
+  // (connectionState i dalje javlja 'connected', ali transport tiho ne
+  // isporučuje poruke — poznata WebSocket pojava na dugotrajnim
+  // kiosk/Electron webview sesijama), NIŠTA od gornjeg to ne detektuje
+  // samo po sebi. lastSyncAtRef bilježi vrijeme SVAKOG uspješnog "znaka
+  // života" podataka — bilo koji Ably poruka (bez obzira mijenja li
+  // ijedan desk/gate) ILI bilo koji uspješan fetchSnapshot round-trip
+  // (bez obzira vratio li promjenu). Stranica (npr.
+  // CheckInPageClient.tsx) ovo čita preko watchdog-a: ako lastSyncAtRef
+  // ne bude dotaknut duže od nekoliko minuta, kanal je zaglavljen bez
+  // obzira šta connectionState tvrdi — vrijeme je za kontrolisan reload.
+  const lastSyncAtRef = useRef<number>(Date.now());
+
   const fetchSnapshot = () => {
     // cache: 'no-store' je NAMJERNO — ruta /api/test/assignments ima
     // kratak Cache-Control (max-age=2, s-maxage=2, stale-while-revalidate=3)
@@ -156,6 +172,9 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       .then(res => res.json())
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
+        // Uspješan round-trip — dotakni sync bez obzira da li je
+        // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
+        lastSyncAtRef.current = Date.now();
         // NOVO (privremeno — dijagnostika za prijavljen bug "dodijelim
         // YM152, pojavi se stari YM340"): pokazuje TAČNO šta REST
         // snapshot vraća za sve šaltere, prije merge-a.
@@ -163,7 +182,8 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}));
       })
-      .catch(() => { /* ostani na trenutnom stanju */ });
+      .catch(() => { /* ostani na trenutnom stanju — NE dodirujemo
+        lastSyncAtRef ovdje: neuspio fetch NIJE znak života. */ });
   };
 
   useEffect(() => {
@@ -229,6 +249,10 @@ export function useRealtimeAssignments(role: AblyClientRole) {
 
     const onDeskMsg = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
+      // Bilo koja primljena Ably poruka dokazuje da kanal ŽIVI —
+      // dotakni sync PRIJE merge-a, bez obzira mijenja li ova poruka
+      // baš ovaj desk ili nešto drugo na kanalu.
+      lastSyncAtRef.current = Date.now();
       const { deskNumber, entry } = msg.data as { deskNumber: string; entry: AssignmentEntry };
       // NOVO (privremeno — po zahtjevu, dijagnostika za prijavljen bug
       // "dodijelim YM152, pojavi se stari YM340"): pokazuje TAČNO šta
@@ -238,6 +262,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     };
     const onGateMsg = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
+      lastSyncAtRef.current = Date.now();
       const { gateNumber, entry } = msg.data as { gateNumber: string; entry: AssignmentEntry };
       setGateEntries(prev => mergeOne(prev, gateNumber, entry));
     };
@@ -294,5 +319,8 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     return () => clearInterval(id);
   }, []);
 
-  return { deskEntries, gateEntries, connectionState };
+  // NOVO — vidi komentar uz lastSyncAtRef iznad. Vraćamo REF (ne state)
+  // namjerno: watchdog na strani stranice čita .current preko sopstvenog
+  // setInterval-a, ne treba mu re-render pri svakom dodiru.
+  return { deskEntries, gateEntries, connectionState, lastSyncAtRef };
 }

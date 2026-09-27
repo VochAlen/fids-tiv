@@ -24,7 +24,7 @@ import {
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 // FIX (portovano iz glavnog/polling sistema — potrebno za praznične
-// kampanje ispod, koje su datum-zasnovane, ne noćni-režim-zasnovane):
+// kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
 // namjerno OSTAJE van upotrebe u ovom Ably sistemu (drugačiji model
 // troška, ne treba polling-skip logika).
@@ -43,6 +43,17 @@ const AD_SWITCH_INTERVAL = 15_000;
 // ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
 const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5_000);
 
+// NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display se
+// zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27): vidi
+// opširan komentar uz lastSyncAtRef u hooks/useRealtimeAssignments.ts.
+// Ako ni Ably poruka ni 3-minutni reconciliation fetch ne uspiju
+// duže od ovoga, kanal je zaglavljen ("zombie") bez obzira šta
+// connectionState javlja — kontrolisan reload je jedini pouzdan
+// oporavak. Prag je namjerno VIŠE od RECONCILE_INTERVAL_MS (3 min) da
+// se ne okida lažno pri normalnom radu — 10 min znači da je fetch
+// promašio bar 2-3 uzastopna pokušaja.
+const DATA_STALE_AFTER_MS = 10 * 60_000;
+const DATA_STALE_CHECK_INTERVAL_MS = 30_000;
 
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
@@ -562,7 +573,34 @@ function CheckInDisplay() {
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
   const { data: liveFlightData } = useRealtimeFlightData('checkin');
-const { deskEntries } = useRealtimeAssignments('checkin');
+const { deskEntries, lastSyncAtRef } = useRealtimeAssignments('checkin');
+
+  // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
+  // se zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27):
+  // watchdog vezan za STVARNU uspješnost sinhronizacije podataka
+  // (lastSyncAtRef iz useRealtimeAssignments — dotiče se na SVAKU
+  // primljenu Ably poruku I SVAKI uspješan reconciliation fetch, bez
+  // obzira da li je sadržaj promijenjen). Ovo je NAMJERNO odvojeno od
+  // postojećeg heartbeat/memory watchdog-a ispod (koji hvata zamrznut
+  // event loop) — ovaj hvata drugačiji, suptilniji slučaj: JS radi
+  // savršeno normalno, ali je Ably kanal postao "zombie" (izgleda
+  // 'connected', tiho ne isporučuje poruke). Prag od 10 min je VIŠE od
+  // RECONCILE_INTERVAL_MS (3 min) u samom hook-u, da se ne okida lažno
+  // pri normalnom radu — znači da su bar 2-3 uzastopna pokušaja
+  // sinhronizacije promašila prije nego što ovo uopšte razmotri reload.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const gap = Date.now() - lastSyncAtRef.current;
+      if (gap > DATA_STALE_AFTER_MS) {
+        console.error(
+          `[checkin-${deskNumberParam}] Nema uspješne sinhronizacije ${Math.round(gap / 1000)}s ` +
+          `— Ably kanal je vjerovatno "zombie" (izgleda povezan, ne isporučuje), restartujem stranicu.`
+        );
+        window.location.reload();
+      }
+    }, DATA_STALE_CHECK_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [deskNumberParam, lastSyncAtRef]);
 
   // Ad state
   const [currentAdIndex, setCurrentAdIndex] = useState(0);
@@ -650,7 +688,7 @@ const fixedHolidayImage = getFixedHolidayImage();
     };
   }, []);
 
-  
+
   // ── v5: Memory pressure auto-reload ──────────────────────
   // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
   // poruke, image cache, DOM čvorovi). Kad usedJSHeapSize pređe
