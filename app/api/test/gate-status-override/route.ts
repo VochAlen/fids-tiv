@@ -21,7 +21,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { NextResponse, after } from 'next/server';
-import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
+import { safeRedisGet, safeRedisGetStrict, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
@@ -38,7 +38,10 @@ const ALL_KEY = 'ably-fids:gate-status:all';
 const LOCK_KEY = 'ably-fids:lock:gate-status:override';
 const LOCK_TTL_SECONDS = 5;
 const LOCK_WAIT_POLL_MS = 200;
-const LOCK_WAIT_MAX_MS = 2_000;
+// FIX (isti razlog kao app/api/test/desk-status-override/route.ts —
+// vidi opširan komentar tamo i uz BULK_CLEAR_BATCH_SIZE u
+// app/admin/assign-checkin/page.tsx).
+const LOCK_WAIT_MAX_MS = 3_000;
 
 // ── In-process cache za GET — sprečava da paralelni GET-ovi svi
 // udare Redis. 30s je dovoljno kratko da admin akcija propagira
@@ -79,6 +82,32 @@ async function readAllUncached(): Promise<GateMap> {
     return result;
   } catch {
     return {};
+  }
+}
+
+// NOVO (KRITIČNO — isti razlog kao app/api/test/desk-status-override/
+// route.ts, vidi opširan komentar tamo i uz safeRedisGetStrict u
+// lib/redis.ts za pun kontekst): verzija za MUTACIJU (POST), razlikuje
+// "stvarno prazno" od "čitanje nije uspjelo", da mutateAll ne bi
+// read-modify-write radio nad LAŽNO praznim stanjem (circuit breaker
+// otvoren) i tako ili tiho no-op-ovao 'clear' (dok Redis i dalje ima
+// stari podatak) ili, gore, prepisao cijeli blob i obrisao SVE ostale
+// gate-ove pri 'open'/'closed' akciji.
+async function readAllForMutation(): Promise<{ ok: boolean; all: GateMap }> {
+  const { ok, value: raw } = await safeRedisGetStrict(ALL_KEY);
+  if (!ok) return { ok: false, all: {} };
+  if (!raw) return { ok: true, all: {} };
+  try {
+    const parsed = JSON.parse(raw) as GateMap;
+    const now = Date.now();
+    const result: GateMap = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) continue;
+      result[k] = v;
+    }
+    return { ok: true, all: result };
+  } catch {
+    return { ok: true, all: {} };
   }
 }
 
@@ -160,7 +189,14 @@ async function mutateAll(
   }
 
   try {
-    const all = await readAllUncached();
+    // NOVO (KRITIČNO — vidi opširan komentar uz readAllForMutation i
+    // safeRedisGetStrict u lib/redis.ts): ako čitanje CIJELOG bloba nije
+    // uspjelo, ne smijemo nastaviti kao da je stanje prazno — odustajemo
+    // i vraćamo istu "retryable" grešku kao pri lock konfliktu.
+    const { ok, all } = await readAllForMutation();
+    if (!ok) {
+      return { success: false, conflict: true };
+    }
 
     // Cleanup starih unosa pod lock-om
     // FIX (KRITIČNO — isti razlog kao u desk-status-override/route.ts,

@@ -19,7 +19,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { NextResponse, after } from 'next/server';
-import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
+import { safeRedisGet, safeRedisGetStrict, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
@@ -45,7 +45,14 @@ const ALL_KEY = 'ably-fids:desk-status:all';
 const LOCK_KEY = 'ably-fids:lock:desk-status:override';
 const LOCK_TTL_SECONDS = 5;
 const LOCK_WAIT_POLL_MS = 200;
-const LOCK_WAIT_MAX_MS = 2_000;
+// FIX (po zahtjevu — dodatna margina uz batch-ovanje na admin strani,
+// vidi opširan komentar uz BULK_CLEAR_BATCH_SIZE u
+// app/admin/assign-checkin/page.tsx): 2s je bilo dovoljno za pojedinačne
+// akcije, ali tijesno pod umjerenom paralelnom kontencijom (npr.
+// nekoliko admin tabova otvoreno istovremeno). 3s daje malo više
+// margine bez primjetnog uticaja na normalan, brz slučaj (lock se
+// obično drži samo par ms).
+const LOCK_WAIT_MAX_MS = 3_000;
 
 // ── KEŠ SA "STALE-WHILE-REVALIDATE" ──────────────────────
 let cachedAll: Record<string, DeskEntry> | null = null;
@@ -91,6 +98,36 @@ async function readAllUncached(): Promise<DeskMap> {
     return result;
   } catch {
     return {};
+  }
+}
+
+// NOVO (KRITIČNO — vidi opširan komentar uz safeRedisGetStrict u
+// lib/redis.ts za pun kontekst): verzija za MUTACIJU (POST), za
+// razliku od readAllUncached iznad (koju i dalje koristi read-only GET
+// keš) — razlikuje "stvarno prazno" od "čitanje nije uspjelo", da
+// mutateAll ne bi read-modify-write radio nad LAŽNO praznim stanjem
+// (circuit breaker otvoren zbog prolazne Redis greške) i tako ili tiho
+// no-op-ovao 'clear' akciju (dok je Redis i dalje imao stari, stvaran
+// podatak — prijavljeni bug) ili, gore, prepisao CIJEL blob i obrisao
+// SVE ostale šaltere pri 'open'/'closed' akciji.
+async function readAllForMutation(): Promise<{ ok: boolean; all: DeskMap }> {
+  const { ok, value: raw } = await safeRedisGetStrict(ALL_KEY);
+  if (!ok) return { ok: false, all: {} };
+  if (!raw) return { ok: true, all: {} };
+  try {
+    const parsed = JSON.parse(raw) as DeskMap;
+    const now = Date.now();
+    const result: DeskMap = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v?.setAt && now - v.setAt > MAX_AGE_MS) continue;
+      result[k] = v;
+    }
+    return { ok: true, all: result };
+  } catch {
+    // Korumpiran JSON na ključu koji je STVARNO pročitan (ne
+    // circuit-blokiran) — rijedak slučaj, ali tretiramo isto kao i
+    // dosad (readAllUncached): bezbjedno kao prazno, ne kao neuspjeh.
+    return { ok: true, all: {} };
   }
 }
 
@@ -175,7 +212,19 @@ async function mutateAll(
   }
 
   try {
-    const all = await readAllUncached();
+    // NOVO (KRITIČNO — vidi opširan komentar uz readAllForMutation i
+    // safeRedisGetStrict u lib/redis.ts): ako čitanje CIJELOG bloba nije
+    // uspjelo (Redis/circuit breaker problem), NE SMIJEMO nastaviti kao
+    // da je stanje prazno — to bi ili tiho poništilo 'clear' akciju
+    // (dok Redis i dalje ima stari podatak) ili, gore, prepisalo cijeli
+    // blob i obrisalo SVE ostale šaltere. Umjesto toga, odustajemo
+    // odmah i vraćamo istu "retryable" grešku kao i pri lock konfliktu
+    // — admin panel je već ispravno obučen da na to reaguje (rollback +
+    // vidljiva poruka), umjesto lažnog "uspješno".
+    const { ok, all } = await readAllForMutation();
+    if (!ok) {
+      return { success: false, conflict: true };
+    }
 
     // Cleanup starih unosa pod lock-om
     // FIX (KRITIČNO — pravi uzrok prijavljenog "check-in šalter se ne

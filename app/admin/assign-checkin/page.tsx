@@ -756,7 +756,28 @@ const router = useRouter();
   // komentar uz handleRemoveCheckin/handleRemoveGate): bez ovoga bi
   // osoblje vidjelo tiho vraćanje stavke nazad (rollback) i
   // pomislilo da je UI "glitch", ne znajući da treba da pokuša ponovo.
-  const [removalErrorNotice, setRemovalErrorNotice] = useState<string | null>(null);
+  //
+  // FIX (KRITIČNO — po zahtjevu, nastavak dijagnostike "bulk-clear lock
+  // kontencija", 2026-09-27): OVO JE BIO JEDAN string, ne lista. Kod
+  // "Očisti sve" (handleClearAll) šalje SVE clear pozive paralelno
+  // (Promise.all) — ako pod lock kontencijom (svi dijele ISTI Redis
+  // lock za desk-status, vidi opširan komentar tamo) VIŠE njih ne
+  // uspije skoro istovremeno, svaki poziva setRemovalErrorNotice(...) —
+  // POSLJEDNJI poziv tiho PREPISUJE sve prethodne poruke, pa osoblje
+  // vidi SAMO JEDAN kratak toast (ili nijedan, ako se setTimeout za
+  // brisanje iz RANIJEG poziva okine BAŠ dok se noviji ispisuje) —
+  // iako je npr. 5 šaltera stvarno ostalo neobrisano. Sad je ovo RED
+  // (niz) nezavisnih obavještenja, svako sa svojim ID-jem i svojim
+  // tajmerom — ne brišu jedno drugo.
+  const [removalErrorNotices, setRemovalErrorNotices] = useState<{ id: number; message: string }[]>([]);
+  const removalErrorIdRef = useRef(0);
+  const pushRemovalErrorNotice = useCallback((message: string) => {
+    const id = ++removalErrorIdRef.current;
+    setRemovalErrorNotices(prev => [...prev, { id, message }]);
+    setTimeout(() => {
+      setRemovalErrorNotices(prev => prev.filter(n => n.id !== id));
+    }, 5_000);
+  }, []);
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(false);
   const [showStats,              setShowStats]              = useState(false);
@@ -775,6 +796,58 @@ const router = useRouter();
   const checkinAssignmentsRef = useRef<Assignment[]>([]);
   const gateAssignmentsRef    = useRef<Assignment[]>([]);
   const touchTimeoutRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // NOVO (KRITIČNO — po zahtjevu, nastavak dijagnostike "svaki mogući
+  // scenario zaglavljivanja/nemogućnosti zatvaranja check-in šaltera",
+  // 2026-09-27): ČETVRTI, do sada nepokriven scenario — konkretno onaj
+  // koji je osoblje EKSPLICITNO opisalo kao svoj radni ritam ("brzo
+  // zatvoriti let/check-in, i ODMAH nakon toga otvoriti drugi na istom
+  // šalteru").
+  //
+  // Problem: "zatvori" (handleRemoveCheckin, action:'clear') i "otvori
+  // novi" (assignFlightToResource, action:'open') su DVA ODVOJENA HTTP
+  // zahtjeva. Pošto optimistički UI odmah (lokalno) prikazuje šalter
+  // kao prazan ČIM se klikne "ukloni" — prije nego server uopšte
+  // odgovori — osoblje fizički MOŽE (i po opisanom radnom ritmu, HOĆE)
+  // odmah dodijeliti novi let na isti, sad "prazan izgledajući" šalter,
+  // dok je "ukloni" zahtjev za taj isti šalter JOŠ uvijek u letu ka
+  // serveru.
+  //
+  // Oba zahtjeva prolaze kroz ISTI, dijeljeni Redis lock (LOCK_KEY u
+  // desk-status-override/route.ts, zajednički za SVE šaltere) — red
+  // kojim ih server stvarno obradi NIJE garantovano isti kao red kojim
+  // ih je browser POSLAO: lock acquire je "ko prvi stigne" polling na
+  // 200ms, ne fer FIFO red, a Vercel serverless cold start može
+  // dodatno usporiti BILO KOJI od dva poziva nezavisno. Ako "otvori
+  // novi" slučajno stigne do lock-a PRIJE "zatvori" (obrnuto od
+  // stvarnog redoslijeda klikova), "zatvori" izvršen POSLIJE briše
+  // upravo dodijeljen novi let — šalter ostaje prazan/zatvoren umjesto
+  // da prikazuje novi let, iako je poslednja radnja osoblja bila
+  // "dodijeli".
+  //
+  // Rješenje: red čekanja PO ŠALTERU/GATE-u — svaki naredni STVARNI
+  // mrežni zahtjev (fetch) za ISTI resourceId čeka da prethodni zahtjev
+  // za TAJ ISTI resurs stvarno završi (uspješno ili neuspješno) prije
+  // nego što krene, čime se na serveru garantovano čuva ISTI redoslijed
+  // kojim je osoblje kliknulo. Optimistički UI ostaje trenutan i
+  // NEPROMIJENJEN (i dalje se mijenja odmah, bez čekanja) — u red se
+  // stavlja SAMO mrežni poziv, ne i vizuelna promjena, da osoblje i
+  // dalje osjeća da je aplikacija "brza".
+  const resourceOpQueueRef = useRef<Map<string, Promise<unknown>>>(new Map());
+  const enqueueResourceOp = useCallback(<T,>(resourceKey: string, op: () => Promise<T>): Promise<T> => {
+    const queue = resourceOpQueueRef.current;
+    const prevOp = queue.get(resourceKey) ?? Promise.resolve();
+    // .then(fn, fn) — naredna operacija kreće bez obzira da li je
+    // PRETHODNA uspjela ili pala (pad ne smije trajno zaglaviti red).
+    const nextOp = prevOp.then(op, op);
+    // Čuvamo verziju koja NIKAD ne odbija (catch), da queue.get() za
+    // SLEDEĆI poziv nikad ne naiđe na "unhandled rejection" lanac —
+    // stvaran rezultat/grešku i dalje dobija pozivalac preko `nextOp`
+    // koji se vraća ispod, ova "tiha" verzija je samo interni marker
+    // reda čekanja.
+    queue.set(resourceKey, nextOp.catch(() => {}));
+    return nextOp;
+  }, []);
 
 
   const setSelectedFlight = useCallback((flight: Flight | null) => {
@@ -1035,11 +1108,21 @@ const assignFlightToResource = useCallback(async (
   }
 
   try {
-    // Glavni assign i trackStart idu paralelno — nezavisni su
-    const assignPromise = fetch(endpoint, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    // Glavni assign i trackStart idu paralelno — nezavisni su.
+    // FIX (vidi opširan komentar uz resourceOpQueueRef/enqueueResourceOp
+    // iznad — "brzo zatvori pa odmah otvori novi na istom šalteru"):
+    // sam mrežni fetch ide kroz red čekanja PO RESURSU, da server
+    // garantovano obradi 'clear' i 'open' za ISTI šalter/gate tačno
+    // onim redoslijedom kojim je osoblje kliknulo, bez obzira na
+    // Vercel cold-start/lock-timing varijacije koje bi ih inače mogle
+    // obrnuti.
+    const assignPromise = enqueueResourceOp(
+      resourceType === 'desk' ? `desk:${resourceId}` : `gate:${resourceId}`,
+      () => fetch(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    );
     const trackPromise = trackStart(resourceType, resourceId, flight);
 
     const [res] = await Promise.all([assignPromise, trackPromise]);
@@ -1165,8 +1248,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
   } catch (err) {
     console.error('Greška pri brisanju šaltera', deskNumber, err);
-    setRemovalErrorNotice(`Šalter ${deskNumber} nije uklonjen — pokušaj ponovo`);
-    setTimeout(() => setRemovalErrorNotice(null), 5_000);
+    pushRemovalErrorNotice(`Šalter ${deskNumber} nije uklonjen — pokušaj ponovo`);
     // Rollback — vrati stavku nazad ako je poziv pao
     if (removed) {
       setCheckinAssignments(list =>
@@ -1180,7 +1262,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources]);
+}, [removingResources, pushRemovalErrorNotice]);
 
 const handleRemoveGate = useCallback(async (gateNumber: string) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
@@ -1203,8 +1285,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
  //   isDirty = true;
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
-    setRemovalErrorNotice(`Gate ${gateNumber} nije uklonjen — pokušaj ponovo`);
-    setTimeout(() => setRemovalErrorNotice(null), 5_000);
+    pushRemovalErrorNotice(`Gate ${gateNumber} nije uklonjen — pokušaj ponovo`);
     if (removed) {
       setGateAssignments(list =>
         list.some(a => a.resourceId === gateNumber) ? list : [...list, removed]
@@ -1217,7 +1298,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources]);
+}, [removingResources, pushRemovalErrorNotice]);
 
 // FIX (po zahtjevu — hitno, za brzo čišćenje zaostalih/zaglavljenih
 // dodjela iz ranijeg testiranja, npr. duh-klik bug pronađen i
@@ -1233,6 +1314,35 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
 // zavisnosti moraju biti već inicijalizovane u trenutku kad se ovaj
 // useCallback poziva.
 const [clearingAll, setClearingAll] = useState(false);
+
+// NOVO (KRITIČNO — po zahtjevu, nastavak dijagnostike "bulk-clear lock
+// kontencija", 2026-09-27): desk-status-override i gate-status-override
+// rute rade read-modify-write nad CIJELIM blobom (svi šalteri/gate-ovi
+// u JEDNOM Redis ključu), pa MORAJU dijeliti JEDAN global lock po
+// resursu (desk lock ODVOJEN od gate lock-a, ali svi desk-ovi
+// MEĐUSOBNO dijele isti lock — vidi opširan komentar uz LOCK_KEY u
+// app/api/test/desk-status-override/route.ts). To je namjerno i
+// ispravno (spriječava lost-update kad bi dva zahtjeva istovremeno
+// pisala u isti blob) — ALI to znači da SVAKI paralelan zahtjev čeka
+// red za ISTI lock (LOCK_WAIT_MAX_MS = 2s po pokušaju u toj rути).
+//
+// Prije ovog fix-a, "Očisti sve" je slao SVE clear pozive ODJEDNOM
+// (Promise.all) — sa npr. 15-20 zauzetih šaltera/gate-ova, mnogi bi se
+// naredali za isti lock i neki bi neizbježno premašili 2s budžet →
+// 503 "Concurrent modification" → vidljiva greška + rollback (bezbjedno,
+// ali nepotrebno čest neuspjeh za operaciju koja bi trebalo pouzdano da
+// prođe). Sad se šalje MALI BROJ zahtjeva paralelno odjednom (batch),
+// čekajući da se prethodni batch završi prije sledećeg — drastično
+// smanjuje trenutnu kontenciju za lock, bez gubitka brzine bulk
+// operacije (i dalje mnogo brže od ručnog, jedan-po-jedan klika).
+const BULK_CLEAR_BATCH_SIZE = 4;
+async function runInBatches<T>(items: T[], batchSize: number, fn: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    await Promise.all(batch.map(fn));
+  }
+}
+
 const handleClearAll = useCallback(async () => {
   const deskIds = checkinAssignmentsRef.current.map(a => a.resourceId);
   const gateIds = gateAssignmentsRef.current.map(a => a.resourceId);
@@ -1245,9 +1355,12 @@ const handleClearAll = useCallback(async () => {
 
   setClearingAll(true);
   try {
+    // Desk i gate idu paralelno MEĐUSOBNO (odvojeni lock-ovi, ne
+    // kontenišu jedno drugo) — ALI unutar svake grupe, u malim
+    // batch-evima (vidi komentar iznad uz BULK_CLEAR_BATCH_SIZE).
     await Promise.all([
-      ...deskIds.map(id => handleRemoveCheckin(id)),
-      ...gateIds.map(id => handleRemoveGate(id)),
+      runInBatches(deskIds, BULK_CLEAR_BATCH_SIZE, handleRemoveCheckin),
+      runInBatches(gateIds, BULK_CLEAR_BATCH_SIZE, handleRemoveGate),
     ]);
   } finally {
     setClearingAll(false);
@@ -1410,12 +1523,22 @@ const handleClearAll = useCallback(async () => {
           ⏱️ Selekcija leta je istekla — izaberi let ponovo
         </div>
       )}
-      {/* NOVO — vidi opširan komentar uz removalErrorNotice state.
-          Isti obrazac kao selectionExpiredNotice, crveno umjesto
-          žuto (stvarna greška, ne samo istek selekcije). */}
-      {removalErrorNotice && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-5 py-3 rounded-xl shadow-2xl bg-red-500 text-white font-semibold text-sm flex items-center gap-2 animate-in fade-in">
-          ⚠️ {removalErrorNotice}
+      {/* NOVO — vidi opširan komentar uz removalErrorNotices state.
+          Isti obrazac kao selectionExpiredNotice, crveno umjesto žuto
+          (stvarna greška, ne samo istek selekcije) — sad RED poruka,
+          slaganih vertikalno, jedna ispod druge, da bulk operacija
+          ("Očisti sve") koja pogodi više šaltera odjednom ne izgubi
+          nijednu poruku prepisivanjem. */}
+      {removalErrorNotices.length > 0 && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2">
+          {removalErrorNotices.map(n => (
+            <div
+              key={n.id}
+              className="px-5 py-3 rounded-xl shadow-2xl bg-red-500 text-white font-semibold text-sm flex items-center gap-2 animate-in fade-in"
+            >
+              ⚠️ {n.message}
+            </div>
+          ))}
         </div>
       )}
       {pendingOverride && (

@@ -161,6 +161,68 @@ export async function safeRedisGet(key: string): Promise<string | null> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// safeRedisGetStrict — KRITIČNO (novo, po zahtjevu — nastavak
+// dijagnostike "check-in salter se zatvori u adminu, ali kiosk i
+// dalje prikazuje stari let", 2026-09-27): `safeRedisGet` iznad
+// namjerno vraća `null` i na STVARNO PRAZAN ključ (ne postoji u
+// Redis-u) I na NEUSPJEH čitanja (circuit breaker otvoren, mrežna
+// greška) — za obično, read-only prikazivanje (GET rute, health
+// dashboard) to je ispravno i bezopasno ponašanje (bolje prazan
+// prikaz nego pad stranice).
+//
+// ALI: desk/gate-status-override POST rute rade READ-MODIFY-WRITE nad
+// CIJELIM JSON blobom svih šaltera/gate-ova odjednom (`ALL_KEY`) —
+// pročitaju TRENUTNO stanje SVIH resursa, izmijene JEDAN, pa upišu
+// SVE nazad. Ako se ovo "pročitaj sve" osloni na `safeRedisGet` i
+// circuit breaker je otvoren (npr. zbog jedne prolazne Redis greške
+// minut ranije, cooldown traje 15-120s), `readAllUncached()` tiho
+// vraća `{}` — kao da NIJEDAN šalter/gate nije zauzet. To je LAŽNO
+// stanje, ne stvarno stanje. Posljedice, po akciji:
+//  - 'clear' na (lažno) praznom stanju → tiho no-op (kod tretira "ne
+//    postoji" kao legitiman, već-obrisan slučaj) → admin panel javlja
+//    "uspješno", ALI Redis (i kiosk) i dalje ima STARI, stvaran
+//    podatak — TAČNO prijavljeni bug.
+//  - 'open'/'closed' na (lažno) praznom stanju → JOŠ GORE: upisuje se
+//    NOVI blob koji sadrži SAMO taj jedan šalter — writeAll bi
+//    OBRISAO dodjele SVIH OSTALIH šaltera/gate-ova u istom trenutku
+//    (stvarni podaci u Redis-u postoje, ali se prepisuju praznim
+//    stanjem + jednim novim unosom).
+// Ova funkcija razlikuje ta dva slučaja eksplicitno (`ok: false` =
+// čitanje NIJE uspjelo, ne smije se nastaviti sa upisom cijelog
+// bloba), pa mutateAll ispod može bezbjedno da ODUSTANE (vrati
+// retryable grešku admin panelu) umjesto da "popravi" na osnovu
+// pogrešne pretpostavke da je stanje prazno.
+// ─────────────────────────────────────────────────────────────
+export async function safeRedisGetStrict(key: string): Promise<{ ok: boolean; value: string | null }> {
+  if (isCircuitBlocked()) {
+    return { ok: false, value: null };
+  }
+
+  try {
+    const client = getRedisClient();
+    const result = await client.get(key);
+    if (circuitOpen) closeCircuit();
+    return { ok: true, value: result };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Redis] safeRedisGetStrict("${key}") failed: ${msg}`);
+
+    if (isWrongTypeError(err)) {
+      // Isti self-heal kao safeRedisGet — ključ je bio pogrešnog tipa,
+      // ne Redis konekcija. Nakon brisanja, ključ JE stvarno prazan
+      // (legitiman prazan blob), pa je ok:true ispravno ovdje —
+      // sledeći upis će normalno kreirati ispravan JSON string.
+      getRedisClient().del(key).catch(() => {});
+      console.warn(`[Redis] "${key}" je bio pogrešnog tipa — obrisan radi samo-ispravke, circuit breaker NIJE okinut`);
+      return { ok: true, value: null };
+    }
+
+    openCircuit();
+    return { ok: false, value: null };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // safeRedisHGetAll — za hash komande (override:* ključevi)
 // ─────────────────────────────────────────────────────────────
 export async function safeRedisHGetAll(key: string): Promise<Record<string, string> | null> {

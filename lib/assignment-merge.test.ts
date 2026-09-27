@@ -45,6 +45,25 @@ describe('mergeOne', () => {
     // seq nedostaje -> ?? 0 -> 0 >= 5 je false -> IGNORISANO
     expect(result['7'].seq).toBe(5);
   });
+
+  it('PRIHVATA drastičan pad u seq-u (reset brojača) kad je setAt noviji', () => {
+    // Scenario: Redis SEQ_KEY je eviktovan/resetovan (restart, memorijski
+    // pritisak, redeploy) — brojač kreće ponovo od 1. Bez zaštite, ovaj
+    // update bi bio ZAUVIJEK odbačen jer 2 < 487.
+    const oldTime = Date.now() - 60_000;
+    const newTime = Date.now();
+    const prev = { '7': entry({ seq: 487, flightNumber: 'STALE_PRE_RESETA', setAt: oldTime }) };
+    const result = mergeOne(prev, '7', entry({ seq: 2, flightNumber: 'NOVI_LET', setAt: newTime }));
+    expect(result['7'].flightNumber).toBe('NOVI_LET');
+  });
+
+  it('i dalje IGNORIŠE mali pad u seq-u čak i sa novijim setAt (normalno van-reda)', () => {
+    // Mali pad (ispod praga) ostaje tretiran kao obično kašnjenje u
+    // isporuci, ne kao reset — poredi se i dalje po seq, ne po setAt.
+    const prev = { '7': entry({ seq: 10, flightNumber: 'CURRENT', setAt: Date.now() - 1000 }) };
+    const result = mergeOne(prev, '7', entry({ seq: 3, flightNumber: 'STALE', setAt: Date.now() }));
+    expect(result['7'].flightNumber).toBe('CURRENT');
+  });
 });
 
 describe('mergeNewer', () => {
