@@ -1,5 +1,5 @@
 // lib/assignments-service.ts
-import { safeRedisGet } from '@/lib/redis';
+import { safeRedisGetStrict } from '@/lib/redis';
 
 // FIX (vidi opširan komentar u
 // app/api/test/desk-status-override/route.ts): preimenovano da nikad
@@ -32,6 +32,22 @@ export type GateEntry = {
 export type RawAssignments = {
   desks: Record<string, DeskEntry>;
   gates: Record<string, GateEntry>;
+  // NOVO (KRITIČNO — regresija pronađena pri ponovnoj analizi nakon fix-a
+  // u lib/assignment-merge.ts, 2026-09-28): `mergeNewer` na klijentu SAD
+  // ispravno tretira "ključ nedostaje u punom snapshot-u" kao "obrisano na
+  // serveru" (vidi opširan komentar tamo). To znači da OVAJ snapshot MORA
+  // biti pouzdano razlikovati "stvarno prazno" od "čitanje nije uspjelo"
+  // — inače bi svaki prolazan Redis/circuit-breaker problem (ili bilo koji
+  // neuhvaćen izuzetak u GET ruti) doveo do toga da klijent PRIMI
+  // LAŽNO PRAZAN snapshot i (ispravno, prema svojoj sad ispravljenoj
+  // logici) OBRIŠE BAŠ SVE trenutno aktivne dodjele na SVIM kioscima
+  // odjednom — mnogo gori, širi oblik istog bug-a koji je upravo popravljen.
+  // `ok: false` signalizira pozivaocu (ovdje: /api/test/assignments) da
+  // OVAJ odgovor NIJE pouzdan pun snapshot i da ga klijent (hooks/
+  // useRealtimeAssignments.ts) ne smije koristiti za merge — mora ga
+  // tretirati identično kao neuspio fetch (zadrži trenutno stanje, probaj
+  // ponovo na sledećem ciklusu).
+  ok: boolean;
 };
 
 export type SimpleAssignments = {
@@ -54,7 +70,11 @@ export type SimpleAssignments = {
 // produženje TTL-a na 30s ne štedi Active CPU (I/O čekanje se ne
 // naplaćuje kod Fluid Compute), a UNOSI rizik da promjena statusa
 // kasni do 30s umjesto do ~10s. Ne diraj bez razloga.
-let cachedRaw: RawAssignments | null = null;
+// NAPOMENA: keš čuva podatak BEZ `ok` polja — `ok` je isključivo
+// procjena SVJEŽINE konkretnog poziva (da li JE OVAJ poziv uspio da
+// pročita Redis), ne osobina samog keširanog sadržaja, pa se dodaje
+// tek u povratnoj vrijednosti (vidi getRawAssignments ispod).
+let cachedRaw: Omit<RawAssignments, 'ok'> | null = null;
 let cachedRawExpiry = 0;
 const RAW_CACHE_TTL_MS = 8_000;
 
@@ -81,21 +101,38 @@ export function invalidateAssignmentsCache(): void {
 
 export async function getRawAssignments(): Promise<RawAssignments> {
   const now = Date.now();
-  if (cachedRaw && now < cachedRawExpiry) return cachedRaw;
+  if (cachedRaw && now < cachedRawExpiry) return { ...cachedRaw, ok: true };
 
-  const [deskRaw, gateRaw] = await Promise.all([
-    safeRedisGet(DESK_ALL_KEY),
-    safeRedisGet(GATE_ALL_KEY),
+  // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u RawAssignments):
+  // safeRedisGetStrict (ista bezbjedna primitiva kao u desk/gate-status-
+  // override rutama) razlikuje "ključ stvarno ne postoji" od "čitanje nije
+  // uspjelo" (Redis greška / circuit breaker otvoren) — za razliku od
+  // ranijeg safeRedisGet, koji je obje situacije tiho tretirao identično
+  // kao "prazno".
+  const [deskResult, gateResult] = await Promise.all([
+    safeRedisGetStrict(DESK_ALL_KEY),
+    safeRedisGetStrict(GATE_ALL_KEY),
   ]);
+
+  if (!deskResult.ok || !gateResult.ok) {
+    console.warn('[assignments-service] Redis čitanje nije uspjelo — ne vraćam lažno prazan snapshot.');
+    // Bolje vratiti POSLEDNJI POZNAT (čak i istekao) keš nego lažno
+    // prazno stanje — pozivalac (npr. /api/test/assignments) i dalje
+    // MORA proslijediti `ok: false` dalje, bez obzira šta ovdje vratimo
+    // kao `desks`/`gates`, jer je i keširan podatak sad potencijalno
+    // zastarjeo i ne smije se koristiti za merge na klijentu.
+    if (cachedRaw) return { ...cachedRaw, ok: false };
+    return { desks: {}, gates: {}, ok: false };
+  }
 
   let desks: Record<string, DeskEntry> = {};
   let gates: Record<string, GateEntry> = {};
-  if (deskRaw) { try { desks = JSON.parse(deskRaw); } catch { desks = {}; } }
-  if (gateRaw) { try { gates = JSON.parse(gateRaw); } catch { gates = {}; } }
+  if (deskResult.value) { try { desks = JSON.parse(deskResult.value); } catch { desks = {}; } }
+  if (gateResult.value) { try { gates = JSON.parse(gateResult.value); } catch { gates = {}; } }
 
   cachedRaw = { desks, gates };
   cachedRawExpiry = now + RAW_CACHE_TTL_MS;
-  return cachedRaw;
+  return { ...cachedRaw, ok: true };
 }
 
 // ======================================================

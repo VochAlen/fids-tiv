@@ -86,6 +86,11 @@ export type { AssignmentEntry };
 type AssignmentsResponse = {
   deskEntries?: Record<string, AssignmentEntry>;
   gateEntries?: Record<string, AssignmentEntry>;
+  // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
+  // lib/assignments-service.ts): `false` znači da server NIJE uspio
+  // pouzdano pročitati stanje (Redis/circuit-breaker problem) — ovaj
+  // odgovor NIJE punopravan snapshot i NE SMIJE se koristiti za merge.
+  ok?: boolean;
 };
 
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
@@ -172,6 +177,18 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       .then(res => res.json())
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
+        // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
+        // lib/assignments-service.ts i AssignmentsResponse iznad):
+        // `ok === false` znači server NIJE uspio pouzdano pročitati
+        // stanje (Redis/circuit-breaker problem) — ovo NIJE punopravan
+        // snapshot. mergeNewer ispravno tretira "ključ nedostaje" kao
+        // "obrisano na serveru" (vidi lib/assignment-merge.ts), pa bi
+        // primjena OVOG odgovora obrisala baš SVE trenutno aktivne
+        // dodjele na SVIM kioscima odjednom — samo zato što je Redis
+        // bio privremeno nedostupan. Tretiraj identično kao mrežni
+        // fetch fail ispod (catch): zadrži trenutno stanje, probaj
+        // ponovo na sledećem ciklusu (fallback poll / 3min reconcile).
+        if (data.ok === false) return;
         // Uspješan round-trip — dotakni sync bez obzira da li je
         // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
         lastSyncAtRef.current = Date.now();
