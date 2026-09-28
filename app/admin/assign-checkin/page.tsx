@@ -1236,12 +1236,36 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     // što je osoblju izgledalo kao "kiosk se ne može zatvoriti".
     // Eksplicitna .ok provjera + throw sad garantuje da svaki neuspjeh
     // (uključujući 503) ispravno pokrene rollback ispod.
+    //
+    // FIX (KRITIČNO — treći, do sada nepokriven uzrok prijavljenog
+    // "prikazuje se stari let"/"šalter se ne može zatvoriti", pronađen
+    // pri ponovnoj analizi osnovnog problema, 2026-09-28): opširan
+    // komentar uz resourceOpQueueRef/enqueueResourceOp (iznad, oko
+    // definicije) objašnjava TAČNO ovaj scenario — "brzo zatvori pa
+    // odmah dodijeli novi na isti šalter" — i kaže da SVAKI mrežni
+    // zahtjev za dati resurs mora ići kroz red čekanja da bi server
+    // garantovano obradio 'clear' i 'open' istim redoslijedom kojim je
+    // osoblje kliknulo. `assignFlightToResource` (open) JE koristio
+    // `enqueueResourceOp` — ALI OVAJ fetch (clear) NIJE, ni ovdje ni u
+    // handleRemoveGate ispod — išao je DIREKTNO, mimo reda. Posljedica:
+    // ako osoblje klikne "ukloni" pa odmah "dodijeli novi" na ISTI
+    // šalter, oba zahtjeva kreću PARALELNO (nijedan ne čeka drugi), a
+    // redoslijed kojim server stvarno obradi lock (poll na 200ms) NIJE
+    // garantovano isti kao redoslijed klikova — ako 'open' slučajno
+    // stigne do lock-a PRIJE 'clear'-a (obrnuto od stvarnog redoslijeda),
+    // 'clear' izvršen POSLIJE briše upravo dodijeljen novi let, ili –
+    // ako "novi let" gore obrisan pa odmah PONOVO dodijeljen drugom
+    // šalteru zbog "auto-replace" funkcije – uzrokuje da se prikaže
+    // POGREŠAN/STARI let. Sad ide kroz ISTI red (`desk:${deskNumber}`)
+    // kao assignFlightToResource, čime je garancija stvarno cjelovita.
     const [, deskRes] = await Promise.all([
       trackEnd('desk', deskNumber),
-      fetch(`${API_PREFIX}/desk-status-override`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deskNumber, action: 'clear' }),
-      }),
+      enqueueResourceOp(`desk:${deskNumber}`, () =>
+        fetch(`${API_PREFIX}/desk-status-override`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deskNumber, action: 'clear' }),
+        })
+      ),
     ]);
     if (!deskRes.ok) throw new Error(`HTTP ${deskRes.status}`);
    // isDirty = true;
@@ -1262,7 +1286,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp]);
 
 const handleRemoveGate = useCallback(async (gateNumber: string) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
@@ -1273,13 +1297,18 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
 
   try {
     // FIX (po zahtjevu — isti razlog kao handleRemoveCheckin, vidi
-    // opširan komentar tamo).
+    // opširan komentar tamo): fetch sad ide kroz enqueueResourceOp
+    // (`gate:${gateNumber}`) — ISTI red kao assignFlightToResource za
+    // ovaj gate — inače "ukloni pa odmah dodijeli novi" na isti gate
+    // nije garantovano obrađeno tim redoslijedom na serveru.
     const [, gateRes] = await Promise.all([
       trackEnd('gate', gateNumber),
-      fetch(`${API_PREFIX}/gate-status-override`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gateNumber, action: 'clear' }),
-      }),
+      enqueueResourceOp(`gate:${gateNumber}`, () =>
+        fetch(`${API_PREFIX}/gate-status-override`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gateNumber, action: 'clear' }),
+        })
+      ),
     ]);
     if (!gateRes.ok) throw new Error(`HTTP ${gateRes.status}`);
  //   isDirty = true;
@@ -1298,7 +1327,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp]);
 
 // FIX (po zahtjevu — hitno, za brzo čišćenje zaostalih/zaglavljenih
 // dodjela iz ranijeg testiranja, npr. duh-klik bug pronađen i
