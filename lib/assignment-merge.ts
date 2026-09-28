@@ -81,6 +81,41 @@ function isIncomingNewer(
   return false;
 }
 
+// NOVO (KRITIČNO — pravi uzrok prijavljenog bug-a, 2026-09-28 jutro:
+// "zatvore check-in šalter, ali monitor na tom šalteru i dalje
+// prikazuje let koji su upravo zatvorili", na skoro svim šalterima
+// koji su tada bili u upotrebi): `mergeNewer` se poziva ISKLJUČIVO sa
+// PUNIM snapshot-om cijelog desk/gate bloba (vidi jedini pozivalac —
+// fetchSnapshot u hooks/useRealtimeAssignments.ts, `data.deskEntries`/
+// `data.gateEntries` su CIJEL Redis blob, ne djelimičan delta). Server
+// (lib/resource-mutations.ts, `applyResourceAction` grana 'clear', i
+// `computeCleanup`) 'clear' akciju sprovodi tako što BRIŠE ključ iz
+// bloba u potpunosti — NE postavlja status na null, nego ga ukloni.
+// To znači da 'clear'-ovan šalter NIKAD više ne postoji u sledećem
+// REST snapshot-u.
+//
+// Ranija verzija ove funkcije je iterisala SAMO kroz `Object.keys(incoming)`
+// i prosto zadržavala SVAKI ključ iz `prev` koji incoming ne pominje —
+// ispravno ponašanje ZA DJELIMIČAN delta, ali POGREŠNO za pun snapshot:
+// ako se izgubi TA JEDNA Ably 'clear' poruka (mrežni blip, noćni
+// reconnect ciklus opisan u lib/ably-client.ts, zombie kanal), stari
+// (otvoren) unos je ostajao ZAUVIJEK u React state-u kioska — periodični
+// reconciliation fetch (svaka 3 min, i pri svakom reconnect-u), koji bi
+// TREBALO da bude sigurnosna mreža upravo za ovakav slučaj, ga NIKAD
+// nije mogao ispraviti, jer je taj isti fetch bio izvor koji je (tiho)
+// zadržavao staro stanje.
+//
+// Ispravka: pošto je `incoming` UVIJEK pun, autoritativan snapshot,
+// svaki ključ koji postoji u `prev` ali NEDOSTAJE u `incoming` znači da
+// je resurs u međuvremenu obrisan/zatvoren na serveru — tretiramo ga
+// kao eksplicitan "clear" unos, osim ako već i lokalno pokazuje
+// status: null (ništa se ne mijenja, izbjegava nepotreban re-render).
+const CLEARED_BY_SNAPSHOT: Omit<AssignmentEntry, 'setAt' | 'seq'> = {
+  status: null,
+  flightNumber: '',
+  classType: null,
+};
+
 export function mergeNewer(
   prev: Record<string, AssignmentEntry>,
   incoming: Record<string, AssignmentEntry>
@@ -92,6 +127,12 @@ export function mergeNewer(
     if (isIncomingNewer(existing, incomingEntry)) {
       result[key] = incomingEntry;
     }
+  }
+  for (const key of Object.keys(prev)) {
+    if (Object.prototype.hasOwnProperty.call(incoming, key)) continue;
+    const existing = prev[key];
+    if (!existing || existing.status === null) continue;
+    result[key] = { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: existing.seq ?? 0 };
   }
   return result;
 }

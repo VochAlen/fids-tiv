@@ -80,9 +80,20 @@ describe('mergeNewer', () => {
     expect(result['8'].flightNumber).toBe('NEW8');    // incoming je noviji, primijenjeno
   });
 
-  it('zadržava ključeve iz prev koji nisu u incoming', () => {
-    const prev = { '7': entry({ seq: 1 }), '9': entry({ seq: 1, flightNumber: 'UNTOUCHED' }) };
+  it('KRITIČNO — čisti ključ iz prev koji nedostaje u punom incoming snapshot-u (server ga je obrisao/zatvorio)', () => {
+    // Ovo je tačan scenario prijavljenog bug-a: šalter '9' je bio
+    // otvoren u prev (lokalni state kioska), ali ga server (nakon
+    // 'clear' akcije) više uopšte ne vraća u punom snapshot-u — mora
+    // se tretirati kao zatvoren, ne kao "netaknut".
+    const prev = { '7': entry({ seq: 1 }), '9': entry({ seq: 1, flightNumber: 'STALE_STILL_SHOWN' }) };
     const result = mergeNewer(prev, { '7': entry({ seq: 2 }) });
-    expect(result['9'].flightNumber).toBe('UNTOUCHED');
+    expect(result['9'].status).toBeNull();
+    expect(result['9'].flightNumber).toBe('');
+  });
+
+  it('ne dira ključ koji nedostaje u incoming ako je već lokalno status: null (izbjegava nepotreban update)', () => {
+    const prev = { '9': entry({ seq: 1, status: null, flightNumber: '' }) };
+    const result = mergeNewer(prev, {});
+    expect(result['9']).toBe(prev['9']); // ISTA referenca — nema nepotrebne izmjene
   });
 });
