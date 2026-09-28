@@ -870,17 +870,25 @@ if (!myData.flightNumber || myData.status === null) {
 
 const classType: string | null = myData.classType ?? null;
 
-// Isti let – samo ako su detalji već uspješno učitani ranije
-if (myData.flightNumber === lastFlightNumberRef.current && detailsLoadedRef.current) {
-  setAssignment(prev => ({
-    ...prev,
-    status: myData.status as 'open' | 'closed',
-    classType,
-    setAt: myData.setAt || null,
-  }));
-  return;
-}
-
+// FIX (KRITIČNO — pravi uzrok RECIDIVA prijavljenog bug-a "check-in
+// prikazuje let koji je poletio/zatvoren", pronađen pri ponovnoj
+// analizi osnovnog problema, 2026-09-28): ova "brza grana" je
+// PRESKAKALA CIJELU provjeru ispod (uključujući `matchIsDeparted`
+// bezbjednosnu mrežu i cancelled/diverted zastavice) ČIM JEDNOM uspješno
+// učita detalje za neki let — svaki naredni computeAssignment poziv
+// (a poziva se na SVAKU promjenu liveFlightData-a, uključujući svaki
+// 3-minutni poll ciklus) je za ISTI, još uvijek dodijeljen let samo
+// kopirao status/classType/setAt iz myData, NIKAD ponovo ne provjeravajući
+// da li je taj isti let u MEĐUVREMENU poletio/otkazan/preusmjeren. Ako
+// server-side auto-close (autoCloseDepartedDesks, cron na svakih 3 min —
+// vidi lib/override-utils.ts) kasni i par ciklusa, ili niko ručno ne
+// očisti šalter, kiosk je i dalje prikazivao let kao aktivan — upravo
+// `matchIsDeparted` zaštita ispod je NAMJENSKI napisana za ovaj scenario,
+// ali se nikad nije izvršavala nakon prvog uspješnog prikaza. Sad se
+// pretraga u liveFlightData (i sve njene provjere) radi NA SVAKOM
+// pozivu, bez obzira da li je flightNumber isti kao prošli put — cijena
+// je jedan `find()` kroz listu letova, zanemarljivo u odnosu na
+// sigurnost prikaza.
 lastFlightNumberRef.current = myData.flightNumber;
 
 let flightDetails: Partial<Flight> = {};
@@ -909,7 +917,7 @@ if (liveFlightData) {
   }
   if (match) {
     flightDetails = match;
-    detailsLoadedRef.current = true;   // ← NOVO — uspjeh, ubuduće koristi brzu granu
+    detailsLoadedRef.current = true;   // zadržano radi kompatibilnosti/dijagnostike (više ne kontroliše granu)
   } else {
     detailsLoadedRef.current = false;  // ← NOVO — probaj ponovo idući put
   }

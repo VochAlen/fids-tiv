@@ -416,14 +416,32 @@ const computeDisplay = useCallback(async () => {
       : getEffectiveDepartureMs(a) - getEffectiveDepartureMs(b)
   );
 
+  // FIX (KRITIČNO — pronađeno pri ponovnoj analizi osnovnog problema
+  // "kiosk i dalje prikazuje let koji je poletio/zatvoren", 2026-09-28):
+  // `shouldDisplayFlight` GORE (linije 319-321) VEĆ ima ispravnu granu
+  // za `manualGateStatusRef.current === 'open'` (isključi SAMO
+  // departed/poletio, dozvoli sve ostalo) — napisana TAČNO za ovaj,
+  // ručno-dodijeljen slučaj. ALI ovaj kod je RANIJE, u override-open
+  // grani, uzimao `sorted[0]` DIREKTNO, bez ikakvog poziva
+  // `shouldDisplayFlight`-a — ta zaštita je postojala u kodu, ali se
+  // nikad stvarno nije izvršavala za override-open slučaj. Posljedica:
+  // ako gate ima ručnu dodjelu (open) na let koji u međuvremenu POLETI,
+  // a server-side auto-close (autoCloseDepartedGates, cron na svakih 3
+  // min — vidi lib/override-utils.ts) još nije stigao da očisti taj
+  // gate (ili osoblje nije ručno kliknulo "zatvori"), gate ekran je i
+  // dalje prikazivao poletio let — ISTA klasa bug-a kao prijavljeni
+  // check-in problem, samo na gate strani i bez oslanjanja na
+  // desk-status blob (CheckInPageClient.tsx je dobio analognu zaštitu,
+  // `matchIsDeparted`, ranije ove sesije — gate strana ju je propustila).
+  // Sad se `shouldDisplayFlight` dosljedno primjenjuje u OBA slučaja.
   const current: (typeof sorted)[number] | null =
-    overrideStatus === 'open' ? (sorted[0] ?? null) : (sorted.find(f => shouldDisplayFlight(f)) ?? null);
+    sorted.find(f => shouldDisplayFlight(f)) ?? null;
 
   let nextFlight: (typeof sorted)[number] | null = null;
   const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
   if (idx >= 0) {
     for (let i = idx + 1; i < sorted.length; i++) {
-      if (overrideStatus === 'open' || shouldDisplayFlight(sorted[i])) { nextFlight = sorted[i]; break; }
+      if (shouldDisplayFlight(sorted[i])) { nextFlight = sorted[i]; break; }
     }
   }
 
