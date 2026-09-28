@@ -231,7 +231,30 @@ export function useRealtimeFlightData(role: AblyClientRole) {
     const handler = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
       const newData = msg.data as FlightData;
-      setData(newData);
+      // FIX (KRITIČNO — pronađeno pri ponovnoj analizi osnovnog problema,
+      // 2026-09-28): `fetchSnapshot` iznad VEĆ ima zaštitu od prepisivanja
+      // novijeg podatka starijim REST snapshot-om koji je mrežno kasnio
+      // (poređenje po `lastUpdated`) — ALI ovaj Ably handler je ISTU
+      // vrstu podatka (cijeli `flights:combined` blob, uključujući
+      // `StatusEN` za svaki let) primjenjivao BEZUSLOVNO, bez ikakvog
+      // poređenja. Ably garantuje redoslijed poruka PO KANALU u normalnim
+      // uslovima, ali NE i pri resume/reconnect ciklusima (vidi noćni
+      // watcher u lib/ably-client.ts, koji namjerno zatvara/otvara ovu
+      // istu konekciju) — ako bi ikad stigla ZASTARJELA poruka poslije
+      // svježije (npr. isporuka odgođena tokom kratkog mrežnog prekida,
+      // pa stigne tek nakon što je REST fetchSnapshot već primijenio
+      // noviju verziju), let koji je u MEĐUVREMENU poletio bi se ovom
+      // porukom vratio na stari status (npr. "Scheduled") — a upravo na
+      // taj status/StatusEN se oslanja "sakrij let koji je poletio"
+      // zaštita u CheckInPageClient.tsx/GatePageClient.tsx. Ista zaštita
+      // kao kod fetchSnapshot: primijeni SAMO ako incoming nije stariji
+      // od trenutno prikazanog stanja.
+      setData(prev => {
+        if (prev?.lastUpdated && newData?.lastUpdated && newData.lastUpdated < prev.lastUpdated) {
+          return prev;
+        }
+        return newData;
+      });
       saveEmergencyCache(newData);
       // FIX (po zahtjevu — dinamički noćni režim, vidi opširan
       // komentar iznad kod fetchSnapshot).

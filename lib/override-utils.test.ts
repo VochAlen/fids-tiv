@@ -102,7 +102,43 @@ vi.mock('@/lib/assignments-service', () => ({
 // pa lock uvijek uspije odmah (dovoljno za ovaj test, ne testiramo
 // lock-contention ovdje).
 
-import { runAutoReset, autoCloseDepartedDesks, autoCloseDepartedGates } from './override-utils';
+import { runAutoReset, autoCloseDepartedDesks, autoCloseDepartedGates, isTerminatedStatus } from './override-utils';
+
+// NOVO (po zahtjevu — regresioni test za propust pronađen pri ponovnoj
+// analizi osnovnog problema, 2026-09-28): isTerminatedStatus je
+// prepoznavala UŽI skup varijanti statusa nego ostatak aplikacije
+// (display strane već očekuju "take off", "canceled" (jedno "l"),
+// "annulé", "dévié") — vidi opširan komentar uz funkciju u
+// lib/override-utils.ts. Bez ovih varijanti, autoCloseDepartedDesks/
+// Gates i runAutoReset NIKAD ne bi oslobodili šalter/gate za let
+// prijavljen sa takvim statusom.
+describe('isTerminatedStatus — prepoznaje sve varijante statusa koje ostatak aplikacije već očekuje', () => {
+  it('prepoznaje "Take Off" (varijanta za poletio, koju CheckInPageClient/departures već očekuju)', () => {
+    expect(isTerminatedStatus('Take Off')).toBe(true);
+  });
+  it('prepoznaje "Canceled" (američki pravopis, jedno "l")', () => {
+    expect(isTerminatedStatus('Canceled')).toBe(true);
+  });
+  it('prepoznaje francusko "Annulé" (otkazan, codeshare izvori)', () => {
+    expect(isTerminatedStatus('Annulé')).toBe(true);
+  });
+  it('prepoznaje francusko "Dévié" (preusmjeren, codeshare izvori)', () => {
+    expect(isTerminatedStatus('Dévié')).toBe(true);
+  });
+  it('i dalje prepoznaje postojeće varijante (Departed, Cancelled, Diverted, poletio, otkazan, preusmjeren)', () => {
+    expect(isTerminatedStatus('Departed')).toBe(true);
+    expect(isTerminatedStatus('Cancelled')).toBe(true);
+    expect(isTerminatedStatus('Diverted')).toBe(true);
+    expect(isTerminatedStatus('poletio')).toBe(true);
+    expect(isTerminatedStatus('otkazan')).toBe(true);
+    expect(isTerminatedStatus('preusmjeren')).toBe(true);
+  });
+  it('ne prepoznaje aktivne statuse kao terminirane', () => {
+    expect(isTerminatedStatus('Scheduled')).toBe(false);
+    expect(isTerminatedStatus('Boarding')).toBe(false);
+    expect(isTerminatedStatus('Delayed')).toBe(false);
+  });
+});
 
 describe('runAutoReset — desk-status cross-contamination zaštita', () => {
   beforeEach(() => {

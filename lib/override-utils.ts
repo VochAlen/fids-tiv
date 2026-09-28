@@ -72,12 +72,29 @@ export function minutesUntilCheckInReset(scheduledTime: string): number {
   return diff;
 }
 
+// FIX (KRITIČNO — pronađeno pri ponovnoj analizi osnovnog problema,
+// 2026-09-28): ova funkcija odlučuje kad se šalter/gate AUTOMATSKI
+// zatvara (autoCloseDepartedDesks/Gates ispod, i legacy runAutoReset)
+// — ali je prepoznavala UŽI skup varijanti statusa nego ostatak
+// aplikacije koji odlučuje da li se let PRIKAZUJE kao aktivan
+// (CheckInPageClient.tsx matchIsDeparted, departures/split-board/
+// combined `isDeparted`/`isCancelled`/`isDiverted`, lib/check-in-service.ts).
+// Nedostajalo je: "take off" (varijanta statusa za poletio, koju
+// klijentske stranice VEĆ očekuju), američki pravopis "canceled" (jedno
+// "l"), i francuske varijante "annulé"/"dévié" (codeshare izvori). Da je
+// izvor podataka ikad vratio let sa statusom npr. "Take Off" ili
+// "Annulé", auto-close/auto-reset ga NIKAD ne bi prepoznao kao
+// terminiran — šalter bi ostao "zauvijek zauzet" u adminu (dok bi
+// display-strana ipak ispravno sakrila let), poništavajući baš
+// funkciju koju je osoblje eksplicitno tražilo ("ako poletim a
+// zaboravim da zatvorim, treba automatski da se zatvori"). Sad
+// prepoznaje ISTI, najširi skup varijanti kao ostatak aplikacije.
 export function isTerminatedStatus(statusEN: string): boolean {
   const s = (statusEN || '').toLowerCase();
   return (
-    s.includes('departed')  || s.includes('poletio')    ||
-    s.includes('cancelled') || s.includes('otkazan')    ||
-    s.includes('diverted')  || s.includes('preusmjeren')
+    s.includes('departed')  || s.includes('poletio')    || s.includes('take off') ||
+    s.includes('cancelled') || s.includes('canceled')   || s.includes('otkazan')  || s.includes('annulé') ||
+    s.includes('diverted')  || s.includes('preusmjeren') || s.includes('dévié')
   );
 }
 
