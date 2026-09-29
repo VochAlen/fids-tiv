@@ -851,12 +851,16 @@ const computeAssignment = useCallback(async () => {
 
   const myData = deskEntries[deskNumberParam] ?? { status: null, flightNumber: '', classType: null, setAt: null };
 
-  // NOVO (privremeno — po zahtjevu, dijagnostika za prijavljen bug
-  // "dodijelim YM152, pojavi se stari YM340"): ostaje dok se problem
-  // ne potvrdi i riješi, onda se uklanja. Otvori kiosk browser
-  // konzolu (F12) sledeći put kad se ovo desi — ove linije će tačno
-  // pokazati šta je stiglo iz deskEntries za ovaj šalter.
-  console.log('[DIAG checkin]', deskNumberParam, 'myData iz deskEntries:', JSON.stringify(myData));
+  // FIX (po zahtjevu — memory leak / optimizacija, 2026-09-29): uklonjeni
+  // privremeni dijagnostički console.log/JSON.stringify pozivi koji su ovdje
+  // stajali od 2026-09-27 debug sesije — bug koji su trebali da dijagnostikuju
+  // je odavno potvrđen i riješen ("radi odlicno" nakon 24h u produkciji).
+  // Ovi pozivi su se izvršavali na SVAKI computeAssignment poziv (tj. na SVAKU
+  // promjenu liveFlightData/deskEntries — praktično neprekidno, 24/7, na svim
+  // check-in kioscima), svaki put alocirajući novi JSON string. Na dugotrajnoj
+  // (nedeljama/mjesecima bez restarta) Electron webview sesiji, akumulirana
+  // istorija konzole (i stringovi koje drži) postepeno rastu i doprinose
+  // curenju memorije koje smo ovom analizom tražili da spriječimo — uklonjeno.
 
   setLastUpdate(new Date().toLocaleTimeString('en-GB'));
   setLoading(false);
@@ -898,8 +902,6 @@ if (liveFlightData) {
     ...(liveFlightData.arrivals || []),
   ];
   const match = allFlights.find((f: Flight) => f.FlightNumber === myData.flightNumber);
-  // NOVO (privremeno — dijagnostika, vidi napomenu iznad).
-  console.log('[DIAG checkin]', deskNumberParam, 'trazi flight:', myData.flightNumber, '| pronadjeno:', match ? match.FlightNumber : 'NIJE PRONADJENO', '| ukupno letova u liveFlightData:', allFlights.length);
   // NOVO (po zahtjevu — bezbjednosna mreža, nezavisno od konačnog
   // uzroka prijavljenog "zatvoren/poletio let se i dalje prikazuje"):
   // ako je pronađeni let VEĆ poletio, NEMOGUĆE je da se prikaže na
@@ -910,7 +912,6 @@ if (liveFlightData) {
   // stranica je nije imala).
   const matchIsDeparted = match ? /(departed|poletio|take off)/i.test(match.StatusEN ?? '') : false;
   if (match && matchIsDeparted) {
-    console.log('[DIAG checkin]', deskNumberParam, 'let', match.FlightNumber, 'je VEC POLETIO — ignorisem, prikazujem prazno');
     detailsLoadedRef.current = false;
     setAssignment(EMPTY_ASSIGNMENT);
     return;

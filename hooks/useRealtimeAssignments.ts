@@ -192,10 +192,14 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         // Uspješan round-trip — dotakni sync bez obzira da li je
         // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
         lastSyncAtRef.current = Date.now();
-        // NOVO (privremeno — dijagnostika za prijavljen bug "dodijelim
-        // YM152, pojavi se stari YM340"): pokazuje TAČNO šta REST
-        // snapshot vraća za sve šaltere, prije merge-a.
-        console.log('[DIAG assignments]', 'fetchSnapshot deskEntries:', JSON.stringify(data.deskEntries ?? {}));
+        // FIX (po zahtjevu — memory leak / optimizacija, 2026-09-29): uklonjen
+        // privremeni dijagnostički console.log/JSON.stringify (vidi identičnu
+        // napomenu u CheckInPageClient.tsx computeAssignment) — bug koji je
+        // trebao da dijagnostikuje je odavno potvrđen i riješen. Ovaj poziv se
+        // izvršavao na SVAKI uspješan fetchSnapshot round-trip (min. svaka 3
+        // min, ČEŠĆE tokom fallback poll-a) na SVIM ekranima koji koriste ovaj
+        // dijeljeni hook (checkin, gate, board) — nepotreban trošak na
+        // dugotrajnim kiosk/Electron webview sesijama.
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}));
       })
@@ -271,10 +275,14 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       // baš ovaj desk ili nešto drugo na kanalu.
       lastSyncAtRef.current = Date.now();
       const { deskNumber, entry } = msg.data as { deskNumber: string; entry: AssignmentEntry };
-      // NOVO (privremeno — po zahtjevu, dijagnostika za prijavljen bug
-      // "dodijelim YM152, pojavi se stari YM340"): pokazuje TAČNO šta
-      // Ably poruka nosi za taj šalter, prije bilo kakve obrade.
-      console.log('[DIAG assignments]', 'desk', deskNumber, '- primljena poruka:', JSON.stringify(entry));
+      // FIX (po zahtjevu — memory leak / optimizacija, 2026-09-29): uklonjen
+      // privremeni dijagnostički console.log/JSON.stringify (vidi napomenu
+      // uz fetchSnapshot iznad). Ovaj je bio i najskuplji od svih uklonjenih —
+      // izvršavao se na SVAKU Ably poruku na `assignments:desks` kanalu, koja
+      // je BROADCAST ka SVIM check-in/board ekranima odjednom (ne samo ka
+      // ekranu na koji se poruka odnosi) — svaka promjena BILO KOG šaltera na
+      // cijelom aerodromu je značila po jedan JSON.stringify + console.log na
+      // SVAKOM check-in kiosku istovremeno, non-stop, 24/7.
       setDeskEntries(prev => mergeOne(prev, deskNumber, entry));
     };
     const onGateMsg = (msg: Ably.Message) => {
