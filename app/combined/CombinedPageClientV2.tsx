@@ -15,7 +15,7 @@ import {
 } from "react"
 import type { Flight } from "@/types/flight"
 import { getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
-import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind } from "lucide-react"
+import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind, Building2 } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
@@ -71,6 +71,52 @@ const FlightWeatherCell = memo(function FlightWeatherCell({
     </div>
   );
 });
+
+// NOVO (po zahtjevu — ista kružna oznaka terminala kao na /departures,
+// samo na combined ekranu, i to SAMO na prikazu koji pokazuje departures
+// letove — vidi showArrivals check na mjestima korišćenja ispod):
+// T1: žuta pozadina/crn tekst, T2: crvena pozadina/bijel tekst.
+function getTerminalForCombinedCheckInDesk(checkInDesk: string | undefined | null): 'T1' | 'T2' | null {
+  if (!checkInDesk || checkInDesk === '-') return null;
+  const desks = checkInDesk.split(',').map(d => d.trim()).filter(Boolean);
+  for (const d of desks) {
+    const num = parseInt(d.replace(/\D/g, ''), 10);
+    if (isNaN(num)) continue;
+    if (num >= 1 && num <= 15) return 'T1';
+    if (num >= 20 && num <= 30) return 'T2';
+  }
+  return null;
+}
+
+// NOVO (po zahtjevu — check-in šalteri ne smiju prelaziti u 2 reda):
+// kad let ima više dodijeljenih šaltera, prikazivali su se kao jedan
+// tekstualni string (npr. "21, 22, 23") unutar kutije fiksne širine —
+// pri velikom fontu taj string bi se prelomio u 2 reda. Sad se šalteri
+// prikazuju kao zasebni badge-ovi u jednom redu (flex-nowrap), sa
+// veličinom koja se dinamički smanjuje kad ih je više, tako da uvijek
+// stanu u jedan red (isti princip kao na /departures).
+function getCombinedCheckInBadgeSizing(deskCount: number): { gap: string; badge: string } {
+  if (deskCount >= 4) return { gap: 'gap-1',   badge: 'text-[1.3rem] py-1 px-1.5' };
+  if (deskCount === 3) return { gap: 'gap-1',   badge: 'text-[1.7rem] py-1.5 px-2' };
+  if (deskCount === 2) return { gap: 'gap-1.5', badge: 'text-[2.1rem] py-1.5 px-2.5' };
+  return { gap: 'gap-1.5', badge: 'text-[2.5rem] py-2 px-3' };
+}
+
+function CombinedTerminalPill({ terminal, className = '' }: { terminal: 'T1' | 'T2' | null; className?: string }) {
+  if (!terminal) return null;
+  const isT1 = terminal === 'T1';
+  return (
+    <div
+      className={`rounded-full flex items-center justify-center font-black shadow-xl border-2 ${
+        isT1
+          ? 'bg-yellow-400 text-black border-yellow-300'
+          : 'bg-red-600 text-white border-red-400'
+      } ${className}`}
+    >
+      {terminal}
+    </div>
+  );
+}
 
 // ============================================================
 // KONSTANTE
@@ -597,11 +643,29 @@ const FlightRow = memo(
                   {flight.DestinationCityName || flight.DestinationAirportName}
                 </div>
               </div>
-              <div className="flex items-center justify-center" style={{ width: "260px" }}>
-                {flight.CheckInDesk && flight.CheckInDesk !== "-"
-                  ? <div className="text-[2.5rem] font-black text-white bg-black/40 py-2 px-3 rounded-xl border-2 border-white/20 shadow-xl">{flight.CheckInDesk}</div>
-                  : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+              <div className="flex items-center justify-center text-center" style={{ width: "160px" }}>
+                <CombinedTerminalPill
+                  terminal={getTerminalForCombinedCheckInDesk(flight.CheckInDesk)}
+                  className="w-12 h-12 text-lg"
+                />
               </div>
+              {(() => {
+                const desks = flight.CheckInDesk && flight.CheckInDesk !== "-"
+                  ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean)
+                  : [];
+                const { gap, badge } = getCombinedCheckInBadgeSizing(desks.length);
+                return (
+                  <div className={`flex items-center justify-center flex-nowrap ${gap}`} style={{ width: "260px" }}>
+                    {desks.length > 0
+                      ? desks.map(d => (
+                          <div key={d} className={`${badge} font-black text-white bg-black/40 rounded-xl border-2 border-white/20 shadow-xl whitespace-nowrap`}>
+                            {d}
+                          </div>
+                        ))
+                      : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+                  </div>
+                );
+              })()}
               <div className="flex items-center justify-center" style={{ width: "200px" }}>
                 {flight.GateNumber && flight.GateNumber !== "-"
                   ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
@@ -659,6 +723,18 @@ const FlightRow = memo(
             {flight.DestinationCityName || flight.DestinationAirportName}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {!showArrivals && (() => {
+              const terminal = getTerminalForCombinedCheckInDesk(flight.CheckInDesk);
+              if (!terminal) return null;
+              const isT1 = terminal === 'T1';
+              return (
+                <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[0.65rem] font-black ${
+                  isT1 ? 'bg-yellow-400 text-black' : 'bg-red-600 text-white'
+                }`}>
+                  {terminal}
+                </span>
+              );
+            })()}
             {!showArrivals && flight.CheckInDesk && flight.CheckInDesk !== "-" && (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
                 <Users className="w-3 h-3 opacity-70" />{flight.CheckInDesk}
@@ -1210,6 +1286,7 @@ const handleClose = useCallback(() => {
       { label: t.estimated,   width: "180px", icon: Clock        },
       { label: t.flight,      width: "280px", icon: DepartureIcon},
       { label: t.destination, width: "320px", icon: MapPin       },
+      { label: "Terminal",    width: "160px", icon: Building2    },
       { label: t.checkIn,     width: "260px", icon: Users        },
       { label: t.gate,        width: "200px", icon: DoorOpen     },
       { label: t.status,      width: "580px", icon: Info         },

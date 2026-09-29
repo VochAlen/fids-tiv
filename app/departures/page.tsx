@@ -7,7 +7,7 @@
 import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component, type ErrorInfo, type ReactNode } from 'react';
 import type { Flight } from '@/types/flight';
 import { getUniqueDeparturesWithDeparted } from '@/lib/flight-service';
-import { Info, Plane, Clock, MapPin, Users, DoorOpen } from 'lucide-react';
+import { Info, Plane, Clock, MapPin, Users, DoorOpen, Building2 } from 'lucide-react';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
@@ -16,6 +16,56 @@ import { sortNumericStrings } from '@/lib/sort-utils';
 import { useWeather } from '@/hooks/use-weather';
 import WeatherIcon from '@/components/weather-icon';
 
+
+// NOVO (po zahtjevu — kolona "Terminal" između Weather i Check-In):
+// T1 pokriva check-in šaltere 1-15, T2 pokriva šaltere 20-30. Let može
+// imati više šaltera odjednom (CheckInDesk je "5, 6" npr.) — uzimamo
+// PRVI šalter iz liste koji upadne u jedan od opsega. Ako nijedan broj
+// šaltera ne upada ni u jedan opseg (ili nema dodijeljenog šaltera),
+// terminal se ne prikazuje (isti obrazac kao ostale kolone koje
+// prikazuju prazno kad nema podatka).
+function getTerminalForCheckInDesk(checkInDesk: string | undefined | null): 'T1' | 'T2' | null {
+  if (!checkInDesk || checkInDesk === '-') return null;
+  const desks = checkInDesk.split(',').map(d => d.trim()).filter(Boolean);
+  for (const d of desks) {
+    const num = parseInt(d.replace(/\D/g, ''), 10);
+    if (isNaN(num)) continue;
+    if (num >= 1 && num <= 15) return 'T1';
+    if (num >= 20 && num <= 30) return 'T2';
+  }
+  return null;
+}
+
+// Okrugla (kružna) oznaka terminala — T1: žuta pozadina/crn tekst,
+// T2: crvena pozadina/bijel tekst (po zahtjevu).
+// NOVO (po zahtjevu — check-in šalteri ne smiju prelaziti u 2 reda):
+// kad let ima više dodijeljenih šaltera (npr. "21, 22, 23"), badge-ovi
+// se ranije prelamali u drugi red jer je kontejner bio flex-wrap sa
+// fiksnom, prevelikom veličinom fonta/paddinga za 3+ šaltera. Sad se
+// veličina badge-ova dinamički smanjuje sa brojem šaltera, a kontejner
+// je flex-nowrap, tako da SVI šalteri jednog leta uvijek stanu u jedan red.
+function getCheckInBadgeSizing(deskCount: number): { gap: string; badge: string } {
+  if (deskCount >= 4) return { gap: 'gap-1',   badge: 'text-[1rem] py-1 px-1.5' };
+  if (deskCount === 3) return { gap: 'gap-1',   badge: 'text-[1.3rem] py-1 px-2' };
+  if (deskCount === 2) return { gap: 'gap-1.5', badge: 'text-[1.55rem] py-1.5 px-2' };
+  return { gap: 'gap-1.5', badge: 'text-[1.8rem] py-1.5 px-2.5' };
+}
+
+function TerminalPill({ terminal, className = '' }: { terminal: 'T1' | 'T2' | null; className?: string }) {
+  if (!terminal) return null;
+  const isT1 = terminal === 'T1';
+  return (
+    <div
+      className={`rounded-full flex items-center justify-center font-black shadow-xl border-2 ${
+        isT1
+          ? 'bg-yellow-400 text-black border-yellow-300'
+          : 'bg-red-600 text-white border-red-400'
+      } ${className}`}
+    >
+      {terminal}
+    </div>
+  );
+}
 
 // ── v4: Per-flight weather cell for departures ───────────────
 const DepartureWeatherCell = memo(function DepartureWeatherCell({
@@ -500,20 +550,35 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           {/* Weather */}
           <DepartureWeatherCell flight={flight} />
 
+          {/* Terminal — izvedeno iz Check-In šaltera (1-15 -> T1, 20-30 -> T2) */}
+          <div className="flex items-center justify-center text-center" style={{ width: '180px' }}>
+            <TerminalPill
+              terminal={getTerminalForCheckInDesk(flight.CheckInDesk)}
+              className="w-12 h-12 text-lg"
+            />
+          </div>
+
           {/* Check-In */}
-{/* Check-In */}
-<div className="flex items-center justify-center flex-wrap gap-1.5" style={{ width: '280px' }}>
-  {flight.CheckInDesk && flight.CheckInDesk !== '-'
-    ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean).map(d => (
-        <div key={d} className="text-[1.8rem] font-black text-white bg-black/40 py-1.5 px-2.5 rounded-xl border-2 border-white/20 shadow-xl">
-          {d}
-        </div>
-      ))
-    : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
-</div>
+{(() => {
+  const desks = flight.CheckInDesk && flight.CheckInDesk !== '-'
+    ? flight.CheckInDesk.split(',').map(d => d.trim()).filter(Boolean)
+    : [];
+  const { gap, badge } = getCheckInBadgeSizing(desks.length);
+  return (
+    <div className={`flex items-center justify-center text-center flex-nowrap ${gap}`} style={{ width: '280px' }}>
+      {desks.length > 0
+        ? desks.map(d => (
+            <div key={d} className={`${badge} font-black text-white bg-black/40 rounded-xl border-2 border-white/20 shadow-xl whitespace-nowrap`}>
+              {d}
+            </div>
+          ))
+        : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
+    </div>
+  );
+})()}
 
           {/* Gate */}
-          <div className="flex items-center justify-center" style={{ width: '180px' }}>
+          <div className="flex items-center justify-center text-center" style={{ width: '180px' }}>
             {flight.GateNumber && flight.GateNumber !== '-'
               ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl
                   ${isGateChanged
@@ -577,8 +642,20 @@ const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
           <div className="text-[1.25rem] font-black text-white truncate leading-tight">
             {flight.DestinationCityName || flight.DestinationAirportName}
           </div>
-          {/* Red 3: Check-in + Gate + Status */}
+          {/* Red 3: Terminal + Check-in + Gate + Status */}
           <div className="flex items-center gap-2 flex-wrap">
+            {(() => {
+              const terminal = getTerminalForCheckInDesk(flight.CheckInDesk);
+              if (!terminal) return null;
+              const isT1 = terminal === 'T1';
+              return (
+                <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[0.65rem] font-black ${
+                  isT1 ? 'bg-yellow-400 text-black' : 'bg-red-600 text-white'
+                }`}>
+                  {terminal}
+                </span>
+              );
+            })()}
             {flight.CheckInDesk && flight.CheckInDesk !== '-' && (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-black/40 px-2 py-1 rounded-lg border border-white/20">
                 <Users className="w-3 h-3 opacity-70" />
@@ -966,6 +1043,7 @@ const sortedFlights = useMemo(() => {
         <circle cx="12" cy="12" r="4" fill="#F59E0B"/>
       </svg>
     ) },
+    { label: 'Terminal',    width: '180px', icon: Building2     },
     { label: 'Check-In',    width: '280px', icon: Users         },
     { label: 'Gate',        width: '180px', icon: DoorOpen      },
     { label: 'Status',      width: '640px', icon: Info          },
