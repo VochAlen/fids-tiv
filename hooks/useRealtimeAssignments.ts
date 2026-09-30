@@ -72,7 +72,7 @@
 // hooks/useRealtimeAssignments.ts
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Ably from 'ably';
 
 // NOVO — izdvojeno u lib/assignment-merge.ts (vidi opširan komentar
@@ -167,7 +167,15 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // obzira šta connectionState tvrdi — vrijeme je za kontrolisan reload.
   const lastSyncAtRef = useRef<number>(Date.now());
 
-  const fetchSnapshot = () => {
+  // FIX (po zahtjevu — garantovano zatvaranje check-in šaltera u 20s,
+  // 2026-09-29): umotano u useCallback (isti obrazac kao
+  // hooks/useRealtimeFlightData.ts) tako da funkcija ima STABILAN
+  // identitet kroz rendere — potrebno da bi se mogla bezbjedno izložiti
+  // kao `refetch` i koristiti u dependency nizu efekta na strani
+  // stranice (npr. brzi "zatvoren u 20s" watchdog u
+  // CheckInPageClient.tsx), bez ponovnog kreiranja intervala pri svakom
+  // re-renderu.
+  const fetchSnapshot = useCallback(() => {
     // cache: 'no-store' je NAMJERNO — ruta /api/test/assignments ima
     // kratak Cache-Control (max-age=2, s-maxage=2, stale-while-revalidate=3)
     // koji je ispravan za CDN/kioske, ali bez ovoga bi admin panel
@@ -205,7 +213,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       })
       .catch(() => { /* ostani na trenutnom stanju — NE dodirujemo
         lastSyncAtRef ovdje: neuspio fetch NIJE znak života. */ });
-  };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -306,7 +314,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       // Napomena: NE zatvaramo 'ably' konekciju ovdje jer je dijeljena —
       // druge komponente na istoj stranici je možda i dalje koriste.
     };
-  }, [role]);
+  }, [role, fetchSnapshot]);
 
   // ── 3. Fallback polling kad Ably nije konektovan I nije night-sleep ──
   // FIX (po zahtjevu — eksponencijalni backoff, vidi opširan komentar
@@ -329,7 +337,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     timeoutId = setTimeout(tick, delay);
 
     return () => { cancelled = true; clearTimeout(timeoutId); };
-  }, [connectionState]);
+  }, [connectionState, fetchSnapshot]);
 
   // ── 4. Periodičan "reconciliation" fetch — RADI UVIJEK, nezavisno
   // od connectionState-a (vidi opširan komentar uz
@@ -342,10 +350,17 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   useEffect(() => {
     const id = setInterval(fetchSnapshot, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [fetchSnapshot]);
 
   // NOVO — vidi komentar uz lastSyncAtRef iznad. Vraćamo REF (ne state)
   // namjerno: watchdog na strani stranice čita .current preko sopstvenog
   // setInterval-a, ne treba mu re-render pri svakom dodiru.
-  return { deskEntries, gateEntries, connectionState, lastSyncAtRef };
+  //
+  // FIX (po zahtjevu — garantovano zatvaranje check-in šaltera u 20s,
+  // 2026-09-29): `refetch` izložen spolja (isti obrazac kao
+  // hooks/useRealtimeFlightData.ts) da stranice mogu pokrenuti STVARAN,
+  // dodatan resync na sopstvenom, kraćem rasporedu — vidi novi
+  // "zatvoreno u 20s" watchdog u CheckInPageClient.tsx, koji ovo koristi
+  // dok je šalter aktivno otvoren.
+  return { deskEntries, gateEntries, connectionState, lastSyncAtRef, refetch: fetchSnapshot };
 }
