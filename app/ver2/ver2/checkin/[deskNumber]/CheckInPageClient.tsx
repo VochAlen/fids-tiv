@@ -63,6 +63,28 @@ const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5
 const DATA_STALE_AFTER_MS = 5 * 60_000;
 const DATA_STALE_CHECK_INTERVAL_MS = 20_000;
 
+// NOVO (po zahtjevu — TVRD ZAHTJEV: kad osoblje zatvori check-in šalter,
+// EKRAN MORA prikazati zatvoreno u roku od 20 sekundi, garantovano, i to
+// pouzdano na Chrome 109 (Electron klijent), 2026-09-29): normalan put je
+// Ably 'assignments:desks' poruka, koja stiže skoro trenutno (sub-sekunda).
+// Postojeći periodični reconciliation fetch u hooks/useRealtimeAssignments.ts
+// (RECONCILE_INTERVAL_MS = 3 min) je bio NAMJERNO spor — dizajniran kao
+// rijetka sigurnosna mreža protiv izgubljene poruke, ne kao SLA za
+// zatvaranje — 3 min je daleko iznad traženih 20s. Umjesto da se taj
+// DIJELJENI interval (koristi ga i gate i board, i utiče na trošak/Edge
+// Requests) ubrza globalno za SVE ekrane i SVE situacije, dodat je poseban,
+// CILJAN watchdog ispod: dok je OVAJ šalter aktivno OTVOREN (isOpen), stranica
+// dodatno, samostalno provjerava stvarno stanje sa servera na svakih
+// ~12-15s (refetchAssignments — isti /api/test/assignments poziv koji i
+// admin panel čita) — bez obzira da li Ably poruka o zatvaranju stigne ili
+// ne. Ako se šalter zatvori na serveru, ovaj re-fetch to garantovano
+// pokupi u sledećem ciklusu, well pod 20s marginom (uključujući mrežno
+// kašnjenje). Kad šalter NIJE otvoren, ovaj dodatni poll se uopšte ne
+// pokreće — nema dodatnog troška na neaktivnim šalterima.
+const OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS = 12_000;
+const getCloseVerifyIntervalWithJitter = () =>
+  OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS + Math.floor(Math.random() * 3_000); // 12-15s
+
 const BLUR_DATA_URL =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
 
@@ -588,7 +610,7 @@ function CheckInDisplay() {
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
   const { data: liveFlightData } = useRealtimeFlightData('checkin');
-const { deskEntries, lastSyncAtRef } = useRealtimeAssignments('checkin');
+const { deskEntries, lastSyncAtRef, refetch: refetchAssignments } = useRealtimeAssignments('checkin');
 
   // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
   // se zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27):
@@ -968,6 +990,30 @@ useEffect(() => {
   // ── Stanje za render ───────────────────────────────────────
   const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;
   const hasFlight = !!assignment.flightNumber;
+
+  // NOVO (po zahtjevu — garantovano zatvaranje u 20s, vidi opširan
+  // komentar uz OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS iznad): dok je šalter
+  // aktivno otvoren, dodatno (nezavisno od Ably-ja i od 3-minutnog
+  // reconciliation-a u hook-u) provjeravaj stvarno stanje na serveru na
+  // svakih ~12-15s. `refetchAssignments` ažurira `deskEntries` preko
+  // istog `mergeNewer`/seq mehanizma kao i sve ostalo — ako je server u
+  // međuvremenu zatvorio ovaj šalter, `computeAssignment` efekat će se
+  // sam pokrenuti na promjenu `deskEntries` i odmah prikazati zatvoreno.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      refetchAssignments();
+      timeoutId = setTimeout(tick, getCloseVerifyIntervalWithJitter());
+    };
+    timeoutId = setTimeout(tick, getCloseVerifyIntervalWithJitter());
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [isOpen, refetchAssignments]);
 
   // ============================================================
   // RENDER: Loading
