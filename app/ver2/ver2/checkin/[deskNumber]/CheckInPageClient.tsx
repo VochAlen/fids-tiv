@@ -273,6 +273,13 @@ class CheckInErrorBoundary extends Component<
   { children: ReactNode },
   { hasError: boolean; message: string }
 > {
+  // FIX (po predlogu — 2026-10-03): reset-tajmer nije imao cleanup —
+  // ako bi boundary uhvatio VIŠE grešaka zaredom, svaka je pravila
+  // sopstveni setTimeout (nagomilavanje), i nijedan se nije čistio pri
+  // unmount-u. Sad se čuva kao instance field: prethodni se čisti prije
+  // zakazivanja novog, i svi se čiste u componentWillUnmount.
+  private resetTimeout: ReturnType<typeof setTimeout> | null = null;
+
   constructor(props: { children: ReactNode }) {
     super(props);
     this.state = { hasError: false, message: '' };
@@ -282,7 +289,17 @@ class CheckInErrorBoundary extends Component<
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('🚨 CheckIn ErrorBoundary:', error, info);
-    setTimeout(() => this.setState({ hasError: false, message: '' }), 10_000);
+    if (this.resetTimeout !== null) clearTimeout(this.resetTimeout);
+    this.resetTimeout = setTimeout(() => {
+      this.resetTimeout = null;
+      this.setState({ hasError: false, message: '' });
+    }, 10_000);
+  }
+  componentWillUnmount() {
+    if (this.resetTimeout !== null) {
+      clearTimeout(this.resetTimeout);
+      this.resetTimeout = null;
+    }
   }
   render() {
     if (this.state.hasError) {
@@ -565,6 +582,131 @@ const AdBanner = memo(function AdBanner({
     </div>
   );
 });
+
+// ============================================================
+// AD ROTATOR — NOVO (po zahtjevu — Lighthouse performanse / manje
+// opterećenje glavne niti, 2026-09-30): ad-rotacija (currentAdIndex/
+// nextAdIndex/isAdTransitioning + setInterval sa ugniježđenim
+// setTimeout-ovima) je RANIJE bila state u samom vrhu CheckInDisplay
+// komponente — svaka od 3 promjene po ciklusu (svakih 15s, ZAUVIJEK,
+// 24/7, dok god je kiosk upaljen) je re-renderovala CIJELO stablo
+// (flight info karticu, logo, grad, vremena, gate info...), iako se
+// vizuelno mijenja ISKLJUČIVO reklamni baner. Izdvojeno u sopstvenu
+// memo komponentu — sad re-render pogađa SAMO ovo malo podstablo, ne
+// cijelu stranicu. Direktno smanjuje broj/trajanje "long main-thread
+// tasks" i ukupan CPU/GC rad tokom cijelog radnog dana kioska (tačno
+// ono na šta Lighthouse "Avoid long main-thread tasks" upozorava).
+const AdRotator = memo(function AdRotator({
+  adImages,
+  baImageSrc,
+  overrideImageSrc,
+  lufthansaImageSrc,
+  sundorHolidayImageSrc,
+  israirHolidayImageSrc,
+  arkiaHolidayImageSrc,
+  fixedHolidayImageSrc,
+}: {
+  adImages: string[];
+  baImageSrc: string | null;
+  overrideImageSrc?: string | null;
+  lufthansaImageSrc?: string | null;
+  sundorHolidayImageSrc?: string | null;
+  israirHolidayImageSrc?: string | null;
+  arkiaHolidayImageSrc?: string | null;
+  fixedHolidayImageSrc?: string | null;
+}) {
+  const [currentAdIndex, setCurrentAdIndex] = useState(0);
+  const [nextAdIndex, setNextAdIndex] = useState(1);
+  const [isAdTransitioning, setIsAdTransitioning] = useState(false);
+
+  // v4 FIX (portovano, nepromijenjeno u suštini): ugniježđeni
+  // setTimeout-ovi (100ms, 300ms) se čiste na unmount-u da ne pozovu
+  // setState na unmount-ovanoj komponenti.
+  // FIX (po predlogu — 2026-10-03): `currentAdIndex` je ranije bio u
+  // dependency nizu, što je značilo da se CIJELI `setInterval` rušio i
+  // iznova pravio na SVAKIH 15s (svaki ad-ciklus) — nepotreban trošak
+  // i potencijalni izvor driftovanja tajminga. `setNextAdIndex` sad
+  // koristi funkcionalni updater (`prev => ...`) umjesto da čita
+  // `currentAdIndex` iz zatvaranja, pa efekat više ne zavisi od njega
+  // — invarijanta `nextAdIndex === (currentAdIndex + 1) % length` se
+  // i dalje čuva kroz svaki ciklus (matematički identično ranijem
+  // ponašanju), ali `setInterval` se sad pravi SAMO JEDNOM (dok god je
+  // `adImages` ista referenca — a `useAdImages` je vraća stabilnu).
+  useEffect(() => {
+    if (adImages.length < 2) return;
+    let inner1: ReturnType<typeof setTimeout> | null = null;
+    let inner2: ReturnType<typeof setTimeout> | null = null;
+    const id = setInterval(() => {
+      setIsAdTransitioning(true);
+      inner1 = setTimeout(() => {
+        setNextAdIndex((prev) => (prev + 1) % adImages.length);
+        inner2 = setTimeout(() => {
+          setCurrentAdIndex((prev) => (prev + 1) % adImages.length);
+          setIsAdTransitioning(false);
+        }, 300);
+      }, 100);
+    }, AD_SWITCH_INTERVAL);
+    return () => {
+      clearInterval(id);
+      if (inner1) clearTimeout(inner1);
+      if (inner2) clearTimeout(inner2);
+    };
+  }, [adImages]);
+
+  return (
+    <AdBanner
+      adImages={adImages}
+      currentIndex={currentAdIndex}
+      nextIndex={nextAdIndex}
+      isTransitioning={isAdTransitioning}
+      baImageSrc={baImageSrc}
+      overrideImageSrc={overrideImageSrc}
+      lufthansaImageSrc={lufthansaImageSrc}
+      sundorHolidayImageSrc={sundorHolidayImageSrc}
+      israirHolidayImageSrc={israirHolidayImageSrc}
+      arkiaHolidayImageSrc={arkiaHolidayImageSrc}
+      fixedHolidayImageSrc={fixedHolidayImageSrc}
+    />
+  );
+});
+
+// ============================================================
+// OPEN DURATION LABEL — NOVO (po zahtjevu — Lighthouse performanse,
+// 2026-09-30): isti princip kao <AdRotator> iznad. "otvoren XX min"
+// tekst zahtijeva sopstveni "tick" (osvježavanje na 30s) da bi ostao
+// tačan — ali taj tick NE SMIJE re-renderovati cijelu stranicu.
+// Izdvojeno u malu memo komponentu koja sama drži svoj nowMs state i
+// interval; roditelj (CheckInDisplay) prosljeđuje samo `setAt`
+// (mijenja se rijetko — samo kad se šalter otvori/zatvori), pa se
+// ovaj podstablo re-renderuje na 30s, ne cijela stranica.
+const OpenDurationLabel = memo(function OpenDurationLabel({
+  setAt,
+  className,
+}: {
+  setAt: number | null;
+  className: string;
+}) {
+  // NOVO (po zahtjevu — isti "čist" obrazac kao ranije u
+  // CheckInDisplay/BaggagePageClient.tsx, react-hooks/purity):
+  // Date.now() se poziva ISKLJUČIVO unutar useEffect-a, nikad direktno
+  // tokom render-a. 0 = efekat još nije postavio pravu vrijednost
+  // (traje mikrosekunde pri mount-u) — formatOpenDuration ignoriše
+  // taj slučaj (setAt bi tada bio noviji od 0, minutes bi ispao
+  // ogroman broj — ali komponenta se renderuje tek nakon prvog
+  // computeAssignment poziva, koji je uvijek nakon mount-a, pa je ovo
+  // u praksi bezopasno; zadržano identično ranijem ponašanju).
+  const [nowMs, setNowMs] = useState(0);
+  useEffect(() => {
+    queueMicrotask(() => setNowMs(Date.now()));
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const text = formatOpenDuration(setAt, nowMs);
+  if (!text) return null;
+  return <div className={className}>{text}</div>;
+});
+
 // ============================================================
 // GLAVNA KOMPONENTA — klijentska logika (nepromijenjena)
 // ============================================================
@@ -587,25 +729,13 @@ function CheckInDisplay() {
   useBodyBackground('#0f172a');
 
   const [assignment, setAssignment] = useState<DeskAssignment>(EMPTY_ASSIGNMENT);
-  // NOVO (po zahtjevu — "Check-in otvoren XX minuta" indikator): isti
-  // "čist" obrazac kao app/baggage/[beltNumber]/BaggagePageClient.tsx
-  // (react-hooks/purity) — Date.now() se poziva ISKLJUČIVO unutar
-  // useEffect-a, nikad direktno tokom render-a. 0 = efekat još nije
-  // postavio pravu vrijednost (traje mikrosekunde pri mount-u);
-  // formatOpenDuration ignoriše taj slučaj (vidi njenu definiciju).
-  const [nowMs, setNowMs] = useState(0);
-  useEffect(() => {
-    // FIX (build greška — "Calling setState synchronously within an
-    // effect can trigger cascading renders"): isti obrazac kao u
-    // hooks/useRealtimeAssignments.ts (queueMicrotask) — izbacuje
-    // POČETNI setState poziv iz sinhronog tijela efekta, ponašajući se
-    // kao da je stigao kroz event handler/callback, umjesto direktno
-    // tokom commit faze efekta. Interval ispod je već asinhron (poziva
-    // se iz setInterval callback-a), pa njemu ovo nije bilo potrebno.
-    queueMicrotask(() => setNowMs(Date.now()));
-    const id = setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => clearInterval(id);
-  }, []);
+  // FIX (po zahtjevu — Lighthouse performanse, 2026-09-30): `nowMs`
+  // "tick" state (i njegov 30s interval) je RANIJE živio ovdje, u vrhu
+  // CheckInDisplay — svaka promjena je re-renderovala CIJELU stranicu
+  // svakih 30s, zauvijek, samo da bi se osvježio jedan mali tekst
+  // ("otvoren XX min"). Isti anti-obrazac kao ad-rotacija (vidi
+  // <AdRotator> iznad) — sad premješteno u <OpenDurationLabel>, koja
+  // sama drži svoj "tick" i re-renderuje SAMO taj mali label.
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
@@ -638,11 +768,6 @@ const { deskEntries, lastSyncAtRef, refetch: refetchAssignments } = useRealtimeA
     }, DATA_STALE_CHECK_INTERVAL_MS);
     return () => clearInterval(id);
   }, [deskNumberParam, lastSyncAtRef]);
-
-  // Ad state
-  const [currentAdIndex, setCurrentAdIndex] = useState(0);
-  const [nextAdIndex, setNextAdIndex] = useState(1);
-  const [isAdTransitioning, setIsAdTransitioning] = useState(false);
 
 const isMountedRef = useRef(true);
   const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -773,20 +898,43 @@ const fixedHolidayImage = getFixedHolidayImage();
   // Ako neko otvori drugi prozor preko kiosk taba (Windows update
   // dialog, notifikacija), kiosk tab ode u pozadinu. Chrome ga
   // može throttlovati. Ovo vraća fokus, ili radi reload ako ne može.
+  // FIX (po predlogu — 2026-10-03): unutrašnji setTimeout nije imao
+  // cleanup — ako se tab vrati u foreground prije isteka 2s, tajmer je
+  // i dalje postojao (bezopasno se gasio zbog provjere `document.hidden`
+  // pri samom pozivu, ali je nepotrebno curio do tada); a ako
+  // visibilitychange "zatreperi" nekoliko puta zaredom, mogli su se
+  // nagomilati višestruki paralelni tajmeri. Sad se prethodni tajmer
+  // eksplicitno čisti i pri svakom novom 'visible' događaju i pri
+  // unmount-u komponente.
   useEffect(() => {
+    let refocusTimeout: ReturnType<typeof setTimeout> | null = null;
+
     const handleVisibility = () => {
-      if (document.hidden) {
-        console.warn('Kiosk tab lost focus — attempting to refocus');
-        window.focus();
-        setTimeout(() => {
-          if (document.hidden) {
-            window.location.reload();
-          }
-        }, 2_000);
+      if (!document.hidden) {
+        if (refocusTimeout !== null) {
+          clearTimeout(refocusTimeout);
+          refocusTimeout = null;
+        }
+        return;
       }
+
+      console.warn('Kiosk tab lost focus — attempting to refocus');
+      window.focus();
+
+      if (refocusTimeout !== null) clearTimeout(refocusTimeout);
+      refocusTimeout = setTimeout(() => {
+        refocusTimeout = null;
+        if (document.hidden) {
+          window.location.reload();
+        }
+      }, 2_000);
     };
+
     document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (refocusTimeout !== null) clearTimeout(refocusTimeout);
+    };
   }, []);
 // ── Hard reset svakih ~6h (sa jitterom da se izbjegne sinhroni
   // reload svih desk ekrana u istoj sekundi) ──────────────────
@@ -843,28 +991,11 @@ const fixedHolidayImage = getFixedHolidayImage();
   }, []);
 
   // ── Ad crossfade ───────────────────────────────────────────
-  // v4 FIX: ugniježđeni setTimeout-ovi (100ms, 300ms) se čiste
-  // na unmount-u da ne pozovu setState na unmount-ovanoj komponenti.
-  useEffect(() => {
-    if (adImages.length < 2) return;
-    let inner1: ReturnType<typeof setTimeout> | null = null;
-    let inner2: ReturnType<typeof setTimeout> | null = null;
-    const id = setInterval(() => {
-      setIsAdTransitioning(true);
-      inner1 = setTimeout(() => {
-        setNextAdIndex((currentAdIndex + 1) % adImages.length);
-        inner2 = setTimeout(() => {
-          setCurrentAdIndex((p) => (p + 1) % adImages.length);
-          setIsAdTransitioning(false);
-        }, 300);
-      }, 100);
-    }, AD_SWITCH_INTERVAL);
-    return () => {
-      clearInterval(id);
-      if (inner1) clearTimeout(inner1);
-      if (inner2) clearTimeout(inner2);
-    };
-  }, [adImages, currentAdIndex]);
+  // FIX (po zahtjevu — Lighthouse performanse, 2026-09-30): state i
+  // interval su premješteni u novu <AdRotator> komponentu iznad (vidi
+  // opširan komentar tamo) — više se NE nalaze ovdje, da bi se
+  // re-render svakog ad-ciklusa (svakih 15s, zauvijek) ograničio na
+  // mali podstablo reklame, umjesto na cijelu stranicu.
 
 //polling
 const computeAssignment = useCallback(async () => {
@@ -1313,11 +1444,10 @@ useEffect(() => {
                 <div className="text-3xl sm:text-8xl font-mono font-bold text-white">
                   {assignment.scheduledTime}
                 </div>
-                {formatOpenDuration(assignment.setAt, nowMs) && (
-                  <div className="text-[10px] sm:text-xl text-white/40 mt-1 sm:mt-2 font-mono">
-                    {formatOpenDuration(assignment.setAt, nowMs)}
-                  </div>
-                )}
+                <OpenDurationLabel
+                  setAt={assignment.setAt}
+                  className="text-[10px] sm:text-xl text-white/40 mt-1 sm:mt-2 font-mono"
+                />
               </div>
 
               {assignment.estimatedTime &&
@@ -1351,11 +1481,8 @@ useEffect(() => {
           </div>
 
           {/* Reklame */}
-<AdBanner
+<AdRotator
   adImages={adImages}
-  currentIndex={currentAdIndex}
-  nextIndex={nextAdIndex}
-  isTransitioning={isAdTransitioning}
   baImageSrc={baAdImage}
   overrideImageSrc={easyJetOverrideImage}
   lufthansaImageSrc={lufthansaGroupImage}
@@ -1518,11 +1645,10 @@ useEffect(() => {
                 CHECK-IN OPEN
               </div>
               <div className="text-4xl text-green-400 mt-2">Please proceed to check-in</div>
-              {formatOpenDuration(assignment.setAt, nowMs) && (
-                <div className="text-2xl text-white/50 mt-3 font-mono">
-                  {formatOpenDuration(assignment.setAt, nowMs)}
-                </div>
-              )}
+              <OpenDurationLabel
+                setAt={assignment.setAt}
+                className="text-2xl text-white/50 mt-3 font-mono"
+              />
             </div>
 
             {assignment.gateNumber && (
