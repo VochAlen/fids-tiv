@@ -280,6 +280,29 @@ class CheckInErrorBoundary extends Component<
   // zakazivanja novog, i svi se čiste u componentWillUnmount.
   private resetTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // NOVO (po zahtjevu — "battle-ready" audit, manje crash-ova, 2026-10-04):
+  // raniji kod je na SVAKU uhvaćenu grešku radio identičan "soft reset"
+  // (sačekaj 10s, pa pokušaj da ponovo renderuje djecu) — bez obzira
+  // koliko puta zaredom se greška ponovila. Ako je uzrok greške TRAJAN
+  // (npr. nevažeće stanje koje render svaki put iznova izazove istu
+  // grešku, ne prolazan "blip"), ovo pravi BESKONAČNU petlju: greška →
+  // 10s čekanje → isti render → ista greška → ... — na kiosku bez
+  // nadzora, to je neprimjetan, ali trajan trošak CPU-a i rastuća
+  // istorija konzole (`console.error` na svaki krug) 24/7, danima/
+  // nedjeljama, tačno onaj tip "sporog curenja" koji je ova sesija već
+  // jednom morala da otkloni (vidi komentar uz computeAssignment ispod).
+  // Brojimo uzastopne greške unutar kratkog prozora; nakon ESCALATE_AFTER
+  // uzastopnih pokušaja, odustajemo od soft-reseta i radimo PUN
+  // `window.location.reload()` — isti, dokazan "zadnja linija odbrane"
+  // obrazac kao svi ostali watchdog-ovi u ovoj komponenti (memory
+  // pressure, data staleness, hard reset na 6h), koji pouzdano čisti
+  // BILO KAKVO zaglavljeno/korumpirano React stanje, umjesto da se
+  // oslanja na to da će isti render drugačije proći idući put.
+  private consecutiveErrorCount = 0;
+  private lastErrorAt = 0;
+  private static readonly ERROR_WINDOW_MS = 60_000;
+  private static readonly ESCALATE_AFTER = 3;
+
   constructor(props: { children: ReactNode }) {
     super(props);
     this.state = { hasError: false, message: '' };
@@ -289,6 +312,23 @@ class CheckInErrorBoundary extends Component<
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('🚨 CheckIn ErrorBoundary:', error, info);
+
+    const now = Date.now();
+    if (now - this.lastErrorAt > CheckInErrorBoundary.ERROR_WINDOW_MS) {
+      this.consecutiveErrorCount = 0; // prethodna greška je bila davno, ne broji se kao "u nizu"
+    }
+    this.lastErrorAt = now;
+    this.consecutiveErrorCount += 1;
+
+    if (this.consecutiveErrorCount >= CheckInErrorBoundary.ESCALATE_AFTER) {
+      console.error(
+        `🚨 CheckIn ErrorBoundary: ${this.consecutiveErrorCount} grešaka u ` +
+        `${Math.round(CheckInErrorBoundary.ERROR_WINDOW_MS / 1000)}s — soft reset očigledno ne pomaže, radim pun reload.`
+      );
+      window.location.reload();
+      return;
+    }
+
     if (this.resetTimeout !== null) clearTimeout(this.resetTimeout);
     this.resetTimeout = setTimeout(() => {
       this.resetTimeout = null;
@@ -876,14 +916,61 @@ const fixedHolidayImage = getFixedHolidayImage();
 
   // ── v5.3: Network disconnection auto-recovery ────────────
   // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
-  // (svake 2s), a fallback polling pada. Kad se mreža vrati,
-  // radimo full reload da sinhronizujemo React state sa serverom.
+  // (svake 2s), a fallback polling pada.
+  // FIX (po zahtjevu — "battle-ready" audit, manje crash-ova/CPU-a,
+  // bolja reakcija na mrežni ispad, 2026-10-04): raniji kod je radio
+  // BEZUSLOVAN, TRENUTAN `window.location.reload()` na SVAKI 'online'
+  // event — a aerodromski WiFi/Ethernet na kiosk uređajima zna
+  // "flapati" (kratkotrajno gubi/vraća vezu nekoliko puta zaredom, npr.
+  // pri AP handoff-u ili privremenom zagušenju). Svaki takav blip je
+  // značio PUN reload stranice (potpuna reinicijalizacija React stabla,
+  // novi Ably handshake, novi token fetch) — tačno suprotno od "manje
+  // crash-ova/manje CPU opterećenja": ako bi više od 41 kioska istovremeno
+  // "zatreperilo" (npr. zajednički mrežni segment), svi bi istovremeno
+  // radili pun reload, umjesto blagog oporavka. Istovremeno, Ably
+  // `onConnected` handler u hooks/useRealtimeFlightData.ts i
+  // hooks/useRealtimeAssignments.ts VEĆ radi sopstven `fetchSnapshot()`
+  // resync čim se konekcija ponovo uspostavi — reload ovdje je u većini
+  // slučajeva DUPLIRAN posao, ne jedini put do svježeg stanja.
+  // Novo ponašanje: 'online' NE radi odmah reload — zakazuje provjeru za
+  // par sekundi (da se "flapanje" samo otkaže/presloži, umjesto da svaki
+  // blip pravi sopstveni tajmer), i reload radi SAMO ako u međuvremenu
+  // (a) veza ostane stvarno online I (b) `lastSyncAtRef` pokazuje da
+  // Ably/fallback mehanizmi NISU sami već uspjeli da se usklade (ista
+  // "zombie/stale" mjera kao DATA_STALE_AFTER_MS watchdog iznad, samo sa
+  // kraćim pragom jer znamo da je baš došlo do mrežnog prekida). Ako su
+  // se sami uskladili (uobičajen slučaj za kratak blip), reload se uopšte
+  // ne dešava — brži, jeftiniji oporavak, bez vizuelnog "treptaja" ekrana.
   useEffect(() => {
+    let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+    const ONLINE_RELOAD_DEBOUNCE_MS = 8_000;
+    // Dovoljno manje od DATA_STALE_AFTER_MS (5 min) da se ne čeka
+    // predugo poslije STVARNOG mrežnog ispada, ali dovoljno veće od
+    // normalnog Ably reconnect+resync vremena (sub-sekunda do par
+        // sekundi) da se ne pokrene lažno dok resync tek traje.
+    const STALE_AFTER_RECONNECT_MS = 15_000;
+
     const handleOnline = () => {
-      console.warn('Network restored — reloading to resync state');
-      window.location.reload();
+      if (reloadTimeout !== null) clearTimeout(reloadTimeout);
+      reloadTimeout = setTimeout(() => {
+        reloadTimeout = null;
+        if (!navigator.onLine) return; // ponovo offline u međuvremenu — odustani
+        const gap = Date.now() - lastSyncAtRef.current;
+        if (gap > STALE_AFTER_RECONNECT_MS) {
+          console.warn(
+            `Network restored but no successful sync in ${Math.round(gap / 1000)}s — reloading to resync state`
+          );
+          window.location.reload();
+        } else {
+          console.warn('Network restored — Ably/polling already resynced, skipping reload');
+        }
+      }, ONLINE_RELOAD_DEBOUNCE_MS);
     };
     const handleOffline = () => {
+      if (reloadTimeout !== null) {
+        clearTimeout(reloadTimeout);
+        reloadTimeout = null;
+      }
       console.warn('Network lost — Ably will retry, showing cached data');
     };
     window.addEventListener('online', handleOnline);
@@ -891,8 +978,9 @@ const fixedHolidayImage = getFixedHolidayImage();
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      if (reloadTimeout !== null) clearTimeout(reloadTimeout);
     };
-  }, []);
+  }, [lastSyncAtRef]);
 
   // ── v5.3: Visibilitychange — auto-focus kiosk tab ────────
   // Ako neko otvori drugi prozor preko kiosk taba (Windows update
