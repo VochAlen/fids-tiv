@@ -145,6 +145,25 @@ const FALLBACK_POLL_MAX_MS = 60_000;
 // "zaglavljeno" stanje nikad ne traje predugo u praksi.
 const RECONCILE_INTERVAL_MS = 3 * 60_000;
 
+// NOVO (po predlogu — 2026-10-04): `fetchSnapshot` ranije nije imao
+// nikakav timeout/prekid — na flaky kiosk mreži, `fetch()` bez
+// `AbortController`-a može visjeti znatno duže od browser-TCP nivoa
+// (desetinama sekundi do par minuta, zavisno od OS-a), a ISTI endpoint
+// (`/api/test/assignments`) se poziva iz VIŠE nezavisnih mehanizama
+// odjednom (initial mount, Ably reconnect, fallback poll, 3-min
+// reconciliation, i "zatvoreno u 20s" watchdog u CheckInPageClient.tsx
+// preko `refetch`-a) — bez gornje granice, na degradiranoj mreži se
+// mogu nagomilati višestruki paralelni "zaglavljeni" zahtjevi,
+// trošeći ograničen broj paralelnih konekcija ka istom originu (što bi
+// moglo usporiti/odgoditi i DRUGE, kritičnije mrežne pozive, npr. Ably
+// token fetch). 10s je namjerno KRAĆE od najkraćeg redovnog razmaka
+// između poziva (fallback poll na 5s je izuzetak — ali se poziva samo
+// dok veza NIJE 'connected', kad kašnjenje ionako nije kritično) —
+// tako da se zaglavljen pokušaj stigne prekinuti i osloboditi
+// `inFlightRef` PRIJE nego što sledeći redovni ciklus (checkin
+// watchdog na 12-15s) i onako pokuša ponovo.
+const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
+
 export function useRealtimeAssignments(role: AblyClientRole) {
   const [deskEntries, setDeskEntries] = useState<Record<string, AssignmentEntry>>({});
   const [gateEntries, setGateEntries] = useState<Record<string, AssignmentEntry>>({});
@@ -165,7 +184,31 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // CheckInPageClient.tsx) ovo čita preko watchdog-a: ako lastSyncAtRef
   // ne bude dotaknut duže od nekoliko minuta, kanal je zaglavljen bez
   // obzira šta connectionState tvrdi — vrijeme je za kontrolisan reload.
-  const lastSyncAtRef = useRef<number>(Date.now());
+  // FIX (greška — Date.now() se ranije pozivao direktno u useRef
+  // inicijalizatoru, što se izvršava TOKOM render-a — React (i React
+  // Compiler) ovo prijavljuje kao "Cannot call impure function during
+  // render", 2026-10-04): inicijalizuje se na 0 (bezopasno — efekat
+  // ispod ga odmah, u prvom "tick"-u nakon mount-a, postavlja na
+  // stvaran Date.now(), a prvi uspješan fetchSnapshot/Ably poruka ga
+  // i onako postavlja ponovo koji trenutak kasnije). Stvarna vremenska
+  // oznaka se sad postavlja ISKLJUČIVO unutar useEffect-a, nikad
+  // direktno tokom render-a — isti princip kao `nowMs`/`queueMicrotask`
+  // obrazac koji se već koristi na više mjesta u projektu (npr.
+  // CheckInPageClient.tsx).
+  const lastSyncAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (lastSyncAtRef.current === 0) lastSyncAtRef.current = Date.now();
+  }, []);
+
+  // NOVO (po predlogu — 2026-10-04, vidi opširan komentar uz
+  // FETCH_SNAPSHOT_TIMEOUT_MS): sprečava da dva poziva fetchSnapshot-a
+  // (npr. reconciliation interval i checkin "zatvoreno u 20s" watchdog)
+  // budu istovremeno "u letu" — drugi poziv se tiho preskače dok prvi
+  // ne završi (uspješno, grеškom, ili timeout-om). Ovo je ČISTO
+  // optimizacija mrežnog saobraćaja — mergeNewer/seq mehanizam već
+  // ispravno podnosi i da dva odgovora stignu van reda, pa ovo ne
+  // mijenja nikakvu postojeću logiku zatvaranja/otvaranja šaltera.
+  const inFlightRef = useRef(false);
 
   // FIX (po zahtjevu — garantovano zatvaranje check-in šaltera u 20s,
   // 2026-09-29): umotano u useCallback (isti obrazac kao
@@ -176,13 +219,35 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // CheckInPageClient.tsx), bez ponovnog kreiranja intervala pri svakom
   // re-renderu.
   const fetchSnapshot = useCallback(() => {
+    // Preskoči ako je prethodni poziv i dalje u letu (vidi komentar uz
+    // inFlightRef iznad) — izbjegava gomilanje paralelnih zahtjeva ka
+    // istom endpoint-u kad se više mehanizama poklopi u vremenu.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    // NOVO (po predlogu — 2026-10-04, vidi opširan komentar uz
+    // FETCH_SNAPSHOT_TIMEOUT_MS): AbortController osigurava da zahtjev
+    // koji visi na flaky mreži bude prekinut najkasnije nakon 10s,
+    // umjesto da se osloni na (znatno duži, nepredvidiv) OS/browser
+    // TCP timeout — i oslobađa inFlightRef da naredni pokušaj ne mora
+    // čekati taj duži rok.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_SNAPSHOT_TIMEOUT_MS);
+
     // cache: 'no-store' je NAMJERNO — ruta /api/test/assignments ima
     // kratak Cache-Control (max-age=2, s-maxage=2, stale-while-revalidate=3)
     // koji je ispravan za CDN/kioske, ali bez ovoga bi admin panel
     // mogao dobiti stale podatak iz browser HTTP keša pri svakom
     // remount-u (npr. nakon logout/login), umjesto svježeg stanja.
-    fetch('/api/test/assignments', { cache: 'no-store' })
-      .then(res => res.json())
+    fetch('/api/test/assignments', { cache: 'no-store', signal: controller.signal })
+      .then(res => {
+        // NOVO (po predlogu): eksplicitna provjera HTTP statusa —
+        // ranije se `res.json()` pozivao bezuslovno, pa bi npr. 500
+        // odgovor sa praznim/neočekivanim tijelom mogao tiho "proći"
+        // umjesto da završi u catch-u ispod.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<AssignmentsResponse>;
+      })
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
         // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
@@ -200,19 +265,16 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         // Uspješan round-trip — dotakni sync bez obzira da li je
         // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
         lastSyncAtRef.current = Date.now();
-        // FIX (po zahtjevu — memory leak / optimizacija, 2026-09-29): uklonjen
-        // privremeni dijagnostički console.log/JSON.stringify (vidi identičnu
-        // napomenu u CheckInPageClient.tsx computeAssignment) — bug koji je
-        // trebao da dijagnostikuje je odavno potvrđen i riješen. Ovaj poziv se
-        // izvršavao na SVAKI uspješan fetchSnapshot round-trip (min. svaka 3
-        // min, ČEŠĆE tokom fallback poll-a) na SVIM ekranima koji koriste ovaj
-        // dijeljeni hook (checkin, gate, board) — nepotreban trošak na
-        // dugotrajnim kiosk/Electron webview sesijama.
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}));
       })
-      .catch(() => { /* ostani na trenutnom stanju — NE dodirujemo
-        lastSyncAtRef ovdje: neuspio fetch NIJE znak života. */ });
+      .catch(() => { /* ostani na trenutnom stanju (uklj. AbortError od
+        timeout-a iznad) — NE dodirujemo lastSyncAtRef ovdje: neuspio
+        fetch NIJE znak života. */ })
+      .finally(() => {
+        clearTimeout(timeoutId);
+        inFlightRef.current = false;
+      });
   }, []);
 
   useEffect(() => {

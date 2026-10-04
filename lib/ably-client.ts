@@ -127,6 +127,14 @@ export function getLastKnownDynamicNightMode(): boolean {
 // u connectionState='night-sleep' kad je isNightHours() true, a fallback
 // polling efekat eksplicitno preskače taj state (vidi hooks/*.ts).
 let nightWatcherStarted = false;
+// FIX (higijena, 2026-10-04 — korisnik primijetio pri pregledu
+// lib/ably-client.ts): setInterval handle se ranije nigdje nije čuvao.
+// Nije pravi memory leak za kiosk (jedan interval, tab radi 24/7,
+// nikad se ne pokreće drugi put jer nightWatcherStarted to sprečava) —
+// ali je tehnički ispravnije imati referencu i počistiti je na
+// beforeunload, pogotovo pošto taj handler već postoji za Ably
+// konekciju ispod.
+let nightWatcherInterval: ReturnType<typeof setInterval> | null = null;
 
 function nightWatcherTick() {
   if (!sharedAbly) return;
@@ -162,7 +170,7 @@ function startNightWatcher() {
   if (nightWatcherStarted || typeof window === 'undefined') return;
   nightWatcherStarted = true;
   nightWatcherTick(); // odmah provjeri (tab se možda otvara usred noći)
-  setInterval(nightWatcherTick, 60_000);
+  nightWatcherInterval = setInterval(nightWatcherTick, 60_000);
 }
 
 export function getSharedAbly(role: AblyClientRole): Ably.Realtime {
@@ -198,6 +206,10 @@ export function getSharedAbly(role: AblyClientRole): Ably.Realtime {
 // v5: Ably connection cleanup na beforeunload
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
+    if (nightWatcherInterval !== null) {
+      clearInterval(nightWatcherInterval);
+      nightWatcherInterval = null;
+    }
     if (sharedAbly) {
       try { sharedAbly.close(); } catch {}
       sharedAbly = null;

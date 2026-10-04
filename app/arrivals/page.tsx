@@ -390,7 +390,17 @@ function ArrivalsBoard(): JSX.Element {
 
   const isMountedRef = useRef(true);
   const isInitialLoad = useRef(true);
-  const lastHeartbeat = useRef(Date.now());
+  // FIX (greška — "Cannot call impure function during render" /
+  // react-hooks/purity, 2026-10-04): Date.now() se ranije pozivao
+  // direktno u useRef inicijalizatoru (izvršava se TOKOM render-a).
+  // Inicijalizuje se na 0 i odmah postavlja na stvaran Date.now()
+  // unutar efekta ispod — efekat se izvršava u istom commit-u, davno
+  // prije prvog heartbeat-interval provjere (HEARTBEAT_CHECK_INTERVAL_MS),
+  // pa nema rizika od lažnog reload-a pri mount-u.
+  const lastHeartbeat = useRef(0);
+  useEffect(() => {
+    if (lastHeartbeat.current === 0) lastHeartbeat.current = Date.now();
+  }, []);
 
   // ── v4.2: Ably real-time hook ───────────────────────────
   // Kao i departures, arrivals koristi useRealtimeFlightData()

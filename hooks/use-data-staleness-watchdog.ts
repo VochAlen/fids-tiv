@@ -48,10 +48,20 @@ export function useDataStalenessWatchdog(options: DataStalenessOptions) {
     enabled = true,
   } = options;
 
-  // Init na Date.now() (ne 0) — sprečava lažni reload odmah pri mount-u
-  // prije nego što stranica stigne da uradi svoj prvi uspješan fetch.
-  const lastDataAtRef = useRef(Date.now());
+  // FIX (greška — "Cannot call impure function during render" /
+  // react-hooks/purity, 2026-10-04): Date.now() se ranije pozivao
+  // direktno u useRef inicijalizatoru (izvršava se TOKOM render-a).
+  // Inicijalizuje se na 0 i odmah postavlja na stvaran Date.now() u
+  // zasebnom efektu ispod (izvršava se u istom commit-u, davno prije
+  // prve interval provjere) — i dalje sprečava lažni reload odmah pri
+  // mount-u, isti cilj kao i ranije, samo bez direktnog poziva
+  // Date.now() tokom render-a.
+  const lastDataAtRef = useRef(0);
   const reloadTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    if (lastDataAtRef.current === 0) lastDataAtRef.current = Date.now();
+  }, []);
 
   useEffect(() => {
     if (!enabled) return;

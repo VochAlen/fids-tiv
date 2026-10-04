@@ -64,6 +64,28 @@ describe('mergeOne', () => {
     const result = mergeOne(prev, '7', entry({ seq: 3, flightNumber: 'STALE', setAt: Date.now() }));
     expect(result['7'].flightNumber).toBe('CURRENT');
   });
+
+  it('GC/render optimizacija — vraća ISTU prev referencu kad je incoming sadržajno identičan (isti seq, iste vrijednosti)', () => {
+    const sharedSetAt = Date.now();
+    const prev = { '7': entry({ seq: 5, flightNumber: 'XY100', setAt: sharedSetAt }) };
+    const result = mergeOne(prev, '7', entry({ seq: 5, flightNumber: 'XY100', setAt: sharedSetAt }));
+    expect(result).toBe(prev);
+  });
+
+  it('KRITIČNO — nakon clear-a (mergeNewer), DUPLICIRANA/redeliverovana Ably poruka sa STARIM (pre-clear) seq-om ne smije "uskrsnuti" već zatvoren šalter', () => {
+    // Ably garantuje "at-least-once" isporuku — poruka koja je VEĆ
+    // obrađena prije clear-a može, u rijetkim slučajevima (reconnect/
+    // resume), stići JOŠ JEDNOM. Clear-ovan unos mora imati seq STROGO
+    // veći od zadnjeg poznatog, ne isti — inače bi ta stara, ponovljena
+    // poruka prošla isIncomingNewer() (>=) i vratila zatvoren šalter na
+    // staro (otvoreno) stanje.
+    const prev = { '9': entry({ seq: 500, flightNumber: 'XY999', status: 'open' }) };
+    const cleared = mergeNewer(prev, {}); // server snapshot više ne sadrži '9' -> clear
+    expect(cleared['9'].status).toBeNull();
+
+    const resurrected = mergeOne(cleared, '9', entry({ seq: 500, flightNumber: 'XY999', status: 'open' }));
+    expect(resurrected['9'].status).toBeNull(); // duplikat ODBIJEN — šalter ostaje zatvoren
+  });
 });
 
 describe('mergeNewer', () => {
@@ -95,5 +117,26 @@ describe('mergeNewer', () => {
     const prev = { '9': entry({ seq: 1, status: null, flightNumber: '' }) };
     const result = mergeNewer(prev, {});
     expect(result['9']).toBe(prev['9']); // ISTA referenca — nema nepotrebne izmjene
+  });
+
+  it('GC/render optimizacija — vraća ISTU top-level referencu kad je incoming sadržajno identičan (isti seq, iste vrijednosti)', () => {
+    // Ovo je scenario koji korisnik prijavio: periodični snapshot fetch
+    // (reconciliation, watchdog, fallback poll) koji ne nosi nikakvu
+    // stvarnu promjenu ne smije izazvati setState → re-render.
+    const prev = { '7': entry({ seq: 5, flightNumber: 'XY100' }), '8': entry({ seq: 2, flightNumber: 'AB222' }) };
+    const incoming = { '7': entry({ seq: 5, flightNumber: 'XY100' }), '8': entry({ seq: 2, flightNumber: 'AB222' }) };
+    const result = mergeNewer(prev, incoming);
+    expect(result).toBe(prev);
+    expect(result['7']).toBe(prev['7']);
+    expect(result['8']).toBe(prev['8']);
+  });
+
+  it('GC/render optimizacija — i dalje mijenja SAMO ključeve koji su stvarno drugačiji, ostale vraća po referenci', () => {
+    const prev = { '7': entry({ seq: 5, flightNumber: 'XY100' }), '8': entry({ seq: 2, flightNumber: 'AB222' }) };
+    const incoming = { '7': entry({ seq: 6, flightNumber: 'XY999' }), '8': entry({ seq: 2, flightNumber: 'AB222' }) };
+    const result = mergeNewer(prev, incoming);
+    expect(result).not.toBe(prev);
+    expect(result['7'].flightNumber).toBe('XY999');
+    expect(result['8']).toBe(prev['8']); // nepromijenjen ključ — ista referenca
   });
 });
