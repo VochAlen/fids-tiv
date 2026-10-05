@@ -25,6 +25,10 @@
     {
       "source": "/city-images/(.*)",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400, immutable" }]
+    },
+    {
+      "source": "/(reklame|praznici|israir|arkia|sundor|lufthansa|easyjet|british)/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400, immutable" }]
     }
   ]
 }

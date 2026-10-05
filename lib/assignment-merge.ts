@@ -81,6 +81,45 @@ function isIncomingNewer(
   return false;
 }
 
+// NOVO (GC/render-churn optimizacija, 2026-10-04 — primijetio korisnik:
+// "ako mergeNewer() uvijek kreira novi objekat čak kada se ništa nije
+// promijenilo... imaš nepotreban allocation → GC → render → recomputation
+// ciklus"): `isIncomingNewer()` vraća true i kad je `incomingSeq ===
+// existingSeq` (namjerno, vidi test "JEDNAKIM seq (>=, ne samo >)" —
+// potrebno je zbog "republish" scenarija gdje server ponovo pošalje isti
+// seq sa ISTIM sadržajem, npr. retry logika). Bez provjere sadržaja, OBA
+// mergeNewer i mergeOne su ranije uvijek alocirala nov objekat/entry čim
+// bi seq provjera prošla — čak i kad incoming entry ima IDENTIČNE
+// vrijednosti kao postojeći. Pošto svaki snapshot fetch (mount, reconnect,
+// fallback poll, 3-min reconciliation, i novi 12-15s "close in 20s"
+// watchdog na check-in stranici) prolazi kroz mergeNewer, ovo je
+// uzrokovalo setState → render → CheckInDisplay → computeAssignment() na
+// SVAKI fetch, čak i kad se apsolutno ništa nije promijenilo na serveru.
+//
+// `entriesEqual` dodaje provjeru sadržaja (sva polja, ne samo seq) prije
+// zamjene unosa — ako je incoming seq-noviji-ili-jednak ALI sadržajno
+// identičan postojećem, ne pravimo novi objekat. mergeNewer dodatno
+// alocira svoj top-level rezultat LIJENO (tek kad se prvi put nešto
+// zaista promijeni) umjesto bezuslovnog `{ ...prev }` na početku, da bi
+// vratio TAČNO istu `prev` referencu kad se ništa ne promijeni u cijelom
+// snapshot-u (najčešći slučaj u praksi — većina fetch-eva ne nosi
+// nikakvu stvarnu promjenu). Seq-based poredak (isIncomingNewer) ostaje
+// potpuno netaknut — ovo je isključivo dodatna provjera IZNAD njega, ne
+// zamjena za njega.
+function entriesEqual(
+  a: AssignmentEntry | undefined,
+  b: AssignmentEntry
+): boolean {
+  if (!a) return false;
+  return (
+    a.status === b.status &&
+    a.flightNumber === b.flightNumber &&
+    a.classType === b.classType &&
+    a.setAt === b.setAt &&
+    (a.seq ?? 0) === (b.seq ?? 0)
+  );
+}
+
 // NOVO (KRITIČNO — pravi uzrok prijavljenog bug-a, 2026-09-28 jutro:
 // "zatvore check-in šalter, ali monitor na tom šalteru i dalje
 // prikazuje let koji su upravo zatvorili", na skoro svim šalterima
@@ -110,6 +149,26 @@ function isIncomingNewer(
 // je resurs u međuvremenu obrisan/zatvoren na serveru — tretiramo ga
 // kao eksplicitan "clear" unos, osim ako već i lokalno pokazuje
 // status: null (ništa se ne mijenja, izbjegava nepotreban re-render).
+//
+// NOVO (KRITIČNO — korisnik primijetio, 2026-10-04: clear-ovan unos je
+// ranije dobijao seq: existing.seq ?? 0 — ISTI seq kao zadnje poznato
+// stanje, ne veći. Ably garantuje "at-least-once" isporuku, što znači
+// da RIJETKO, ali MOGUĆE, ista poruka (npr. "otvoreno" sa seq=500) može
+// stići JOŠ JEDNOM nakon reconnect/resume ciklusa, i to i nakon što je
+// server u međuvremenu šalter obrisao/zatvorio. Pošto isIncomingNewer()
+// namjerno prihvata incomingSeq >= existingSeq (potrebno za legitiman
+// "republish" slučaj), stari duplikat sa seq=500 bi prošao protiv
+// clear-ovanog lokalnog unosa koji TAKOĐE ima seq=500, i "uskrsnuo" bi
+// već zatvoren šalter na kiosku.
+//
+// Zaštita: clear-ovan unos dobija existing.seq + 1, STROGO veći od
+// zadnjeg poznatog realnog seq-a za taj ključ. Ovo je sigurno jer je
+// SEQ_KEY dijeljen/monoton brojač — svaka buduća STVARNA mutacija nad
+// bilo kojim resursom pomjera ga dalje, pa će svaki legitiman budući
+// update za ovaj ključ prirodno imati seq >= existing.seq + 1. Jedino
+// što ova +1 granica odbija jeste TAČNO ponovljena stara poruka sa
+// TAČNO istim seq-om kao prije clear-a — što je upravo scenario koji
+// treba odbiti.
 const CLEARED_BY_SNAPSHOT: Omit<AssignmentEntry, 'setAt' | 'seq'> = {
   status: null,
   flightNumber: '',
@@ -120,21 +179,30 @@ export function mergeNewer(
   prev: Record<string, AssignmentEntry>,
   incoming: Record<string, AssignmentEntry>
 ): Record<string, AssignmentEntry> {
-  const result = { ...prev };
+  // Lijena alokacija: `result` ostaje `null` (i na kraju vraćamo tačno
+  // `prev` referencu) dok se ne desi BAREM jedna stvarna izmjena. Ovo je
+  // namjerno drugačije od ranije verzije koja je uvijek radila
+  // `{ ...prev }` na početku.
+  let result: Record<string, AssignmentEntry> | null = null;
+
   for (const key of Object.keys(incoming)) {
-    const existing = result[key];
+    const existing = (result ?? prev)[key];
     const incomingEntry = incoming[key];
-    if (isIncomingNewer(existing, incomingEntry)) {
+    if (isIncomingNewer(existing, incomingEntry) && !entriesEqual(existing, incomingEntry)) {
+      if (!result) result = { ...prev };
       result[key] = incomingEntry;
     }
   }
+
   for (const key of Object.keys(prev)) {
     if (Object.prototype.hasOwnProperty.call(incoming, key)) continue;
     const existing = prev[key];
     if (!existing || existing.status === null) continue;
-    result[key] = { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: existing.seq ?? 0 };
+    if (!result) result = { ...prev };
+    result[key] = { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: (existing.seq ?? 0) + 1 };
   }
-  return result;
+
+  return result ?? prev;
 }
 
 export function mergeOne(
@@ -143,7 +211,7 @@ export function mergeOne(
   incomingEntry: AssignmentEntry
 ): Record<string, AssignmentEntry> {
   const existing = prev[key];
-  if (isIncomingNewer(existing, incomingEntry)) {
+  if (isIncomingNewer(existing, incomingEntry) && !entriesEqual(existing, incomingEntry)) {
     return { ...prev, [key]: incomingEntry };
   }
   return prev;

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 'use client';
 
 import {
@@ -1620,4 +1621,1766 @@ useEffect(() => {
       </div>
     </div>
   );
+=======
+'use client';
+
+import {
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  memo, useMemo,
+  Component,
+  type ErrorInfo,
+  type ReactNode,
+} from 'react';
+import { useParams } from 'next/navigation';
+import {
+  CheckCircle,
+  Clock,
+  MapPin,
+  Users,
+  AlertCircle,
+  Info,
+  XCircle,
+  Plane,
+} from 'lucide-react';
+import Image from 'next/image';
+import { useAdImages } from '@/hooks/useAdImages';
+// FIX (portovano iz glavnog/polling sistema — potrebno za praznične
+// kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
+// getPodgoricaDateString je jedino što nam treba odavde — isNightHours
+// namjerno OSTAJE van upotrebe u ovom Ably sistemu (drugačiji model
+// troška, ne treba polling-skip logika).
+import { getPodgoricaDateString } from '@/lib/night-hours';
+import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
+import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
+import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { useBodyBackground } from '@/hooks/use-body-background';
+import { Flight } from '@/types/flight';
+
+// ============================================================
+// KONSTANTE
+// ============================================================
+const POLL_INTERVAL = 25_000; // Svako 15s provjerava admin promjene
+const AD_SWITCH_INTERVAL = 15_000;
+// ── NOVO: jitter da se izbjegne sinhronizacija svih check-in ekrana ──
+const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5_000);
+
+// NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display se
+// zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27): vidi
+// opširan komentar uz lastSyncAtRef u hooks/useRealtimeAssignments.ts.
+// Ako ni Ably poruka ni 3-minutni reconciliation fetch ne uspiju
+// duže od ovoga, kanal je zaglavljen ("zombie") bez obzira šta
+// connectionState javlja — kontrolisan reload je jedini pouzdan
+// oporavak.
+// FIX (po zahtjevu — 2026-09-27, skraćeno sa 10 na 5 min): osoblje
+// ponekad mora BRZO zatvoriti let i odmah otvoriti drugi na istom
+// šalteru — 10 min oporavka je predugo za taj radni ritam. 5 min je
+// najniža bezbjedna vrijednost iznad RECONCILE_INTERVAL_MS (3 min u
+// hook-u) — reconciliation fetch dotiče lastSyncAtRef na SVAKIH 3 min
+// BEZ OBZIRA da li se sadržaj promijenio, pa normalan rad nikad ne
+// priđe ovom pragu bliže od ~2 min margine. Manje od ~4-4.5 min bi
+// rizikovalo lažni reload ako jedan reconciliation ciklus kasni
+// (spor Redis/Vercel cold start, kratak mrežni zastoj) — 5 min ostaje
+// siguran razmak uz duplo brži oporavak nego ranije.
+const DATA_STALE_AFTER_MS = 5 * 60_000;
+const DATA_STALE_CHECK_INTERVAL_MS = 20_000;
+
+// NOVO (po zahtjevu — TVRD ZAHTJEV: kad osoblje zatvori check-in šalter,
+// EKRAN MORA prikazati zatvoreno u roku od 20 sekundi, garantovano, i to
+// pouzdano na Chrome 109 (Electron klijent), 2026-09-29): normalan put je
+// Ably 'assignments:desks' poruka, koja stiže skoro trenutno (sub-sekunda).
+// Postojeći periodični reconciliation fetch u hooks/useRealtimeAssignments.ts
+// (RECONCILE_INTERVAL_MS = 3 min) je bio NAMJERNO spor — dizajniran kao
+// rijetka sigurnosna mreža protiv izgubljene poruke, ne kao SLA za
+// zatvaranje — 3 min je daleko iznad traženih 20s. Umjesto da se taj
+// DIJELJENI interval (koristi ga i gate i board, i utiče na trošak/Edge
+// Requests) ubrza globalno za SVE ekrane i SVE situacije, dodat je poseban,
+// CILJAN watchdog ispod: dok je OVAJ šalter aktivno OTVOREN (isOpen), stranica
+// dodatno, samostalno provjerava stvarno stanje sa servera na svakih
+// ~12-15s (refetchAssignments — isti /api/test/assignments poziv koji i
+// admin panel čita) — bez obzira da li Ably poruka o zatvaranju stigne ili
+// ne. Ako se šalter zatvori na serveru, ovaj re-fetch to garantovano
+// pokupi u sledećem ciklusu, well pod 20s marginom (uključujući mrežno
+// kašnjenje). Kad šalter NIJE otvoren, ovaj dodatni poll se uopšte ne
+// pokreće — nema dodatnog troška na neaktivnim šalterima.
+const OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS = 12_000;
+const getCloseVerifyIntervalWithJitter = () =>
+  OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS + Math.floor(Math.random() * 3_000); // 12-15s
+
+const BLUR_DATA_URL =
+  'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
+
+  const isBAFlight = (flightNumber: string): boolean =>
+  flightNumber.toUpperCase().startsWith('BA');
+
+  const EASYJET_PREFIXES = ['U2', 'EZY']; // U2 = IATA kod, EZY = ICAO (za svaki slučaj)
+
+const isEasyJetFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/\s+/g, '');
+  if (name.includes('easyjet')) return true;
+  const fn = flightNumber.toUpperCase();
+  return EASYJET_PREFIXES.some(prefix => fn.startsWith(prefix));
+};
+
+const EASYJET_IMAGES: Record<string, string> = {
+  PLUS: '/easyjet/easyjet_plus.avif',
+};
+
+// FIX (portovano iz glavnog/polling sistema — kompletan set praznik/
+// avio-kompanija kampanja koje su tamo dodate poslije ove Ably grane):
+// Lufthansa Group, Sundor/El Al, Israir, Arkia, i fiksni nacionalni
+// praznici. Sva logika je identična; jedina prilagodba je stil
+// prikaza (ovaj fajl koristi goli <img>, ne next/image <Image>, u
+// AdBanner-u — vidi ispod).
+
+// ── Lufthansa Group (Lufthansa + Austrian) — bez classType uslova,
+// SVAKI LH/OS let dobija fiksnu grupnu sliku ──
+const LUFTHANSA_GROUP_PREFIXES = ['LH', 'OS'];
+
+const isLufthansaGroupFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/\s+/g, '');
+  if (name.includes('lufthansa') || name.includes('austrian')) return true;
+  const fn = flightNumber.toUpperCase();
+  return LUFTHANSA_GROUP_PREFIXES.some(prefix => fn.startsWith(prefix));
+};
+
+const LUFTHANSA_GROUP_IMAGE = '/lufthansa/LH_group.avif';
+
+// ── Sundor holiday kampanja (El Al grupa) — vremenski ograničena,
+// prati POKRETNI hebrejski kalendar (nije fiksan svake godine). Vidi
+// opširan komentar u glavnom/polling sistemu za pun kontekst —
+// identično prenesen ovdje bez izmjena. 2026 red je POTVRĐEN, 2027/2028
+// su PROCJENA — provjeriti prije tih godina.
+interface SundorHolidayWindow { start: string; end: string }
+const SUNDOR_HOLIDAY_WINDOWS: SundorHolidayWindow[] = [
+  { start: '2026-09-11', end: '2026-10-03' }, // POTVRĐENO — Roš Hašana → Šemini Aceret 5787
+  { start: '2027-10-01', end: '2027-10-23' }, // PROCJENA — provjeriti prije 2027
+  { start: '2028-09-20', end: '2028-10-12' }, // PROCJENA — provjeriti prije 2028
+];
+
+function isWithinSundorHolidayWindow(): boolean {
+  const today = getPodgoricaDateString();
+  return SUNDOR_HOLIDAY_WINDOWS.some(w => today >= w.start && today <= w.end);
+}
+
+const isElAlFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('elal')) return true;
+  return flightNumber.toUpperCase().startsWith('LY');
+};
+
+// Israir (6H/ISR) i Arkia (IZ/AIZ) — ista kampanja, ista vremenska
+// prozora kao El Al/Sundor.
+const isIsrairFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('israir')) return true;
+  return flightNumber.toUpperCase().startsWith('6H');
+};
+
+const isArkiaFlight = (flightNumber: string, airlineName?: string): boolean => {
+  const name = (airlineName || '').toLowerCase().replace(/[\s-]+/g, '');
+  if (name.includes('arkia')) return true;
+  return flightNumber.toUpperCase().startsWith('IZ');
+};
+
+const ISRAIR_HOLIDAY_IMAGE = '/israir/israir-holiday.avif';
+const ARKIA_HOLIDAY_IMAGE  = '/arkia/arkia-holiday.avif';
+
+// FIX (po zahtjevu — stvaran fajl u projektu je .avif, ne .jpg):
+// pojednostavljeno na isti, direktan obrazac kao Israir/Arkia iznad
+// (bez jpg→avif onError fallback komplikacije, koja je ranije postojala
+// jer nismo znali unaprijed koji tačno fajl postoji na serveru).
+const SUNDOR_HOLIDAY_IMAGE = '/sundor/sundor-holiday.avif';
+
+// ── Fiksni nacionalni/aerodromski praznici — FIKSNI gregorijanski
+// datumi koji se ponavljaju svake godine, ne zavise od avio kompanije.
+interface FixedHolidayImage {
+  image: string;
+  startMonth: number; startDay: number;
+  endMonth: number;   endDay: number;
+}
+
+const FIXED_HOLIDAY_IMAGES: FixedHolidayImage[] = [
+  { image: '/praznici/21maj.avif',          startMonth: 5,  startDay: 20, endMonth: 5,  endDay: 22 },
+  { image: '/praznici/13jul.avif',          startMonth: 7,  startDay: 13, endMonth: 7,  endDay: 14 },
+  { image: '/praznici/newyear.avif',        startMonth: 12, startDay: 23, endMonth: 1,  endDay: 14 }, // wraparound preko Nove godine
+  { image: '/praznici/civil-aviation.avif', startMonth: 12, startDay: 7,  endMonth: 12, endDay: 7  },
+];
+
+function isWithinFixedHolidayWindow(h: FixedHolidayImage, month: number, day: number): boolean {
+  const mmdd = month * 100 + day;
+  const startMmdd = h.startMonth * 100 + h.startDay;
+  const endMmdd = h.endMonth * 100 + h.endDay;
+  if (startMmdd <= endMmdd) return mmdd >= startMmdd && mmdd <= endMmdd;
+  return mmdd >= startMmdd || mmdd <= endMmdd; // wraparound
+}
+
+function getFixedHolidayImage(): string | null {
+  const dateStr = getPodgoricaDateString(); // "YYYY-MM-DD"
+  const month = parseInt(dateStr.slice(5, 7), 10);
+  const day = parseInt(dateStr.slice(8, 10), 10);
+  const match = FIXED_HOLIDAY_IMAGES.find(h => isWithinFixedHolidayWindow(h, month, day));
+  return match ? match.image : null;
+}
+
+// NOVO (po zahtjevu — "Check-in otvoren XX minuta" indikator): stvarna,
+// tačna informacija (koliko dugo je šalter VEĆ aktivan za ovaj let) —
+// NAMJERNO ne "procijenjeno vrijeme čekanja u redu" (ta procjena bi
+// zahtijevala mjerenje koje sistem trenutno nema — broj putnika u
+// redu — i bila bi obmanjujuća). setAt dolazi iz admin akcije "otvori
+// šalter", pa ovo uvijek odražava stvarno stanje.
+function formatOpenDuration(setAt: number | null, nowMs: number): string | null {
+  if (!setAt) return null;
+  const minutes = Math.max(0, Math.floor((nowMs - setAt) / 60_000));
+  if (minutes < 1) return 'upravo otvoren';
+  if (minutes < 60) return `otvoren ${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `otvoren ${h}h ${m}min`;
+}
+
+
+
+const BA_IMAGES: Record<string, string> = {
+  BUSINESS: '/british/ba1.avif',
+  ECONOMY:  '/british/ba2.avif',
+};
+const CSS_ANIMATIONS = `
+  .gpu-accelerated{transform:translateZ(0);backface-visibility:hidden;will-change:opacity,transform}.ad-image-container,.aspect-ratio-box{position:relative;overflow:hidden}.ad-image,.aspect-ratio-box>div{position:absolute;inset:0}.aspect-ratio-box::before{content:'';display:block;padding-bottom:62.5%}.ad-image{width:100%;height:100%;transition:opacity .5s ease-in-out;will-change:opacity}.ad-image.active{opacity:1;z-index:2}.ad-image.inactive{opacity:0;z-index:1}@media (prefers-reduced-motion:reduce){.ad-image,.animate-pulse,.animate-spin,.gpu-accelerated{transition:none!important;animation:none!important;will-change:auto!important;opacity:1!important}}
+`;
+
+// ============================================================
+// TIPOVI
+// ============================================================
+interface DeskAssignment {
+  status: 'open' | 'closed' | null;
+  flightNumber: string;
+  airlineName: string;
+  destinationCity: string;
+  destinationCode: string;
+  scheduledTime: string;
+  estimatedTime: string;
+  gateNumber: string;
+  logoUrl: string;
+  cityUrl: string;
+  classType: string | null;
+  isCancelled: boolean;
+  isDiverted: boolean;
+  codeshareFlights: string[];
+  setAt: number | null;
+}
+
+const EMPTY_ASSIGNMENT: DeskAssignment = {
+  status: null,
+  flightNumber: '',
+  airlineName: '',
+  destinationCity: '',
+  destinationCode: '',
+  scheduledTime: '',
+  estimatedTime: '',
+  gateNumber: '',
+  logoUrl: '',
+  cityUrl: '',
+  classType: null,
+  isCancelled: false,
+  isDiverted: false,
+  codeshareFlights: [],
+  setAt: null,
+};
+
+// ============================================================
+// ERROR BOUNDARY
+// ============================================================
+class CheckInErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; message: string }
+> {
+  // FIX (po predlogu — 2026-10-03): reset-tajmer nije imao cleanup —
+  // ako bi boundary uhvatio VIŠE grešaka zaredom, svaka je pravila
+  // sopstveni setTimeout (nagomilavanje), i nijedan se nije čistio pri
+  // unmount-u. Sad se čuva kao instance field: prethodni se čisti prije
+  // zakazivanja novog, i svi se čiste u componentWillUnmount.
+  private resetTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // NOVO (po zahtjevu — "battle-ready" audit, manje crash-ova, 2026-10-04):
+  // raniji kod je na SVAKU uhvaćenu grešku radio identičan "soft reset"
+  // (sačekaj 10s, pa pokušaj da ponovo renderuje djecu) — bez obzira
+  // koliko puta zaredom se greška ponovila. Ako je uzrok greške TRAJAN
+  // (npr. nevažeće stanje koje render svaki put iznova izazove istu
+  // grešku, ne prolazan "blip"), ovo pravi BESKONAČNU petlju: greška →
+  // 10s čekanje → isti render → ista greška → ... — na kiosku bez
+  // nadzora, to je neprimjetan, ali trajan trošak CPU-a i rastuća
+  // istorija konzole (`console.error` na svaki krug) 24/7, danima/
+  // nedjeljama, tačno onaj tip "sporog curenja" koji je ova sesija već
+  // jednom morala da otkloni (vidi komentar uz computeAssignment ispod).
+  // Brojimo uzastopne greške unutar kratkog prozora; nakon ESCALATE_AFTER
+  // uzastopnih pokušaja, odustajemo od soft-reseta i radimo PUN
+  // `window.location.reload()` — isti, dokazan "zadnja linija odbrane"
+  // obrazac kao svi ostali watchdog-ovi u ovoj komponenti (memory
+  // pressure, data staleness, hard reset na 6h), koji pouzdano čisti
+  // BILO KAKVO zaglavljeno/korumpirano React stanje, umjesto da se
+  // oslanja na to da će isti render drugačije proći idući put.
+  private consecutiveErrorCount = 0;
+  private lastErrorAt = 0;
+  private static readonly ERROR_WINDOW_MS = 60_000;
+  private static readonly ESCALATE_AFTER = 3;
+
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, message: error.message };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('🚨 CheckIn ErrorBoundary:', error, info);
+
+    const now = Date.now();
+    if (now - this.lastErrorAt > CheckInErrorBoundary.ERROR_WINDOW_MS) {
+      this.consecutiveErrorCount = 0; // prethodna greška je bila davno, ne broji se kao "u nizu"
+    }
+    this.lastErrorAt = now;
+    this.consecutiveErrorCount += 1;
+
+    if (this.consecutiveErrorCount >= CheckInErrorBoundary.ESCALATE_AFTER) {
+      console.error(
+        `🚨 CheckIn ErrorBoundary: ${this.consecutiveErrorCount} grešaka u ` +
+        `${Math.round(CheckInErrorBoundary.ERROR_WINDOW_MS / 1000)}s — soft reset očigledno ne pomaže, radim pun reload.`
+      );
+      window.location.reload();
+      return;
+    }
+
+    if (this.resetTimeout !== null) clearTimeout(this.resetTimeout);
+    this.resetTimeout = setTimeout(() => {
+      this.resetTimeout = null;
+      this.setState({ hasError: false, message: '' });
+    }, 10_000);
+  }
+  componentWillUnmount() {
+    if (this.resetTimeout !== null) {
+      clearTimeout(this.resetTimeout);
+      this.resetTimeout = null;
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white gap-6">
+          <CheckCircle className="w-24 h-24 text-green-400 opacity-30 animate-pulse" />
+          <div className="text-4xl font-bold opacity-60">Reconnecting...</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ============================================================
+// AIRLINE LOGO
+// ============================================================
+const AirlineLogo = memo(function AirlineLogo({
+  logoUrl,
+  airlineName,
+  portrait,
+}: {
+  logoUrl: string;
+  airlineName: string;
+  portrait: boolean;
+}) {
+const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const img = e.currentTarget;
+  if (img.dataset.fallback === 'true') return; // već smo probali fallback, stop
+  img.dataset.fallback = 'true';
+  img.src = '/airlines/placeholder.avif';
+}, []);
+
+  if (!logoUrl) return null;
+
+// AirlineLogo komponenta - portrait verzija
+if (portrait) {
+  return (
+    <div className="relative w-full max-w-[90vw] bg-white rounded-xl shadow-lg mb-3 flex items-center justify-center" style={{ height: 'clamp(120px, 18vh, 280px)' }}>
+      <Image
+        src={logoUrl}
+        alt={airlineName}
+        width={800}
+        height={400}
+        className="object-contain p-4 w-full h-full"
+        priority
+        fetchPriority="high"
+        loading="eager"
+        decoding="async"
+        unoptimized
+        onError={handleError}
+      />
+    </div>
+  );
+}
+
+return (
+    <div className="w-72 h-36 bg-white rounded-2xl p-3 shadow-lg flex items-center justify-center flex-shrink-0">
+      <Image
+        src={logoUrl}
+        alt={airlineName}
+        width={360}
+        height={120}
+        className="object-contain w-full h-full"
+        priority
+        decoding="async"
+        unoptimized
+        onError={handleError}
+      />
+    </div>
+  );
+});
+
+// ============================================================
+// CITY IMAGE
+// ============================================================
+const CityImage = memo(function CityImage({
+  cityUrl,
+  destinationCity,
+  portrait,
+}: {
+  cityUrl: string;
+  destinationCity: string;
+  portrait: boolean;
+}) {
+  if (!cityUrl) return null;
+  const sizeClass = portrait ? 'w-56 h-56' : 'w-80 h-80';
+  return (
+    <div
+      className={`relative ${sizeClass} rounded-3xl overflow-hidden border-4 border-white/30 shadow-2xl flex-shrink-0 aspect-ratio-box`}
+    >
+      <Image
+        src={cityUrl}
+        alt={destinationCity}
+        fill
+        className="object-cover"
+        priority
+        quality={90}
+        sizes={portrait ? '224px' : '320px'}
+        placeholder="blur"
+        blurDataURL={BLUR_DATA_URL}
+        decoding="async"
+        unoptimized
+      />
+      <div className="absolute inset-0 bg-linear-to-t from-black/50 to-transparent" />
+    </div>
+  );
+});
+
+// ============================================================
+// AD BANNER
+// ============================================================
+const AdBanner = memo(function AdBanner({
+  adImages,
+  currentIndex,
+  nextIndex,
+  isTransitioning,
+  baImageSrc,
+  overrideImageSrc, // ← NOVO — generički override (easyJet, ili bilo šta ubuduće)
+  lufthansaImageSrc,
+  sundorHolidayImageSrc,
+  israirHolidayImageSrc,
+  arkiaHolidayImageSrc,
+  fixedHolidayImageSrc,
+}: {
+  adImages: string[];
+  currentIndex: number;
+  nextIndex: number;
+  isTransitioning: boolean;
+  baImageSrc: string | null;
+  overrideImageSrc?: string | null; // ← NOVO
+  lufthansaImageSrc?: string | null;
+  sundorHolidayImageSrc?: string | null;
+  israirHolidayImageSrc?: string | null;
+  arkiaHolidayImageSrc?: string | null;
+  fixedHolidayImageSrc?: string | null;
+}) {
+  // FIX (po zahtjevu — stvaran fajl je .avif, pojednostavljeno na isti
+  // direktan obrazac kao Israir/Arkia ispod, umjesto posebne
+  // SundorHolidayBanner komponente sa jpg→avif fallback logikom koja
+  // više nije potrebna): Sundor/El Al je i dalje NAMJERNO prva
+  // provjera, prije BA/easyJet/Lufthansa — vremenski ograničena
+  // promotivna kampanja treba prioritet.
+  if (sundorHolidayImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={sundorHolidayImageSrc}
+          alt="Sundor Holiday"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  // Israir/Arkia — ista prioritetska grupa kao Sundor/El Al iznad.
+  if (israirHolidayImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={israirHolidayImageSrc}
+          alt="Israir Holiday"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  if (arkiaHolidayImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={arkiaHolidayImageSrc}
+          alt="Arkia Holiday"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  if (baImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={baImageSrc}
+          alt="British Airways"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  // ── NOVO: generički override (npr. easyJet Plus) ──
+  if (overrideImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={overrideImageSrc}
+          alt="easyJet Plus"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  // ── Lufthansa Group (LH/OS) override ──
+  if (lufthansaImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={lufthansaImageSrc}
+          alt="Lufthansa Group"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  // ── Fiksni nacionalni/aerodromski praznici — NAMJERNO poslije svih
+  // avio-kompanija-specifičnih override-a, ali PRIJE generičke
+  // rotacije reklama ispod (isti redosled kao glavni sistem). ──
+  if (fixedHolidayImageSrc) {
+    return (
+      <div
+        style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+        className="rounded-xl overflow-hidden relative"
+      >
+        <img
+          src={fixedHolidayImageSrc}
+          alt="Holiday"
+          className="absolute inset-0 w-full h-full object-fill"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+
+  if (!adImages.length) return null;
+  return (
+    <div
+      style={{ flex: '1 1 0%', minHeight: 'min(200px, 22vh)' }}
+      className="bg-slate-800 rounded-xl overflow-hidden relative"
+    >
+      <img
+        src={adImages[currentIndex]}
+        alt="Advertisement"
+        className={`absolute inset-0 w-full h-full object-fill ad-image ${isTransitioning ? 'inactive' : 'active'}`}
+        decoding="async"
+      />
+      <img
+        src={adImages[nextIndex]}
+        alt="Advertisement"
+        className={`absolute inset-0 w-full h-full object-fill ad-image ${isTransitioning ? 'active' : 'inactive'}`}
+        decoding="async"
+      />
+    </div>
+  );
+});
+
+// ============================================================
+// AD ROTATOR — NOVO (po zahtjevu — Lighthouse performanse / manje
+// opterećenje glavne niti, 2026-09-30): ad-rotacija (currentAdIndex/
+// nextAdIndex/isAdTransitioning + setInterval sa ugniježđenim
+// setTimeout-ovima) je RANIJE bila state u samom vrhu CheckInDisplay
+// komponente — svaka od 3 promjene po ciklusu (svakih 15s, ZAUVIJEK,
+// 24/7, dok god je kiosk upaljen) je re-renderovala CIJELO stablo
+// (flight info karticu, logo, grad, vremena, gate info...), iako se
+// vizuelno mijenja ISKLJUČIVO reklamni baner. Izdvojeno u sopstvenu
+// memo komponentu — sad re-render pogađa SAMO ovo malo podstablo, ne
+// cijelu stranicu. Direktno smanjuje broj/trajanje "long main-thread
+// tasks" i ukupan CPU/GC rad tokom cijelog radnog dana kioska (tačno
+// ono na šta Lighthouse "Avoid long main-thread tasks" upozorava).
+const AdRotator = memo(function AdRotator({
+  adImages,
+  baImageSrc,
+  overrideImageSrc,
+  lufthansaImageSrc,
+  sundorHolidayImageSrc,
+  israirHolidayImageSrc,
+  arkiaHolidayImageSrc,
+  fixedHolidayImageSrc,
+}: {
+  adImages: string[];
+  baImageSrc: string | null;
+  overrideImageSrc?: string | null;
+  lufthansaImageSrc?: string | null;
+  sundorHolidayImageSrc?: string | null;
+  israirHolidayImageSrc?: string | null;
+  arkiaHolidayImageSrc?: string | null;
+  fixedHolidayImageSrc?: string | null;
+}) {
+  const [currentAdIndex, setCurrentAdIndex] = useState(0);
+  const [nextAdIndex, setNextAdIndex] = useState(1);
+  const [isAdTransitioning, setIsAdTransitioning] = useState(false);
+
+  // v4 FIX (portovano, nepromijenjeno u suštini): ugniježđeni
+  // setTimeout-ovi (100ms, 300ms) se čiste na unmount-u da ne pozovu
+  // setState na unmount-ovanoj komponenti.
+  // FIX (po predlogu — 2026-10-03): `currentAdIndex` je ranije bio u
+  // dependency nizu, što je značilo da se CIJELI `setInterval` rušio i
+  // iznova pravio na SVAKIH 15s (svaki ad-ciklus) — nepotreban trošak
+  // i potencijalni izvor driftovanja tajminga. `setNextAdIndex` sad
+  // koristi funkcionalni updater (`prev => ...`) umjesto da čita
+  // `currentAdIndex` iz zatvaranja, pa efekat više ne zavisi od njega
+  // — invarijanta `nextAdIndex === (currentAdIndex + 1) % length` se
+  // i dalje čuva kroz svaki ciklus (matematički identično ranijem
+  // ponašanju), ali `setInterval` se sad pravi SAMO JEDNOM (dok god je
+  // `adImages` ista referenca — a `useAdImages` je vraća stabilnu).
+  useEffect(() => {
+    if (adImages.length < 2) return;
+    let inner1: ReturnType<typeof setTimeout> | null = null;
+    let inner2: ReturnType<typeof setTimeout> | null = null;
+    const id = setInterval(() => {
+      setIsAdTransitioning(true);
+      inner1 = setTimeout(() => {
+        setNextAdIndex((prev) => (prev + 1) % adImages.length);
+        inner2 = setTimeout(() => {
+          setCurrentAdIndex((prev) => (prev + 1) % adImages.length);
+          setIsAdTransitioning(false);
+        }, 300);
+      }, 100);
+    }, AD_SWITCH_INTERVAL);
+    return () => {
+      clearInterval(id);
+      if (inner1) clearTimeout(inner1);
+      if (inner2) clearTimeout(inner2);
+    };
+  }, [adImages]);
+
+  return (
+    <AdBanner
+      adImages={adImages}
+      currentIndex={currentAdIndex}
+      nextIndex={nextAdIndex}
+      isTransitioning={isAdTransitioning}
+      baImageSrc={baImageSrc}
+      overrideImageSrc={overrideImageSrc}
+      lufthansaImageSrc={lufthansaImageSrc}
+      sundorHolidayImageSrc={sundorHolidayImageSrc}
+      israirHolidayImageSrc={israirHolidayImageSrc}
+      arkiaHolidayImageSrc={arkiaHolidayImageSrc}
+      fixedHolidayImageSrc={fixedHolidayImageSrc}
+    />
+  );
+});
+
+// ============================================================
+// OPEN DURATION LABEL — NOVO (po zahtjevu — Lighthouse performanse,
+// 2026-09-30): isti princip kao <AdRotator> iznad. "otvoren XX min"
+// tekst zahtijeva sopstveni "tick" (osvježavanje na 30s) da bi ostao
+// tačan — ali taj tick NE SMIJE re-renderovati cijelu stranicu.
+// Izdvojeno u malu memo komponentu koja sama drži svoj nowMs state i
+// interval; roditelj (CheckInDisplay) prosljeđuje samo `setAt`
+// (mijenja se rijetko — samo kad se šalter otvori/zatvori), pa se
+// ovaj podstablo re-renderuje na 30s, ne cijela stranica.
+const OpenDurationLabel = memo(function OpenDurationLabel({
+  setAt,
+  className,
+}: {
+  setAt: number | null;
+  className: string;
+}) {
+  // NOVO (po zahtjevu — isti "čist" obrazac kao ranije u
+  // CheckInDisplay/BaggagePageClient.tsx, react-hooks/purity):
+  // Date.now() se poziva ISKLJUČIVO unutar useEffect-a, nikad direktno
+  // tokom render-a. 0 = efekat još nije postavio pravu vrijednost
+  // (traje mikrosekunde pri mount-u) — formatOpenDuration ignoriše
+  // taj slučaj (setAt bi tada bio noviji od 0, minutes bi ispao
+  // ogroman broj — ali komponenta se renderuje tek nakon prvog
+  // computeAssignment poziva, koji je uvijek nakon mount-a, pa je ovo
+  // u praksi bezopasno; zadržano identično ranijem ponašanju).
+  const [nowMs, setNowMs] = useState(0);
+  useEffect(() => {
+    queueMicrotask(() => setNowMs(Date.now()));
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const text = formatOpenDuration(setAt, nowMs);
+  if (!text) return null;
+  return <div className={className}>{text}</div>;
+});
+
+// ============================================================
+// GLAVNA KOMPONENTA — klijentska logika (nepromijenjena)
+// ============================================================
+export default function CheckInPageClient() {
+  return (
+    <CheckInErrorBoundary>
+      <CheckInDisplay />
+    </CheckInErrorBoundary>
+  );
+}
+
+function CheckInDisplay() {
+  const params = useParams();
+  const deskNumberParam = params.deskNumber as string;
+
+  // FIX (po zahtjevu — bijela pozadina "probija" kroz ekran): vidi
+  // opširan komentar u hooks/use-body-background.ts za pun kontekst.
+  // Postavlja PRAVU tamnu body pozadinu dok je ova kiosk stranica
+  // aktivna, sprečavajući bijeli "bljesak" pri elastic overscroll-u.
+  useBodyBackground('#0f172a');
+
+  const [assignment, setAssignment] = useState<DeskAssignment>(EMPTY_ASSIGNMENT);
+  // FIX (po zahtjevu — Lighthouse performanse, 2026-09-30): `nowMs`
+  // "tick" state (i njegov 30s interval) je RANIJE živio ovdje, u vrhu
+  // CheckInDisplay — svaka promjena je re-renderovala CIJELU stranicu
+  // svakih 30s, zauvijek, samo da bi se osvježio jedan mali tekst
+  // ("otvoren XX min"). Isti anti-obrazac kao ad-rotacija (vidi
+  // <AdRotator> iznad) — sad premješteno u <OpenDurationLabel>, koja
+  // sama drži svoj "tick" i re-renderuje SAMO taj mali label.
+  const [loading, setLoading] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState('');
+  const [isPortrait, setIsPortrait] = useState(false);
+  const { data: liveFlightData } = useRealtimeFlightData('checkin');
+const { deskEntries, lastSyncAtRef, refetch: refetchAssignments } = useRealtimeAssignments('checkin');
+
+  // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
+  // se zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27):
+  // watchdog vezan za STVARNU uspješnost sinhronizacije podataka
+  // (lastSyncAtRef iz useRealtimeAssignments — dotiče se na SVAKU
+  // primljenu Ably poruku I SVAKI uspješan reconciliation fetch, bez
+  // obzira da li je sadržaj promijenjen). Ovo je NAMJERNO odvojeno od
+  // postojećeg heartbeat/memory watchdog-a ispod (koji hvata zamrznut
+  // event loop) — ovaj hvata drugačiji, suptilniji slučaj: JS radi
+  // savršeno normalno, ali je Ably kanal postao "zombie" (izgleda
+  // 'connected', tiho ne isporučuje poruke). Prag od 10 min je VIŠE od
+  // RECONCILE_INTERVAL_MS (3 min) u samom hook-u, da se ne okida lažno
+  // pri normalnom radu — znači da su bar 2-3 uzastopna pokušaja
+  // sinhronizacije promašila prije nego što ovo uopšte razmotri reload.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const gap = Date.now() - lastSyncAtRef.current;
+      if (gap > DATA_STALE_AFTER_MS) {
+        console.error(
+          `[checkin-${deskNumberParam}] Nema uspješne sinhronizacije ${Math.round(gap / 1000)}s ` +
+          `— Ably kanal je vjerovatno "zombie" (izgleda povezan, ne isporučuje), restartujem stranicu.`
+        );
+        window.location.reload();
+      }
+    }, DATA_STALE_CHECK_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [deskNumberParam, lastSyncAtRef]);
+
+const isMountedRef = useRef(true);
+  const orientationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFlightNumberRef = useRef<string>('');
+  const logoCacheRef = useRef<Map<string, string>>(new Map());
+  // Dodaj pored ostalih refova:
+const detailsLoadedRef = useRef<boolean>(false);
+
+
+  const { adImages } = useAdImages();
+  // BA override za ad banner
+const baAdImage = useMemo((): string | null => {
+  if (!isBAFlight(assignment.flightNumber)) return null;
+  if (assignment.classType === 'BUSINESS') return BA_IMAGES.BUSINESS;
+  if (assignment.classType === 'ECONOMY')  return BA_IMAGES.ECONOMY;
+  return null;
+}, [assignment.flightNumber, assignment.classType]);
+// easyJet Plus override za ad banner
+const easyJetOverrideImage = useMemo((): string | null => {
+  if (!isEasyJetFlight(assignment.flightNumber, assignment.airlineName)) return null;
+  if (assignment.classType === 'EASYJET_PLUS') return EASYJET_IMAGES.PLUS;
+  return null;
+}, [assignment.flightNumber, assignment.airlineName, assignment.classType]);
+
+// FIX (portovano iz glavnog/polling sistema): Lufthansa Group — bez
+// classType uslova, svaki LH/OS let dobija fiksnu grupnu sliku.
+const lufthansaGroupImage = useMemo((): string | null => {
+  if (!isLufthansaGroupFlight(assignment.flightNumber, assignment.airlineName)) return null;
+  return LUFTHANSA_GROUP_IMAGE;
+}, [assignment.flightNumber, assignment.airlineName]);
+
+// Sundor holiday kampanja (El Al grupa) — vremenski ograničena. Provjera
+// datuma NIJE u dependency nizu — namjerno, isti razlog kao glavni
+// sistem (datum se mijenja jednom dnevno, rijedak prelaz se pokupi na
+// sledeći put kad se ekran ionako osvježi/re-renderuje preko realtime
+// podataka).
+const showSundorHoliday = useMemo((): boolean => {
+  if (!isElAlFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+// Ista kampanja, Israir i Arkia — identičan obrazac kao showSundorHoliday.
+const showIsrairHoliday = useMemo((): boolean => {
+  if (!isIsrairFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+const showArkiaHoliday = useMemo((): boolean => {
+  if (!isArkiaFlight(assignment.flightNumber, assignment.airlineName)) return false;
+  return isWithinSundorHolidayWindow();
+}, [assignment.flightNumber, assignment.airlineName]);
+
+// Fiksni nacionalni/aerodromski praznici — NAMJERNO BEZ useMemo (isti
+// razlog kao glavni sistem): zavisi ISKLJUČIVO od današnjeg datuma, ne
+// od trenutnog leta, pa mora da se provjeri na svakom renderu da bi se
+// primijetio prelaz preko ponoći (npr. 23.12. kad treba da se upali
+// novogodišnja slika). Jeftina provjera (par brojeva, 4 stavke).
+const fixedHolidayImage = getFixedHolidayImage();
+
+  // ── CSS injection ──────────────────────────────────────────
+  useEffect(() => {
+    if (document.getElementById('checkin-animations')) return;
+    const el = document.createElement('style');
+    el.id = 'checkin-animations';
+    el.textContent = CSS_ANIMATIONS;
+    document.head.appendChild(el);
+    return () => { document.getElementById('checkin-animations')?.remove(); };
+  }, []);
+
+  // ── Kiosk mode ─────────────────────────────────────────────
+  useEffect(() => {
+    const preventDefault = (e: Event) => e.preventDefault();
+    document.addEventListener('contextmenu', preventDefault);
+    document.addEventListener('selectstart', preventDefault);
+    document.addEventListener('dragstart', preventDefault);
+    return () => {
+      document.removeEventListener('contextmenu', preventDefault);
+      document.removeEventListener('selectstart', preventDefault);
+      document.removeEventListener('dragstart', preventDefault);
+    };
+  }, []);
+
+
+  // ── v5: Memory pressure auto-reload ──────────────────────
+  // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
+  // poruke, image cache, DOM čvorovi). Kad usedJSHeapSize pređe
+  // 85% jsHeapSizeLimit (~2GB po tabu), radimo auto-reload prije
+  // nego kiosk postane vidljivo spor/nezgledan.
+  useEffect(() => {
+    const checkMemory = () => {
+      const perf = performance;
+      if (perf?.memory) {
+        const used = perf.memory.usedJSHeapSize;
+        const limit = perf.memory.jsHeapSizeLimit;
+        const pct = used / limit;
+        if (pct > 0.85) {
+          console.warn(`Memory pressure ${Math.round(pct * 100)}% — auto reload`);
+          window.location.reload();
+        }
+      }
+    };
+    const id = setInterval(checkMemory, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+
+  // ── v5.3: Network disconnection auto-recovery ────────────
+  // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
+  // (svake 2s), a fallback polling pada.
+  // FIX (po zahtjevu — "battle-ready" audit, manje crash-ova/CPU-a,
+  // bolja reakcija na mrežni ispad, 2026-10-04): raniji kod je radio
+  // BEZUSLOVAN, TRENUTAN `window.location.reload()` na SVAKI 'online'
+  // event — a aerodromski WiFi/Ethernet na kiosk uređajima zna
+  // "flapati" (kratkotrajno gubi/vraća vezu nekoliko puta zaredom, npr.
+  // pri AP handoff-u ili privremenom zagušenju). Svaki takav blip je
+  // značio PUN reload stranice (potpuna reinicijalizacija React stabla,
+  // novi Ably handshake, novi token fetch) — tačno suprotno od "manje
+  // crash-ova/manje CPU opterećenja": ako bi više od 41 kioska istovremeno
+  // "zatreperilo" (npr. zajednički mrežni segment), svi bi istovremeno
+  // radili pun reload, umjesto blagog oporavka. Istovremeno, Ably
+  // `onConnected` handler u hooks/useRealtimeFlightData.ts i
+  // hooks/useRealtimeAssignments.ts VEĆ radi sopstven `fetchSnapshot()`
+  // resync čim se konekcija ponovo uspostavi — reload ovdje je u većini
+  // slučajeva DUPLIRAN posao, ne jedini put do svježeg stanja.
+  // Novo ponašanje: 'online' NE radi odmah reload — zakazuje provjeru za
+  // par sekundi (da se "flapanje" samo otkaže/presloži, umjesto da svaki
+  // blip pravi sopstveni tajmer), i reload radi SAMO ako u međuvremenu
+  // (a) veza ostane stvarno online I (b) `lastSyncAtRef` pokazuje da
+  // Ably/fallback mehanizmi NISU sami već uspjeli da se usklade (ista
+  // "zombie/stale" mjera kao DATA_STALE_AFTER_MS watchdog iznad, samo sa
+  // kraćim pragom jer znamo da je baš došlo do mrežnog prekida). Ako su
+  // se sami uskladili (uobičajen slučaj za kratak blip), reload se uopšte
+  // ne dešava — brži, jeftiniji oporavak, bez vizuelnog "treptaja" ekrana.
+  useEffect(() => {
+    let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+    const ONLINE_RELOAD_DEBOUNCE_MS = 8_000;
+    // Dovoljno manje od DATA_STALE_AFTER_MS (5 min) da se ne čeka
+    // predugo poslije STVARNOG mrežnog ispada, ali dovoljno veće od
+    // normalnog Ably reconnect+resync vremena (sub-sekunda do par
+        // sekundi) da se ne pokrene lažno dok resync tek traje.
+    const STALE_AFTER_RECONNECT_MS = 15_000;
+
+    const handleOnline = () => {
+      if (reloadTimeout !== null) clearTimeout(reloadTimeout);
+      reloadTimeout = setTimeout(() => {
+        reloadTimeout = null;
+        if (!navigator.onLine) return; // ponovo offline u međuvremenu — odustani
+        const gap = Date.now() - lastSyncAtRef.current;
+        if (gap > STALE_AFTER_RECONNECT_MS) {
+          console.warn(
+            `Network restored but no successful sync in ${Math.round(gap / 1000)}s — reloading to resync state`
+          );
+          window.location.reload();
+        } else {
+          console.warn('Network restored — Ably/polling already resynced, skipping reload');
+        }
+      }, ONLINE_RELOAD_DEBOUNCE_MS);
+    };
+    const handleOffline = () => {
+      if (reloadTimeout !== null) {
+        clearTimeout(reloadTimeout);
+        reloadTimeout = null;
+      }
+      console.warn('Network lost — Ably will retry, showing cached data');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (reloadTimeout !== null) clearTimeout(reloadTimeout);
+    };
+  }, [lastSyncAtRef]);
+
+  // ── v5.3: Visibilitychange — auto-focus kiosk tab ────────
+  // Ako neko otvori drugi prozor preko kiosk taba (Windows update
+  // dialog, notifikacija), kiosk tab ode u pozadinu. Chrome ga
+  // može throttlovati. Ovo vraća fokus, ili radi reload ako ne može.
+  // FIX (po predlogu — 2026-10-03): unutrašnji setTimeout nije imao
+  // cleanup — ako se tab vrati u foreground prije isteka 2s, tajmer je
+  // i dalje postojao (bezopasno se gasio zbog provjere `document.hidden`
+  // pri samom pozivu, ali je nepotrebno curio do tada); a ako
+  // visibilitychange "zatreperi" nekoliko puta zaredom, mogli su se
+  // nagomilati višestruki paralelni tajmeri. Sad se prethodni tajmer
+  // eksplicitno čisti i pri svakom novom 'visible' događaju i pri
+  // unmount-u komponente.
+  useEffect(() => {
+    let refocusTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        if (refocusTimeout !== null) {
+          clearTimeout(refocusTimeout);
+          refocusTimeout = null;
+        }
+        return;
+      }
+
+      console.warn('Kiosk tab lost focus — attempting to refocus');
+      window.focus();
+
+      if (refocusTimeout !== null) clearTimeout(refocusTimeout);
+      refocusTimeout = setTimeout(() => {
+        refocusTimeout = null;
+        if (document.hidden) {
+          window.location.reload();
+        }
+      }, 2_000);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (refocusTimeout !== null) clearTimeout(refocusTimeout);
+    };
+  }, []);
+// ── Hard reset svakih ~6h (sa jitterom da se izbjegne sinhroni
+  // reload svih desk ekrana u istoj sekundi) ──────────────────
+  useEffect(() => {
+    const jitteredResetMs = 6 * 60 * 60 * 1000 + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
+    const id = setTimeout(() => window.location.reload(), jitteredResetMs);
+    return () => clearTimeout(id);
+  }, []);
+
+  // ── v4 FIX: isMountedRef cleanup ────────────────────────────
+  // Ranije je isMountedRef.current bio true zauvijek — provjere
+  // `if (!isMountedRef.current) return` su bile mrtav kod.
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (orientationTimeoutRef.current) {
+        clearTimeout(orientationTimeoutRef.current);
+        orientationTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // NOVO (po zahtjevu — prijavljen bug "pojedini check-in monitori
+  // tokom reload-a ostanu zauvijek na 'Loading check-in
+  // information...'", 2026-09-27): vidi opširan komentar uz
+  // CHECKIN_HYDRATION_WATCHDOG_SCRIPT u app/layout.tsx za pun
+  // kontekst. Ovaj flag je "signal života" koji taj watchdog čeka —
+  // čim se ova komponenta STVARNO upali (hidrira) u browseru, javljamo
+  // to odmah, prije bilo kog drugog efekta, da watchdog zna da React
+  // radi i da NE treba da radi reload zbog spore hidratacije.
+  useEffect(() => {
+    (window as unknown as { __CHECKIN_APP_MOUNTED__?: boolean }).__CHECKIN_APP_MOUNTED__ = true;
+  }, []);
+
+  // ── Reset praćenja leta pri promjeni šaltera ────────────────
+  useEffect(() => {
+    lastFlightNumberRef.current = '';
+  }, [deskNumberParam]);
+
+  // ── Debounced orientation ──────────────────────────────────
+  useEffect(() => {
+    const check = () => setIsPortrait(window.innerHeight > window.innerWidth);
+    check();
+    const debounced = () => {
+      if (orientationTimeoutRef.current) clearTimeout(orientationTimeoutRef.current);
+      orientationTimeoutRef.current = setTimeout(check, 200);
+    };
+    window.addEventListener('resize', debounced, { passive: true });
+    return () => {
+      window.removeEventListener('resize', debounced);
+      if (orientationTimeoutRef.current) clearTimeout(orientationTimeoutRef.current);
+    };
+  }, []);
+
+  // ── Ad crossfade ───────────────────────────────────────────
+  // FIX (po zahtjevu — Lighthouse performanse, 2026-09-30): state i
+  // interval su premješteni u novu <AdRotator> komponentu iznad (vidi
+  // opširan komentar tamo) — više se NE nalaze ovdje, da bi se
+  // re-render svakog ad-ciklusa (svakih 15s, zauvijek) ograničio na
+  // mali podstablo reklame, umjesto na cijelu stranicu.
+
+//polling
+const computeAssignment = useCallback(async () => {
+  if (!isMountedRef.current) return;
+  if (!deskNumberParam) return;
+
+  const myData = deskEntries[deskNumberParam] ?? { status: null, flightNumber: '', classType: null, setAt: null };
+
+  // FIX (po zahtjevu — memory leak / optimizacija, 2026-09-29): uklonjeni
+  // privremeni dijagnostički console.log/JSON.stringify pozivi koji su ovdje
+  // stajali od 2026-09-27 debug sesije — bug koji su trebali da dijagnostikuju
+  // je odavno potvrđen i riješen ("radi odlicno" nakon 24h u produkciji).
+  // Ovi pozivi su se izvršavali na SVAKI computeAssignment poziv (tj. na SVAKU
+  // promjenu liveFlightData/deskEntries — praktično neprekidno, 24/7, na svim
+  // check-in kioscima), svaki put alocirajući novi JSON string. Na dugotrajnoj
+  // (nedeljama/mjesecima bez restarta) Electron webview sesiji, akumulirana
+  // istorija konzole (i stringovi koje drži) postepeno rastu i doprinose
+  // curenju memorije koje smo ovom analizom tražili da spriječimo — uklonjeno.
+
+  setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+  setLoading(false);
+
+if (!myData.flightNumber || myData.status === null) {
+  lastFlightNumberRef.current = '';
+  detailsLoadedRef.current = false; // ← NOVO
+  setAssignment(EMPTY_ASSIGNMENT);
+  return;
+}
+
+const classType: string | null = myData.classType ?? null;
+
+// FIX (KRITIČNO — pravi uzrok RECIDIVA prijavljenog bug-a "check-in
+// prikazuje let koji je poletio/zatvoren", pronađen pri ponovnoj
+// analizi osnovnog problema, 2026-09-28): ova "brza grana" je
+// PRESKAKALA CIJELU provjeru ispod (uključujući `matchIsDeparted`
+// bezbjednosnu mrežu i cancelled/diverted zastavice) ČIM JEDNOM uspješno
+// učita detalje za neki let — svaki naredni computeAssignment poziv
+// (a poziva se na SVAKU promjenu liveFlightData-a, uključujući svaki
+// 3-minutni poll ciklus) je za ISTI, još uvijek dodijeljen let samo
+// kopirao status/classType/setAt iz myData, NIKAD ponovo ne provjeravajući
+// da li je taj isti let u MEĐUVREMENU poletio/otkazan/preusmjeren. Ako
+// server-side auto-close (autoCloseDepartedDesks, cron na svakih 3 min —
+// vidi lib/override-utils.ts) kasni i par ciklusa, ili niko ručno ne
+// očisti šalter, kiosk je i dalje prikazivao let kao aktivan — upravo
+// `matchIsDeparted` zaštita ispod je NAMJENSKI napisana za ovaj scenario,
+// ali se nikad nije izvršavala nakon prvog uspješnog prikaza. Sad se
+// pretraga u liveFlightData (i sve njene provjere) radi NA SVAKOM
+// pozivu, bez obzira da li je flightNumber isti kao prošli put — cijena
+// je jedan `find()` kroz listu letova, zanemarljivo u odnosu na
+// sigurnost prikaza.
+lastFlightNumberRef.current = myData.flightNumber;
+
+let flightDetails: Partial<Flight> = {};
+if (liveFlightData) {
+  const allFlights: Flight[] = [
+    ...(liveFlightData.departures || []),
+    ...(liveFlightData.arrivals || []),
+  ];
+  const match = allFlights.find((f: Flight) => f.FlightNumber === myData.flightNumber);
+  // NOVO (po zahtjevu — bezbjednosna mreža, nezavisno od konačnog
+  // uzroka prijavljenog "zatvoren/poletio let se i dalje prikazuje"):
+  // ako je pronađeni let VEĆ poletio, NEMOGUĆE je da se prikaže na
+  // check-in monitoru kao aktivan — bez obzira ODAKLE je taj podatak
+  // stigao (Ably poruka, REST snapshot, bilo koji budući izvor). Ista
+  // "departed/poletio" konvencija kao svugdje drugo u projektu (vidi
+  // npr. GatePageClient.tsx, koji je ovu zaštitu već imao — checkin
+  // stranica je nije imala).
+  const matchIsDeparted = match ? /(departed|poletio|take off)/i.test(match.StatusEN ?? '') : false;
+  if (match && matchIsDeparted) {
+    detailsLoadedRef.current = false;
+    setAssignment(EMPTY_ASSIGNMENT);
+    return;
+  }
+  if (match) {
+    flightDetails = match;
+    detailsLoadedRef.current = true;   // zadržano radi kompatibilnosti/dijagnostike (više ne kontroliše granu)
+  } else {
+    detailsLoadedRef.current = false;  // ← NOVO — probaj ponovo idući put
+  }
+} else {
+  detailsLoadedRef.current = false;    // ← NOVO — liveFlightData još nije stigao, probaj ponovo
+}
+
+const icao = flightDetails.AirlineICAO || myData.flightNumber.substring(0, 2).toUpperCase();
+let logoUrl = '/airlines/placeholder.jpg';
+if (icao) {
+  const cachedLogo = logoCacheRef.current.get(icao);
+  if (cachedLogo) {
+    logoUrl = cachedLogo;
+  } else {
+    logoUrl = getInitialAirlineLogoSrc(icao, '/airlines/placeholder.jpg');
+    logoCacheRef.current.set(icao, logoUrl);
+  }
+}
+
+const destCode = flightDetails.DestinationAirportCode || '';
+const cityUrl = destCode ? `/city-images/${destCode.toLowerCase()}.jpg` : '';
+const statusStr = flightDetails.StatusEN || '';
+const sl = statusStr.toLowerCase().trim();
+const isCancelled = sl.includes('cancelled') || sl.includes('canceled') || sl.includes('annulé') || sl.includes('otkazan');
+const isDiverted = sl.includes('diverted') || sl.includes('preusmjeren') || sl.includes('dévié');
+
+setAssignment({
+  status: myData.status as 'open' | 'closed',
+  flightNumber: myData.flightNumber,
+  airlineName: flightDetails.AirlineName || '',
+  destinationCity: flightDetails.DestinationCityName || '',
+  destinationCode: destCode,
+  scheduledTime: flightDetails.ScheduledDepartureTime || '',
+  estimatedTime: flightDetails.EstimatedDepartureTime || '',
+  gateNumber: flightDetails.GateNumber || '',
+  logoUrl, cityUrl, classType, isCancelled, isDiverted,
+  codeshareFlights: flightDetails.CodeShareFlights || [],
+  setAt: myData.setAt || null,
+});
+}, [deskNumberParam, deskEntries, liveFlightData]);
+
+useEffect(() => {
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  computeAssignment();
+}, [computeAssignment]);
+
+  // ── Stanje za render ───────────────────────────────────────
+  const isOpen = assignment.status === 'open' && !assignment.isCancelled && !assignment.isDiverted;
+  const hasFlight = !!assignment.flightNumber;
+
+  // NOVO (po zahtjevu — garantovano zatvaranje u 20s, vidi opširan
+  // komentar uz OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS iznad): dok je šalter
+  // aktivno otvoren, dodatno (nezavisno od Ably-ja i od 3-minutnog
+  // reconciliation-a u hook-u) provjeravaj stvarno stanje na serveru na
+  // svakih ~12-15s. `refetchAssignments` ažurira `deskEntries` preko
+  // istog `mergeNewer`/seq mehanizma kao i sve ostalo — ako je server u
+  // međuvremenu zatvorio ovaj šalter, `computeAssignment` efekat će se
+  // sam pokrenuti na promjenu `deskEntries` i odmah prikazati zatvoreno.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      refetchAssignments();
+      timeoutId = setTimeout(tick, getCloseVerifyIntervalWithJitter());
+    };
+    timeoutId = setTimeout(tick, getCloseVerifyIntervalWithJitter());
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [isOpen, refetchAssignments]);
+
+  // ============================================================
+  // RENDER: Loading
+  // ============================================================
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white flex items-center justify-center p-4">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <div className="text-2xl text-slate-300">Loading check-in information...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // RENDER: Inactive (nema dodjele / zatvoreno / otkazano)
+  // ============================================================
+  if (!isOpen) {
+    const wallpaperSrc = isPortrait ? '/wallpaper.jpg' : '/wallpaper-landscape.jpg';
+
+    return (
+      <div className="min-h-screen relative gpu-accelerated bg-slate-900">
+        <div className="absolute inset-0 z-0">
+          <Image
+            src={wallpaperSrc}
+            alt="Airport Wallpaper"
+            fill
+            className="object-cover"
+            priority
+            quality={90}
+            placeholder="blur"
+            blurDataURL={BLUR_DATA_URL}
+            sizes="100vw"
+            decoding="async"
+            unoptimized
+          />
+          <div className="absolute inset-0 bg-black/50" />
+        </div>
+
+        <div className="relative z-10 min-h-screen flex items-center justify-center p-4 text-white">
+          <div
+            className={`text-center bg-slate-800/80 rounded-3xl p-6 sm:p-12 border border-white/20 shadow-2xl w-full ${
+              isPortrait ? 'max-w-md sm:max-w-4xl' : 'max-w-6xl'
+            } mx-auto`}
+          >
+            {assignment.isCancelled ? (
+              <XCircle className="w-16 h-16 sm:w-32 sm:h-32 text-red-500 mx-auto mb-4 sm:mb-8" />
+            ) : assignment.isDiverted ? (
+              <Plane className="w-16 h-16 sm:w-32 sm:h-32 text-orange-500 mx-auto mb-4 sm:mb-8" />
+            ) : (
+              <CheckCircle className="w-16 h-16 sm:w-32 sm:h-32 text-white/60 mx-auto mb-4 sm:mb-8" />
+            )}
+
+            <div className="text-center mb-4 sm:mb-8">
+              {/* NOVO (po zahtjevu — mobilna optimizacija, 2026-09-27):
+                  mobilna (default) veličina ostaje čitljiva na telefonu
+                  (npr. Motorola G34 5G, Redmi 13/14 — CSS širina ~390-412px);
+                  puna kiosk veličina se aktivira tek od `sm:` (640px) naviše,
+                  što pravi kiosk monitor u portretu (npr. 1080×1920) uvijek
+                  ispunjava — nema potrebe za JS detekcijom uređaja. */}
+              <div
+                className={`font-bold text-white/80 mb-2 sm:mb-4 ${
+                  isPortrait ? 'text-3xl sm:text-[6rem]' : 'text-[4rem]'
+                }`}
+              >
+                Check-in
+              </div>
+              <div
+                className={`font-black text-orange-400 leading-none drop-shadow-2xl ${
+                  isPortrait ? 'text-7xl sm:text-[20rem]' : 'text-[15rem]'
+                }`}
+              >
+                {deskNumberParam}
+              </div>
+            </div>
+
+            {assignment.isCancelled ? (
+              <div
+                className={`text-red-500 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
+                }`}
+              >
+                ✈️ Flight {assignment.flightNumber} CANCELLED
+              </div>
+            ) : assignment.isDiverted ? (
+              <div
+                className={`text-orange-500 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
+                }`}
+              >
+                ✈️ Flight {assignment.flightNumber} DIVERTED
+              </div>
+            ) : (
+              <div
+                className={`text-white/90 mb-3 sm:mb-6 font-semibold ${
+                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
+                }`}
+              >
+                {hasFlight
+                  ? 'Check-in is currently closed'
+                  : 'No flights currently checking in here'}
+              </div>
+            )}
+
+            {hasFlight && !assignment.isCancelled && !assignment.isDiverted && (
+              <div
+                className={`text-orange-300 mb-3 sm:mb-6 font-medium bg-black/30 py-2 px-4 sm:py-3 sm:px-6 rounded-2xl ${
+                  isPortrait ? 'text-base sm:text-3xl' : 'text-2xl'
+                }`}
+              >
+                <div>
+                  Flight: {assignment.flightNumber} → {assignment.destinationCity}
+                </div>
+                {assignment.scheduledTime && (
+                  <div className={isPortrait ? 'text-sm sm:text-xl mt-1 sm:mt-2' : 'text-xl mt-2'}>
+                    Scheduled: {assignment.scheduledTime}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div
+              className={`text-white/70 mb-2 sm:mb-4 ${isPortrait ? 'text-xs sm:text-xl' : 'text-lg'}`}
+            >
+              Updated at: {lastUpdate || 'Never'}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // RENDER: Portrait — aktivan check-in
+  // ============================================================
+  if (isPortrait) {
+    return (
+      <div className="min-h-screen sm:h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white sm:overflow-hidden flex flex-col">
+        {/* Header — mobilna veličina (telefon) je default, kiosk-veličina
+            (text-[4rem]) tek od sm: naviše, isti obrazac kao gore. */}
+        <div className="flex-shrink-0 p-2 bg-slate-800/80 border-b border-white/10 sm:mt-[0.3cm] gpu-accelerated">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <div className="p-1.5 sm:p-2 bg-white/10 rounded-xl border border-white/20 flex-shrink-0">
+                <CheckCircle className="w-4 h-4 sm:w-6 sm:h-6 text-green-400" />
+              </div>
+              <h1 className="text-xl sm:text-[4rem] font-black bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent leading-tight truncate">
+                CHECK-IN {deskNumberParam}
+              </h1>
+            </div>
+            <div className="text-right flex-shrink-0">
+              <div className="text-[10px] sm:text-xs text-slate-400">Updated</div>
+              <div className="text-xs sm:text-sm font-mono text-slate-300">{lastUpdate}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col px-2 py-1 min-h-0 gap-2">
+          {/* Flight info card */}
+          <div className="bg-slate-800/80 rounded-xl border border-white/10 p-3 sm:p-4 gpu-accelerated">
+            <div className="flex flex-col items-center mb-2 sm:mb-4">
+              <AirlineLogo
+                logoUrl={assignment.logoUrl}
+                airlineName={assignment.airlineName}
+                portrait
+              />
+
+{assignment.classType && (
+  <div className="w-full max-w-[90vw] mb-2 sm:mb-3">
+    <div
+      className="rounded-xl px-3 py-1.5 sm:px-6 sm:py-3 text-center shadow-lg border-2"
+      style={
+        assignment.classType.toUpperCase() === 'EASYJET_PLUS'
+          ? { background: 'linear-gradient(to right, #f97316, #ea580c)', borderColor: '#fb923c' }
+          : assignment.classType.toUpperCase().includes('BUSINESS')
+          ? { background: 'linear-gradient(to right, #dc2626, #b91c1c)', borderColor: '#f87171' }
+          : assignment.classType.toUpperCase().includes('PREMIUM')
+          ? { background: 'linear-gradient(to right, #9333ea, #7e22ce)', borderColor: '#c084fc' }
+          : assignment.classType.toUpperCase().includes('PRIORITY')
+          ? { background: 'linear-gradient(to right, #16a34a, #15803d)', borderColor: '#4ade80' }
+          : { background: 'linear-gradient(to right, #2563eb, #1d4ed8)', borderColor: '#60a5fa' }
+      }
+    >
+      <h1 className="text-lg sm:text-5xl font-black text-white tracking-wider">
+        {assignment.classType.toUpperCase() === 'EASYJET_PLUS' ? 'easyJet Plus class' : assignment.classType.toUpperCase()}
+      </h1>
+    </div>
+  </div>
+)}
+
+              {/* Broj leta — mobilna veličina fiksna (clamp donja granica
+                  bila je 3rem, previše za uzan telefonski ekran), kiosk
+                  veličina (do 13rem preko vh-a) tek od sm: naviše. */}
+      <div className="text-center w-full">
+  <div
+    className="font-black leading-tight text-5xl sm:leading-tight"
+    style={typeof window !== 'undefined' && window.innerWidth >= 640 ? { fontSize: 'clamp(3rem, 11vh, 13rem)' } : undefined}
+  >
+    {(() => {
+      const iata = assignment.flightNumber.substring(0, 2);
+      const num = assignment.flightNumber.substring(2);
+      return (
+        <>
+          <span className="text-yellow-200 drop-shadow-lg" style={{ marginRight: '0.1em' }}>
+            {iata}
+          </span>
+          <span className="text-yellow-500">{num}</span>
+        </>
+      );
+    })()}
+  </div>
+</div>
+            </div>
+
+            {/* Codeshare */}
+            {assignment.codeshareFlights.length > 0 && (
+              <div className="flex items-center gap-2 sm:gap-3 bg-blue-500/20 px-3 py-1.5 sm:px-4 sm:py-2 rounded-xl border border-blue-500/30 mb-2 sm:mb-3">
+                <Users className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400 flex-shrink-0" />
+                <div className="text-xs sm:text-sm text-blue-300">
+                  Also: {assignment.codeshareFlights.join(', ')}
+                </div>
+              </div>
+            )}
+
+            {/* Grad + slika — NOVO (po zahtjevu, 2026-09-27): na telefonu
+                nema dovoljno širine za sliku grada pored teksta (narandžasta
+                "pill" oznaka se lomila i preklapala sa nazivom grada) — na
+                mobilnom (default) sakrivamo sliku i pin ikonicu, prikazujemo
+                samo grad + IATA kod, jednostavno i centrirano. Kiosk (sm:
+                naviše) ostaje potpuno nepromijenjen (slika, pill oznaka, pin). */}
+            <div className="flex flex-col sm:flex-row sm:items-end gap-1 sm:gap-4 mb-2 sm:mb-3">
+              <div className="hidden sm:block">
+                <CityImage
+                  cityUrl={assignment.cityUrl}
+                  destinationCity={assignment.destinationCity}
+                  portrait
+                />
+              </div>
+              <div className="flex-1 text-center sm:text-right min-w-0">
+                <div
+                  className="font-bold text-white mb-1 leading-tight text-3xl sm:text-[length:var(--city-size)]"
+                  style={{
+                    // Kiosk (sm i naviše) i dalje koristi tačan proračun po
+                    // dužini naziva grada; telefon dobija fiksnu, čitljivu
+                    // veličinu (text-3xl iznad) preko Tailwind klase.
+                    ['--city-size' as string]:
+                      assignment.destinationCity.length > 14
+                        ? '4rem'
+                        : assignment.destinationCity.length > 11
+                        ? '5.5rem'
+                        : assignment.destinationCity.length > 8
+                        ? '7rem'
+                        : '8.5rem',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
+                    hyphens: 'auto',
+                  }}
+                >
+                  {assignment.destinationCity}
+                </div>
+                <div className="flex flex-col sm:flex-row items-center sm:items-center justify-center sm:justify-end gap-0.5 sm:gap-3 mb-1 sm:mb-2">
+                  {/* Kiosk verzija oznake — nepromijenjena */}
+                  <span className="hidden sm:inline-block text-[1.25rem] bg-orange-500 text-white px-3 py-1 rounded-full font-semibold whitespace-nowrap">
+                    Airport IATA code:
+                  </span>
+                  {/* Mobilna verzija — jednostavan sitan label, bez pill
+                      oblika koji se lomio na uskom ekranu */}
+                  <span className="sm:hidden text-[10px] uppercase tracking-widest text-slate-400 font-semibold">
+                    Airport IATA code
+                  </span>
+                  <span className="text-3xl sm:text-6xl font-bold text-cyan-400">
+                    {assignment.destinationCode}
+                  </span>
+                </div>
+              </div>
+              <MapPin className="hidden sm:block w-10 h-10 text-cyan-400 flex-shrink-0 mb-3" />
+            </div>
+
+            {/* Portable chargers upozorenje */}
+            <div className="flex items-center justify-center gap-2 mt-1 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-3 py-1.5 sm:px-4 sm:py-2 mx-auto w-fit">
+              <AlertCircle className="w-4 h-4 sm:w-6 sm:h-6 text-yellow-400 flex-shrink-0" />
+    <div className="text-[0.7rem] sm:text-[1.36rem] font-bold text-yellow-300 text-center">
+  Power banks: CARRY-ON ONLY, max 2 per person. No charging (of or with) during flight. Terminals must be protected.
+</div>
+            </div>
+          </div>
+
+          {/* Vremena + gate */}
+          <div className="bg-slate-800/80 rounded-xl border border-white/10 p-3 sm:p-4 gpu-accelerated">
+            <div className="grid grid-cols-2 gap-2 sm:gap-4">
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-1 sm:gap-2 mb-1 sm:mb-2">
+                  <Clock className="w-3 h-3 sm:w-5 sm:h-5 text-slate-400" />
+                  <div className="text-[10px] sm:text-sm text-slate-400">Scheduled</div>
+                </div>
+                <div className="text-3xl sm:text-8xl font-mono font-bold text-white">
+                  {assignment.scheduledTime}
+                </div>
+                <OpenDurationLabel
+                  setAt={assignment.setAt}
+                  className="text-[10px] sm:text-xl text-white/40 mt-1 sm:mt-2 font-mono"
+                />
+              </div>
+
+              {assignment.estimatedTime &&
+                assignment.estimatedTime !== assignment.scheduledTime && (
+                  <div className="text-center">
+                    <div className="flex items-center justify-center gap-1 sm:gap-2 mb-1 sm:mb-2">
+                      <AlertCircle className="w-3 h-3 sm:w-5 sm:h-5 text-yellow-400" />
+                      <div className="text-[10px] sm:text-sm text-yellow-400">Expected</div>
+                    </div>
+                    <div className="text-3xl sm:text-8xl font-mono font-bold text-yellow-400 animate-pulse">
+                      {assignment.estimatedTime}
+                    </div>
+                  </div>
+                )}
+
+              {assignment.gateNumber && (
+                <div className="col-span-2 text-center mt-1 sm:mt-2">
+                  <div className="text-sm sm:text-3xl text-slate-400 mb-0">Gate Information</div>
+                  <div className="text-2xl sm:text-5xl font-bold text-white">
+                    Gate {assignment.gateNumber}
+                  </div>
+                  <div className="flex items-center justify-center gap-1 text-xs sm:text-3xl text-slate-300 mt-0">
+                    <Info className="w-3 h-3 sm:w-5 sm:h-5 text-yellow-400 flex-shrink-0" />
+                    <span>
+                      After check-in please proceed to gate {assignment.gateNumber}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Reklame */}
+<AdRotator
+  adImages={adImages}
+  baImageSrc={baAdImage}
+  overrideImageSrc={easyJetOverrideImage}
+  lufthansaImageSrc={lufthansaGroupImage}
+  sundorHolidayImageSrc={showSundorHoliday ? SUNDOR_HOLIDAY_IMAGE : null}
+  israirHolidayImageSrc={showIsrairHoliday ? ISRAIR_HOLIDAY_IMAGE : null}
+  arkiaHolidayImageSrc={showArkiaHoliday ? ARKIA_HOLIDAY_IMAGE : null}
+  fixedHolidayImageSrc={fixedHolidayImage}
+/>
+
+          {/* Footer */}
+          <div className="flex-shrink-0 flex justify-center items-center space-x-2 text-xs font-inter py-1">
+            <Image
+  src="/icons8-next.js-96.png"              alt="nextjs"
+              width={20}
+              height={20}
+              unoptimized
+              className="inline-block"
+            />
+            <a
+              href="mailto:alen.vocanec@apm.co.me"
+              className="bg-gradient-to-r from-yellow-400 to-orange-500 bg-clip-text text-transparent hover:underline"
+            >
+              code by Tivat Airport, 2025
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // RENDER: Landscape — aktivan check-in
+  // ============================================================
+  return (
+    <div className="w-[99vw] h-[100vh] mx-auto rounded-3xl border-2 border-white/10 shadow-2xl overflow-hidden gpu-accelerated">
+      <div className="h-full grid grid-cols-12 gap-8 p-3 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+
+        {/* Lijeva kolona */}
+        <div className="col-span-7 flex flex-col justify-between">
+          <div className="mb-8">
+            <div className="flex items-center gap-6 mb-6">
+              <div className="p-5 bg-slate-700/80 rounded-2xl border border-white/20">
+                <CheckCircle className="w-12 h-12 text-green-400" />
+              </div>
+              <h1 className="text-8xl font-black bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent leading-tight">
+                CHECK-IN {deskNumberParam}
+              </h1>
+            </div>
+          </div>
+
+          <div className="space-y-8 flex-1">
+            {/* Logo + broj leta */}
+            <div className="flex items-center gap-8 mb-10">
+              <AirlineLogo
+                logoUrl={assignment.logoUrl}
+                airlineName={assignment.airlineName}
+                portrait={false}
+              />
+              <div className="flex-1">
+  {assignment.classType && (
+  <div className="mb-4">
+    <div
+      className="inline-block rounded-xl px-6 py-3 text-center shadow-lg border-2"
+      style={
+        assignment.classType.toUpperCase() === 'EASYJET_PLUS'
+          ? { background: 'linear-gradient(to right, #f97316, #ea580c)', borderColor: '#fb923c' }
+          : assignment.classType.toUpperCase().includes('BUSINESS')
+          ? { background: 'linear-gradient(to right, #dc2626, #b91c1c)', borderColor: '#f87171' }
+          : assignment.classType.toUpperCase().includes('PREMIUM')
+          ? { background: 'linear-gradient(to right, #9333ea, #7e22ce)', borderColor: '#c084fc' }
+          : assignment.classType.toUpperCase().includes('PRIORITY')
+          ? { background: 'linear-gradient(to right, #16a34a, #15803d)', borderColor: '#4ade80' }
+          : { background: 'linear-gradient(to right, #2563eb, #1d4ed8)', borderColor: '#60a5fa' }
+      }
+    >
+      <h1 className="text-5xl font-black text-white tracking-wider">
+        {assignment.classType.toUpperCase() === 'EASYJET_PLUS' ? 'easyJet Plus class' : assignment.classType.toUpperCase()}
+      </h1>
+    </div>
+  </div>
+)}
+                <div className="text-[12rem] font-black text-yellow-500 mb-2 leading-none">
+                  {assignment.flightNumber}
+                </div>
+                <div className="text-lg text-slate-400">{assignment.airlineName}</div>
+              </div>
+            </div>
+
+            {/* Codeshare */}
+            {assignment.codeshareFlights.length > 0 && (
+              <div className="flex items-center gap-4 bg-blue-500/20 px-6 py-3 rounded-3xl border border-blue-500/30">
+                <Users className="w-8 h-8 text-blue-400" />
+                <div className="text-2xl text-blue-300">
+                  Also: {assignment.codeshareFlights.join(', ')}
+                </div>
+              </div>
+            )}
+
+            {/* Grad + slika */}
+            <div className="flex items-center gap-8">
+              <CityImage
+                cityUrl={assignment.cityUrl}
+                destinationCity={assignment.destinationCity}
+                portrait={false}
+              />
+              <div className="flex-1">
+                <div className="text-8xl font-bold text-white mb-2">
+                  {assignment.destinationCity}
+                </div>
+                <div className="text-8xl font-bold text-cyan-400">
+                  {assignment.destinationCode}
+                </div>
+                <div className="flex items-center gap-2 mt-4 bg-yellow-500/20 border border-yellow-400/40 rounded-xl px-4 py-2">
+                  <AlertCircle className="w-6 h-6 text-yellow-400 flex-shrink-0" />
+                  <div className="text-lg font-semibold text-yellow-300">
+                    Portable chargers: CABIN BAGGAGE ONLY! Not in overhead bins. No charging during flight.
+                  </div>
+                </div>
+              </div>
+              <MapPin className="w-12 h-12 text-cyan-400" />
+            </div>
+          </div>
+
+          <div className="mt-8">
+            <div className="text-xl text-slate-400">Last Updated</div>
+            <div className="text-2xl font-mono text-slate-300">{lastUpdate}</div>
+          </div>
+        </div>
+
+        {/* Desna kolona */}
+        <div className="col-span-5 flex flex-col justify-between border-l-2 border-white/10 pl-8">
+          <div className="space-y-8">
+            <div className="text-right">
+              <div className="flex items-center justify-end gap-4 mb-4">
+                <Clock className="w-10 h-10 text-slate-400" />
+                <div className="text-2xl text-slate-400">Scheduled Departure</div>
+              </div>
+              <div className="text-7xl font-mono font-bold text-white leading-tight">
+                {assignment.scheduledTime}
+              </div>
+            </div>
+
+            {assignment.estimatedTime &&
+              assignment.estimatedTime !== assignment.scheduledTime && (
+                <div className="text-right">
+                  <div className="flex items-center justify-end gap-4 mb-4">
+                    <AlertCircle className="w-10 h-10 text-yellow-400" />
+                    <div className="text-2xl text-yellow-400">Expected Departure</div>
+                  </div>
+                  <div className="text-6xl font-mono font-bold text-yellow-400 animate-pulse leading-tight">
+                    {assignment.estimatedTime}
+                  </div>
+                </div>
+              )}
+          </div>
+
+          <div className="text-right space-y-6">
+            <div>
+              <div className="text-6xl font-bold text-green-400 leading-tight animate-pulse">
+                CHECK-IN OPEN
+              </div>
+              <div className="text-4xl text-green-400 mt-2">Please proceed to check-in</div>
+              <OpenDurationLabel
+                setAt={assignment.setAt}
+                className="text-2xl text-white/50 mt-3 font-mono"
+              />
+            </div>
+
+            {assignment.gateNumber && (
+              <div className="bg-slate-700/80 rounded-2xl p-6 border border-white/10">
+                <div className="text-2xl text-slate-400 mb-3">Gate Information</div>
+                <div className="text-4xl font-bold text-white">
+                  Gate {assignment.gateNumber}
+                </div>
+                <div className="flex items-center justify-end gap-2 text-xl text-slate-300 mt-2">
+                  <Info className="w-6 h-6 text-yellow-400" />
+                  <span>
+                    After check-in please proceed to gate {assignment.gateNumber}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+>>>>>>> origin/Ably
 }

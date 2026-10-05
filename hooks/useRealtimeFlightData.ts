@@ -138,17 +138,56 @@ const FALLBACK_POLL_MAX_MS = 60_000;
 // sopstveni raspored.
 const RECONCILE_INTERVAL_MS = 3 * 60_000;
 
+// NOVO (po zahtjevu — "battle-ready" audit check-in stranice, 2026-10-04,
+// portovano iz hooks/useRealtimeAssignments.ts, vidi opširan komentar uz
+// FETCH_SNAPSHOT_TIMEOUT_MS tamo za pun kontekst): ovaj hook je RANIJE bio
+// JEDINI od dva realtime hook-a bez timeout-a na fetch-u, iako ga koriste
+// SVI kiosk ekrani (checkin, gate, departures, arrivals, combined, border,
+// baggage, split-board, pa) i iako je /api/flights/snapshot teži endpoint
+// (veći JSON payload — vidi Vercel Fast Data Transfer metriku) od
+// /api/test/assignments. Bez gornje granice, na flaky kiosk mreži je ovaj
+// `fetch()` mogao visjeti znatno duže od browser-TCP nivoa, trošeći jednu
+// od ograničenog broja paralelnih konekcija ka istom originu dok traje —
+// isti rizik je već bio prepoznat i otklonjen u useRealtimeAssignments.ts,
+// ova izmjena samo zatvara identičnu rupu i ovdje.
+const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
+
 export function useRealtimeFlightData(role: AblyClientRole) {
   const [data, setData] = useState<FlightData | null>(null);
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'night-sleep'>('connecting');
   const mountedRef = useRef(true);
+  // NOVO — isti razlog kao inFlightRef u useRealtimeAssignments.ts: ovaj
+  // fetch se poziva iz više nezavisnih mehanizama (initial mount, Ably
+  // reconnect, fallback poll, 3-min reconciliation, i eksplicitni
+  // `refetch()` poziv sa strane stranice) — bez dedup-a bi se na
+  // degradiranoj mreži mogli nagomilati paralelni pozivi ka istom
+  // endpoint-u. Čisto optimizacija mrežnog saobraćaja, ne mijenja logiku
+  // "ne prepisuj noviji podatak starijim" ispod.
+  const inFlightRef = useRef(false);
 
   const fetchSnapshot = useCallback(() => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    // NOVO — AbortController osigurava da zahtjev koji visi na flaky
+    // mreži bude prekinut najkasnije nakon 10s, umjesto da se osloni na
+    // (znatno duži, nepredvidiv) OS/browser TCP timeout — vidi opširan
+    // komentar uz FETCH_SNAPSHOT_TIMEOUT_MS iznad.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_SNAPSHOT_TIMEOUT_MS);
+
     // cache: 'no-store' — vidi napomenu u useRealtimeAssignments.ts.
     // Sprečava browser HTTP keš da servira stale flight podatke pri
     // remount-u komponente (npr. admin logout/login).
-    fetch('/api/flights/snapshot', { cache: 'no-store' })
-      .then(res => res.json())
+    fetch('/api/flights/snapshot', { cache: 'no-store', signal: controller.signal })
+      .then(res => {
+        // NOVO — eksplicitna provjera HTTP statusa, isti razlog kao
+        // useRealtimeAssignments.ts: bez ovoga bi npr. 500 odgovor sa
+        // praznim/neočekivanim tijelom mogao tiho "proći" umjesto da
+        // završi u catch-u (i aktivira emergency cache fallback) ispod.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<FlightData>;
+      })
       .then((snapshot: FlightData) => {
         if (!mountedRef.current) return;
         // Ne prepisuj noviji podatak (npr. onaj koji je upravo stigao
@@ -168,8 +207,15 @@ export function useRealtimeFlightData(role: AblyClientRole) {
         reportDynamicNightMode(!!snapshot?.isNightMode);
       })
       .catch(() => {
+        // Ne dirati emergency cache ovdje na AbortError od timeout-a
+        // iznad niti na bilo koji drugi fail — isto ponašanje kao prije,
+        // samo sad pokriva i timeout slučaj.
         const cached = loadEmergencyCache();
         if (cached && mountedRef.current) setData(cached);
+      })
+      .finally(() => {
+        clearTimeout(timeoutId);
+        inFlightRef.current = false;
       });
   }, []);
 

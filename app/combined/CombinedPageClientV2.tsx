@@ -415,7 +415,15 @@ const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: st
     const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
     tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
   }, [])
-  return <div className={`text-[3rem] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time || "--:--"}</div>
+  // NOVO (po zahtjevu — na mobilnom sat preveliki, "DEPARTURES"/"ARRIVALS"
+  // se ne vidi u cijelosti): fiksnih 3rem (48px) za sat na uskom telefonu
+  // (360-390px širine) ostavljao je premalo prostora pored njega za
+  // naslov (koji ima flex-shrink-0 desno od sebe, pa se NIKAD nije
+  // smanjivao — naslov je morao da se skupi/odsiječe umjesto njega).
+  // clamp() glatko skalira veličinu sata sa širinom ekrana (umjesto
+  // jednog fiksnog praga), oslobađajući prostor naslovu na svim uskim
+  // ekranima, ne samo na jednoj testiranoj širini.
+  return <div className={`text-[clamp(1.1rem,6vw,3rem)] sm:text-[7rem] font-black ${colorClass} drop-shadow-2xl leading-none`}>{time || "--:--"}</div>
 })
 
 const NightClock = memo(function NightClock() {
@@ -512,6 +520,33 @@ const AirportStatusPill = memo(function AirportStatusPill({
     </div>
   )
 })
+
+// NOVO (po zahtjevu — footer ticker "sjecka"/stutter, 2026-10-04):
+// Ticker je RANIJE bio pisan direktno inline u FlightBoard return-u, pa
+// je React morao da rekoncilira (ponovo obradi) CIJELO ticker podstablo
+// na SVAKI re-render FlightBoard-a — a FlightBoard se re-renderuje vrlo
+// često: langIdx svake 4s, autoStatusTick svakih 60s, memory-check
+// svakih 60s, heartbeat svakih 30s, svaka Ably poruka sa novim flight
+// podatkom (može biti i više puta u minuti). Nijedna od tih promjena
+// stvarno ne mijenja ticker — jedini prop koji mu je stvarno potreban
+// je `titleColorClass` (mijenja se SAMO kad showArrivals promijeni boju
+// teme, svakih 20s). Izdvajanjem u zaseban memo() komponentu, React
+// PRESKAČE reconciliaciju ticker podstabla na svim ostalim re-renderima
+// (shallow-compare prop-ova u memo() vraća "nepromijenjeno") — manje
+// posla za glavnu nit tačno dok CSS animacija (ticker-move) pokušava da
+// se kontinuirano pomjera, što direktno smanjuje vidljivo "sjeckanje".
+const SecurityTicker = memo(function SecurityTicker({ titleColorClass }: { titleColorClass: string }) {
+  return (
+    <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
+      <div className="ticker-wrap" style={{ contain: 'layout style paint' }}>
+        <div className={`ticker-move ${titleColorClass} font-bold text-sm sm:text-xl flex items-center h-full`}>
+          {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
+          {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
@@ -1376,14 +1411,14 @@ const handleClose = useCallback(() => {
 {/* ── Header ─────────────────────────────────────────── */}
 <div className="w-full mx-auto mb-2 sm:mb-4 flex-shrink-0">
   <div className="relative flex justify-between items-center gap-2 sm:gap-4">
-    <div className="flex items-center gap-3 sm:gap-6 min-w-0">
-      <div className="p-2 sm:p-4 bg-transparent rounded-xl sm:rounded-2xl shadow-2xl border-2 border-orange-500 flex-shrink-0">
+    <div className="flex items-center gap-1.5 sm:gap-6 min-w-0">
+      <div className="p-1.5 sm:p-4 bg-transparent rounded-xl sm:rounded-2xl shadow-2xl border-2 border-orange-500 flex-shrink-0">
         {showArrivals
-          ? <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500 rotate-90" />
-          : <Plane className="w-8 h-8 sm:w-16 sm:h-16 text-orange-500" />}
+          ? <Plane className="w-6 h-6 sm:w-16 sm:h-16 text-orange-500 rotate-90" />
+          : <Plane className="w-6 h-6 sm:w-16 sm:h-16 text-orange-500" />}
       </div>
       <div className="min-w-0">
-        <h1 className={`text-[2.5rem] sm:text-[6rem] font-black ${colors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
+        <h1 className={`text-[clamp(1.3rem,6.5vw,2.5rem)] sm:text-[6rem] font-black ${colors.title} leading-none tracking-tight drop-shadow-2xl truncate`}>
           {title}
         </h1>
         <p className={`${colors.subtitle} text-sm sm:text-2xl mt-0.5 sm:mt-2 font-semibold truncate`}>
@@ -1393,6 +1428,17 @@ const handleClose = useCallback(() => {
     </div>
 
 <div
+  // NOVO (po zahtjevu — optimizacija mobilnog dizajna): AirportStatusPill
+  // ima fiksnu min-širinu (260px) i centriran je PREKO CIJELOG header-a
+  // (left: 50% translateX(-50%)) — na uskom ekranu telefona (iPhone SE
+  // ~375px, mnogi Android telefoni 360-390px) taj apsolutno pozicioniran
+  // blok neizbježno PREKLAPA naslov ("ARRIVALS"/"DEPARTURES") i/ili sat,
+  // jer prostor za centriranje jednostavno ne postoji na tako uskom
+  // ekranu. Isti princip kao TableHeaders (već `hidden sm:flex` — ne
+  // pokušava da se prikaže na mobilnom uopšte): sakriveno ispod `sm`
+  // breakpoint-a (640px), vraća se na desktop/tablet veličinama gdje ima
+  // prostora, bez promjene postojećeg desktop pozicioniranja ispod.
+  className="hidden sm:block"
   style={{
     position: 'absolute',
     left: '50%',
@@ -1424,55 +1470,55 @@ const handleClose = useCallback(() => {
 
     <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
       <ClockDisplay colorClass="text-white" />
-      <div className={`w-3 h-3 sm:w-6 sm:h-6 rounded-full ${colors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
+      <div className={`w-2 h-2 sm:w-6 sm:h-6 rounded-full ${colors.accent} animate-pulse shadow-2xl flex-shrink-0`} />
     </div>
   </div>
 </div>
 
       {/* ── Tablica ─────────────────────────────────────────── */}
+      {/* NOVO (po zahtjevu — "Loading flight data" tekst/spinner se ne
+          smije vidjeti, učitavanje mora biti nevidljivo, u pozadini):
+          RANIJE se cijeli header/tabela (TableHeaders, card pozadina)
+          nije ni renderovao dok god je `loading` bio true — umjesto
+          toga se prikazivao upadljiv spinner + "Awaiting flight
+          data..." tekst, koji je kiosk putnici vidjeli svaki put kad
+          se stranica prvi put učita (hard reset u 03:00, soft reload
+          svaka 4h, network-restore reload, itd.). Sad se CIJELI okvir
+          (card pozadina, TableHeaders) renderuje ODMAH, bez čekanja na
+          prve podatke — samo je TIJELO tabele prazno (bez teksta/
+          spinnera) dok prvi Ably snapshot ne stigne, pa se tabela
+          pojavljuje odjednom, popunjena, bez vidljivog "loading"
+          koraka. Nakon prvog punjenja (loading=false), prazna lista
+          i dalje ispravno prikazuje "No X scheduled" kao i prije. */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {loading && arrivals.length === 0 && departures.length === 0 ? (
-          <div className="text-center p-8 h-full flex items-center justify-center">
-            <div className="inline-flex items-center gap-4">
-              <div className={`w-8 h-8 border-4 ${colors.border} border-t-transparent rounded-full animate-spin`} />
-              <span className="text-xl sm:text-2xl text-white font-semibold">Awaiting flight data...</span>
-            </div>
-          </div>
-        ) : (
-          <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
-            <TableHeaders headers={tableHeaders} headerBg={colors.header} />
-            <div className="flex-1 overflow-y-auto">
-              {sortedFlights.length === 0 ? (
-                <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
-                  <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
-                  <div className="text-xl sm:text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
-                </div>
-              ) : (
-                sortedFlights.map((flight, index) => (
-                  <FlightRow
-                    key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
-                    flight={flight}
-                    index={index}
-                    showArrivals={showArrivals}
-                    colorTitle={colors.title}
-                    autoStatusTick={autoStatusTick}
-                  />
-                ))
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ── Ticker ──────────────────────────────────────────── */}
-      <div className="w-full mx-auto mt-2 sm:mt-4 flex-shrink-0 overflow-hidden bg-black/30 rounded-full border-2 border-white/10 h-8 sm:h-10 relative">
-        <div className="ticker-wrap">
-          <div className={`ticker-move ${colors.title} font-bold text-sm sm:text-xl flex items-center h-full`}>
-            {SECURITY_MESSAGES.map((msg, i) => <span key={i} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
-            {SECURITY_MESSAGES.map((msg, i) => <span key={`d-${i}`} className="mx-6 sm:mx-8 whitespace-nowrap">{msg}</span>)}
+        <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
+          <TableHeaders headers={tableHeaders} headerBg={colors.header} />
+          <div className="flex-1 overflow-y-auto">
+            {loading && sortedFlights.length === 0 ? (
+              <div className="h-full" />
+            ) : sortedFlights.length === 0 ? (
+              <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
+                <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
+                <div className="text-xl sm:text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
+              </div>
+            ) : (
+              sortedFlights.map((flight, index) => (
+                <FlightRow
+                  key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
+                  flight={flight}
+                  index={index}
+                  showArrivals={showArrivals}
+                  colorTitle={colors.title}
+                  autoStatusTick={autoStatusTick}
+                />
+              ))
+            )}
           </div>
         </div>
       </div>
+
+      {/* ── Ticker (izdvojen u SecurityTicker — vidi komentar uz definiciju) ── */}
+      <SecurityTicker titleColorClass={colors.title} />
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-1.5 mt-2">
           {Array.from({ length: totalPages }).map((_, i) => (
