@@ -13,6 +13,10 @@
 #
 # Landing stranica (/) OSTAJE indeksirana — ona je namjerno javna,
 # B2B/informativna.
+#
+# AI/GEO (2026-10-05): ova pravila važe i za AI crawlere (GPTBot,
+# OAI-SearchBot, ClaudeBot, PerplexityBot, ...) — grupa "*" ih pokriva,
+# pa smiju samo landing stranicu. Sitemap ispod pomaže otkrivanju.
 User-agent: *
 Disallow: /ver2/
 Disallow: /admin/
@@ -26,3 +30,5 @@ Disallow: /pa
 Disallow: /api/
 
 Allow: /$
+
+Sitemap: https://fids-tiv.vercel.app/sitemap.xml

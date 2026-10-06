@@ -306,7 +306,9 @@ export function useRealtimeFlightData(role: AblyClientRole) {
       // komentar iznad kod fetchSnapshot).
       reportDynamicNightMode(!!newData?.isNightMode);
     };
-    channel.subscribe('update', handler);
+    // NOVO (2026-10-06): vidi komentar u useRealtimeAssignments.ts —
+    // subscribe() Promise se odbija ako se konekcija zatvori prije attach-a.
+    channel.subscribe('update', handler)?.catch(() => {});
 
     return () => {
       mountedRef.current = false;

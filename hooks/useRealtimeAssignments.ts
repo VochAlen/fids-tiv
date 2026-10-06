@@ -362,8 +362,13 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       setGateEntries(prev => mergeOne(prev, gateNumber, entry));
     };
 
-    deskChannel?.subscribe(onDeskMsg);
-    gateChannel?.subscribe(onGateMsg);
+    // NOVO (2026-10-06): subscribe() vraća Promise (čeka attach). Kad se
+    // konekcija zatvori prije nego što attach završi (reload, tab promjena,
+    // beforeunload -> ably.close()), Promise se odbija sa "Connection
+    // closed" — bez .catch() to je unhandledRejection. Namjerno ga gutamo:
+    // pokretanje/prekid konekcije već pokrivaju connectionState + watchdog.
+    deskChannel?.subscribe(onDeskMsg)?.catch(() => {});
+    gateChannel?.subscribe(onGateMsg)?.catch(() => {});
 
     return () => {
       mountedRef.current = false;

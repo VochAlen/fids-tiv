@@ -119,9 +119,98 @@ function CombinedTerminalPill({ terminal, className = '' }: { terminal: 'T1' | '
 }
 
 // ============================================================
+// FIT-TO-CELL NAZIV DESTINACIJE + RIGIDNE KOLONE
+// ============================================================
+// FIX (po zahtjevu — 2026-10-06, prijavljeno: "kad je ime destinacije
+// dugačko, dio teksta se ne vidi, a pomjeri se i pill terminala. To ne
+// smije da se dešava"): dva odvojena uzroka.
+//
+// 1) POMJERANJE KOLONA: desktop red je flex sa ćelijama fiksne širine
+//    (npr. 280px/320px/160px...), ali je zbir tih širina (~2220px) veći
+//    od većine ekrana, pa se ćelije SKUPLJAJU (flex-shrink). Ćelija
+//    ispod koje ne može manje od svog sadržaja (logo + broj leta, ili
+//    široka status oznaka) se skuplja MANJE od ostalih — pa se, zavisno
+//    o tome koji je let u redu (npr. "U28812" je šire od "JU681"),
+//    raspodjela širina razlikuje po redu i terminal pill "skače". Sad
+//    je svaka ćelija `container-type: inline-size` + `min-width: 0`:
+//    inline-size containment znači da širina ćelije NIKAD ne zavisi od
+//    sadržaja, pa se sve skuplja ISKLJUČIVO proporcionalno (identično u
+//    zaglavlju i u svakom redu). Sadržaj se prilagođava širini ćelije
+//    preko `cqw` jedinica (Chrome 105+, Firefox 110+ — Chrome 109 kiosk
+//    OK), umjesto da gura susjede.
+// 2) ODSIJECANJE IMENA: `truncate` je rezao dugačka imena ("London L...").
+//    Sad se font prilagođava dužini TEKSTA (mjeri se canvas-om, sa
+//    sigurnosnom rezervom) tako da cijelo ime uvijek stane u ćeliju; za
+//    ekstremno dugačka imena prelazi u dva reda manjeg fonta.
+let _cityMeasureCtx: CanvasRenderingContext2D | null | undefined;
+const _cityEmCache = new Map<string, number>();
+
+// Širina teksta u "em" (font-weight 900, body font). Rezerva 8% pokriva
+// razlike u renderingu; ako canvas nije dostupan — konzervativna procjena.
+function measureTextEm(text: string): number {
+  const cached = _cityEmCache.get(text);
+  if (cached !== undefined) return cached;
+  let em = text.length * 0.66;
+  try {
+    if (_cityMeasureCtx === undefined) {
+      _cityMeasureCtx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
+    }
+    if (_cityMeasureCtx) {
+      _cityMeasureCtx.font = `900 100px ${getComputedStyle(document.body).fontFamily || 'Arial, sans-serif'}`;
+      const w = _cityMeasureCtx.measureText(text).width / 100;
+      if (w > 0) em = w * 1.08;
+    }
+  } catch { /* ostaje procjena */ }
+  _cityEmCache.set(text, em);
+  return em;
+}
+
+const CITY_BASE_REM = 3.3;       // originalna veličina fonta imena
+const CITY_MIN_SINGLE_PX = 30;   // ispod ovoga prelazi u dva reda
+const CITY_CELL_PAD_PX = 8;      // rezerva unutar ćelije
+
+function getFitCityStyle(text: string, cellPx: number): React.CSSProperties {
+  const em = measureTextEm(text);
+  const usable = cellPx - CITY_CELL_PAD_PX;
+  const avail = `(100cqw - ${CITY_CELL_PAD_PX}px)`;
+
+  // Jedan red: font = (širina ćelije - rezerva) / širina teksta u em,
+  // ograničen na originalnih 3.3rem. cqw prati STVARNU širinu ćelije,
+  // pa radi i kad se kolone proporcionalno skupe.
+  if (usable / em >= CITY_MIN_SINGLE_PX) {
+    return {
+      fontSize: `min(${CITY_BASE_REM}rem, calc(${avail} / ${em.toFixed(3)}))`,
+      whiteSpace: 'nowrap',
+      lineHeight: 1.1,
+    };
+  }
+
+  // Dva reda (veoma dugačka imena): najduža riječ mora stati, a ukupan
+  // tekst se mora raspodijeliti na dva reda (faktor 0.625 = pola teksta
+  // + rezerva za neravnomjeran prelom).
+  const longestWordEm = Math.max(...text.split(/[\s-]+/).map((w) => measureTextEm(w)), 0.1);
+  const em2 = Math.max(longestWordEm, em * 0.625);
+  return {
+    fontSize: `min(2.1rem, calc(${avail} / ${em2.toFixed(3)}))`,
+    lineHeight: 1.05,
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden',
+  };
+}
+
+// Rigidna (sadržaj-nezavisna) ćelija reda — vidi komentar iznad.
+function rigidCell(widthPx: number): React.CSSProperties {
+  return { width: `${widthPx}px`, minWidth: 0, containerType: 'inline-size' };
+}
+
+// ============================================================
 // KONSTANTE
 // ============================================================
-const HARD_RESET_HOUR             = 3         // reload u 03:00 (ne interval)
+const HARD_RESET_HOUR            = 3         // reload u 03:00 (ne interval)
 const SOFT_RELOAD_INTERVAL_MS     = 4 * 60 * 60_000  // periodični "meki" reload svaka 4h — čisti akumuliranu memoriju/GC pritisak u kiosk browserima, ne čeka se samo 03:00
 const MAX_FLIGHTS_DISPLAY         = 9
 const MAX_FLIGHTS_MEMORY          = 60
@@ -582,6 +671,11 @@ const FlightRow = memo(
 
     const icao = flight.AirlineICAO || flight.FlightNumber?.substring(0, 2).toUpperCase() || ""
 
+    // Naziv destinacije + font prilagođen širini ćelije (vidi
+    // getFitCityStyle) — cijelo ime uvijek vidljivo, bez "...".
+    const cityText = flight.DestinationCityName || flight.DestinationAirportName || ""
+    const cityStyle = useMemo(() => getFitCityStyle(cityText, showArrivals ? 400 : 320), [cityText, showArrivals])
+
     const onImgErr = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
       const img = e.currentTarget
       if (img.dataset.tried === 'local') {
@@ -613,19 +707,23 @@ const FlightRow = memo(
     return (
       <>
         {/* ── DESKTOP (sm+) ────────────────────────────────── */}
-        <div className={`hidden sm:flex gap-2 p-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: '68px', contain: 'layout style paint', contentVisibility: 'auto', containIntrinsicSize: '68px' }}>
-          <div className="flex items-center justify-center" style={{ width: "180px" }}>
-            <div className="text-[2.5rem] font-black text-white drop-shadow-lg">
+        {/* px-2 (ne p-1): isto horizontalno poravnanje kao zaglavlje
+            (TableHeaders: p-2), da kolone u redu i u zaglavlju dobiju
+            IDENTIČNU raspodjelu širina. Sve ćelije su rigidCell() —
+            vidi komentar uz getFitCityStyle. */}
+        <div className={`hidden sm:flex gap-2 px-2 py-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: '68px', contain: 'layout style paint', contentVisibility: 'auto', containIntrinsicSize: '68px' }}>
+          <div className="flex items-center justify-center" style={rigidCell(180)}>
+            <div className="font-black text-white drop-shadow-lg whitespace-nowrap" style={{ fontSize: 'min(2.5rem, 22.2cqw)' }}>
               {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
             </div>
           </div>
-          <div className="flex items-center justify-center" style={{ width: "180px" }}>
+          <div className="flex items-center justify-center" style={rigidCell(180)}>
             {estimatedDisplay
-              ? <div className={`text-[2.5rem] font-black ${colorTitle} drop-shadow-lg`}>{estimatedDisplay}</div>
+              ? <div className={`font-black ${colorTitle} drop-shadow-lg whitespace-nowrap`} style={{ fontSize: 'min(2.5rem, 22.2cqw)' }}>{estimatedDisplay}</div>
               : <div className="text-2xl text-white/30 font-bold">-</div>}
           </div>
-          <div className="flex items-center gap-3" style={{ width: "280px" }}>
-            <div className="relative w-[70px] h-11 bg-white rounded-xl p-1 shadow-xl flex-shrink-0">
+          <div className="flex items-center" style={{ ...rigidCell(280), gap: 'min(12px, 4.3cqw)' }}>
+            <div className="relative bg-white rounded-xl p-1 shadow-xl flex-shrink-0" style={{ width: 'min(70px, 25cqw)', height: 'min(44px, 15.7cqw)' }}>
               <img
                 src={getInitialAirlineLogoSrc(icao, PLACEHOLDER_IMAGE)}
                 alt={`${flight.AirlineName} logo`}
@@ -637,24 +735,24 @@ const FlightRow = memo(
                 fetchPriority={index < 8 ? "high" : "auto"}
               />
             </div>
-            <div className="text-[2.4rem] font-black text-white drop-shadow-lg">{flight.FlightNumber}</div>
+            <div className="font-black text-white drop-shadow-lg whitespace-nowrap" style={{ fontSize: 'min(2.4rem, 13.7cqw)' }}>{flight.FlightNumber}</div>
             {flight.CodeShareFlights && flight.CodeShareFlights.length > 0 && (
-              <div className="text-sm text-white/50 font-bold">+{flight.CodeShareFlights.length}</div>
+              <div className="text-sm text-white/50 font-bold whitespace-nowrap">+{flight.CodeShareFlights.length}</div>
             )}
           </div>
 
           {showArrivals ? (
             <>
-              <div className="flex items-center" style={{ width: "400px" }}>
-                <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
-                  {flight.DestinationCityName || flight.DestinationAirportName}
+              <div className="flex items-center" style={rigidCell(400)}>
+                <div className="font-black text-white drop-shadow-lg" style={cityStyle}>
+                  {cityText}
                 </div>
               </div>
               <FlightWeatherCell flight={flight} />
-              <div className="flex items-center justify-center" style={{ width: "640px" }}>
+              <div className="flex items-center justify-center" style={rigidCell(640)}>
                 {pill.hasStatusText ? (
                   <div className={`${pillCls} relative`}
-                    style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%" }}>
+                    style={{ paddingLeft: pill.showLEDs ? "3.5rem" : "1rem", paddingRight: "1rem", width: "95%", fontSize: 'min(1.9rem, 4.75cqw)' }}>
                     {pill.showLEDs && (
                       <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1 z-10">
                         <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />
@@ -673,12 +771,12 @@ const FlightRow = memo(
             </>
           ) : (
             <>
-              <div className="flex items-center" style={{ width: "320px" }}>
-                <div className="text-[3.3rem] font-black text-white truncate drop-shadow-lg">
-                  {flight.DestinationCityName || flight.DestinationAirportName}
+              <div className="flex items-center" style={rigidCell(320)}>
+                <div className="font-black text-white drop-shadow-lg" style={cityStyle}>
+                  {cityText}
                 </div>
               </div>
-              <div className="flex items-center justify-center text-center" style={{ width: "160px" }}>
+              <div className="flex items-center justify-center text-center" style={rigidCell(160)}>
                 <CombinedTerminalPill
                   terminal={getTerminalForCombinedCheckInDesk(flight.CheckInDesk)}
                   className="w-12 h-12 text-lg"
@@ -690,7 +788,7 @@ const FlightRow = memo(
                   : [];
                 const { gap, badge } = getCombinedCheckInBadgeSizing(desks.length);
                 return (
-                  <div className={`flex items-center justify-center flex-nowrap ${gap}`} style={{ width: "260px" }}>
+                  <div className={`flex items-center justify-center flex-nowrap ${gap}`} style={rigidCell(260)}>
                     {desks.length > 0
                       ? desks.map(d => (
                           <div key={d} className={`${badge} font-black text-white bg-black/40 rounded-xl border-2 border-white/20 shadow-xl whitespace-nowrap`}>
@@ -701,16 +799,16 @@ const FlightRow = memo(
                   </div>
                 );
               })()}
-              <div className="flex items-center justify-center" style={{ width: "200px" }}>
+              <div className="flex items-center justify-center" style={rigidCell(200)}>
                 {flight.GateNumber && flight.GateNumber !== "-"
                   ? <div className={`text-[2.5rem] font-black py-2 px-3 rounded-xl border-2 shadow-xl ${isGateChanged ? "text-red-500 bg-red-500/20 border-red-400 animate-pill-blink-fast" : "text-white bg-black/40 border-white/20"}`}>
                       {flight.GateNumber}
                     </div>
                   : <div className="text-[2.5rem] font-black text-transparent py-2 px-3">-</div>}
               </div>
-              <div className="flex items-center justify-center" style={{ width: "580px" }}>
+              <div className="flex items-center justify-center" style={rigidCell(580)}>
                 {pill.hasStatusText ? (
-                  <div className={`${pillCls} text-[1.8rem]`}>
+                  <div className={pillCls} style={{ fontSize: 'min(1.8rem, 4.97cqw)' }}>
                     {pill.showLEDs && (
                       <div className="flex items-center gap-1 flex-shrink-0">
                         <LEDIndicator color={pill.led1} phase="a" size="w-4 h-4" />

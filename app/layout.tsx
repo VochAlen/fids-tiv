@@ -4,6 +4,7 @@ import Script from "next/script";
 import "./globals.css";
 import { ConsoleSuppressor } from "@/components/ConsoleSuppressor";
 import { ServiceWorkerRegistration } from "@/components/ServiceWorkerRegistration";
+import { SITE_URL } from "@/lib/site-content";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,6 +17,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  // NOVO (AI/GEO, 2026-10-05): bez metadataBase relativni og:image i
+  // canonical URL-ovi (vidi app/page.tsx) ne bi imali apsolutni domen.
+  metadataBase: new URL(SITE_URL),
   title: "FIDS TIV — Flight Information Display System",
   description: "Tivat Airport Flight Information Display System",
 };
@@ -85,18 +89,22 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <head>
+      <body className="min-h-full flex flex-col">
+        <ConsoleSuppressor />
+        <ServiceWorkerRegistration />
+        {children}
+        {/* NOVO (2026-10-06): next/script sa beforeInteractive, ali UNUTAR
+            <body> (ne u <head>, ne kao dijete <html>) — Next ga sam ubaci u
+            <head> i izvrši prije hidratacije/React bundle-a, pa watchdog radi
+            isto kao i ranije. Ručni <script> u <head> je u dev režimu
+            izazivao React 19 upozorenje "Encountered a script tag while
+            rendering React component". */}
         <Script
           id="checkin-hydration-watchdog"
           strategy="beforeInteractive"
         >
           {CHECKIN_HYDRATION_WATCHDOG_SCRIPT}
         </Script>
-      </head>
-      <body className="min-h-full flex flex-col">
-        <ConsoleSuppressor />
-        <ServiceWorkerRegistration />
-        {children}
       </body>
     </html>
   );
