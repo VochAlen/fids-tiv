@@ -24,6 +24,8 @@ import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
+import { recordAssignmentLearning } from '@/lib/assignment-learning-server';
+import { sanitizeLearningContext } from '@/lib/assignment-learning';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -353,6 +355,12 @@ interface DeskStatusRequestBody {
   action?: 'open' | 'closed' | 'clear' | 'setClass';
   flightNumber?: string;
   classType?: string | null;
+  /** 'suggestion' = primijenjeno iz AI sugestije → NE uči se iz toga. */
+  source?: 'suggestion';
+  /** Kontekst ručne dodjele (učenje zamjene + tačnost) — vidi sanitizeLearningContext. */
+  preferredPool?: string[];
+  suggested?: string[];
+  suggestionSource?: string;
 }
 
 export async function POST(request: Request) {
@@ -372,7 +380,17 @@ export async function POST(request: Request) {
     // NOVO — odlučivačka logika (open/closed/clear/setClass) sad
     // dolazi iz lib/resource-mutations.ts (testabilna, ista logika za
     // desk i gate) — vidi opširan komentar tamo za pun kontekst.
+    // NOVO (2026-10-08): učenje šablona dodjele — vidi lib/assignment-learning.ts.
+    // Uči se SAMO iz ručne 'open' dodjele (ne iz AI sugestije, ne iz ponovnog
+    // otvaranja istog resursa za isti let).
+    let learnEligible = false;
+    let busyPreferred: string[] = [];
+    const learnCtx = sanitizeLearningContext(body);
+    let openCountForFlight = 0;
     const result = await mutateAll((all) => {
+      learnEligible = false;
+      busyPreferred = [];
+      const existingEntry = (all as unknown as Record<string, ResourceEntry>)[deskNumber];
       const now = Date.now();
       const outcome = applyResourceAction(
         all as unknown as Record<string, ResourceEntry>,
@@ -382,6 +400,19 @@ export async function POST(request: Request) {
         classType,
         now
       );
+      if (outcome.changed && action === 'open' && flightNumber) {
+        const sameAsBefore = existingEntry?.status === 'open' && existingEntry.flightNumber === flightNumber;
+        if (!sameAsBefore) {
+          learnEligible = true;
+          // Koji su uobičajeni resursi bili zauzeti DRUGIM letom (naučena zamjena).
+          busyPreferred = (learnCtx.preferredPool ?? []).filter(id => {
+            const e = (all as unknown as Record<string, ResourceEntry>)[id];
+            return id !== deskNumber && e?.status === 'open' && e.flightNumber !== flightNumber;
+          });
+          openCountForFlight = Object.values(all as unknown as Record<string, ResourceEntry>)
+            .filter(e => e?.status === 'open' && e.flightNumber === flightNumber).length;
+        }
+      }
       if (!outcome.changed || !outcome.publishedEntry) {
         return outcome.changed ? { changed: true } : null;
       }
@@ -435,6 +466,18 @@ export async function POST(request: Request) {
     // (after() — vidi objašnjenje u gate-status-override/route.ts).
     // Response se vraća odmah. Ako publish ipak padne, kiosci će
     // dobiti promjenu preko fallback polling-a.
+    if (learnEligible && flightNumber) {
+      after(() => recordAssignmentLearning({
+        kind: 'desk',
+        resourceId: deskNumber,
+        flightNumber,
+        openCountForFlight,
+        fromSuggestion: body.source === 'suggestion',
+        busyPreferred,
+        context: learnCtx,
+      }));
+    }
+
     if (result.publishedEntry) {
       after(() =>
         publishToChannel('assignments:desks', 'update', result.publishedEntry).catch(err =>

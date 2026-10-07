@@ -13,17 +13,7 @@ import type { Flight } from '@/types/flight';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments, type AssignmentEntry } from '@/hooks/useRealtimeAssignments';
 import { logoutAndRedirect } from '@/lib/admin-logout';
-import { getPodgoricaMinutesOfDay, getPodgoricaDateString } from '@/lib/night-hours';
-import { computeAssignmentSuggestions, type Suggestion } from '@/lib/assignment-suggestions';
-import {
-  parseLearned, seasonFromDate, dowFromDate, summarizeAccuracy, recentWeekKeys, type LearnedIndex,
-} from '@/lib/assignment-learning';
-import {
-  EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
-  type SuggestionConstraints,
-} from '@/lib/suggestion-constraints';
-import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
-import { SuggestionsCard } from './SuggestionsCard';
+import { getPodgoricaMinutesOfDay } from '@/lib/night-hours';
 // ─────────────────────────────────────────────
 // Konstante
 // ─────────────────────────────────────────────
@@ -1048,26 +1038,13 @@ useEffect(() => {
   return () => clearInterval(id);
 }, [refetchFlights]);
 
-// NOVO (2026-10-08): zadnji prijedlog po resursu+letu ("desk:LY1234"). Služi za
-// MJERENJE TAČNOSTI (šta je sistem nudio u trenutku ručne dodjele) i za učenje
-// zamjene (uobičajeni bazen). Ne briše se kad let dobije dodjelu — drugi šalter
-// istog leta se poredi sa istim prijedlogom. Piše se samo u effect-u.
-const suggestionSnapshotRef = useRef<Map<string, Suggestion>>(new Map());
-
 const assignFlightToResource = useCallback(async (
   flight: Flight, resourceId: string, resourceType: 'desk' | 'gate',
-  // NOVO (2026-10-08): 'suggestion' = primijenjeno iz AI sugestije — server
-  // NE uči iz takve dodjele (da sistem ne uči iz vlastitih prijedloga).
-  source?: 'suggestion',
 ): Promise<boolean> => {
   const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
-  const snap = suggestionSnapshotRef.current.get(`${resourceType}:${flight.FlightNumber}`);
-  const learnCtx = snap
-    ? { preferredPool: snap.pool, suggested: snap.resources, suggestionSource: snap.source }
-    : {};
   const payload  = resourceType === 'desk'
-    ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber, ...(source ? { source } : {}), ...learnCtx }
-    : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber, ...(source ? { source } : {}), ...learnCtx };
+    ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber }
+    : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber };
 
   // ── Odredi auto-klasu ODMAH (lokalno, bez čekanja servera) ──
   let autoClass: ClassType = null;
@@ -1189,145 +1166,6 @@ const assignFlightToResource = useCallback(async (
     return false;
   }
 }, []);
-
-  // ── NOVO (2026-10-07): "AI sugestija" — prijedlog dodjele šaltera/gate-ova ──
-  // Algoritam je ČISTA funkcija (lib/assignment-suggestions.ts, bez mreže i AI
-  // poziva). Ovdje samo: (1) trenutno vrijeme kao state (Date se čita u effect-u,
-  // ne u renderu), (2) vremena otvaranja check-in-a iz /api/checkin-config
-  // (jedan mali GET pri otvaranju stranice), (3) izračun prijedloga, (4) primjena
-  // kroz POSTOJEĆI assignFlightToResource (iste zaštite kao ručna dodjela).
-  const [suggestNowMin, setSuggestNowMin] = useState<number | null>(null);
-  const [openLeadByIata, setOpenLeadByIata] = useState<Record<string, number>>({});
-  const [isSummer, setIsSummer] = useState(false);
-  const [learned, setLearned] = useState<LearnedIndex | undefined>(undefined);
-  const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
-  const [todayISO, setTodayISO] = useState<string | null>(null);
-  const [constraints, setConstraints] = useState<SuggestionConstraints>(EMPTY_CONSTRAINTS);
-  const [noteError, setNoteError] = useState<string | null>(null);
-  const [noteUnparsed, setNoteUnparsed] = useState<string[]>([]);
-  const [applyingKey, setApplyingKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    const tick = () => {
-      const today = getPodgoricaDateString();
-      setSuggestNowMin(getPodgoricaMinutesOfDay());
-      setTodayISO(today);
-      setIsSummer(seasonFromDate(today) === 'S'); // 1.6.–1.10.
-    };
-    tick();
-    const id = setInterval(tick, 30_000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/checkin-config')
-      .then(r => (r.ok ? r.json() : null))
-      .then(cfg => { if (!cancelled && cfg && typeof cfg === 'object') setOpenLeadByIata(cfg as Record<string, number>); })
-      .catch(() => { /* bez konfiguracije važi zadano (120 min) */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  // NOVO (2026-10-08): naučeni šabloni (brojači iz prošlih ručnih dodjela).
-  // Jedan GET pri otvaranju stranice (jedan Redis HGETALL). Bez njega važe
-  // ručni profili — greška se ignoriše.
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/admin/learned-assignments', { cache: 'no-store' })
-      .then(r => (r.ok ? r.json() : null))
-      .then(j => {
-        if (cancelled || !j?.data) return;
-        setLearnedRaw(j.data as Record<string, string>);
-        setLearned(parseLearned(j.data as Record<string, string>));
-      })
-      .catch(() => { /* bez učenja važe ručni profili */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
-
-  const suggestions = useMemo(() => {
-    if (suggestNowMin === null) return { desks: [] as Suggestion[], gates: [] as Suggestion[] };
-    const toMap = (list: Assignment[]) =>
-      Object.fromEntries(list.map(a => [a.resourceId, a.flightNumber]));
-    return computeAssignmentSuggestions({
-      flights,
-      currentDesks: toMap(checkinAssignments),
-      currentGates: toMap(gateAssignments),
-      nowMin: suggestNowMin,
-      openLeadByIata,
-      summer: isSummer,
-      learned,
-      dow,
-      constraints,
-    });
-  }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints]);
-
-  // Zapamti zadnji prijedlog po letu (vidi suggestionSnapshotRef) — samo u effect-u.
-  useEffect(() => {
-    const m = suggestionSnapshotRef.current;
-    for (const sg of [...suggestions.desks, ...suggestions.gates]) m.set(`${sg.type}:${sg.flightNumber}`, sg);
-  }, [suggestions]);
-
-  // Tačnost za aktivni tab, zadnje 4 sedmice (iz brojača učitanih pri otvaranju stranice).
-  const accuracyByKind = useMemo(() => {
-    if (!learnedRaw || !todayISO) return null;
-    const weeks = recentWeekKeys(todayISO, 4);
-    return { desk: summarizeAccuracy(learnedRaw, 'desk', weeks), gate: summarizeAccuracy(learnedRaw, 'gate', weeks) };
-  }, [learnedRaw, todayISO]);
-
-  const constraintChips = useMemo(() => describeConstraints(constraints), [constraints]);
-
-  // Napomena osoblja → ograničenja. Čita se lokalno, običnim pravilima
-  // (lib/suggestion-note-parser.ts) — bez mreže, bez AI poziva, bez troška.
-  const handleSubmitNote = useCallback((text: string) => {
-    setNoteError(null);
-    const { constraints: parsed, unparsed } = parseSuggestionNote(text, flightsRef.current.map(f => f.FlightNumber));
-    setConstraints(prev => mergeConstraints(prev, parsed));
-    setNoteUnparsed(unparsed);
-    if (isEmptyConstraints(parsed)) {
-      setNoteError('Nisam prepoznao nijedno pravilo. Primjer: "šalter 12 ne radi do 14:00" ili "LY1234 na 10 i 11".');
-    }
-  }, []);
-
-  const handleClearConstraints = useCallback(() => {
-    setConstraints(EMPTY_CONSTRAINTS);
-    setNoteUnparsed([]);
-    setNoteError(null);
-  }, []);
-
-  const applySuggestionList = useCallback(async (list: Suggestion[]) => {
-    try {
-      for (const s of list) {
-        const flight = flightsRef.current.find(f => f.FlightNumber === s.flightNumber);
-        if (!flight) continue;
-        setApplyingKey(`${s.type}:${s.flightNumber}`);
-        const label = s.type === 'desk' ? 'šalter' : 'gate';
-        for (const id of s.resources) {
-          const current = s.type === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current;
-          // Zauzeto u međuvremenu (ručno) — NE diramo, samo javi.
-          if (current.some(a => a.resourceId === id)) {
-            pushRemovalErrorNotice(`${s.flightNumber}: ${label} ${id} je u međuvremenu zauzet — preskočen.`);
-            continue;
-          }
-          const ok = await assignFlightToResource(flight, id, s.type, 'suggestion');
-          if (!ok) pushRemovalErrorNotice(`${s.flightNumber}: dodjela ${label}a ${id} nije uspjela.`);
-        }
-      }
-    } finally {
-      setApplyingKey(null);
-    }
-  }, [assignFlightToResource, pushRemovalErrorNotice]);
-
-  const handleApplySuggestion = useCallback((s: Suggestion) => {
-    void applySuggestionList([s]);
-  }, [applySuggestionList]);
-
-  const handleApplyDueSuggestions = useCallback((list: Suggestion[]) => {
-    if (list.length === 0) return;
-    if (!window.confirm(`Primijeniti ${list.length} prijedlog(a) koji su na redu?`)) return;
-    void applySuggestionList(list);
-  }, [applySuggestionList]);
 
   const handleResourceTouchAssign = useCallback(async (
     resourceId: string, resourceType: 'desk' | 'gate',
@@ -1937,23 +1775,6 @@ const handleClearAll = useCallback(async () => {
           </div>
         )}
         </div>
-
-        {/* NOVO (2026-10-07): AI sugestija — prijedlog za aktivni tab */}
-        <SuggestionsCard
-          type={activeTab === 'checkin' ? 'desk' : 'gate'}
-          suggestions={activeTab === 'checkin' ? suggestions.desks : suggestions.gates}
-          nowMin={suggestNowMin}
-          isDark={isDark}
-          applyingKey={applyingKey}
-          onApply={handleApplySuggestion}
-          onApplyDue={handleApplyDueSuggestions}
-          accuracy={accuracyByKind ? (activeTab === 'checkin' ? accuracyByKind.desk : accuracyByKind.gate) : null}
-          chips={constraintChips}
-          unparsed={noteUnparsed}
-          noteError={noteError}
-          onSubmitNote={handleSubmitNote}
-          onClearConstraints={handleClearConstraints}
-        />
 
         {/* Selected Flight Banner */}
         {selectedFlightForTouch && (

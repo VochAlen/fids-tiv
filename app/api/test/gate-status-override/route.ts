@@ -26,6 +26,8 @@ import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
+import { recordAssignmentLearning } from '@/lib/assignment-learning-server';
+import { sanitizeLearningContext } from '@/lib/assignment-learning';
 
 export const dynamic = 'force-dynamic';
 
@@ -295,6 +297,12 @@ interface GateStatusRequestBody {
   action?: 'open' | 'closed' | 'clear' | 'setClass';
   flightNumber?: string;
   classType?: string | null;
+  /** 'suggestion' = primijenjeno iz AI sugestije → NE uči se iz toga. */
+  source?: 'suggestion';
+  /** Kontekst ručne dodjele (učenje zamjene + tačnost) — vidi sanitizeLearningContext. */
+  preferredPool?: string[];
+  suggested?: string[];
+  suggestionSource?: string;
 }
 
 export async function POST(request: Request) {
@@ -312,7 +320,16 @@ export async function POST(request: Request) {
   }
 
   try {
+    // NOVO (2026-10-08): učenje šablona dodjele — vidi lib/assignment-learning.ts.
+    // Uči se SAMO iz ručne 'open' dodjele (ne iz AI sugestije, ne iz ponovnog
+    // otvaranja istog resursa za isti let).
+    let learnEligible = false;
+    let busyPreferred: string[] = [];
+    const learnCtx = sanitizeLearningContext(body);
     const result = await mutateAll((all) => {
+      learnEligible = false;
+      busyPreferred = [];
+      const existingEntry = (all as unknown as Record<string, ResourceEntry>)[gateNumber];
       const now = Date.now();
       // NOVO — odlučivačka logika sad dolazi iz lib/resource-mutations.ts.
       const outcome = applyResourceAction(
@@ -323,6 +340,17 @@ export async function POST(request: Request) {
         classType,
         now
       );
+      if (outcome.changed && action === 'open' && flightNumber) {
+        const sameAsBefore = existingEntry?.status === 'open' && existingEntry.flightNumber === flightNumber;
+        if (!sameAsBefore) {
+          learnEligible = true;
+          // Koji su uobičajeni resursi bili zauzeti DRUGIM letom (naučena zamjena).
+          busyPreferred = (learnCtx.preferredPool ?? []).filter(id => {
+            const e = (all as unknown as Record<string, ResourceEntry>)[id];
+            return id !== gateNumber && e?.status === 'open' && e.flightNumber !== flightNumber;
+          });
+        }
+      }
       if (!outcome.changed || !outcome.publishedEntry) {
         return outcome.changed ? { changed: true } : null;
       }
@@ -368,6 +396,17 @@ export async function POST(request: Request) {
     // (after() ne blokira response). Ako publish ipak padne (Ably
     // outage), kiosci će dobiti promjenu preko fallback polling-a na
     // 20s (vidi useRealtimeAssignments hook).
+    if (learnEligible && flightNumber) {
+      after(() => recordAssignmentLearning({
+        kind: 'gate',
+        resourceId: gateNumber,
+        flightNumber,
+        fromSuggestion: body.source === 'suggestion',
+        busyPreferred,
+        context: learnCtx,
+      }));
+    }
+
     if (result.publishedEntry) {
       after(() =>
         publishToChannel('assignments:gates', 'update', result.publishedEntry)
