@@ -323,3 +323,19 @@ describe('v2: dan, zamjena, ograničenja', () => {
     expect(r.desks[0].resources).not.toContain('1');
   });
 });
+
+describe('v2: završeni letovi se ne nude', () => {
+  it('check-in završen po rasporedu (STD−30) → nema prijedloga za šalter, čak i ako let kasni', () => {
+    const late = fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '07:40', EstimatedDepartureTime: '10:30' }); // NOW=08:00
+    const r = run([late]);
+    expect(r.desks).toEqual([]);
+    expect(r.gates).toHaveLength(1); // kasni → gate još treba
+  });
+  it('let koji je već otišao nema ni gate prijedlog; budući let ostaje', () => {
+    const gone = fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '07:00' });
+    const ok = fl({ FlightNumber: 'TK1085', ScheduledDepartureTime: '09:30' });
+    const r = run([gone, ok]);
+    expect(r.desks.map(d => d.flightNumber)).toEqual(['TK1085']);
+    expect(r.gates.map(g => g.flightNumber)).toEqual(['TK1085']);
+  });
+});

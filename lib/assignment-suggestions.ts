@@ -404,6 +404,8 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
   // ── Šalteri ────────────────────────────────────────────────────────
   const deskOrder = preps
     .filter(p => !hasDesk.has(p.f.FlightNumber))
+    // Check-in je završen po RASPOREDU (STD − 30 min) → ne nudi se, čak ni ako let kasni u poletanju.
+    .filter(p => p.stdAbs - CHECKIN_CLOSE_BEFORE_MIN > nowMin)
     .sort((a, b) => a.deskIv.start - b.deskIv.start || b.deskCount - a.deskCount);
 
   for (const p of deskOrder) {
@@ -451,6 +453,8 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
   // ── Gate-ovi ───────────────────────────────────────────────────────
   const gateOrder = preps
     .filter(p => !hasGate.has(p.f.FlightNumber))
+    // Let je (po rasporedu/procjeni) već otišao → gate se ne nudi.
+    .filter(p => p.effAbs > nowMin)
     .sort((a, b) => a.gateIv.start - b.gateIv.start);
 
   for (const p of gateOrder) {

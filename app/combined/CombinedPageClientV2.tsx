@@ -29,10 +29,17 @@ import WeatherIcon from '@/components/weather-icon'
 // ── v4: Per-flight weather cell ──────────────────────────────
 // Poziva useWeather hook za destinaciju leta. Posebna komponenta
 // jer useWeather ne može biti pozvan u loop-u (Rules of Hooks).
+// FIX (arrivals nije bio u skladu sa departures): ćelija vremena je imala
+// običnu `width: 180px` (bez minWidth:0 / inline-size containment), pa se pri
+// skupljanju reda NIJE skupljala proporcionalno kao ostale kolone — kolone
+// "Weather" i "Status" su se razlikovale od zaglavlja. Sad je rigidna kao i
+// ostale ćelije (vidi rigidCell niže).
+const WEATHER_CELL_STYLE: React.CSSProperties = { width: '180px', minWidth: 0, containerType: 'inline-size' };
+
 const FlightWeatherCell = memo(function FlightWeatherCell({
   flight,
-  size = 28,
-  textSize = 18,
+  size = 44,
+  textSize = 30,
 }: {
   flight: Flight;
   size?: number;
@@ -46,7 +53,7 @@ const FlightWeatherCell = memo(function FlightWeatherCell({
 
   if (weather.loading) {
     return (
-      <div className="flex items-center justify-center" style={{ width: '180px' }}>
+      <div className="flex items-center justify-center" style={WEATHER_CELL_STYLE}>
         <div className="w-6 h-6 border-2 border-white/20 border-t-cyan-400 rounded-full animate-spin" />
       </div>
     );
@@ -54,14 +61,14 @@ const FlightWeatherCell = memo(function FlightWeatherCell({
 
   if (weather.error) {
     return (
-      <div className="flex items-center justify-center" style={{ width: '180px' }}>
+      <div className="flex items-center justify-center" style={WEATHER_CELL_STYLE}>
         <span className="text-white/20 text-xl">—</span>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center justify-center" style={{ width: '180px' }}>
+    <div className="flex items-center justify-center" style={WEATHER_CELL_STYLE}>
       <WeatherIcon
         code={weather.weatherCode}
         temperature={weather.temperature}
@@ -164,6 +171,11 @@ function measureTextEm(text: string): number {
   _cityEmCache.set(text, em);
   return em;
 }
+
+// Ista minimalna visina reda za ARRIVALS i DEPARTURES. Departures redovi su
+// ~89px (gate/šalter bedževi 2.5rem + padding + border), arrivals su bili ~68px
+// (samo naziv grada i status) pa je tabela izgledala "uža"/nesrazmjerna.
+const ROW_MIN_HEIGHT_PX = 90;
 
 const CITY_BASE_REM = 3.3;       // originalna veličina fonta imena
 const CITY_MIN_SINGLE_PX = 30;   // ispod ovoga prelazi u dva reda
@@ -645,7 +657,7 @@ const TableHeaders = memo(function TableHeaders({
       {headers.map(h => {
         const Icon = h.icon
         return (
-          <div key={h.label} className="flex items-stretch justify-center gap-1 px-1 h-full" style={{ width: h.width }}>
+          <div key={h.label} className="flex items-stretch justify-center gap-1 px-1 h-full" style={{ width: h.width, minWidth: 0 }}>
             <Icon className="w-5 h-5 self-center" /><span className="truncate self-center">{h.label}</span>
           </div>
         )
@@ -711,7 +723,7 @@ const FlightRow = memo(
             (TableHeaders: p-2), da kolone u redu i u zaglavlju dobiju
             IDENTIČNU raspodjelu širina. Sve ćelije su rigidCell() —
             vidi komentar uz getFitCityStyle. */}
-        <div className={`hidden sm:flex gap-2 px-2 py-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: '68px', contain: 'layout style paint', contentVisibility: 'auto', containIntrinsicSize: '68px' }}>
+        <div className={`hidden sm:flex gap-2 px-2 py-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: `${ROW_MIN_HEIGHT_PX}px`, contain: 'layout style paint', contentVisibility: 'auto', containIntrinsicSize: `${ROW_MIN_HEIGHT_PX}px` }}>
           <div className="flex items-center justify-center" style={rigidCell(180)}>
             <div className="font-black text-white drop-shadow-lg whitespace-nowrap" style={{ fontSize: 'min(2.5rem, 22.2cqw)' }}>
               {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
