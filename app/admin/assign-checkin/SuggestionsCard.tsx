@@ -8,7 +8,7 @@
 'use client';
 
 import { memo, useMemo, useState } from 'react';
-import { Sparkles, ChevronDown, ChevronUp, AlertTriangle, Check, X } from 'lucide-react';
+import { Sparkles, ChevronDown, ChevronUp, AlertTriangle, Check, X, Clock } from 'lucide-react';
 import { formatClockMinutes, type Suggestion } from '@/lib/assignment-suggestions';
 import type { AccuracySummary, AccuracySource } from '@/lib/assignment-learning';
 const NOTE_MAX_CHARS = 400;
@@ -165,6 +165,8 @@ function SuggestionsCardImpl({
                 const isDue = nowMin !== null && s.openAt <= nowMin;
                 const isSoon = nowMin !== null && !isDue && s.openAt <= nowMin + SOON_MIN;
                 const applying = applyingKey === key;
+                // Predloženi šalteri su još zauzeti (let se uskoro zatvara) → čekaj zatvaranje.
+                const waiting = s.waitingUntil !== undefined && nowMin !== null && nowMin < s.waitingUntil;
                 return (
                   <div
                     key={key}
@@ -207,6 +209,11 @@ function SuggestionsCardImpl({
                           {isSoon && <span className="text-xs font-semibold text-violet-400">uskoro</span>}
                         </div>
                         <div className={`text-[11px] mt-1 ${isDark ? 'text-white/30' : 'text-gray-400'}`}>{s.reason}</div>
+                        {s.waitNotes.map(n => (
+                          <div key={n} className={`flex items-start gap-1 text-[11px] mt-1 ${isDark ? 'text-violet-300' : 'text-violet-700'}`}>
+                            <Clock size={12} className="mt-0.5 flex-shrink-0" /> <span>{n}</span>
+                          </div>
+                        ))}
                         {s.warnings.map(w => (
                           <div key={w} className="flex items-start gap-1 text-[11px] mt-1 text-amber-500">
                             <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" /> <span>{w}</span>
@@ -215,11 +222,11 @@ function SuggestionsCardImpl({
                       </div>
                       <button
                         type="button"
-                        disabled={busy || s.resources.length === 0}
+                        disabled={busy || waiting || s.resources.length === 0}
                         onClick={() => onApply(s)}
                         className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-violet-400/40 bg-violet-500/15 hover:bg-violet-500/25 text-violet-400 text-xs font-semibold disabled:opacity-40 transition-all active:scale-95"
                       >
-                        {applying ? 'Primjenjujem…' : 'Primijeni'}
+                        {applying ? 'Primjenjujem…' : waiting ? 'Čeka zatvaranje' : 'Primijeni'}
                       </button>
                     </div>
                   </div>

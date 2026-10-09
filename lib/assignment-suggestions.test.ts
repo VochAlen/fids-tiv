@@ -83,7 +83,11 @@ describe('šalteri', () => {
     const conflictFlight = fl({ FlightNumber: 'TK1', ScheduledDepartureTime: '15:34' }); // 15:34 - 120 = 13:34 (=lyEnd+4)
     const okFlight = fl({ FlightNumber: 'TK2', ScheduledDepartureTime: '15:35' }); // 13:35 (=lyEnd+5)
     const r1 = run([a, conflictFlight], { openLeadByIata: { LY: 180, default: 120 } });
-    expect(r1.desks.find(d => d.flightNumber === 'TK1')!.resources).not.toEqual(['10', '11', '12']);
+    // Sada: umjesto da se odbaci, nudi se isti blok "po zatvaranju" LY1 (čeka 1 min + pauza).
+    const tk1 = r1.desks.find(d => d.flightNumber === 'TK1')!;
+    expect(tk1.resources).toEqual(['10', '11', '12']);
+    expect(tk1.waitNotes.join(' ')).toContain('LY1');
+    expect(tk1.openAt).toBe(13 * 60 + 35);
     const r2 = run([a, okFlight], { openLeadByIata: { LY: 180, default: 120 } });
     expect(r2.desks.find(d => d.flightNumber === 'TK2')!.resources).toEqual(['10', '11', '12']);
   });
@@ -284,14 +288,17 @@ describe('v2: dan, zamjena, ograničenja', () => {
     expect(run([LYF], { learned, dow: 2 }).desks[0].resources).not.toContain('3');
   });
 
-  it('naučena zamjena: kad je 4 zauzet, nudi 1 (a ne najbliži 7)', () => {
+  it('naučena zamjena: kad su 4,5,6 zauzeti, nudi naučene 1,2 (susjedni blok), a ne najbliže', () => {
     const f = fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' });
-    const learned = parseLearned({ [fOf(scFb('desk', 'JU', 'W'), '4>1')]: '3' });
+    const learned = parseLearned({
+      [fOf(scFb('desk', 'JU', 'W'), '4>1')]: '3',
+      [fOf(scFb('desk', 'JU', 'W'), '5>2')]: '3',
+    });
     const holder = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' });
-    const busyDesks = { '4': 'XX100', '5': 'XX100' } as Record<string, string>;
+    const busyDesks = { '4': 'XX100', '5': 'XX100', '6': 'XX100' } as Record<string, string>;
     const withFb = run([f, holder], { currentDesks: busyDesks, learned });
     const without = run([f, holder], { currentDesks: busyDesks });
-    expect(withFb.desks[0].resources).toContain('1');
+    expect(withFb.desks[0].resources).toEqual(['1', '2']);
     expect(without.desks[0].resources).not.toContain('1');
   });
 
@@ -337,5 +344,99 @@ describe('v2: završeni letovi se ne nude', () => {
     const r = run([gone, ok]);
     expect(r.desks.map(d => d.flightNumber)).toEqual(['TK1085']);
     expect(r.gates.map(g => g.flightNumber)).toEqual(['TK1085']);
+  });
+});
+
+describe('v2: svi šalteri leta u istom terminalu', () => {
+  const holder = (n: string) => fl({ FlightNumber: n, ScheduledDepartureTime: '14:00' });
+  const T1_OF = (id: string) => Number(id) < 20;
+
+  it('nikad ne miješa T1 i T2 (npr. 7 + 21) kad T1 nema dovoljno slobodnih', () => {
+    // 3 šaltera traži BA; zauzmi sve T1 osim 7 i 8 → ostaje cijeli T2 (3 u nizu), a ne 7+8+21
+    const busy: Record<string, string> = {};
+    ['1','2','3','4','5','6','9','10','11','12'].forEach(d => { busy[d] = 'XX100'; });
+    const ba = fl({ FlightNumber: 'BA1234', ScheduledDepartureTime: '14:00' });
+    const r = run([ba, holder('XX100')], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'BA1234')!;
+    expect(d.resources).toHaveLength(3);
+    expect(new Set(d.resources.map(T1_OF)).size).toBe(1);
+  });
+
+  it('kad T1 ne može dati sve, a T2 može — cijeli let ide u T2; kad nijedan ne može — manje šaltera + upozorenje, ne miješanje', () => {
+    const busyAllButTwo: Record<string, string> = {};
+    ['1','2','3','4','5','6','9','10','11','12','22','23','24','25','26'].forEach(d => { busyAllButTwo[d] = 'XX100'; });
+    // slobodni: 7, 8 (T1) i 21 (T2) → nijedan terminal nema 3
+    const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' }), holder('XX100')], { currentDesks: busyAllButTwo });
+    const d = r.desks.find(x => x.flightNumber === 'LY5111')!;
+    expect(new Set(d.resources.map(T1_OF)).size).toBeLessThanOrEqual(1);
+    expect(d.warnings.join(' ')).toContain('Nema dovoljno');
+  });
+
+  it('naučena zamjena preko terminala se ignoriše', () => {
+    const f = fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' });
+    const learned = parseLearned({ [fOf(scFb('desk', 'JU', 'W'), '4>21')]: '5' });
+    const busy = { '4': 'XX100', '5': 'XX100' } as Record<string, string>;
+    const r = run([f, holder('XX100')], { currentDesks: busy, learned });
+    expect(r.desks.find(x => x.flightNumber === 'JU681')!.resources.every(T1_OF)).toBe(true);
+  });
+});
+
+describe('v2: šalteri su uvijek susjedni (bez rupa)', () => {
+  const holder = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' });
+  it('WK415: slobodni 1,6,7,8 → 6,7 (ne 1,6)', () => {
+    const busy: Record<string, string> = {};
+    ['2','3','4','5','9','10','11','12'].forEach(d => { busy[d] = 'XX100'; });
+    const r = run([fl({ FlightNumber: 'WK415', ScheduledDepartureTime: '14:00' }), holder], { currentDesks: busy });
+    expect(r.desks.find(d => d.flightNumber === 'WK415')!.resources).toEqual(['6', '7']);
+  });
+  it('bazen sa rupom (4,6 slobodni uz 5 zauzet) ne daje 4,6 ako postoji susjedni blok', () => {
+    const f = fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' });
+    const r = run([f, holder], { currentDesks: { '5': 'XX100' } });
+    const res = r.desks.find(d => d.flightNumber === 'JU681')!.resources.map(Number);
+    expect(res[1] - res[0]).toBe(1);
+  });
+  it('3 šaltera: uvijek 3 uzastopna kad postoje (2,3,4 a ne 2,3,5)', () => {
+    const busy = { '1': 'XX100', '5': 'XX100', '6': 'XX100', '7': 'XX100', '8': 'XX100', '9': 'XX100', '10': 'XX100', '11': 'XX100', '12': 'XX100' };
+    const r = run([fl({ FlightNumber: 'U28812', ScheduledDepartureTime: '14:00' }), holder], { currentDesks: busy });
+    expect(r.desks.find(d => d.flightNumber === 'U28812')!.resources).toEqual(['2', '3', '4']);
+  });
+});
+
+describe('v2: "po zatvaranju" — zauzeti šalteri koji se uskoro zatvaraju', () => {
+  // NOW=08:00. XX100 (STD 08:55) drži 1,2,3 i zatvara se u 08:25.
+  const occupant = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '08:55' });
+  const ez = fl({ FlightNumber: 'U28812', ScheduledDepartureTime: '10:00' }); // easyJet, bazen 1–4, otvara 08:00
+
+  it('nudi uobičajene šaltere koji se uskoro oslobađaju, sa porukom "po zatvaranju"', () => {
+    const r = run([occupant, ez], { currentDesks: { '1': 'XX100', '2': 'XX100', '3': 'XX100' } });
+    const d = r.desks.find(x => x.flightNumber === 'U28812')!;
+    expect(d.resources.every(id => ['1', '2', '3', '4'].includes(id))).toBe(true);
+    expect(d.waitNotes.length).toBeGreaterThan(0);
+    expect(d.waitNotes[0]).toContain('XX100');
+    expect(d.waitNotes[0]).toContain('po zatvaranju');
+    expect(d.waitingUntil).toBe(8 * 60 + 30);
+    expect(d.openAt).toBe(8 * 60 + 30);
+  });
+
+  it('ako se zauzeti šalteri zatvaraju tek za >30 min, ne čeka se — nudi se slobodan blok', () => {
+    const late = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '09:30' }); // zatvara 09:00
+    const r = run([late, ez], { currentDesks: { '1': 'XX100', '2': 'XX100', '3': 'XX100' } });
+    const d = r.desks.find(x => x.flightNumber === 'U28812')!;
+    expect(d.waitNotes).toEqual([]);
+    expect(d.resources).not.toContain('1');
+  });
+
+  it('slobodni šalteri iz bazena imaju prednost nad onima koji čekaju (isti bazen)', () => {
+    const r = run([occupant, ez], { currentDesks: { '1': 'XX100' } });
+    const d = r.desks.find(x => x.flightNumber === 'U28812')!;
+    expect(d.resources).toEqual(['2', '3', '4']);
+    expect(d.waitNotes).toEqual([]);
+  });
+
+  it('ručno blokiran ("ne radi") šalter se nikad ne nudi uz čekanje', () => {
+    const c = sanitizeConstraints({ blocked: [{ type: 'desk', id: '1' }] });
+    const r = run([ez], { constraints: c });
+    expect(r.desks[0].resources).not.toContain('1');
+    expect(r.desks[0].waitNotes).toEqual([]);
   });
 });
