@@ -14,7 +14,8 @@ import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NO
 import { useRealtimeAssignments, type AssignmentEntry } from '@/hooks/useRealtimeAssignments';
 import { logoutAndRedirect } from '@/lib/admin-logout';
 import { getPodgoricaMinutesOfDay, getPodgoricaDateString } from '@/lib/night-hours';
-import { computeAssignmentSuggestions, type Suggestion } from '@/lib/assignment-suggestions';
+import { computeAssignmentSuggestions, formatClockMinutes, type Suggestion } from '@/lib/assignment-suggestions';
+import { buildPlanHtml, buildDayFlights, openPlanForPrint } from '@/lib/plan-document';
 import {
   parseLearned, seasonFromDate, dowFromDate, summarizeAccuracy, recentWeekKeys, type LearnedIndex,
 } from '@/lib/assignment-learning';
@@ -22,6 +23,7 @@ import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
+import { parseExamples, trainModel } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { SuggestionsCard } from './SuggestionsCard';
 // ─────────────────────────────────────────────
@@ -1201,6 +1203,7 @@ const assignFlightToResource = useCallback(async (
   const [isSummer, setIsSummer] = useState(false);
   const [learned, setLearned] = useState<LearnedIndex | undefined>(undefined);
   const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
+  const [examplesRaw, setExamplesRaw] = useState<Record<string, string> | null>(null);
   const [todayISO, setTodayISO] = useState<string | null>(null);
   const [constraints, setConstraints] = useState<SuggestionConstraints>(EMPTY_CONSTRAINTS);
   const [noteError, setNoteError] = useState<string | null>(null);
@@ -1238,11 +1241,20 @@ const assignFlightToResource = useCallback(async (
       .then(j => {
         if (cancelled || !j?.data) return;
         setLearnedRaw(j.data as Record<string, string>);
+        setExamplesRaw((j.examples ?? {}) as Record<string, string>);
         setLearned(parseLearned(j.data as Record<string, string>));
       })
       .catch(() => { /* bez učenja važe ručni profili */ });
     return () => { cancelled = true; };
   }, []);
+
+  // Model koji uči iz ručnih dodjela (treniranje u pregledniku, ≈ms; bez troška na serveru).
+  // Prvih 7 dana samo uči; u prijedloge ulazi tek kad dokaže da pogađa bolje od brojača.
+  const models = useMemo(() => {
+    if (!examplesRaw || !todayISO) return null;
+    const ex = parseExamples(examplesRaw);
+    return { desk: trainModel(ex, 'desk', todayISO), gate: trainModel(ex, 'gate', todayISO) };
+  }, [examplesRaw, todayISO]);
 
   const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
 
@@ -1260,8 +1272,9 @@ const assignFlightToResource = useCallback(async (
       learned,
       dow,
       constraints,
+      model: { desk: models?.desk.predictor ?? null, gate: models?.gate.predictor ?? null },
     });
-  }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints]);
+  }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints, models]);
 
   // Zapamti zadnji prijedlog po letu (vidi suggestionSnapshotRef) — samo u effect-u.
   useEffect(() => {
@@ -1289,6 +1302,23 @@ const assignFlightToResource = useCallback(async (
       setNoteError('Nisam prepoznao nijedno pravilo. Primjer: "šalter 12 ne radi do 14:00" ili "LY1234 na 10 i 11".');
     }
   }, []);
+
+  // Štampani plan (PDF): sve što je sistem predložio, za šaltere i gate-ove odjednom.
+  const handleExportPlan = useCallback(() => {
+    if (suggestNowMin === null) return;
+    const [y, m, d] = (todayISO ?? '').split('-');
+    const toMap = (list: Assignment[]) => Object.fromEntries(list.map(a => [a.resourceId, a.flightNumber]));
+    const html = buildPlanHtml({
+      dayFlights: buildDayFlights(flightDataRaw?.departures ?? flights, toMap(checkinAssignments), toMap(gateAssignments), suggestions, suggestNowMin, isSummer),
+      desks: suggestions.desks,
+      gates: suggestions.gates,
+      dateLabel: y && m && d ? `${d}.${m}.${y}.` : '',
+      generatedAt: formatClockMinutes(suggestNowMin),
+      modelText: models ? models.desk.info.text : null,
+      constraints: constraintChips.map(c => c.text),
+    });
+    if (!openPlanForPrint(html)) alert('Štampanje plana nije uspjelo — dozvoli iskačuće prozore za ovu stranicu.');
+  }, [flightDataRaw, flights, checkinAssignments, gateAssignments, isSummer, suggestions, suggestNowMin, todayISO, models, constraintChips]);
 
   const handleClearConstraints = useCallback(() => {
     setConstraints(EMPTY_CONSTRAINTS);
@@ -1948,11 +1978,13 @@ const handleClearAll = useCallback(async () => {
           onApply={handleApplySuggestion}
           onApplyDue={handleApplyDueSuggestions}
           accuracy={accuracyByKind ? (activeTab === 'checkin' ? accuracyByKind.desk : accuracyByKind.gate) : null}
+          modelInfo={models ? (activeTab === 'checkin' ? models.desk.info : models.gate.info) : null}
           chips={constraintChips}
           unparsed={noteUnparsed}
           noteError={noteError}
           onSubmitNote={handleSubmitNote}
           onClearConstraints={handleClearConstraints}
+          onExportPlan={handleExportPlan}
         />
 
         {/* Selected Flight Banner */}

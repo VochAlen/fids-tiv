@@ -103,7 +103,7 @@ export const scopeCount = (level: 'A' | 'F', key: string, season: Season) =>
 /** Naučena zamjena: polja "X>Y" (X = zauzeti uobičajeni resurs, Y = ono što je osoblje izabralo). */
 export const scopeFallback = (kind: LearnKind, iata: string, season: Season) => `fb:${kind}:A:${iata}:${season}`;
 /** Tačnost prijedloga: polja hit | miss | none | applied. */
-export type AccuracySource = 'learned' | 'profile' | 'default' | 'note' | 'none';
+export type AccuracySource = 'learned' | 'profile' | 'default' | 'note' | 'model' | 'none';
 export type AccuracyOutcome = 'hit' | 'miss' | 'none' | 'applied';
 export const scopeAccuracy = (kind: LearnKind, source: AccuracySource, weekKey: string) => `acc:${kind}:${source}:${weekKey}`;
 export const fieldOf = (scope: string, id: string | number) => `${scope}${SEP}${id}`;
@@ -353,7 +353,7 @@ export interface LearningContext {
   suggestionSource?: AccuracySource;
 }
 
-const ACC_SOURCES: AccuracySource[] = ['learned', 'profile', 'default', 'note', 'none'];
+const ACC_SOURCES: AccuracySource[] = ['learned', 'profile', 'default', 'note', 'model', 'none'];
 const idList = (v: unknown): string[] | undefined =>
   Array.isArray(v)
     ? [...new Set(v.filter((x): x is string => typeof x === 'string' && /^\d{1,2}$/.test(x)))].slice(0, 12)

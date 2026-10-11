@@ -64,10 +64,10 @@ describe('šalteri', () => {
     ]);
     expect(r.desks[0].resources).toEqual(['10', '11', '12']);
     expect(r.desks[1].resources).toEqual(['7', '8', '9']);
-    expect(r.desks[1].warnings.some(w => w.includes('zauzeti'))).toBe(true);
+    expect(r.desks[1].warnings.some(w => w.includes('nisu slobodni'))).toBe(true);
   });
 
-  it('isti šalteri se ponovo koriste kad se intervali ne preklapaju (uz pauzu 5 min)', () => {
+  it('isti šalteri se ponovo koriste kad se intervali ne preklapaju (uz pauzu 1 min)', () => {
     // LY 08:30 → check-in 05:30-08:00 (nowMin=08:00 ne smeta, apsolutna vremena); TK 12:00 → 10:00-11:30
     const r = run([
       fl({ FlightNumber: 'LY1', ScheduledDepartureTime: '08:30' }),
@@ -76,18 +76,18 @@ describe('šalteri', () => {
     expect(r.desks.find(d => d.flightNumber === 'TK1')!.resources).toEqual(['10', '11', '12']);
   });
 
-  it('pauza: interval koji počinje unutar 5 min poslije zatvaranja je konflikt, a tačno 5 min poslije nije', () => {
+  it('pauza: interval koji počinje prije isteka pauze (1 min) poslije zatvaranja je konflikt, a tačno 1 min poslije nije', () => {
     // LY zatvara u 14:00-30 = 13:30. TK sa lead 120 počinje 14:00-120... koristimo lead da dobijemo start.
     const a = fl({ FlightNumber: 'LY1', ScheduledDepartureTime: '14:00' });
-    // TK start = lyEnd + 4 → konflikt; start = lyEnd + 5 → slobodno
-    const conflictFlight = fl({ FlightNumber: 'TK1', ScheduledDepartureTime: '15:34' }); // 15:34 - 120 = 13:34 (=lyEnd+4)
-    const okFlight = fl({ FlightNumber: 'TK2', ScheduledDepartureTime: '15:35' }); // 13:35 (=lyEnd+5)
+    // TK start = lyEnd → konflikt; start = lyEnd + 1 → slobodno
+    const conflictFlight = fl({ FlightNumber: 'TK1', ScheduledDepartureTime: '15:30' }); // 15:30 - 120 = 13:30 (=lyEnd)
+    const okFlight = fl({ FlightNumber: 'TK2', ScheduledDepartureTime: '15:31' }); // 13:31 (=lyEnd+1)
     const r1 = run([a, conflictFlight], { openLeadByIata: { LY: 180, default: 120 } });
     // Sada: umjesto da se odbaci, nudi se isti blok "po zatvaranju" LY1 (čeka 1 min + pauza).
     const tk1 = r1.desks.find(d => d.flightNumber === 'TK1')!;
     expect(tk1.resources).toEqual(['10', '11', '12']);
     expect(tk1.waitNotes.join(' ')).toContain('LY1');
-    expect(tk1.openAt).toBe(13 * 60 + 35);
+    expect(tk1.openAt).toBe(13 * 60 + 31);
     const r2 = run([a, okFlight], { openLeadByIata: { LY: 180, default: 120 } });
     expect(r2.desks.find(d => d.flightNumber === 'TK2')!.resources).toEqual(['10', '11', '12']);
   });
@@ -166,7 +166,7 @@ describe('gate-ovi', () => {
     );
     r.gates = r.gates.filter(g => g.flightNumber === 'LY1');
     expect(r.gates[0].resources).toHaveLength(1);
-    expect(r.gates[0].warnings.some(w => w.includes('zauzeti'))).toBe(true);
+    expect(r.gates[0].warnings.some(w => w.includes('nisu slobodni'))).toBe(true);
   });
 });
 
@@ -352,14 +352,18 @@ describe('v2: svi šalteri leta u istom terminalu', () => {
   const T1_OF = (id: string) => Number(id) < 20;
 
   it('nikad ne miješa T1 i T2 (npr. 7 + 21) kad T1 nema dovoljno slobodnih', () => {
-    // 3 šaltera traži BA; zauzmi sve T1 osim 7 i 8 → ostaje cijeli T2 (3 u nizu), a ne 7+8+21
+    // 3 šaltera traži BA; zauzmi sve T1 osim 7 i 8. Zimi (T2 obično ne radi): 7,8 u T1 (makar 2 umjesto 3).
+    // Kad osoblje javi "T2 radi": cijeli T2 (3 u nizu), nikad 7+8+21.
     const busy: Record<string, string> = {};
     ['1','2','3','4','5','6','9','10','11','12'].forEach(d => { busy[d] = 'XX100'; });
     const ba = fl({ FlightNumber: 'BA1234', ScheduledDepartureTime: '14:00' });
     const r = run([ba, holder('XX100')], { currentDesks: busy });
     const d = r.desks.find(x => x.flightNumber === 'BA1234')!;
-    expect(d.resources).toHaveLength(3);
-    expect(new Set(d.resources.map(T1_OF)).size).toBe(1);
+    expect(d.resources).toEqual(['7', '8']);
+    const t2 = run([ba, holder('XX100')], { currentDesks: busy, constraints: { blocked: [], pins: [], counts: [], t2: true } });
+    const d2 = t2.desks.find(x => x.flightNumber === 'BA1234')!;
+    expect(d2.resources).toHaveLength(3);
+    expect(new Set(d2.resources.map(T1_OF)).size).toBe(1);
   });
 
   it('kad T1 ne može dati sve, a T2 može — cijeli let ide u T2; kad nijedan ne može — manje šaltera + upozorenje, ne miješanje', () => {
@@ -403,7 +407,7 @@ describe('v2: šalteri su uvijek susjedni (bez rupa)', () => {
 });
 
 describe('v2: "po zatvaranju" — zauzeti šalteri koji se uskoro zatvaraju', () => {
-  // NOW=08:00. XX100 (STD 08:55) drži 1,2,3 i zatvara se u 08:25.
+  // NOW=08:00. XX100 (STD 08:55) drži 1,2,3 i zatvara se u 08:25 (+1 min pauze = 08:26).
   const occupant = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '08:55' });
   const ez = fl({ FlightNumber: 'U28812', ScheduledDepartureTime: '10:00' }); // easyJet, bazen 1–4, otvara 08:00
 
@@ -414,8 +418,8 @@ describe('v2: "po zatvaranju" — zauzeti šalteri koji se uskoro zatvaraju', ()
     expect(d.waitNotes.length).toBeGreaterThan(0);
     expect(d.waitNotes[0]).toContain('XX100');
     expect(d.waitNotes[0]).toContain('po zatvaranju');
-    expect(d.waitingUntil).toBe(8 * 60 + 30);
-    expect(d.openAt).toBe(8 * 60 + 30);
+    expect(d.waitingUntil).toBe(8 * 60 + 26);
+    expect(d.openAt).toBe(8 * 60 + 26);
   });
 
   it('ako se zauzeti šalteri zatvaraju tek za >30 min, ne čeka se — nudi se slobodan blok', () => {
@@ -438,5 +442,189 @@ describe('v2: "po zatvaranju" — zauzeti šalteri koji se uskoro zatvaraju', ()
     const r = run([ez], { constraints: c });
     expect(r.desks[0].resources).not.toContain('1');
     expect(r.desks[0].waitNotes).toEqual([]);
+  });
+});
+
+describe('v3: naučeni model utiče na prijedlog (samo kad je aktivan)', () => {
+  const f = fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' });
+  it('bez modela: uobičajeni izbor; sa modelom: šalteri koje model favorizuje, source=model', () => {
+    const base = run([f], { dow: 2 });
+    const favored = (ctx: { flight: string }) => {
+      void ctx;
+      const o: Record<string, number> = {};
+      for (let i = 1; i <= 12; i++) o[String(i)] = i === 9 || i === 10 ? 0.4 : 0.01;
+      return o;
+    };
+    const m = run([f], { dow: 2, model: { desk: favored } });
+    const d = m.desks.find(x => x.flightNumber === 'JU681')!;
+    expect(d.resources).toEqual(['9', '10']);
+    expect(d.source).toBe('model');
+    expect(base.desks.find(x => x.flightNumber === 'JU681')!.source).not.toBe('model');
+  });
+  it('model ne smije predložiti zauzet šalter ni miješati terminale', () => {
+    const holder = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' });
+    const o: Record<string, number> = { '9': 0.5, '10': 0.4, '21': 0.45 };
+    const m = run([f, holder], { dow: 2, currentDesks: { '9': 'XX100' }, model: { desk: () => o } });
+    const res = m.desks.find(x => x.flightNumber === 'JU681')!.resources;
+    expect(res).not.toContain('9');
+    expect(new Set(res.map(r => (Number(r) >= 21 ? 'T2' : 'T1'))).size).toBe(1);
+  });
+});
+
+describe('v4: planiranje redoslijeda (optimizeOrder)', () => {
+  const mk = (flightNumber: string) => ({ flightNumber } as unknown as import('./assignment-suggestions').Suggestion);
+  it('prihvata zamjenu samo ako strogo smanjuje cijenu i vraća izvorni (vremenski) redoslijed', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    // Cijena: 0 samo ako B ide PRIJE A; inače 1000.
+    const plan = (order: string[]) => ({
+      items: order.map(mk),
+      cost: order.indexOf('B') < order.indexOf('A') ? 0 : 1000,
+    });
+    const out = optimizeOrder(['A', 'B', 'C'], plan, x => x);
+    expect(out.map(s => s.flightNumber)).toEqual(['A', 'B', 'C']); // prikaz ostaje po vremenu
+    let evals = 0;
+    const counting = (order: string[]) => { evals++; return plan(order); };
+    optimizeOrder(['A', 'B', 'C'], counting, x => x);
+    expect(evals).toBeGreaterThan(1);
+    expect(evals).toBeLessThanOrEqual(80);
+  });
+  it('ako je plan već savršen (cijena 0) ne traži dalje', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    let evals = 0;
+    optimizeOrder(['A', 'B'], o => { evals++; return { items: o.map(mk), cost: 0 }; }, x => x);
+    expect(evals).toBe(1);
+  });
+});
+
+describe('v5: upozorenja imenuju tačno ono što je zauzeto + plan bez rupa/drugog terminala', () => {
+  const mkf = (fn: string, t: string, air = 'X') => fl({ FlightNumber: fn, AirlineName: air, ScheduledDepartureTime: t });
+  it('upozorenje ne tvrdi da je cijeli bazen zauzet: navodi samo zauzete i ko ih drži', () => {
+    // LY (bazen 10,11,12) — 12 blokiran napomenom, 10 i 11 slobodni → poruka pominje samo 12.
+    const r = run([mkf('LY5111', '10:20', 'El Al')], {
+      constraints: { blocked: [{ type: 'desk', id: '12' }], pins: [], counts: [] },
+    });
+    const d = r.desks[0];
+    const msg = d.warnings.join(' ');
+    if (msg) {
+      expect(msg).toContain('12');
+      expect(msg).toContain('ne radi');
+      expect(msg).not.toMatch(/\b10\b.*zauzet/);
+    }
+  });
+  it('upozorenje navodi let koji drži šalter', () => {
+    const holder = mkf('XX100', '14:00');
+    const r = run([mkf('U28812', '10:00', 'easyJet'), holder], { currentDesks: { '1': 'XX100', '2': 'XX100', '3': 'XX100', '4': 'XX100' } });
+    const d = r.desks.find(x => x.flightNumber === 'U28812')!;
+    expect(d.warnings.join(' ')).toContain('XX100');
+  });
+  it('pretraga redoslijeda ne šalje let u drugi terminal niti pravi rupe kad to nije potrebno', () => {
+    const list = [
+      mkf('WK415', '09:40', 'Edelweiss'), mkf('U28812', '10:00', 'easyJet'), mkf('LY5111', '10:20', 'El Al'),
+      mkf('TK1062', '10:45', 'Turkish Airlines'), mkf('BA2631', '11:15', 'British Airways'),
+    ];
+    const r = run(list, { dow: 0, currentDesks: { '1': 'JU680', '2': 'JU680', '3': 'JU680' }, constraints: { blocked: [{ type: 'desk', id: '12', fromMin: 0, toMin: 840 }], pins: [], counts: [] } });
+    for (const d of r.desks) {
+      const nums = d.resources.map(Number);
+      expect(new Set(nums.map(n => (n >= 20 ? 'T2' : 'T1'))).size).toBe(1);
+      expect(Math.max(...nums) - Math.min(...nums)).toBe(nums.length - 1); // bez rupa
+    }
+  });
+});
+
+describe('v5: vrijeme otvaranja iz settings.ini ([checkin])', () => {
+  it('koristi minute po kompaniji, pa prefiks broja leta, pa default', () => {
+    const f = (fn: string, code?: string) => fl({ FlightNumber: fn, AirlineCode: code, ScheduledDepartureTime: '14:00' });
+    const open = (fn: string, code?: string) =>
+      run([f(fn, code)], { openLeadByIata: { LY: 180, BA: 150, default: 120 } }).desks[0].openAt;
+    expect(open('LY5111', 'LY')).toBe(14 * 60 - 180);
+    expect(open('BA2631', 'BAW')).toBe(14 * 60 - 150); // AirlineCode troslovni → prefiks leta
+    expect(open('XX100', 'XX')).toBe(14 * 60 - 120);   // nepoznata kompanija → default
+  });
+});
+
+describe('v6: zimi prvenstveno T1, gate u istom terminalu kao šalteri', () => {
+  const f = (fn: string, t: string, air = 'X') => fl({ FlightNumber: fn, AirlineName: air, ScheduledDepartureTime: t });
+  it('zimi opšti let ide u T1 čak i kad optimizacija "štedi" na drugim letovima', () => {
+    const list = ['A1', 'B2', 'C3', 'D4', 'E5', 'F6'].map((n, i) => f(`${n}10${i}`, `1${i}:00`));
+    const r = run(list, { summer: false });
+    for (const d of r.desks) expect(d.resources.every(id => Number(id) <= 12)).toBe(true);
+    for (const g of r.gates) expect(g.resources.every(id => Number(id) <= 6)).toBe(true);
+  });
+  it('T2 se koristi kad T1 ne može (svih 12 šaltera zauzeto)', () => {
+    const holder = f('XX100', '16:00');
+    const busy: Record<string, string> = {};
+    for (let i = 1; i <= 12; i++) busy[String(i)] = 'XX100';
+    const r = run([f('YY200', '14:00'), holder], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'YY200')!;
+    expect(d.resources.length).toBeGreaterThan(0);
+    expect(d.resources.every(id => Number(id) >= 21)).toBe(true);
+  });
+  it('gate prati terminal šaltera: šalteri u T2 → gate u T2; T1 → gate u T1', () => {
+    const holder = f('XX100', '16:00');
+    const busy: Record<string, string> = {};
+    for (let i = 1; i <= 12; i++) busy[String(i)] = 'XX100';
+    const t2 = run([f('YY200', '14:00'), holder], { currentDesks: busy });
+    expect(t2.gates.find(g => g.flightNumber === 'YY200')!.resources.every(id => Number(id) >= 21)).toBe(true);
+    const t1 = run([f('YY200', '14:00')]);
+    expect(t1.gates[0].resources.every(id => Number(id) <= 6)).toBe(true);
+  });
+  it('napomena "T2 radi" ukida zimsko pravilo (T2 se smije birati)', () => {
+    const c = sanitizeConstraints({ t2: true });
+    expect(c.t2).toBe(true);
+  });
+  it('ljeti pravilo ne važi: Sundor/El Al i dalje u T2', () => {
+    const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' })], { summer: true });
+    expect(r.desks[0].resources.every(id => Number(id) >= 21)).toBe(true);
+  });
+});
+
+
+describe('v7: samo uzastopni šalteri; easyJet standardno 2', () => {
+  const f = (fn: string, t: string, air = 'X') => fl({ FlightNumber: fn, AirlineName: air, ScheduledDepartureTime: t });
+  const holder = f('XX100', '16:00');
+  const consecutive = (ids: string[]) => {
+    const n = ids.map(Number).sort((a, b) => a - b);
+    return n.every((v, i) => i === 0 || v === n[i - 1] + 1);
+  };
+
+  it('LY5468: slobodni su samo 1, 4 i 12 → ne predlaže 1,4,12 nego jedan šalter', () => {
+    const busy: Record<string, string> = {};
+    ['2', '3', '5', '6', '7', '8', '9', '10', '11'].forEach(d => { busy[d] = 'XX100'; });
+    // T2 blokiran (zimi ionako nije u upotrebi), T1 ima samo 1, 4, 12 slobodno
+    const blocked = ['21', '22', '23', '24', '25', '26'].map(id => ({ type: 'desk' as const, id }));
+    const r = run([f('LY5468', '14:00', 'El Al'), holder], { currentDesks: busy, constraints: { blocked, pins: [], counts: [] } });
+    const d = r.desks.find(x => x.flightNumber === 'LY5468')!;
+    expect(consecutive(d.resources)).toBe(true);
+    expect(d.resources.length).toBe(1);
+    expect(d.warnings.join(' ')).toContain('Nema dovoljno');
+  });
+
+  it('nema 3 uzastopna ali ima 2 → daje 2 (makar 2 umjesto 3)', () => {
+    const busy: Record<string, string> = {};
+    ['1', '2', '3', '5', '6', '9', '10', '11', '12'].forEach(d => { busy[d] = 'XX100'; });
+    const blocked = ['21', '22', '23', '24', '25', '26'].map(id => ({ type: 'desk' as const, id }));
+    const r = run([f('LY5468', '14:00', 'El Al'), holder], { currentDesks: busy, constraints: { blocked, pins: [], counts: [] } });
+    const d = r.desks.find(x => x.flightNumber === 'LY5468')!;
+    expect(d.resources).toEqual(['7', '8']); // slobodni 4, 7, 8 → jedini uzastopni par
+  });
+
+  it('svi prijedlozi u većem rasporedu su uzastopni brojevi', () => {
+    const list = ['LY5468', 'TK1062', 'BA2631', 'U28812', 'JU680', 'WK415', '4O201'].map((n, i) => f(n, `${10 + i}:30`, n.slice(0, 2)));
+    const r = run(list, { dow: 1 });
+    for (const d of r.desks) expect(consecutive(d.resources)).toBe(true);
+  });
+
+  it('easyJet je standardno na 2 šaltera kad je gužva, a na 3 kad ima dosta slobodnih', () => {
+    const quiet = run([f('U28812', '10:00', 'easyJet')]);
+    expect(quiet.desks[0].resources).toHaveLength(3);
+    // gužva: sedam drugih letova istovremeno (default 2 šaltera svaki) → easyJet ostaje na 2
+    const busyList = [f('U28812', '10:00', 'easyJet'), ...['AA1', 'BB2', 'CC3', 'DD4'].map((n, i) => f(`${n}0${i}`, '10:05'))];
+    const crowded = run(busyList);
+    expect(crowded.desks.find(d => d.flightNumber === 'U28812')!.resources).toHaveLength(2);
+  });
+
+  it('naučen/ručno zadan broj šaltera za easyJet se ne mijenja pravilom', () => {
+    const r = run([f('U28812', '10:00', 'easyJet')], { constraints: { blocked: [], pins: [], counts: [{ flight: 'U28812', count: 2 }] } });
+    expect(r.desks[0].resources).toHaveLength(2);
   });
 });

@@ -36,3 +36,22 @@ describe('parseSuggestionNote', () => {
     expect(parseSuggestionNote('ZZ999 na 10', FL).unparsed).toEqual(['ZZ999 na 10']);
   });
 });
+
+describe('terminal u napomeni', () => {
+  it('"T1 ne radi do 14:00" blokira sve šaltere i gate-ove T1 do tada', () => {
+    const r = parseSuggestionNote('T1 ne radi do 14:00');
+    const desks = r.constraints.blocked.filter(b => b.type === 'desk');
+    const gates = r.constraints.blocked.filter(b => b.type === 'gate');
+    expect(desks.map(b => b.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']);
+    expect(gates.map(b => b.id)).toEqual(['2', '3', '4', '5', '6']);
+    expect(desks[0].toMin).toBe(14 * 60);
+    expect(r.unparsed).toEqual([]);
+  });
+  it('"radovi u terminalu 1" blokira T1; "T2 radi" postavlja t2', () => {
+    expect(parseSuggestionNote('radovi u terminalu 1').constraints.blocked.length).toBe(17);
+    const r = parseSuggestionNote('T2 radi');
+    expect(r.constraints.t2).toBe(true);
+    expect(r.constraints.blocked).toEqual([]);
+    expect(r.unparsed).toEqual([]);
+  });
+});

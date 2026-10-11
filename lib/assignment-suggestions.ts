@@ -40,6 +40,7 @@ import {
   type LearnedIndex, type LearnedPool, type Season, type AccuracySource,
 } from '@/lib/assignment-learning';
 import type { SuggestionConstraints } from '@/lib/suggestion-constraints';
+import type { Predictor, PredictCtx } from '@/lib/assignment-model';
 
 export const DESKS = [
   ...Array.from({ length: 12 }, (_, i) => String(i + 1)),
@@ -52,8 +53,8 @@ export function deskTerminal(id: string): 'T1' | 'T2' {
   return Number(id) >= 20 ? 'T2' : 'T1';
 }
 
-/** Zadana pauza (min) između dva leta na istom šalteru/gate-u. Do 5 min. */
-export const DEFAULT_TURNOVER_MIN = 5;
+/** Zadana pauza (min) između dva leta na istom šalteru/gate-u. Podrazumijevano 1 min (u praksi, naročito ljeti, šalter se predaje odmah). */
+export const DEFAULT_TURNOVER_MIN = 1;
 /** Check-in se zatvara ovoliko minuta prije polaska. */
 export const CHECKIN_CLOSE_BEFORE_MIN = 30;
 /** Gate je zauzet ovoliko minuta prije polaska (boarding prozor). */
@@ -79,7 +80,7 @@ export const AIRLINE_PROFILES: AirlineProfile[] = [
   // ISRAIR: 3 šaltera; uobičajeni šalteri nisu navedeni → isti kao Sundor/El Al.
   // Gate: nije navedeno → opšti raspored.
   { id: 'israir',      label: 'Israir',         deskCount: 3, deskPool: ['10', '11', '12'], gatePool: [] },
-  { id: 'easyjet',     label: 'easyJet',        deskCount: 3, deskPool: ['1', '2', '3', '4'], gatePool: ['5', '6'] },
+  { id: 'easyjet',     label: 'easyJet',        deskCount: 2, deskPool: ['1', '2', '3', '4'], gatePool: ['5', '6'] },
   // British Airways: UVIJEK 3 šaltera u rasponu 7–12.
   { id: 'british-airways', label: 'British Airways', deskCount: 3, deskPool: ['7', '8', '9', '10', '11', '12'], gatePool: [] },
   { id: 'norwegian',   label: 'Norwegian',      deskCount: 2, deskPool: [], gatePool: ['5', '6'] },
@@ -88,6 +89,8 @@ export const AIRLINE_PROFILES: AirlineProfile[] = [
   { id: 'air-montenegro', label: 'Air Montenegro', deskCount: 2, deskPool: ['4', '5', '6', '7'], gatePool: ['2', '3', '4'] },
 ];
 
+/** easyJet je obično na 2 šaltera; 3 samo kad ima dosta slobodnih (vidi EASYJET_EXTRA_*). */
+export const EASYJET_EXTRA_DESK_MAX_DEMAND = 6;
 /** Ljeti (1.6.–1.10.) ove kompanije su uobičajeno u Terminalu 2. */
 const SUMMER_T2_PROFILE_IDS = ['sundor-elal', 'israir'];
 const T2_DESKS = ['21', '22', '23', '24', '25', '26'];
@@ -134,6 +137,8 @@ export interface SuggestionInput {
   dow?: number;
   /** Ograničenja iz slobodnog teksta (LLM sloj, već sanitizirana). */
   constraints?: SuggestionConstraints;
+  /** Naučeni model (lib/assignment-model.ts) — SAMO kad je aktivan (dokazano bolji od brojača). */
+  model?: { desk?: Predictor | null; gate?: Predictor | null };
 }
 
 export interface Suggestion {
@@ -228,7 +233,7 @@ export function getAirlineProfile(f: SuggestionFlight, summer = false): AirlineP
 interface Interval { start: number; end: number; /** let koji drži resurs (za poruku "po zatvaranju X") */ flight?: string }
 
 /** Najduže čekanje (min) da se zauzet šalter oslobodi da bi se još nudio ("po zatvaranju"). */
-export const MAX_WAIT_MIN = 15;
+export const MAX_WAIT_MIN = 30;
 /** Nakon čekanja check-in mora trajati bar ovoliko minuta, inače čekanje nema smisla. */
 export const MIN_OPEN_WINDOW_MIN = 45;
 
@@ -257,6 +262,14 @@ function isFree(busy: Interval[] | undefined, iv: Interval, buf: number): boolea
   return !busy || !busy.some(b => conflicts(iv, b, buf));
 }
 
+/** Najduži niz uzastopnih brojeva među zadatim resursima (npr. 1,2,3,7,8 → 3). */
+function longestRun(ids: string[]): number {
+  const nums = ids.map(Number).sort((a, b) => a - b);
+  let best = 0, cur = 0;
+  nums.forEach((n, i) => { cur = i > 0 && n === nums[i - 1] + 1 ? cur + 1 : 1; best = Math.max(best, cur); });
+  return best;
+}
+
 function pickResources(
   count: number,
   pool: string[],
@@ -266,6 +279,7 @@ function pickResources(
   buf: number,
   fallback: Record<string, Record<string, number>> = {},
   allowWait = false,
+  model?: Record<string, number>,
 ): { picked: string[]; fromPool: number; fromFallback: number } {
   const free = (id: string) => isFree(busy.get(id), iv, buf);
   // "Iskoristiv": slobodan odmah ili (ako je dozvoljeno) uskoro slobodan — vidi availability().
@@ -277,19 +291,20 @@ function pickResources(
   const poolIds = pool.filter(id => universe.includes(id));
   let picked: string[] = [];
 
-  // ── VIŠE RESURSA: uvijek SUSJEDNI blok (npr. 2,3 — nikad 2,5 ili 1,6) ──────────
-  // Prozor od `count` uzastopnih SLOBODNIH resursa (po broju). Redoslijed odluke:
-  //   1) najmanja "rupa" u nizu (susjedni blok je uvijek bolji od rasutog),
-  //   2) najviše uobičajenih (bazen) / naučenih zamjena u bloku,
-  //   3) bolji prioritet u bazenu, 4) blizina uobičajenim šalterima, 5) niži broj.
-  // Samo ako nema ni jednog bloka (fragmentirano), uzima se najkompaktniji mogući.
+  // ── MODEL (ako je aktivan): jedan resurs = najvjerovatniji iskoristiv ──────────
+  if (model && count === 1) {
+    const cand = universe.filter(usable).sort((a, b) => (model[b] ?? 0) - (model[a] ?? 0));
+    if (cand.length) return { picked: [cand[0]], fromPool: 1, fromFallback: 0 };
+  }
+
+  // ── VIŠE RESURSA: SAMO uzastopni brojevi (npr. 2,3,4 — nikad 1,4,12 ni 2,5) ───────
+  // Traži se blok od `count` uzastopnih SLOBODNIH resursa; ako ga nema, traži se blok
+  // od count−1, pa count−2 ... (makar 2 umjesto 3). Tek ako nema ni 2 uzastopna — jedan.
+  // Redoslijed odluke među blokovima: model, najviše uobičajenih (bazen) / naučenih zamjena,
+  // manje čekanja, bolji prioritet u bazenu, blizina uobičajenim, niži broj.
   if (count > 1) {
     const num = (id: string) => Number(id);
     const freeList = universe.filter(usable).sort((x, y) => num(x) - num(y));
-    if (freeList.length <= count) {
-      const all = freeList.slice(0, count);
-      return { picked: all, fromPool: all.filter(id => poolIds.includes(id)).length, fromFallback: 0 };
-    }
     // Zamjene za ZAUZETE uobičajene: najčešće biran slobodan Y ima težinu kao uobičajeni.
     const fbTargets = new Set<string>();
     for (const x of poolIds) {
@@ -301,28 +316,35 @@ function pickResources(
       if (y) fbTargets.add(y);
     }
     const anchors = poolIds.map(num);
-    let best: { w: string[]; gap: number; pref: number; wait: number; prio: number; dist: number } | null = null;
-    for (let i = 0; i + count <= freeList.length; i++) {
-      const w = freeList.slice(i, i + count);
-      const gap = (num(w[w.length - 1]) - num(w[0])) - (count - 1);
-      const pref = w.filter(id => poolIds.includes(id) || fbTargets.has(id)).length;
-      const wait = w.reduce((sum, id) => sum + (free(id) ? 0 : waitOf(id)), 0);
-      const prio = w.reduce((sum, id) => sum + (poolIds.includes(id) ? poolIds.indexOf(id) : poolIds.length + 1), 0);
-      const dist = anchors.length ? w.reduce((sum, id) => sum + Math.min(...anchors.map(a => Math.abs(num(id) - a))), 0) : 0;
-      const better = !best
-        || gap < best.gap
-        || (gap === best.gap && (pref > best.pref
-          || (pref === best.pref && (wait < best.wait
-            || (wait === best.wait && (prio < best.prio
-              || (prio === best.prio && dist < best.dist)))))));
-      if (better) best = { w, gap, pref, wait, prio, dist };
+    for (let k = count; k >= 2; k--) {
+      let best: { w: string[]; mp: number; pref: number; wait: number; prio: number; dist: number } | null = null;
+      for (let i = 0; i + k <= freeList.length; i++) {
+        const w = freeList.slice(i, i + k);
+        if (!w.every((id, j) => j === 0 || num(id) === num(w[j - 1]) + 1)) continue; // samo uzastopni
+        const pref = w.filter(id => poolIds.includes(id) || fbTargets.has(id)).length;
+        const wait = w.reduce((sum, id) => sum + (free(id) ? 0 : waitOf(id)), 0);
+        const mp = model ? w.reduce((sum, id) => sum + (model[id] ?? 0), 0) : 0;
+        const prio = w.reduce((sum, id) => sum + (poolIds.includes(id) ? poolIds.indexOf(id) : poolIds.length + 1), 0);
+        const dist = anchors.length ? w.reduce((sum, id) => sum + Math.min(...anchors.map(a => Math.abs(num(id) - a))), 0) : 0;
+        const better = !best
+          || mp > best.mp + 1e-9
+          || (Math.abs(mp - best.mp) <= 1e-9 && (pref > best.pref
+            || (pref === best.pref && (wait < best.wait
+              || (wait === best.wait && (prio < best.prio
+                || (prio === best.prio && dist < best.dist)))))));
+        if (better) best = { w, mp, pref, wait, prio, dist };
+      }
+      if (best) {
+        const w = best.w;
+        return {
+          picked: w,
+          fromPool: model ? w.length : w.filter(id => poolIds.includes(id)).length,
+          fromFallback: w.filter(id => !poolIds.includes(id) && fbTargets.has(id)).length,
+        };
+      }
     }
-    const w = best!.w;
-    return {
-      picked: w,
-      fromPool: w.filter(id => poolIds.includes(id)).length,
-      fromFallback: w.filter(id => !poolIds.includes(id) && fbTargets.has(id)).length,
-    };
+    // Nema ni 2 uzastopna slobodna → jedan resurs (običnim postupkom ispod).
+    return pickResources(1, pool, universe, busy, iv, buf, fallback, allowWait, model);
   }
 
   // 1) Najbolji SUSJEDNI blok od `count` slobodnih iz bazena (npr. 10,11,12 umjesto 10,12,21).
@@ -373,7 +395,93 @@ function pickResources(
   return { picked, fromPool, fromFallback };
 }
 
-// ── Glavna funkcija ─────────────────────────────────────────────────────
+// ── Planiranje cijelog rasporeda ────────────────────────────────────────
+function cloneBusy(m: Map<string, Interval[]>): Map<string, Interval[]> {
+  return new Map([...m].map(([k, v]) => [k, v.map(x => ({ ...x }))]));
+}
+
+/** Zašto uobičajeni resursi nisu slobodni: "10, 11 (TK1062); 12 (ne radi)". Prazno ako su svi slobodni. */
+function busyReason(ids: string[], busy: Map<string, Interval[]>, iv: Interval, buf: number): string {
+  const byHolder = new Map<string, string[]>();
+  for (const id of ids) {
+    const clash = (busy.get(id) ?? []).filter(b => conflicts(iv, b, buf));
+    if (!clash.length) continue;
+    const holder = [...new Set(clash.map(b => b.flight ?? 'ne radi / blokiran'))].join(', ');
+    byHolder.set(holder, [...(byHolder.get(holder) ?? []), id]);
+  }
+  return [...byHolder].map(([h, list]) => `${list.join(', ')} (${h})`).join('; ');
+}
+
+/**
+ * Ocjena jednog prijedloga (manje = bolje). Nedostajući resursi >> drugi terminal >> rupe u nizu
+ * >> udaljenost od uobičajenih >> zamjene >> čekanje. (Bez ovoga bi pretraga redoslijeda mogla
+ * "uštedjeti" na jednom letu tako što drugom pošalje šaltere iz drugog terminala ili sa rupom.)
+ */
+function planCost(s: Suggestion, wanted: number, winterT1 = false): number {
+  const shortage = Math.max(wanted - s.resources.length, 0);
+  const offPool = s.pool.length ? s.resources.filter(id => !s.pool.includes(id)).length : 0;
+  // Manje šaltera od traženih je prihvatljivo (2 umjesto 3), ali bez ijednog je loše.
+  let cost = shortage * 120 + (s.resources.length === 0 ? 1000 : 0) + offPool * 15 + (s.waitNotes.length ? 25 : 0) + s.warnings.length;
+  if (s.type === 'desk' && s.resources.length) {
+    const nums = s.resources.map(Number).sort((x, y) => x - y);
+    cost += ((nums[nums.length - 1] - nums[0]) - (nums.length - 1)) * 30; // rupe u nizu
+    const chosenT = deskTerminal(s.resources[0]);
+    const poolT = s.pool.length ? deskTerminal(s.pool[0]) : 'T1';
+    if (chosenT !== poolT) {
+      // Zimi (oktobar–april) T2 obično ne radi: T2 samo kad T1 ne može (nijedan šalter = 1000 je skuplji).
+      cost += winterT1 && chosenT === 'T2' ? 200 : s.pool.length ? 60 : 10;
+    }
+    if (s.pool.length) {
+      const anchors = s.pool.map(Number);
+      cost += nums.reduce((sum, n) => sum + Math.min(...anchors.map(a => Math.abs(n - a))), 0) * 2; // udaljenost
+    }
+  } else if (s.type === 'gate' && winterT1 && s.resources.length && deskTerminal(s.resources[0]) === 'T2') {
+    cost += 50;
+  }
+  return cost;
+}
+
+/** Najveći broj probnih planova (svaki je jeftin — par stotina izbora resursa). */
+const MAX_PLAN_EVALS = 80;
+/** Koliko mjesta unaprijed se razmjenjuje redoslijed (letovi blizu u vremenu). */
+const SWAP_REACH = 4;
+
+/**
+ * Pohlepni plan zavisi od REDOSLIJEDA letova. Počinje se redom po vremenu otvaranja, a zatim
+ * se probaju zamjene susjednih letova; zadržava se samo ona koja strogo smanjuje ukupnu cijenu.
+ * Rezultat se vraća u izvornom (vremenskom) redoslijedu da prikaz ostane stabilan.
+ */
+export function optimizeOrder<T>(
+  base: T[],
+  plan: (order: T[]) => { items: Suggestion[]; cost: number },
+  keyOf: (t: T) => string,
+): Suggestion[] {
+  let order = [...base];
+  let best = plan(order);
+  let evals = 1;
+  let improved = best.cost > 0;
+  while (improved && evals < MAX_PLAN_EVALS) {
+    improved = false;
+    for (let i = 0; i < order.length && evals < MAX_PLAN_EVALS; i++) {
+      for (let j = i + 1; j < Math.min(order.length, i + 1 + SWAP_REACH) && evals < MAX_PLAN_EVALS; j++) {
+        const cand = [...order];
+        [cand[i], cand[j]] = [cand[j], cand[i]];
+        const r = plan(cand);
+        evals++;
+        if (r.cost < best.cost - 1e-9) { order = cand; best = r; improved = true; }
+      }
+    }
+  }
+  const idx = new Map(base.map((t, i) => [keyOf(t), i]));
+  return [...best.items].sort((a, b) => (idx.get(a.flightNumber) ?? 0) - (idx.get(b.flightNumber) ?? 0));
+}
+
+function modelReason(model: Predictor, ctx: PredictCtx, picked: string[]): string {
+  const why = model.explain?.(ctx, picked);
+  return why ? `Model (jer: ${why}); ` : 'Model (naučen iz ručnih dodjela); ';
+}
+
+// ── Glavna funkcija ──
 export function computeAssignmentSuggestions(input: SuggestionInput): SuggestionResult {
   const { flights, currentDesks, currentGates, nowMin } = input;
   const buf = input.turnoverMin ?? DEFAULT_TURNOVER_MIN;
@@ -381,6 +489,8 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
   const summer = !!input.summer;
   const season: Season = summer ? 'S' : 'W';
   const learned = input.learned;
+  /** Oktobar–april: T2 obično ne radi → prvenstveno T1 (osim kad T1 ne može ili osoblje napiše "T2 radi"). */
+  const winterT1 = !summer && !input.constraints?.t2;
 
   // Pripremi izvedene vrijednosti po letu.
   interface Prep {
@@ -391,6 +501,8 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
     deskIv: Interval;
     gateIv: Interval;
     deskCount: number;
+    /** Broj šaltera je određen naučeno/napomenom (ne mijenja se pravilom). */
+    deskCountFixed: boolean;
     deskPool: string[];
     gatePool: string[];
     deskSource: string; // opis izvora (profil / naučeno)
@@ -415,8 +527,11 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
     const effAbs = etdAbs > stdAbs && etdAbs - stdAbs < 720 ? etdAbs : stdAbs;
 
     const profile = getAirlineProfile(f, summer);
+    // settings.ini [checkin]: ključ je IATA kod. Prvo kod iz podatka o letu, pa prefiks broja leta
+    // (AirlineCode može biti drugačiji, npr. troslovni), pa 'default', pa 120.
     const iata = (f.AirlineCode || f.FlightNumber.slice(0, 2)).toUpperCase();
-    const openLead = lead[iata] ?? lead['default'] ?? DEFAULT_CHECKIN_OPEN_MIN;
+    const prefix = f.FlightNumber.slice(0, 2).toUpperCase();
+    const openLead = lead[iata] ?? lead[prefix] ?? lead['default'] ?? DEFAULT_CHECKIN_OPEN_MIN;
 
     // ── Broj šaltera: naučeno (let) → jedno odredište (KVO) → naučeno (kompanija) → profil.
     const single = SINGLE_DESK_DESTINATIONS[profile.id]?.includes((f.DestinationAirportCode || '').toUpperCase());
@@ -442,6 +557,7 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
       deskIv: { start: stdAbs - openLead, end: effAbs - CHECKIN_CLOSE_BEFORE_MIN },
       gateIv: { start: effAbs - GATE_OPEN_BEFORE_MIN, end: effAbs },
       deskCount,
+      deskCountFixed: !!lc || !!forced || !!single,
       deskPool: ld ? ld.pool : profile.deskPool,
       gatePool: lg ? lg.pool : profile.gatePool,
       deskSource: ld ? `naučeno ${lvl(ld.level)}, ${ld.samples} dodjela` : profile.label,
@@ -453,7 +569,19 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
     });
   }
 
+  // easyJet: standardno 2 šaltera; 3 samo kad je malo istovremenih letova (ima dosta slobodnih).
+  // Naučen broj (iz ručnih dodjela) i napomena osoblja imaju prednost i ne diraju se.
+  const baseCount = new Map(preps.map(p => [p.f.FlightNumber, p.deskCount]));
+  for (const p of preps) {
+    if (p.profile.id !== 'easyjet' || p.deskCountFixed) continue;
+    const demand = preps
+      .filter(o => o !== p && o.deskIv.start < p.deskIv.end && p.deskIv.start < o.deskIv.end)
+      .reduce((sum, o) => sum + (baseCount.get(o.f.FlightNumber) ?? 2), 0);
+    if (demand <= EASYJET_EXTRA_DESK_MAX_DEMAND) p.deskCount = 3;
+  }
+
   const byFlight = new Map(preps.map(p => [p.f.FlightNumber, p]));
+  const deskCountOf = new Map(preps.map(p => [p.f.FlightNumber, p.deskCount]));
 
   // Zauzetost iz POSTOJEĆIH dodjela (nikad se ne mijenjaju).
   const busyDesks = new Map<string, Interval[]>();
@@ -474,7 +602,7 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
   for (const [id, fn] of Object.entries(currentGates)) {
     hasGate.add(fn);
     const p = byFlight.get(fn);
-    addBusy(busyGates, id, p ? { start: Math.min(p.gateIv.start, nowMin), end: p.gateIv.end } : { start: nowMin, end: nowMin + 30 });
+    addBusy(busyGates, id, p ? { start: Math.min(p.gateIv.start, nowMin), end: p.gateIv.end, flight: fn } : { start: nowMin, end: nowMin + 30, flight: fn });
   }
 
   // Ograničenja iz teksta: resurs "ne radi" = zauzet u zadanom intervalu.
@@ -498,88 +626,117 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
     .filter(p => p.stdAbs - CHECKIN_CLOSE_BEFORE_MIN > nowMin)
     .sort((a, b) => a.deskIv.start - b.deskIv.start || b.deskCount - a.deskCount);
 
-  for (const p of deskOrder) {
-    // Pin iz napomene: traženi šalteri idu prvi (ako su slobodni), ostatak običnim postupkom.
-    const pinned = pinFor('desk', p.f.FlightNumber)
-      .filter(id => isFree(busyDesks.get(id), p.deskIv, buf)).slice(0, Math.max(p.deskCount, 1));
-    const pinRequested = pinFor('desk', p.f.FlightNumber);
-    for (const id of pinned) addBusy(busyDesks, id, p.deskIv);
-    const need = Math.max(p.deskCount - pinned.length, 0);
-    // ISTI TERMINAL: svi šalteri jednog leta moraju biti u istom terminalu (nikad 7 + 21).
-    // Terminal bira: pin (ako ga ima) → inače onaj u kojem se može dobiti najviše traženih
-    // slobodnih šaltera → pa onaj u kojem su uobičajeni šalteri leta.
-    const freeDesk = (id: string) => availability(busyDesks.get(id), p.deskIv, buf).ok;
-    const terminals: Array<'T1' | 'T2'> = ['T1', 'T2'];
-    const firstPoolTerminal = p.deskPool.length ? deskTerminal(p.deskPool[0]) : 'T1';
-    const terminal: 'T1' | 'T2' = pinned.length
-      ? deskTerminal(pinned[0])
-      : [...terminals].sort((a, b) => {
-          const score = (t: 'T1' | 'T2') => ({
-            fit: Math.min(need, DESKS.filter(id => deskTerminal(id) === t && freeDesk(id)).length),
-            pool: p.deskPool.filter(id => deskTerminal(id) === t && freeDesk(id)).length,
-            first: t === firstPoolTerminal ? 1 : 0,
-          });
-          const sa = score(a), sb = score(b);
-          return sb.fit - sa.fit || sb.pool - sa.pool || sb.first - sa.first;
-        })[0];
-    const inTerminal = (id: string) => deskTerminal(id) === terminal;
-    const termFallback: Record<string, Record<string, number>> = {};
-    for (const [x, ys] of Object.entries(p.deskFallback)) {
-      if (!inTerminal(x)) continue;
-      const kept = Object.fromEntries(Object.entries(ys).filter(([y]) => inTerminal(y)));
-      if (Object.keys(kept).length) termFallback[x] = kept;
+  /** Jedan prolaz planiranja šaltera zadatim REDOSLIJEDOM letova (na kopiji zauzetosti). */
+  const planDesks = (order: Prep[]): { items: Suggestion[]; cost: number } => {
+    const bd = cloneBusy(busyDesks);
+    const items: Suggestion[] = [];
+    for (const p of order) {
+      // Pin iz napomene: traženi šalteri idu prvi (ako su slobodni), ostatak običnim postupkom.
+      const pinned = pinFor('desk', p.f.FlightNumber)
+        .filter(id => isFree(bd.get(id), p.deskIv, buf)).slice(0, Math.max(p.deskCount, 1));
+      const pinRequested = pinFor('desk', p.f.FlightNumber);
+      for (const id of pinned) addBusy(bd, id, { ...p.deskIv, flight: p.f.FlightNumber });
+      const need = Math.max(p.deskCount - pinned.length, 0);
+      // ISTI TERMINAL: svi šalteri jednog leta moraju biti u istom terminalu (nikad 7 + 21).
+      // Terminal bira: pin (ako ga ima) → inače onaj u kojem se može dobiti najviše traženih
+      // slobodnih šaltera → pa onaj u kojem su uobičajeni šalteri leta.
+      const freeDesk = (id: string) => availability(bd.get(id), p.deskIv, buf).ok;
+      // Model (samo ako je aktivan): vjerovatnoće po šalteru za ovaj let, uz već otvorene šaltere tog leta.
+      const deskCtx: PredictCtx | null = input.model?.desk && input.dow !== undefined
+        ? {
+            flight: p.f.FlightNumber, dow: input.dow,
+            chosenSoFar: Object.entries(currentDesks).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
+            minute: ((p.deskIv.start % 1440) + 1440) % 1440,
+            busyCount: DESKS.filter(id => (bd.get(id) ?? []).some(b => b.start <= p.deskIv.start && p.deskIv.start < b.end)).length,
+          }
+        : null;
+      const deskModel = deskCtx ? input.model!.desk!(deskCtx) : undefined;
+      const terminals: Array<'T1' | 'T2'> = ['T1', 'T2'];
+      const firstPoolTerminal = p.deskPool.length ? deskTerminal(p.deskPool[0]) : 'T1';
+      const t1Run = longestRun(DESKS.filter(id => deskTerminal(id) === 'T1' && freeDesk(id)));
+      const preferT1 = winterT1 && need > 0 && t1Run >= Math.min(need, 2) && (!p.deskPool.length || firstPoolTerminal === 'T1');
+      const terminal: 'T1' | 'T2' = pinned.length
+        ? deskTerminal(pinned[0])
+        : preferT1 ? 'T1'
+        : [...terminals].sort((a, b) => {
+            const score = (t: 'T1' | 'T2') => ({
+              fit: Math.min(need, longestRun(DESKS.filter(id => deskTerminal(id) === t && freeDesk(id)))),
+              mass: deskModel ? DESKS.filter(id => deskTerminal(id) === t && freeDesk(id)).reduce((s, id) => s + (deskModel[id] ?? 0), 0) : 0,
+              pool: p.deskPool.filter(id => deskTerminal(id) === t && freeDesk(id)).length,
+              first: t === firstPoolTerminal ? 1 : 0,
+            });
+            const sa = score(a), sb = score(b);
+            return sb.fit - sa.fit || sb.mass - sa.mass || sb.pool - sa.pool || sb.first - sa.first;
+          })[0];
+      const inTerminal = (id: string) => deskTerminal(id) === terminal;
+      const termFallback: Record<string, Record<string, number>> = {};
+      for (const [x, ys] of Object.entries(p.deskFallback)) {
+        if (!inTerminal(x)) continue;
+        const kept = Object.fromEntries(Object.entries(ys).filter(([y]) => inTerminal(y)));
+        if (Object.keys(kept).length) termFallback[x] = kept;
+      }
+      const rest = need > 0
+        ? pickResources(need, p.deskPool.filter(inTerminal), DESKS.filter(inTerminal), bd, p.deskIv, buf, termFallback, true, deskModel)
+        : { picked: [] as string[], fromPool: 0, fromFallback: 0 };
+      const picked = [...pinned, ...rest.picked].sort((a, b) => DESKS.indexOf(a) - DESKS.indexOf(b));
+      const fromPool = rest.fromPool + pinned.length;
+      const fromFallback = rest.fromFallback;
+      const warnings: string[] = [];
+      if (pinRequested.length && pinned.length < pinRequested.length) {
+        warnings.push(`Traženi šalteri (${pinRequested.join(', ')}) nisu svi slobodni u tom intervalu.`);
+      }
+      if (picked.length < p.deskCount) {
+        warnings.push(`Nema dovoljno uzastopnih slobodnih šaltera (${picked.length} od ${p.deskCount}) — predloženo koliko ih je moguće u nizu.`);
+      }
+      if (p.deskPool.length && picked.length && fromPool + fromFallback < picked.length) {
+        // Samo ono što STVARNO nije slobodno (a ne cijeli bazen) i ko ga drži.
+        const why = busyReason(p.deskPool.filter(id => !picked.includes(id)), bd, p.deskIv, buf);
+        if (why) warnings.push(`Uobičajeni šalteri nisu slobodni: ${why} — predložen najbliži blok bez rupa.`);
+      }
+      // "Po zatvaranju": predloženi šalteri koji su još zauzeti letom što se uskoro zatvara.
+      const waitGroups = new Map<string, { by: string[]; ids: string[]; until: number }>();
+      let waitingUntil: number | undefined;
+      for (const id of picked) {
+        const a = availability(bd.get(id), p.deskIv, buf);
+        if (!a.ok || a.by.length === 0) continue;
+        const key = a.by.join('+');
+        const g = waitGroups.get(key) ?? { by: a.by, ids: [], until: 0 };
+        g.ids.push(id); g.until = Math.max(g.until, a.until);
+        waitGroups.set(key, g);
+        waitingUntil = Math.max(waitingUntil ?? 0, a.until);
+      }
+      const waitNotes = [...waitGroups.values()].map(g =>
+        `Kad se zatvori ${g.by.join(', ')} na ${g.ids.join(', ')} (oko ${formatClockMinutes(g.until)}) → otvori ${p.f.FlightNumber} na ${g.ids.join(', ')} po zatvaranju ${g.by.join(', ')}.`);
+      const openAt = Math.max(p.deskIv.start, waitingUntil ?? p.deskIv.start);
+      for (const id of rest.picked) addBusy(bd, id, { start: openAt, end: p.deskIv.end, flight: p.f.FlightNumber });
+      items.push({
+        type: 'desk',
+        flightNumber: p.f.FlightNumber,
+        airlineLabel: p.profile.label,
+        destination: p.f.DestinationCityName || p.f.DestinationAirportCode || '',
+        std: formatClockMinutes(p.stdAbs),
+        resources: picked,
+        source: pinned.length ? 'note' : deskModel ? 'model' : p.deskKind,
+        pool: p.deskPool,
+        openAt,
+        closeAt: p.deskIv.end,
+        waitingUntil,
+        waitNotes,
+        reason: (pinned.length ? 'Po napomeni osoblja; ' : deskModel ? modelReason(input.model!.desk!, deskCtx!, picked) : '') + (p.deskPool.length
+          ? `${p.deskSource}: uobičajeno ${p.deskPool.join(', ')}; ${plural(p.deskCount)}`
+          : `Opšti raspored: ${plural(p.deskCount)}`) + (fromFallback ? '; zamjena po naučenom' : ''),
+        warnings,
+      });
     }
-    const rest = need > 0
-      ? pickResources(need, p.deskPool.filter(inTerminal), DESKS.filter(inTerminal), busyDesks, p.deskIv, buf, termFallback, true)
-      : { picked: [] as string[], fromPool: 0, fromFallback: 0 };
-    const picked = [...pinned, ...rest.picked].sort((a, b) => DESKS.indexOf(a) - DESKS.indexOf(b));
-    const fromPool = rest.fromPool + pinned.length;
-    const fromFallback = rest.fromFallback;
-    const warnings: string[] = [];
-    if (pinRequested.length && pinned.length < pinRequested.length) {
-      warnings.push(`Traženi šalteri (${pinRequested.join(', ')}) nisu svi slobodni u tom intervalu.`);
-    }
-    if (picked.length < p.deskCount) {
-      warnings.push(`Nema dovoljno slobodnih šaltera (${picked.length} od ${p.deskCount}).`);
-    }
-    if (p.deskPool.length && picked.length && fromPool + fromFallback < picked.length) {
-      warnings.push(`Uobičajeni šalteri (${p.deskPool.join(', ')}) su zauzeti — predloženi najbliži slobodni.`);
-    }
-    // "Po zatvaranju": predloženi šalteri koji su još zauzeti letom što se uskoro zatvara.
-    const waitGroups = new Map<string, { by: string[]; ids: string[]; until: number }>();
-    let waitingUntil: number | undefined;
-    for (const id of picked) {
-      const a = availability(busyDesks.get(id), p.deskIv, buf);
-      if (!a.ok || a.by.length === 0) continue;
-      const key = a.by.join('+');
-      const g = waitGroups.get(key) ?? { by: a.by, ids: [], until: 0 };
-      g.ids.push(id); g.until = Math.max(g.until, a.until);
-      waitGroups.set(key, g);
-      waitingUntil = Math.max(waitingUntil ?? 0, a.until);
-    }
-    const waitNotes = [...waitGroups.values()].map(g =>
-      `Kad se zatvori ${g.by.join(', ')} na ${g.ids.join(', ')} (oko ${formatClockMinutes(g.until)}) → otvori ${p.f.FlightNumber} na ${g.ids.join(', ')} po zatvaranju ${g.by.join(', ')}.`);
-    const openAt = Math.max(p.deskIv.start, waitingUntil ?? p.deskIv.start);
-    for (const id of rest.picked) addBusy(busyDesks, id, { start: openAt, end: p.deskIv.end, flight: p.f.FlightNumber });
-    desks.push({
-      type: 'desk',
-      flightNumber: p.f.FlightNumber,
-      airlineLabel: p.profile.label,
-      destination: p.f.DestinationCityName || p.f.DestinationAirportCode || '',
-      std: formatClockMinutes(p.stdAbs),
-      resources: picked,
-      source: pinned.length ? 'note' : p.deskKind,
-      pool: p.deskPool,
-      openAt,
-      closeAt: p.deskIv.end,
-      waitingUntil,
-      waitNotes,
-      reason: (pinned.length ? 'Po napomeni osoblja; ' : '') + (p.deskPool.length
-        ? `${p.deskSource}: uobičajeno ${p.deskPool.join(', ')}; ${plural(p.deskCount)}`
-        : `Opšti raspored: ${plural(p.deskCount)}`) + (fromFallback ? '; zamjena po naučenom' : ''),
-      warnings,
-    });
-  }
+    return { items, cost: items.reduce((c, it) => c + planCost(it, deskCountOf.get(it.flightNumber) ?? 1, winterT1), 0) };
+  };
+  const deskPlan = optimizeOrder(deskOrder, planDesks, f => f.f.FlightNumber);
+  desks.push(...deskPlan);
+
+  // Gate ide u ISTI terminal kao šalteri tog leta (putnici se ne vode iz T2 u gate u T1).
+  const deskTermOf = new Map<string, 'T1' | 'T2'>();
+  for (const [id, fn] of Object.entries(currentDesks)) deskTermOf.set(fn, deskTerminal(id));
+  for (const it of desks) if (it.resources.length) deskTermOf.set(it.flightNumber, deskTerminal(it.resources[0]));
 
   // ── Gate-ovi ───────────────────────────────────────────────────────
   const gateOrder = preps
@@ -588,38 +745,66 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
     .filter(p => p.effAbs > nowMin)
     .sort((a, b) => a.gateIv.start - b.gateIv.start);
 
-  for (const p of gateOrder) {
-    const gatePin = pinFor('gate', p.f.FlightNumber);
-    const pinnedGate = gatePin.find(id => isFree(busyGates.get(id), p.gateIv, buf));
-    const gr = pinnedGate
-      ? { picked: [pinnedGate], fromPool: 1, fromFallback: 0 }
-      : pickResources(1, p.gatePool, GATES, busyGates, p.gateIv, buf, p.gateFallback);
-    const { picked, fromPool, fromFallback } = gr;
-    const warnings: string[] = [];
-    if (gatePin.length && !pinnedGate) warnings.push(`Traženi gate (${gatePin.join(', ')}) nije slobodan u tom intervalu.`);
-    if (!picked.length) warnings.push('Nema slobodnog gate-a u tom intervalu.');
-    if (p.gatePool.length && picked.length && fromPool === 0 && fromFallback === 0) {
-      warnings.push(`Uobičajeni gate-ovi (${p.gatePool.join(', ')}) su zauzeti.`);
+  const planGates = (order: Prep[]): { items: Suggestion[]; cost: number } => {
+    const bg = cloneBusy(busyGates);
+    const items: Suggestion[] = [];
+    for (const p of order) {
+      const gatePin = pinFor('gate', p.f.FlightNumber);
+      const gateCtx: PredictCtx | null = input.model?.gate && input.dow !== undefined
+        ? {
+            flight: p.f.FlightNumber, dow: input.dow,
+            chosenSoFar: Object.entries(currentGates).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
+            minute: ((p.gateIv.start % 1440) + 1440) % 1440,
+            busyCount: GATES.filter(id => (bg.get(id) ?? []).some(b => b.start <= p.gateIv.start && p.gateIv.start < b.end)).length,
+          }
+        : null;
+      const gateModel = gateCtx ? input.model!.gate!(gateCtx) : undefined;
+      const pinnedGate = gatePin.find(id => isFree(bg.get(id), p.gateIv, buf));
+      const deskT = deskTermOf.get(p.f.FlightNumber);
+      // Bez šaltera leta: zimi prvo T1 gate-ovi (osim kad je uobičajeni gate leta u T2).
+      let wantT: 'T1' | 'T2' | undefined = deskT ?? (winterT1 ? 'T1' : undefined);
+      // Uobičajeni (profil/naučeni) gate-ovi leta su u drugom terminalu → poštuj naviku osoblja.
+      if (wantT && p.gatePool.length && deskTerminal(p.gatePool[0]) !== wantT) wantT = undefined;
+      const inT = (id: string) => !wantT || deskTerminal(id) === wantT;
+      let gr = pinnedGate
+        ? { picked: [pinnedGate], fromPool: 1, fromFallback: 0 }
+        : pickResources(1, p.gatePool.filter(inT), GATES.filter(inT), bg, p.gateIv, buf, p.gateFallback, false, gateModel);
+      let otherTerminal = false;
+      if (!pinnedGate && wantT && !gr.picked.length) {
+        gr = pickResources(1, p.gatePool, GATES, bg, p.gateIv, buf, p.gateFallback, false, gateModel);
+        otherTerminal = gr.picked.length > 0 && !!deskT;
+      }
+      const { picked, fromPool, fromFallback } = gr;
+      const warnings: string[] = [];
+      if (gatePin.length && !pinnedGate) warnings.push(`Traženi gate (${gatePin.join(', ')}) nije slobodan u tom intervalu.`);
+      if (!picked.length) warnings.push('Nema slobodnog gate-a u tom intervalu.');
+      if (otherTerminal) warnings.push(`Nema slobodnog gate-a u ${deskT} (gdje su šalteri) — predložen gate u drugom terminalu.`);
+      if (p.gatePool.length && picked.length && fromPool === 0 && fromFallback === 0) {
+        const why = busyReason(p.gatePool, bg, p.gateIv, buf);
+        if (why) warnings.push(`Uobičajeni gate-ovi nisu slobodni: ${why}.`);
+      }
+      for (const id of picked) addBusy(bg, id, { ...p.gateIv, flight: p.f.FlightNumber });
+      items.push({
+        type: 'gate',
+        flightNumber: p.f.FlightNumber,
+        airlineLabel: p.profile.label,
+        destination: p.f.DestinationCityName || p.f.DestinationAirportCode || '',
+        std: formatClockMinutes(p.stdAbs),
+        resources: picked,
+        source: pinnedGate ? 'note' : gateModel ? 'model' : p.gateKind,
+        pool: p.gatePool,
+        waitNotes: [],
+        openAt: p.gateIv.start,
+        closeAt: p.gateIv.end,
+        reason: (pinnedGate ? 'Po napomeni osoblja; ' : gateModel ? modelReason(input.model!.gate!, gateCtx!, picked) : '') + (p.gatePool.length
+          ? `${p.gateSource}: uobičajeno gate ${p.gatePool.slice(0, 6).join(', ')}`
+          : 'Opšti raspored') + (fromFallback ? '; zamjena po naučenom' : ''),
+        warnings,
+      });
     }
-    for (const id of picked) addBusy(busyGates, id, p.gateIv);
-    gates.push({
-      type: 'gate',
-      flightNumber: p.f.FlightNumber,
-      airlineLabel: p.profile.label,
-      destination: p.f.DestinationCityName || p.f.DestinationAirportCode || '',
-      std: formatClockMinutes(p.stdAbs),
-      resources: picked,
-      source: pinnedGate ? 'note' : p.gateKind,
-      pool: p.gatePool,
-      waitNotes: [],
-      openAt: p.gateIv.start,
-      closeAt: p.gateIv.end,
-      reason: (pinnedGate ? 'Po napomeni osoblja; ' : '') + (p.gatePool.length
-        ? `${p.gateSource}: uobičajeno gate ${p.gatePool.slice(0, 6).join(', ')}`
-        : 'Opšti raspored') + (fromFallback ? '; zamjena po naučenom' : ''),
-      warnings,
-    });
-  }
+    return { items, cost: items.reduce((c, it) => c + planCost(it, 1, winterT1), 0) };
+  };
+  gates.push(...optimizeOrder(gateOrder, planGates, f => f.f.FlightNumber));
 
   return { desks, gates };
 }

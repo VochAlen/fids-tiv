@@ -325,10 +325,12 @@ export async function POST(request: Request) {
     // otvaranja istog resursa za isti let).
     let learnEligible = false;
     let busyPreferred: string[] = [];
+    let busyIds: string[] = [];
     const learnCtx = sanitizeLearningContext(body);
     const result = await mutateAll((all) => {
       learnEligible = false;
       busyPreferred = [];
+      busyIds = [];
       const existingEntry = (all as unknown as Record<string, ResourceEntry>)[gateNumber];
       const now = Date.now();
       // NOVO — odlučivačka logika sad dolazi iz lib/resource-mutations.ts.
@@ -344,6 +346,10 @@ export async function POST(request: Request) {
         const sameAsBefore = existingEntry?.status === 'open' && existingEntry.flightNumber === flightNumber;
         if (!sameAsBefore) {
           learnEligible = true;
+          // Šta drže DRUGI letovi u ovom trenutku — primjer za model (lib/assignment-model.ts).
+          busyIds = Object.entries(all as unknown as Record<string, ResourceEntry>)
+            .filter(([id, e]) => id !== gateNumber && e?.status === 'open' && e.flightNumber !== flightNumber)
+            .map(([id]) => id);
           // Koji su uobičajeni resursi bili zauzeti DRUGIM letom (naučena zamjena).
           busyPreferred = (learnCtx.preferredPool ?? []).filter(id => {
             const e = (all as unknown as Record<string, ResourceEntry>)[id];
@@ -403,6 +409,7 @@ export async function POST(request: Request) {
         flightNumber,
         fromSuggestion: body.source === 'suggestion',
         busyPreferred,
+        busyIds,
         context: learnCtx,
       }));
     }

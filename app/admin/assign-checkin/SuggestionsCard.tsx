@@ -8,9 +8,10 @@
 'use client';
 
 import { memo, useMemo, useState } from 'react';
-import { Sparkles, ChevronDown, ChevronUp, AlertTriangle, Check, X, Clock } from 'lucide-react';
+import { Sparkles, ChevronDown, ChevronUp, AlertTriangle, Check, X, Clock, FileText } from 'lucide-react';
 import { formatClockMinutes, type Suggestion } from '@/lib/assignment-suggestions';
 import type { AccuracySummary, AccuracySource } from '@/lib/assignment-learning';
+import { TRAIN_DAYS, type ModelInfo } from '@/lib/assignment-model';
 const NOTE_MAX_CHARS = 400;
 
 /** Koliko unaprijed (min) prijedlog smatramo "uskoro na redu". */
@@ -29,21 +30,25 @@ interface Props {
   onApplyDue: (list: Suggestion[]) => void;
   /** Tačnost prijedloga (zadnje sedmice) za ovaj tip, ili null dok se ne učita. */
   accuracy: AccuracySummary | null;
+  /** Stanje modela koji uči iz ručnih dodjela (uči / u sjeni / aktivan) ili null dok se ne učita. */
+  modelInfo: ModelInfo | null;
   /** Pročitana ograničenja iz napomena (čipovi) + dijelovi teksta koji nisu pretvoreni. */
   chips: Array<{ key: string; text: string }>;
   unparsed: string[];
   noteError: string | null;
   onSubmitNote: (text: string) => void;
   onClearConstraints: () => void;
+  /** Otvara štampani plan (šalteri + gate-ovi) → "Sačuvaj kao PDF". */
+  onExportPlan: () => void;
 }
 
 const SOURCE_LABEL: Record<AccuracySource, string> = {
-  learned: 'naučeno', profile: 'profil', default: 'opšti raspored', note: 'napomena', none: 'bez prijedloga',
+  learned: 'naučeno', profile: 'profil', default: 'opšti raspored', note: 'napomena', model: 'model', none: 'bez prijedloga',
 };
 
 function SuggestionsCardImpl({
   type, suggestions, nowMin, isDark, applyingKey, onApply, onApplyDue,
-  accuracy, chips, unparsed, noteError, onSubmitNote, onClearConstraints,
+  accuracy, modelInfo, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
 }: Props) {
   const [note, setNote] = useState('');
   // Zatvoren po zadanom — korisnik ga otvara klikom (po zahtjevu).
@@ -82,6 +87,21 @@ function SuggestionsCardImpl({
           <span className={`text-xs ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
             prijedlog {label} ({sorted.length})
           </span>
+          {modelInfo && (
+            <span
+              className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                modelInfo.phase === 'learning'
+                  ? 'bg-violet-500/20 text-violet-400 animate-pulse'
+                  : modelInfo.phase === 'active'
+                    ? 'bg-emerald-500/20 text-emerald-500'
+                    : isDark ? 'bg-white/10 text-white/50' : 'bg-gray-200 text-gray-600'
+              }`}
+            >
+              {modelInfo.phase === 'learning'
+                ? `Model uči · dan ${modelInfo.day}/${TRAIN_DAYS}`
+                : modelInfo.phase === 'active' ? 'Model aktivan' : 'Model u sjeni'}
+            </span>
+          )}
           {due.length > 0 && (
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-500">
               {due.length} na redu
@@ -97,6 +117,32 @@ function SuggestionsCardImpl({
             Prijedlog se računa iz navika kompanija, vremena otvaranja i trenutnih dodjela. Ništa se ne
             primjenjuje samo — potvrđuješ ti. Postojeće dodjele se ne mijenjaju.
           </p>
+
+          {modelInfo && (
+            <div className={`mb-3 rounded-xl px-3 py-2 text-xs border ${
+              modelInfo.phase === 'learning'
+                ? isDark ? 'bg-violet-500/10 border-violet-400/30 text-violet-200' : 'bg-violet-100 border-violet-300 text-violet-800'
+                : modelInfo.phase === 'active'
+                  ? isDark ? 'bg-emerald-500/10 border-emerald-400/30 text-emerald-200' : 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                  : isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-gray-50 border-gray-200 text-gray-600'
+            }`}>
+              {modelInfo.text}
+            </div>
+          )}
+
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <span className={`text-[11px] ${isDark ? 'text-white/40' : 'text-gray-500'}`}>
+              Štampani plan: šalteri, gate-ovi i raspored zauzetosti (u prozoru za štampu izaberi „Sačuvaj kao PDF“).
+            </span>
+            <button
+              type="button"
+              onClick={onExportPlan}
+              disabled={sorted.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-violet-400/40 bg-violet-500/15 hover:bg-violet-500/25 text-violet-400 text-xs font-semibold disabled:opacity-40 transition-all active:scale-95 whitespace-nowrap"
+            >
+              <FileText size={14} /> PDF plan
+            </button>
+          </div>
 
           {/* Napomena osoblja → ograničenja (jedan AI poziv po kliku) */}
           <div className="mb-3">
@@ -139,7 +185,7 @@ function SuggestionsCardImpl({
               </div>
             )}
             <p className={`text-[10px] mt-1 ${isDark ? 'text-white/25' : 'text-gray-400'}`}>
-              Napomene važe dok ne osvježiš stranicu. Primjeri: „šalter 12 ne radi do 14:00“, „gate 5 u kvaru“, „LY1234 na 10 i 11“, „LY1234 2 šaltera“.
+              Napomene važe dok ne osvježiš stranicu. Primjeri: „šalter 12 ne radi do 14:00“, „gate 5 u kvaru“, „LY1234 na 10 i 11“, „LY1234 2 šaltera“, „T1 ne radi do 14:00“, „T2 radi“ (zimi se prvenstveno koristi T1).
             </p>
           </div>
 

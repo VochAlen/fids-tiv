@@ -35,15 +35,17 @@ export interface SuggestionConstraints {
   blocked: BlockedResource[];
   pins: PinnedFlight[];
   counts: CountOverride[];
+  /** "T2 radi": ukida zimsko pravilo "prvenstveno T1" (T2 je u upotrebi). */
+  t2?: boolean;
 }
 
 export const EMPTY_CONSTRAINTS: SuggestionConstraints = { blocked: [], pins: [], counts: [] };
 
-export const MAX_CONSTRAINT_ITEMS = 20;
+export const MAX_CONSTRAINT_ITEMS = 40; // "T1 ne radi" = svi šalteri + gate-ovi terminala
 const FLIGHT_RE = /^[A-Z0-9]{2}\d{1,4}[A-Z]?$/;
 
 export const isEmptyConstraints = (c: SuggestionConstraints | undefined | null): boolean =>
-  !c || (c.blocked.length === 0 && c.pins.length === 0 && c.counts.length === 0);
+  !c || (c.blocked.length === 0 && c.pins.length === 0 && c.counts.length === 0 && !c.t2);
 
 const universeOf = (t: ResourceType) => (t === 'desk' ? DESKS : GATES);
 
@@ -112,6 +114,7 @@ export function sanitizeConstraints(raw: unknown, knownFlights?: string[]): Sugg
       out.counts.push({ flight, count });
     }
   }
+  if (r.t2 === true) out.t2 = true;
   return out;
 }
 
@@ -123,6 +126,7 @@ export function mergeConstraints(a: SuggestionConstraints, b: SuggestionConstrai
     blocked: uniq([...a.blocked, ...b.blocked]),
     pins: uniq([...a.pins, ...b.pins]),
     counts: uniq([...a.counts, ...b.counts]),
+    ...(a.t2 || b.t2 ? { t2: true } : {}),
   };
 }
 
@@ -137,6 +141,7 @@ export function describeConstraints(c: SuggestionConstraints): Array<{ key: stri
     out.push({ key: `b${i}`, text: `${noun(b.type)} ${b.id} ne radi${when}` });
   });
   c.pins.forEach((p, i) => out.push({ key: `p${i}`, text: `${p.flight}: ${noun(p.type)} ${p.resources.join(', ')}` }));
+  if (c.t2) out.push({ key: 't2', text: 'T2 u upotrebi (ukinuto "prvenstveno T1")' });
   c.counts.forEach((n, i) => out.push({ key: `c${i}`, text: `${n.flight}: ${n.count} šalter${n.count === 1 ? '' : 'a'}` }));
   return out;
 }
