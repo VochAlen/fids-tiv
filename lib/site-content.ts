@@ -71,6 +71,10 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
       a: 'Yes. It is the system that runs flight information at Tivat Airport every day, 24/7, including an automatic night mode when there are no flights.',
     },
     {
+      q: 'Can it suggest which check-in desks and gates to open?',
+      a: 'Yes. The admin panel proposes desks and gates for every flight: it respects each airline’s check-in opening time, avoids overlaps (with a short turnover pause), keeps a flight’s desks consecutive and in one terminal, and prefers Terminal 1 in winter. It learns from staff’s manual assignments, and staff can steer it with plain-text notes such as “desk 3 is out of order” or “T1 is closed”. Every plan is independently checked for conflicts before it is shown, and can be exported as a printable A4 PDF plan. It runs on the airport’s own data and needs no paid AI service.',
+    },
+    {
       q: 'Which languages are supported?',
       a: 'Displays and announcements work in English and the local language. Additional languages are available on request.',
     },
@@ -103,6 +107,10 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
     {
       q: 'Da li se već koristi u produkciji?',
       a: 'Da. To je sistem koji svakodnevno, 24/7, vodi informacije o letovima na Aerodromu Tivat, uključujući automatski noćni režim kada nema letova.',
+    },
+    {
+      q: 'Može li sistem predložiti koje check-in šaltere i gate-ove otvoriti?',
+      a: 'Da. Admin panel predlaže šaltere i gate-ove za svaki let: poštuje vrijeme otvaranja check-ina svake kompanije, izbjegava preklapanja (uz kratku pauzu između letova), drži šaltere jednog leta uzastopno i u istom terminalu, a zimi daje prednost Terminalu 1. Uči iz ručnih dodjela osoblja, a osoblje ga može usmjeravati običnim tekstom, npr. „šalter 3 ne radi“ ili „T1 ne radi“. Svaki plan se prije prikaza nezavisno provjerava na konflikte i može se izvesti kao štampani A4 PDF plan. Radi na podacima samog aerodroma i ne treba plaćenu AI uslugu.',
     },
     {
       q: 'Koji jezici su podržani?',

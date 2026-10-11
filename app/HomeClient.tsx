@@ -17,6 +17,14 @@
 // podržavao — components/demo/*, lib/demo-flights.ts) su obrisane.
 // Default tema je sad LIGHT (bilo dark).
 //
+// v5 (po zahtjevu — 2026-10-11): nova sekcija "Pametni prijedlozi dodjele"
+// (#smart) sa svim mogućnostima planera šaltera/gate-ova: pravila
+// (otvaranje po avio kompaniji iz settings.ini, pauza, uzastopni šalteri,
+// isti terminal, zimi T1), učenje iz ručnih dodjela u pregledniku (bez
+// plaćenog AI-a), napomene običnim tekstom, nezavisna provjera plana,
+// stabilnost prijedloga i štampani A4 PDF plan. Hero/features/about/FAQ
+// dopunjeni. Tvrdnje namjerno odgovaraju onome što kod stvarno radi.
+//
 // v4 (po zahtjevu — 2026-10-05, pivot ka SaaS prodaji malim/regionalnim
 // aerodromima): stranica je do sada bila PRVENSTVENO putnički/osoblje
 // portal za Tivat, sa malom, skromnom B2B sekcijom na dnu. Cilj se
@@ -39,6 +47,7 @@ import {
   Luggage, Radio, ShieldCheck, Zap, Clock3, MonitorSmartphone,
   Sun, Moon, LogIn, LogOut, ArrowRight, Sparkles, Info, Building2, Mail, Check,
   TrendingUp, Palette, Eye, Rocket, Scale,
+  Brain, ShieldAlert, FileText, MessageSquareText, Building, Layers,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/use-theme';
 import { FAQ } from '@/lib/site-content';
@@ -58,7 +67,7 @@ const T = {
     heroTitle1: 'Moderan FIDS',
     heroTitle2: 'za male i regionalne aerodrome',
     heroTitleSuffix: '',
-    heroSubtitle: 'Isti sistem koji svakodnevno vodi Aerodrom Tivat — uživo raspored letova, upravljanje gate-ovima i check-in šalterima, i automatski razglas terminala. Bez cijene i složenosti tradicionalnih FIDS rješenja.',
+    heroSubtitle: 'Isti sistem koji svakodnevno vodi Aerodrom Tivat — uživo raspored letova, upravljanje gate-ovima i check-in šalterima uz pametne prijedloge dodjele, i automatski razglas terminala. Bez cijene i složenosti tradicionalnih FIDS rješenja.',
     ctaLive: 'Pogledajte cijene',
     ctaDepartures: 'Pogledaj uživo na Aerodromu Tivat',
     login: 'Prijava',
@@ -81,6 +90,18 @@ const T = {
       { title: 'Sigurna administracija', description: 'Zaštićen admin panel za osoblje — ručne dodjele, konfiguraciju avio kompanija i kontrolu razglasa, odvojeno od javnih prikaza.' },
       { title: 'Pouzdano 24/7/365', description: 'Sistem prati radno vrijeme aerodroma i sam prelazi u noćni režim — bez nepotrebnog rada kad nema letova.' },
     ],
+    smartBadge: 'Pametni prijedlozi',
+    smartTitle: 'Sistem predlaže koje šaltere i gate-ove otvoriti',
+    smartSubtitle: 'Planer za koordinatore: za svaki let predlaže check-in šaltere i gate, vodi računa o svim letovima zajedno i uči iz navika vašeg osoblja. Bez plaćenog AI servisa i bez troška po upitu.',
+    smartItems: [
+      { title: 'Pravila koja poštuju operativu', description: 'Vrijeme otvaranja check-ina po kompaniji (iz settings.ini), zatvaranje 30 min prije polaska, pauza od 1 min između letova, uzastopni šalteri u istom terminalu i gate u terminalu šaltera.' },
+      { title: 'Planira sve letove zajedno', description: 'Ne dodjeljuje letove jedan po jedan: isprobava više redoslijeda i bira plan sa najmanje nestašica, rupa i miješanja terminala. Zimi prednost ima Terminal 1.' },
+      { title: 'Uči iz ručnih dodjela', description: 'Model se trenira u pregledniku iz dodjela vašeg osoblja (bez troška servera). Prvih 7 dana samo uči; u prijedloge ulazi tek kad dokaže da pogađa bolje od jednostavnih brojača, a objašnjava zašto je izabrao baš te resurse.' },
+      { title: 'Napomene običnim tekstom', description: 'Napišite „šalter 3 ne radi do 14:00“, „T1 ne radi“ ili „LY na 4, 5“ — razumije se bez LLM-a, direktno u pregledniku, i odmah mijenja plan.' },
+      { title: 'Nezavisna provjera plana', description: 'Prije prikaza, poseban validator provjerava preklapanja, blokirane resurse, uzastopnost šaltera i terminale. Neispravan prijedlog se ne prikazuje kao važeći, a čekanje na zatvaranje drugog leta je eksplicitno stanje.' },
+      { title: 'Stabilni prijedlozi i PDF plan', description: 'Prijedlog se ne mijenja zbog sitnih razlika, ali operativne promjene (kašnjenje, kvar šaltera) uvijek pobjeđuju. Cijeli dan se izvozi kao štampani A4 PDF plan šaltera i gate-ova.' },
+    ],
+    smartFootnote: 'Prijedlog je pomoć dispečeru, ne zamjena: osoblje uvijek odlučuje i može sve promijeniti ručno.',
     diffBadge: 'Pozicioniranje',
     diffTitle: 'Napravljen za prazninu između dvije krajnosti',
     diffSubtitle: 'Veliki aerodromi imaju višegodišnje ugovore sa velikim FIDS dobavljačima. Mali aerodromi improvizuju sa TV-om i PowerPoint-om. TIV FIDS je za sve između.',
@@ -171,12 +192,13 @@ const T = {
     aboutTitle: 'O sistemu',
     aboutParagraphs: [
       'TIV FIDS je sistem za informisanje putnika razvijen posebno za Aerodrom Tivat — prikazuje uživo raspored letova na svim ekranima terminala: gate monitorima, check-in šalterima, prikazima dolazaka i odlazaka, i prikazima prtljaga.',
-      'Osim javnih ekrana, sistem uključuje i operativni dio za osoblje aerodroma: ručnu dodjelu gate-ova i check-in šaltera letovima, konfiguraciju avio kompanija, i automatski razglas terminala koji sam najavljuje registraciju, ukrcavanje i kašnjenja letova, na dva jezika.',
+      'Osim javnih ekrana, sistem uključuje i operativni dio za osoblje aerodroma: ručnu dodjelu gate-ova i check-in šaltera letovima, konfiguraciju avio kompanija, i automatski razglas terminala koji sam najavljuje registraciju, ukrcavanje i kašnjenja letova, na dva jezika. Planer predlaže šaltere i gate-ove za cijeli dan, uči iz ručnih dodjela osoblja, nezavisno provjerava plan i izvozi ga kao štampani PDF.',
       'Sistem je napravljen da radi pouzdano, cijele godine, bez prekida — prateći stvarni ritam rada aerodroma, uključujući noćni režim kada nema letova.',
     ],
     footerRights: 'Sistem informisanja o letovima',
     footerLive: 'Uživo letovi',
     footerPricing: 'Cjenovnik',
+    footerSmart: 'Pametni prijedlozi',
     footerAdmin: 'Admin',
   },
   en: {
@@ -185,7 +207,7 @@ const T = {
     heroTitle1: 'Modern FIDS',
     heroTitle2: 'for small and regional airports',
     heroTitleSuffix: '',
-    heroSubtitle: 'The same system that runs Tivat Airport every day — live flight schedules, gate and check-in desk management, and automated terminal announcements. Without the cost and complexity of traditional FIDS solutions.',
+    heroSubtitle: 'The same system that runs Tivat Airport every day — live flight schedules, gate and check-in desk management with smart assignment suggestions, and automated terminal announcements. Without the cost and complexity of traditional FIDS solutions.',
     ctaLive: 'See pricing',
     ctaDepartures: 'See it live at Tivat Airport',
     login: 'Sign in',
@@ -208,6 +230,18 @@ const T = {
       { title: 'Secure administration', description: 'A protected admin panel for staff — manual assignments, airline configuration, and PA control, separate from public displays.' },
       { title: 'Reliable 24/7/365', description: 'The system follows the airport’s operating hours and switches to night mode on its own — no unnecessary activity when there are no flights.' },
     ],
+    smartBadge: 'Smart suggestions',
+    smartTitle: 'The system proposes which desks and gates to open',
+    smartSubtitle: 'A planner for dispatchers: for every flight it proposes check-in desks and a gate, plans all flights together, and learns from your staff’s habits. No paid AI service and no per-query cost.',
+    smartItems: [
+      { title: 'Rules that respect operations', description: 'Check-in opening time per airline (from settings.ini), closing 30 min before departure, a 1-minute turnover pause, consecutive desks in one terminal, and the gate in the same terminal as the desks.' },
+      { title: 'Plans all flights together', description: 'It does not assign flights one by one: it tries several orderings and picks the plan with the fewest shortages, gaps and terminal mix-ups. Terminal 1 is preferred in winter.' },
+      { title: 'Learns from manual assignments', description: 'A model trains in the browser from your staff’s assignments (no server cost). It only learns for the first 7 days, enters suggestions only after it proves better than simple counters, and explains why it picked those resources.' },
+      { title: 'Plain-text notes', description: 'Type “desk 3 out of order until 14:00”, “T1 closed” or “LY on 4, 5” — understood without an LLM, right in the browser, and the plan updates immediately.' },
+      { title: 'Independent plan check', description: 'Before it is shown, a separate validator checks overlaps, blocked resources, desk consecutiveness and terminals. An invalid suggestion is never shown as valid, and waiting for another flight to close is an explicit state.' },
+      { title: 'Stable suggestions & PDF plan', description: 'Suggestions do not flip over tiny differences, but operational changes (a delay, a broken desk) always win. The whole day exports as a printable A4 PDF plan of desks and gates.' },
+    ],
+    smartFootnote: 'Suggestions assist the dispatcher, they do not replace them: staff always decide and can change anything manually.',
     diffBadge: 'Positioning',
     diffTitle: 'Built for the gap between two extremes',
     diffSubtitle: 'Large airports sign multi-year contracts with major FIDS vendors. Small airports improvise with a TV and a PowerPoint loop. TIV FIDS is for everything in between.',
@@ -298,12 +332,13 @@ const T = {
     aboutTitle: 'About the system',
     aboutParagraphs: [
       'TIV FIDS is a passenger information system built specifically for Tivat Airport — it displays live flight schedules across every terminal screen: gate monitors, check-in desks, arrivals and departures boards, and baggage claim displays.',
-      'Beyond the public displays, the system includes an operational layer for airport staff: manual assignment of gates and check-in desks to flights, airline configuration, and an automated terminal announcement system that calls check-in, boarding, and delays on its own, in two languages.',
+      'Beyond the public displays, the system includes an operational layer for airport staff: manual assignment of gates and check-in desks to flights, airline configuration, and an automated terminal announcement system that calls check-in, boarding, and delays on its own, in two languages. A planner proposes desks and gates for the whole day, learns from staff’s manual assignments, independently checks the plan, and exports it as a printable PDF.',
       'The system is built to run reliably, all year round, without interruption — following the airport’s real operating rhythm, including a night mode when there are no flights.',
     ],
     footerRights: 'Flight Information Display System',
     footerLive: 'Live flights',
     footerPricing: 'Pricing',
+    footerSmart: 'Smart suggestions',
     footerAdmin: 'Admin',
   },
 } as const;
@@ -322,6 +357,7 @@ const FEATURE_ICONS = [Zap, DoorOpen, Radio, MonitorSmartphone, ShieldCheck, Clo
 // NOVO — ikone za nove sekcije (cjenovnik i koraci implementacije),
 // dodato uz postojeći FEATURE_ICONS obrazac. Redoslijed mora pratiti
 // redoslijed stavki u T.me/T.en.pricingTiers / onboardingSteps.
+const SMART_ICONS = [Layers, Building, Brain, MessageSquareText, ShieldAlert, FileText];
 const PRICING_ICONS = [Zap, TrendingUp, Building2];
 const ONBOARDING_ICONS = [Mail, Palette, Eye, Rocket];
 // Indeks paketa koji se ističe kao "najpopularniji" — strukturno,
@@ -585,6 +621,38 @@ export default function HomeClient() {
         </div>
       </section>
 
+      {/* ── Pametni prijedlozi dodjele — NOVO (2026-10-11): planer
+          šaltera/gate-ova (lib/assignment-suggestions.ts + model +
+          validator + stabilnost + PDF). ─────────────────────────── */}
+      <section id="smart" className="max-w-6xl mx-auto px-6 py-20 scroll-mt-20">
+        <div className="text-center mb-14">
+          <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+            isDark ? 'bg-violet-400/10 text-violet-300 border border-violet-400/20' : 'bg-violet-500/10 text-violet-700 border border-violet-500/20'
+          }`}>
+            <Brain className="w-3.5 h-3.5" /> {t.smartBadge}
+          </div>
+          <h2 className="text-3xl font-black tracking-tight mb-3">{t.smartTitle}</h2>
+          <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.smartSubtitle}</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          {t.smartItems.map((f, i) => {
+            const Icon = SMART_ICONS[i];
+            return (
+              <div key={f.title} className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-white'}`}>
+                <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-4 ${
+                  isDark ? 'bg-violet-400/15 text-violet-300' : 'bg-violet-500/10 text-violet-700'
+                }`}>
+                  <Icon className="w-5 h-5" />
+                </div>
+                <h3 className="font-bold mb-1.5">{f.title}</h3>
+                <p className={`text-sm leading-relaxed ${textMuted}`}>{f.description}</p>
+              </div>
+            );
+          })}
+        </div>
+        <p className={`text-xs text-center max-w-xl mx-auto mt-8 ${textMuted}`}>{t.smartFootnote}</p>
+      </section>
+
       {/* ── Pozicioniranje (za koga je ovo) — NOVO (po zahtjevu,
           2026-10-05): prodajnoj stranici treba jasan odgovor na "zašto
           vama, a ne velikom dobavljaču ili sopstvenom DIY rješenju" —
@@ -846,6 +914,7 @@ export default function HomeClient() {
           <div className={`text-xs ${textMuted}`}>&copy; {new Date().getFullYear()} {t.tagline} &middot; {t.footerRights}</div>
           <div className={`flex items-center gap-4 text-xs ${textMuted}`}>
             <a href="#showcase" className="hover:underline">{t.footerLive}</a>
+            <a href="#smart" className="hover:underline">{t.footerSmart}</a>
             <a href="#pricing" className="hover:underline">{t.footerPricing}</a>
             <Link href="/admin/login" className="hover:underline">{t.footerAdmin}</Link>
           </div>

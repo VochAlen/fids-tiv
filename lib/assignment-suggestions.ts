@@ -41,6 +41,7 @@ import {
 } from '@/lib/assignment-learning';
 import type { SuggestionConstraints } from '@/lib/suggestion-constraints';
 import type { Predictor, PredictCtx } from '@/lib/assignment-model';
+import { validatePlan } from '@/lib/plan-validator';
 
 export const DESKS = [
   ...Array.from({ length: 12 }, (_, i) => String(i + 1)),
@@ -161,15 +162,49 @@ export interface Suggestion {
   waitingUntil?: number;
   /** Poruke tipa "Kad se zatvori JU680 na 4, 5, 6 → otvori WK415 na 4, 5, 6 po zatvaranju JU680". */
   waitNotes: string[];
+  /** Koliko resursa je traženo (profil/naučeno/napomena); predloženo može biti manje (npr. 2 umjesto 3). */
+  wanted: number;
+  /**
+   * READY = svi predloženi resursi su slobodni u cijelom intervalu.
+   * WAITING_FOR_RESOURCE = neki resurs drži drugi let; vidi `waitFor` (od kojeg leta zavisi i kad se oslobađa).
+   */
+  state: 'READY' | 'WAITING_FOR_RESOURCE';
+  waitFor: WaitDependency[];
   /** Kratko objašnjenje (zašto baš ti resursi). */
   reason: string;
   /** Upozorenja za osoblje (npr. nema dovoljno slobodnih šaltera). */
   warnings: string[];
 }
 
+/** Zavisnost čekanja: prijedlog se aktivira tek kad `flight` zatvori `resources` (u `releaseAt`, uključujući pauzu). */
+export interface WaitDependency {
+  flight: string;
+  resources: string[];
+  /** Minuta od ponoći kad se resursi oslobađaju (zatvaranje + pauza). */
+  releaseAt: number;
+}
+
+/** Zauzeće koje postoji PRIJE prijedloga: postojeće dodjele (sa letom) i blokade iz napomena (bez leta). */
+export interface OccupancyItem {
+  type: 'desk' | 'gate';
+  id: string;
+  start: number;
+  end: number;
+  flight?: string;
+}
+
 export interface SuggestionResult {
   desks: Suggestion[];
   gates: Suggestion[];
+  /** Ulazne činjenice za nezavisnu provjeru plana (lib/plan-validator.ts). */
+  occupancy: OccupancyItem[];
+  /** Pauza između letova (min) koja je korišćena. */
+  turnoverMin: number;
+  /** Ukupna cijena plana (manje = bolje) — koristi lib/plan-stability.ts. */
+  cost: { desks: number; gates: number };
+  winterT1: boolean;
+  /** Greške/upozorenja nezavisne provjere (greške su već uklonjene iz prijedloga). */
+  issues: import('@/lib/plan-validator').ValidationIssue[];
 }
 
 // ── Vrijeme ─────────────────────────────────────────────────────────────
@@ -441,15 +476,23 @@ function planCost(s: Suggestion, wanted: number, winterT1 = false): number {
   return cost;
 }
 
+/** Cijena jednog prijedloga (za poređenje planova — vidi lib/plan-stability.ts). */
+export function suggestionCost(s: Suggestion, winterT1: boolean): number {
+  return planCost(s, s.wanted, winterT1);
+}
+
 /** Najveći broj probnih planova (svaki je jeftin — par stotina izbora resursa). */
-const MAX_PLAN_EVALS = 80;
-/** Koliko mjesta unaprijed se razmjenjuje redoslijed (letovi blizu u vremenu). */
+const MAX_PLAN_EVALS = 160;
+/** Koliko mjesta unaprijed se razmjenjuje / pomjera redoslijed (letovi blizu u vremenu). */
 const SWAP_REACH = 4;
 
 /**
- * Pohlepni plan zavisi od REDOSLIJEDA letova. Počinje se redom po vremenu otvaranja, a zatim
- * se probaju zamjene susjednih letova; zadržava se samo ona koja strogo smanjuje ukupnu cijenu.
- * Rezultat se vraća u izvornom (vremenskom) redoslijedu da prikaz ostane stabilan.
+ * Pohlepni plan zavisi od REDOSLIJEDA letova. Pretraga je determinističa:
+ *   1) dva početna reda: po vremenu otvaranja i obrnuto (kasni letovi prvi) — uzima se jeftiniji;
+ *   2) lokalna pretraga: zamjena dva bliska leta i POMJERANJE jednog leta na drugo mjesto (umetanje);
+ *      zadržava se samo potez koji strogo smanjuje ukupnu cijenu.
+ * Ukupan broj probnih planova je ograničen (MAX_PLAN_EVALS). Rezultat se vraća u izvornom
+ * (vremenskom) redoslijedu da prikaz ostane stabilan.
  */
 export function optimizeOrder<T>(
   base: T[],
@@ -459,16 +502,32 @@ export function optimizeOrder<T>(
   let order = [...base];
   let best = plan(order);
   let evals = 1;
+  if (best.cost > 0 && base.length > 1) {
+    const rev = [...base].reverse();
+    const r = plan(rev);
+    evals++;
+    if (r.cost < best.cost - 1e-9) { order = rev; best = r; }
+  }
   let improved = best.cost > 0;
+  const tryCand = (cand: T[]) => {
+    if (evals >= MAX_PLAN_EVALS) return;
+    const r = plan(cand);
+    evals++;
+    if (r.cost < best.cost - 1e-9) { order = cand; best = r; improved = true; }
+  };
   while (improved && evals < MAX_PLAN_EVALS) {
     improved = false;
     for (let i = 0; i < order.length && evals < MAX_PLAN_EVALS; i++) {
       for (let j = i + 1; j < Math.min(order.length, i + 1 + SWAP_REACH) && evals < MAX_PLAN_EVALS; j++) {
-        const cand = [...order];
-        [cand[i], cand[j]] = [cand[j], cand[i]];
-        const r = plan(cand);
-        evals++;
-        if (r.cost < best.cost - 1e-9) { order = cand; best = r; improved = true; }
+        const sw = [...order];
+        [sw[i], sw[j]] = [sw[j], sw[i]];
+        tryCand(sw);
+        if (j > i + 1) { // umetanje: let sa mjesta j ide na mjesto i
+          const ins = [...order];
+          const [x] = ins.splice(j, 1);
+          ins.splice(i, 0, x);
+          tryCand(ins);
+        }
       }
     }
   }
@@ -482,7 +541,7 @@ function modelReason(model: Predictor, ctx: PredictCtx, picked: string[]): strin
 }
 
 // ── Glavna funkcija ──
-export function computeAssignmentSuggestions(input: SuggestionInput): SuggestionResult {
+export function computeAssignmentSuggestionsRaw(input: SuggestionInput): SuggestionResult {
   const { flights, currentDesks, currentGates, nowMin } = input;
   const buf = input.turnoverMin ?? DEFAULT_TURNOVER_MIN;
   const lead = input.openLeadByIata ?? {};
@@ -722,6 +781,9 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
         closeAt: p.deskIv.end,
         waitingUntil,
         waitNotes,
+        wanted: p.deskCount,
+        state: waitGroups.size ? 'WAITING_FOR_RESOURCE' : 'READY',
+        waitFor: [...waitGroups.values()].flatMap(g => g.by.map(holder => ({ flight: holder, resources: [...g.ids], releaseAt: g.until }))),
         reason: (pinned.length ? 'Po napomeni osoblja; ' : deskModel ? modelReason(input.model!.desk!, deskCtx!, picked) : '') + (p.deskPool.length
           ? `${p.deskSource}: uobičajeno ${p.deskPool.join(', ')}; ${plural(p.deskCount)}`
           : `Opšti raspored: ${plural(p.deskCount)}`) + (fromFallback ? '; zamjena po naučenom' : ''),
@@ -794,6 +856,9 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
         source: pinnedGate ? 'note' : gateModel ? 'model' : p.gateKind,
         pool: p.gatePool,
         waitNotes: [],
+        wanted: 1,
+        state: 'READY',
+        waitFor: [],
         openAt: p.gateIv.start,
         closeAt: p.gateIv.end,
         reason: (pinnedGate ? 'Po napomeni osoblja; ' : gateModel ? modelReason(input.model!.gate!, gateCtx!, picked) : '') + (p.gatePool.length
@@ -806,5 +871,37 @@ export function computeAssignmentSuggestions(input: SuggestionInput): Suggestion
   };
   gates.push(...optimizeOrder(gateOrder, planGates, f => f.f.FlightNumber));
 
-  return { desks, gates };
+  // Zauzeće PRIJE prijedloga (postojeće dodjele + blokade) — činjenice za nezavisnu provjeru.
+  const occupancy: OccupancyItem[] = [];
+  for (const [id, ivs] of busyDesks) for (const iv of ivs) occupancy.push({ type: 'desk', id, start: iv.start, end: iv.end, flight: iv.flight });
+  for (const [id, ivs] of busyGates) for (const iv of ivs) occupancy.push({ type: 'gate', id, start: iv.start, end: iv.end, flight: iv.flight });
+
+  return {
+    desks, gates, occupancy, turnoverMin: buf, winterT1, issues: [],
+    cost: {
+      desks: desks.reduce((c, d) => c + planCost(d, d.wanted, winterT1), 0),
+      gates: gates.reduce((c, g) => c + planCost(g, g.wanted, winterT1), 0),
+    },
+  };
+}
+
+/**
+ * Javni ulaz: planer + NEZAVISNA provjera (lib/plan-validator.ts). Prijedlog koji ne prođe provjeru
+ * (greška, ne upozorenje) se NE prikazuje kao važeći: resursi se brišu i dodaje se objašnjenje.
+ */
+export function computeAssignmentSuggestions(input: SuggestionInput): SuggestionResult {
+  const raw = computeAssignmentSuggestionsRaw(input);
+  const issues = validatePlan({ result: raw, currentDesks: input.currentDesks, currentGates: input.currentGates });
+  const bad = new Map<string, string[]>();
+  for (const i of issues) if (i.severity === 'error') bad.set(`${i.type}:${i.flight}`, [...(bad.get(`${i.type}:${i.flight}`) ?? []), i.code]);
+  if (bad.size === 0) return { ...raw, issues };
+  const fix = (list: Suggestion[], type: 'desk' | 'gate') => list.map(sg => {
+    const codes = bad.get(`${type}:${sg.flightNumber}`);
+    if (!codes) return sg;
+    return {
+      ...sg, resources: [], waitNotes: [], waitFor: [], waitingUntil: undefined, state: 'READY' as const,
+      warnings: [...sg.warnings, `Prijedlog odbačen nakon provjere plana (${[...new Set(codes)].join(', ')}) — dodijeli ručno.`],
+    };
+  });
+  return { ...raw, desks: fix(raw.desks, 'desk'), gates: fix(raw.gates, 'gate'), issues };
 }

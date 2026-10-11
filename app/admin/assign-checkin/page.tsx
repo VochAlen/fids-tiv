@@ -14,7 +14,8 @@ import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NO
 import { useRealtimeAssignments, type AssignmentEntry } from '@/hooks/useRealtimeAssignments';
 import { logoutAndRedirect } from '@/lib/admin-logout';
 import { getPodgoricaMinutesOfDay, getPodgoricaDateString } from '@/lib/night-hours';
-import { computeAssignmentSuggestions, formatClockMinutes, type Suggestion } from '@/lib/assignment-suggestions';
+import { computeAssignmentSuggestions, formatClockMinutes, type Suggestion, type SuggestionResult } from '@/lib/assignment-suggestions';
+import { stabilizePlan, planSignature, type PreviousPlan } from '@/lib/plan-stability';
 import { buildPlanHtml, buildDayFlights, openPlanForPrint } from '@/lib/plan-document';
 import {
   parseLearned, seasonFromDate, dowFromDate, summarizeAccuracy, recentWeekKeys, type LearnedIndex,
@@ -1258,11 +1259,12 @@ const assignFlightToResource = useCallback(async (
 
   const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
 
+  const prevPlanRef = useRef<PreviousPlan | null>(null);
   const suggestions = useMemo(() => {
     if (suggestNowMin === null) return { desks: [] as Suggestion[], gates: [] as Suggestion[] };
     const toMap = (list: Assignment[]) =>
       Object.fromEntries(list.map(a => [a.resourceId, a.flightNumber]));
-    return computeAssignmentSuggestions({
+    const fresh = computeAssignmentSuggestions({
       flights,
       currentDesks: toMap(checkinAssignments),
       currentGates: toMap(gateAssignments),
@@ -1274,7 +1276,17 @@ const assignFlightToResource = useCallback(async (
       constraints,
       model: { desk: models?.desk.predictor ?? null, gate: models?.gate.predictor ?? null },
     });
+    // Stabilnost: zadrži prethodni prijedlog ako i dalje važi, a novi je samo marginalno bolji.
+    const signature = planSignature({ constraints, summer: isSummer, openLeadByIata });
+    return stabilizePlan(prevPlanRef.current, fresh, signature);
   }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints, models]);
+
+  // Zapamti zadnji plan (za stabilnost) — samo u effect-u.
+  useEffect(() => {
+    const r = suggestions as SuggestionResult;
+    if (r.turnoverMin === undefined) return;
+    prevPlanRef.current = { result: r, signature: planSignature({ constraints, summer: isSummer, openLeadByIata }) };
+  }, [suggestions, constraints, isSummer, openLeadByIata]);
 
   // Zapamti zadnji prijedlog po letu (vidi suggestionSnapshotRef) — samo u effect-u.
   useEffect(() => {
