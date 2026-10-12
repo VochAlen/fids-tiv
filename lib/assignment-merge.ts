@@ -175,9 +175,22 @@ const CLEARED_BY_SNAPSHOT: Omit<AssignmentEntry, 'setAt' | 'seq'> = {
   classType: null,
 };
 
+// NOVO (2026-10-12 — prijavljeno: "kad je šalter inactive, ponekad se ne otvori šalter koji
+// osoblje otvori"): TRKA koja je zaglavljivala ekran u "inactive" stanju. Scenario:
+//   1) kiosk pokrene REST snapshot (poll/reconcile/reconnect) — server u tom trenutku nema unos za šalter;
+//   2) osoblje otvori šalter → Ably poruka (seq 20) stigne PRIJE odgovora snapshot-a → ekran postaje aktivan;
+//   3) zakasnjeli snapshot stiže, bez ključa za taj šalter → gornja logika ga tretira kao "obrisano na
+//      serveru" i lokalno ga čisti sa lažnim seq 21;
+//   4) sljedeći pravi snapshot (seq 20) je sada "stariji" od lokalnih 21 → ODBIJEN, i ekran ostaje
+//      neaktivan sve do sljedeće akcije na tom šalteru ili 6-satnog reload-a.
+// Zaštita: pozivalac (hooks/useRealtimeAssignments.ts) zna koji su ključevi dirnuti Ably porukom
+// NAKON što je ovaj snapshot zatražen — za njih snapshot koji je stariji od tog zahtjeva nema pravo
+// da kaže "obrisano", pa se `protectedKeys` NE čiste (unosi koje snapshot SADRŽI i dalje idu kroz
+// uobičajeno seq poređenje).
 export function mergeNewer(
   prev: Record<string, AssignmentEntry>,
-  incoming: Record<string, AssignmentEntry>
+  incoming: Record<string, AssignmentEntry>,
+  protectedKeys?: ReadonlySet<string>
 ): Record<string, AssignmentEntry> {
   // Lijena alokacija: `result` ostaje `null` (i na kraju vraćamo tačno
   // `prev` referencu) dok se ne desi BAREM jedna stvarna izmjena. Ovo je
@@ -196,6 +209,7 @@ export function mergeNewer(
 
   for (const key of Object.keys(prev)) {
     if (Object.prototype.hasOwnProperty.call(incoming, key)) continue;
+    if (protectedKeys?.has(key)) continue; // svježe stigla Ably poruka — stariji snapshot ne smije da je briše
     const existing = prev[key];
     if (!existing || existing.status === null) continue;
     if (!result) result = { ...prev };
@@ -215,4 +229,15 @@ export function mergeOne(
     return { ...prev, [key]: incomingEntry };
   }
   return prev;
+}
+
+
+/**
+ * Ključevi koje je Ably poruka dirnula u trenutku `startedAt` ili poslije — snapshot zatražen u
+ * `startedAt` je stariji od njih i ne smije ih brisati (vidi `protectedKeys` uz mergeNewer).
+ */
+export function protectedKeysSince(touched: ReadonlyMap<string, number>, startedAt: number): Set<string> {
+  const out = new Set<string>();
+  for (const [key, at] of touched) if (at >= startedAt) out.add(key);
+  return out;
 }

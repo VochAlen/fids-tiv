@@ -80,7 +80,7 @@ import * as Ably from 'ably';
 // Re-eksportovano ispod (export type { AssignmentEntry }) da
 // app/admin/assign-checkin/page.tsx i dalje može uvoziti tip odavde,
 // bez izmjene tog fajla.
-import { mergeNewer, mergeOne, type AssignmentEntry } from '@/lib/assignment-merge';
+import { mergeNewer, mergeOne, protectedKeysSince, type AssignmentEntry } from '@/lib/assignment-merge';
 export type { AssignmentEntry };
 
 type AssignmentsResponse = {
@@ -210,6 +210,16 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // mijenja nikakvu postojeću logiku zatvaranja/otvaranja šaltera.
   const inFlightRef = useRef(false);
 
+  // NOVO (2026-10-12): kad je zadnji put ključ dirnut Ably porukom (ms). fetchSnapshot() ovo koristi da
+  // zakasnjeli snapshot (zatražen PRIJE poruke) ne obriše svježe stigao unos — vidi komentar uz
+  // `protectedKeys` u lib/assignment-merge.ts (uzrok "šalter ostane inactive iako je otvoren").
+  const touchedDeskRef = useRef<Map<string, number>>(new Map());
+  const touchedGateRef = useRef<Map<string, number>>(new Map());
+
+  // NOVO (2026-10-12): true tek kad je stigao PRVI pouzdan podatak (uspješan snapshot ili Ably poruka).
+  // Dok je false, stranica ne smije pogađati "inactive" — stvarno stanje šaltera joj je još nepoznato
+  // (npr. prvih par sekundi poslije svakog reload-a/restarta Electron klijenta).
+  const [isSynced, setIsSynced] = useState(false);
   // FIX (po zahtjevu — garantovano zatvaranje check-in šaltera u 20s,
   // 2026-09-29): umotano u useCallback (isti obrazac kao
   // hooks/useRealtimeFlightData.ts) tako da funkcija ima STABILAN
@@ -231,6 +241,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     // umjesto da se osloni na (znatno duži, nepredvidiv) OS/browser
     // TCP timeout — i oslobađa inFlightRef da naredni pokušaj ne mora
     // čekati taj duži rok.
+    const startedAt = Date.now();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_SNAPSHOT_TIMEOUT_MS);
 
@@ -265,8 +276,12 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         // Uspješan round-trip — dotakni sync bez obzira da li je
         // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
         lastSyncAtRef.current = Date.now();
-        setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}));
-        setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}));
+        // Ključevi dirnuti Ably porukom NAKON što je ovaj zahtjev krenuo: snapshot je stariji od njih.
+        const protectedDesks = protectedKeysSince(touchedDeskRef.current, startedAt);
+        const protectedGates = protectedKeysSince(touchedGateRef.current, startedAt);
+        setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks));
+        setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates));
+        setIsSynced(true);
       })
       .catch(() => { /* ostani na trenutnom stanju (uklj. AbortError od
         timeout-a iznad) — NE dodirujemo lastSyncAtRef ovdje: neuspio
@@ -353,13 +368,17 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       // ekranu na koji se poruka odnosi) — svaka promjena BILO KOG šaltera na
       // cijelom aerodromu je značila po jedan JSON.stringify + console.log na
       // SVAKOM check-in kiosku istovremeno, non-stop, 24/7.
+      touchedDeskRef.current.set(deskNumber, Date.now());
       setDeskEntries(prev => mergeOne(prev, deskNumber, entry));
+      setIsSynced(true);
     };
     const onGateMsg = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
       lastSyncAtRef.current = Date.now();
       const { gateNumber, entry } = msg.data as { gateNumber: string; entry: AssignmentEntry };
+      touchedGateRef.current.set(gateNumber, Date.now());
       setGateEntries(prev => mergeOne(prev, gateNumber, entry));
+      setIsSynced(true);
     };
 
     // NOVO (2026-10-06): subscribe() vraća Promise (čeka attach). Kad se
@@ -429,5 +448,5 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // dodatan resync na sopstvenom, kraćem rasporedu — vidi novi
   // "zatvoreno u 20s" watchdog u CheckInPageClient.tsx, koji ovo koristi
   // dok je šalter aktivno otvoren.
-  return { deskEntries, gateEntries, connectionState, lastSyncAtRef, refetch: fetchSnapshot };
+  return { deskEntries, gateEntries, connectionState, isSynced, lastSyncAtRef, refetch: fetchSnapshot };
 }

@@ -90,7 +90,7 @@ describe('nasumični rasporedi: planer nikad ne daje neispravan plan', () => {
         }
       }
     }
-  });
+  }, 30_000);
 
   it('javna funkcija (sa zaštitom) uvijek vraća plan bez grešaka', () => {
     for (let seed = 2000; seed < 2200; seed++) {

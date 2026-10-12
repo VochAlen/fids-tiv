@@ -140,3 +140,37 @@ describe('mergeNewer', () => {
     expect(result['8']).toBe(prev['8']); // nepromijenjen ključ — ista referenca
   });
 });
+
+
+describe('mergeNewer — zaštita od zakasnjelog snapshot-a (trka Ably poruka vs. REST)', () => {
+  const open = (seq: number) => ({ status: 'open' as const, flightNumber: 'LY5468', classType: null, setAt: 1000 + seq, seq });
+
+  it('BEZ zaštite: zakasnjeli snapshot bez ključa briše svježe otvoren šalter (regresioni dokaz uzroka)', () => {
+    const afterAbly = { '3': open(20) };
+    const afterStale = mergeNewer(afterAbly, {});
+    expect(afterStale['3'].status).toBeNull();
+    // ...a sljedeći pravi snapshot (seq 20) biva odbijen zbog lažnog seq 21:
+    const afterReal = mergeNewer(afterStale, { '3': open(20) });
+    expect(afterReal['3'].status).toBeNull();
+  });
+
+  it('SA zaštitom: ključ dirnut Ably porukom poslije zahtjeva se NE čisti', () => {
+    const afterAbly = { '3': open(20) };
+    const afterStale = mergeNewer(afterAbly, {}, new Set(['3']));
+    expect(afterStale['3'].status).toBe('open');
+    expect(afterStale).toBe(afterAbly);
+  });
+
+  it('zaštita važi samo za navedene ključeve — ostali se i dalje čiste', () => {
+    const prev = { '3': open(20), '4': open(18) };
+    const out = mergeNewer(prev, {}, new Set(['3']));
+    expect(out['3'].status).toBe('open');
+    expect(out['4'].status).toBeNull();
+  });
+
+  it('zaštićen ključ koji snapshot SADRŽI i dalje prolazi kroz seq poređenje', () => {
+    const prev = { '3': open(20) };
+    expect(mergeNewer(prev, { '3': open(25) }, new Set(['3']))['3'].seq).toBe(25);
+    expect(mergeNewer(prev, { '3': open(19) }, new Set(['3']))['3'].seq).toBe(20);
+  });
+});
