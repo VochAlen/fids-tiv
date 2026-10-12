@@ -15,6 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Flight } from "@/types/flight";
+import InactiveScreen from '@/components/InactiveScreen';
 import { fetchFlightData, getUniqueDeparturesWithDeparted } from "@/lib/flight-service";
 import { Info, Plane, Clock, MapPin, Users, DoorOpen } from "lucide-react";
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
@@ -57,11 +58,7 @@ class SplitBoardErrorBoundary extends Component<{ children: ReactNode; fallback?
   render() {
     if (this.state.hasError) {
       return this.props.fallback || (
-        <div className="h-screen bg-black flex flex-col items-center justify-center text-white gap-6">
-          <Plane className="w-24 h-24 opacity-30 animate-pulse" />
-          <div className="text-4xl font-bold opacity-70">Reconnecting...</div>
-          <div className="text-xl opacity-40">{this.state.errorMessage}</div>
-        </div>
+        <InactiveScreen message="Reconnecting…" detail={this.state.errorMessage} />
       );
     }
     return this.props.children;
@@ -791,12 +788,7 @@ useEffect(() => {
 
   if (loading && arrivals.length === 0 && departures.length === 0) {
     return (
-      <div className="h-screen bg-black flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-white/30 border-t-orange-500 rounded-full animate-spin mx-auto mb-4" />
-          <div className="text-white text-xl">Loading flight data...</div>
-        </div>
-      </div>
+      <InactiveScreen message="Loading flight data…" />
     );
   }
 

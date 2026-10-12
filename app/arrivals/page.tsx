@@ -7,6 +7,7 @@
 import { JSX, useEffect, useState, useCallback, useMemo, useRef, memo, Component, type ErrorInfo, type ReactNode } from 'react';
 import type { Flight } from '@/types/flight';
 import { Info, Plane, Clock, MapPin, Building2 } from 'lucide-react';
+import InactiveScreen from '@/components/InactiveScreen';
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
@@ -90,10 +91,7 @@ class ArrivalsErrorBoundary extends Component<{ children: ReactNode }, EBState> 
   componentDidCatch(e: Error, i: ErrorInfo) { console.error('Arrivals ErrorBoundary:', e, i); setTimeout(() => this.setState({ hasError: false, errorMessage: '' }), 10_000); }
   render() {
     if (this.state.hasError) return (
-      <div className="h-screen bg-blue-950 flex flex-col items-center justify-center text-white gap-6">
-        <Plane className="w-24 h-24 opacity-30 animate-pulse" />
-        <div className="text-4xl font-bold opacity-70">Reconnecting...</div>
-      </div>
+      <InactiveScreen message="Reconnecting…" />
     );
     return this.props.children;
   }

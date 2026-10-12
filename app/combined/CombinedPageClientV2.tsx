@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from "react"
 import type { Flight } from "@/types/flight"
+import InactiveScreen from '@/components/InactiveScreen';
 import { getUniqueDeparturesWithDeparted } from "@/lib/flight-service"
 import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind, Building2 } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
@@ -344,11 +345,7 @@ class FlightBoardErrorBoundary extends Component<{ children: ReactNode; fallback
   }
   render() {
     if (this.state.hasError) return this.props.fallback || (
-      <div className="h-screen bg-blue-950 flex flex-col items-center justify-center text-white gap-6">
-        <Plane className="w-24 h-24 opacity-30 animate-pulse" />
-        <div className="text-4xl font-bold opacity-70">Reconnecting...</div>
-        <div className="text-xl opacity-40">{this.state.errorMessage}</div>
-      </div>
+      <InactiveScreen message="Reconnecting…" detail={this.state.errorMessage} />
     )
     return this.props.children
   }

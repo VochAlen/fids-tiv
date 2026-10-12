@@ -17,6 +17,8 @@
 // podržavao — components/demo/*, lib/demo-flights.ts) su obrisane.
 // Default tema je sad LIGHT (bilo dark).
 //
+// v5b (2026-10-11): sekcija "Naša priča" (#history) — istorija sistema od VB6 do danas.
+//
 // v5 (po zahtjevu — 2026-10-11): nova sekcija "Pametni prijedlozi dodjele"
 // (#smart) sa svim mogućnostima planera šaltera/gate-ova: pravila
 // (otvaranje po avio kompaniji iz settings.ini, pauza, uzastopni šalteri,
@@ -48,9 +50,11 @@ import {
   Sun, Moon, LogIn, LogOut, ArrowRight, Sparkles, Info, Building2, Mail, Check,
   TrendingUp, Palette, Eye, Rocket, Scale,
   Brain, ShieldAlert, FileText, MessageSquareText, Building, Layers,
+  History, Megaphone, Terminal, FileCode2, Cloud, Hourglass, PlaneTakeoff,
+  Bus, TrainFront, Ship, Monitor, Copy, Wrench, Anchor,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/use-theme';
-import { FAQ } from '@/lib/site-content';
+import { FAQ, SITE_URL } from '@/lib/site-content';
 
 const THEME_STORAGE_KEY = 'theme:landing';
 const LANG_STORAGE_KEY = 'lang:landing';
@@ -67,6 +71,16 @@ const T = {
     heroTitle1: 'Moderan FIDS',
     heroTitle2: 'za male i regionalne aerodrome',
     heroTitleSuffix: '',
+    heroBoardTitle: 'Odlasci',
+    heroBoardNote: 'Ilustracija prikaza — stvarni ekrani su ispod',
+    heroBoardCols: ['Vrijeme', 'Destinacija', 'Šalter', 'Gate', 'Status'],
+    heroStatus: { onTime: 'Na vrijeme', checkin: 'Check-in', boarding: 'Ukrcavanje', closing: 'Zadnji poziv', delayed: 'Kasni' },
+    heroStats: [
+      { value: '{liveYears}', label: 'godina u radu' },
+      { value: '24/7', label: 'uživo, cijele godine' },
+      { value: '6', label: 'tipova ekrana' },
+      { value: '2', label: 'jezika razglasa' },
+    ],
     heroSubtitle: 'Isti sistem koji svakodnevno vodi Aerodrom Tivat — uživo raspored letova, upravljanje gate-ovima i check-in šalterima uz pametne prijedloge dodjele, i automatski razglas terminala. Bez cijene i složenosti tradicionalnih FIDS rješenja.',
     ctaLive: 'Pogledajte cijene',
     ctaDepartures: 'Pogledaj uživo na Aerodromu Tivat',
@@ -92,7 +106,7 @@ const T = {
     ],
     smartBadge: 'Pametni prijedlozi',
     smartTitle: 'Sistem predlaže koje šaltere i gate-ove otvoriti',
-    smartSubtitle: 'Planer za koordinatore: za svaki let predlaže check-in šaltere i gate, vodi računa o svim letovima zajedno i uči iz navika vašeg osoblja. Bez plaćenog AI servisa i bez troška po upitu.',
+    smartSubtitle: 'Planer za dispečere: za svaki let predlaže check-in šaltere i gate, vodi računa o svim letovima zajedno i uči iz navika vašeg osoblja. Bez plaćenog AI servisa i bez troška po upitu.',
     smartItems: [
       { title: 'Pravila koja poštuju operativu', description: 'Vrijeme otvaranja check-ina po kompaniji (iz settings.ini), zatvaranje 30 min prije polaska, pauza od 1 min između letova, uzastopni šalteri u istom terminalu i gate u terminalu šaltera.' },
       { title: 'Planira sve letove zajedno', description: 'Ne dodjeljuje letove jedan po jedan: isprobava više redoslijeda i bira plan sa najmanje nestašica, rupa i miješanja terminala. Zimi prednost ima Terminal 1.' },
@@ -102,6 +116,60 @@ const T = {
       { title: 'Stabilni prijedlozi i PDF plan', description: 'Prijedlog se ne mijenja zbog sitnih razlika, ali operativne promjene (kašnjenje, kvar šaltera) uvijek pobjeđuju. Cijeli dan se izvozi kao štampani A4 PDF plan šaltera i gate-ova.' },
     ],
     smartFootnote: 'Prijedlog je pomoć dispečeru, ne zamjena: osoblje uvijek odlučuje i može sve promijeniti ručno.',
+    historyBadge: 'Naša priča',
+    historyTitle: 'Od VB6 projekta iz {devSince}. do cloud sistema — {liveYears} godina uživo',
+    historySubtitle: 'TIV FIDS nije nastao preko noći niti iz prezentacije. Rastao je godinama, uz stvarne letove, stvarno osoblje i stvarne greške iz kojih se učilo.',
+    historySteps: [
+      { year: '2009', title: 'Visual Basic 6', text: 'Razvoj počinje 2009. kao jednostavan VB6 projekat — prvi pokušaj da se informacije o letovima prikazuju putnicima bez skupog gotovog rješenja.' },
+      { year: '2012', title: 'Javni rad počinje', text: 'Nakon tri godine razvoja sistem izlazi u javni rad i počinje da radi na Aerodromu Tivat, sa stvarnim letovima i stvarnim ekranima u terminalu.' },
+      { year: '2015', title: 'Automatski razglas', text: 'Dodaje se razglas: sistem sam najavljuje letove, umjesto da to radi osoblje ručno.' },
+      { year: '2017–2020', title: 'Node.js i JavaScript', text: 'Sistem prelazi na Node i JavaScript — ekrani rade u običnom browseru, bez posebnog hardvera i desktop aplikacija.' },
+      { year: '2023', title: 'TypeScript i moderna cloud arhitektura', text: 'Kod prelazi na TypeScript (Next.js, React), a podaci uživo na Redis i Ably realtime, na standardnom cloud hostingu.' },
+      { year: 'Danas', title: 'Pametno planiranje', text: 'Planer šaltera i gate-ova koji uči iz navika osoblja i nezavisno provjerava svaki plan.' },
+    ],
+    historyFootnote: 'Strpljiva evolucija umjesto prepisivanja od nule: svaka faza je ostala u radu dok se gradila sljedeća.',
+    beyondBadge: 'Ne samo aerodromi',
+    beyondTitle: 'Isti sistem za svako mjesto na kome se čeka polazak',
+    beyondSubtitle: 'Tabla polazaka, dodjela mjesta, razglas i ekrani u realnom vremenu nisu vezani za avione. Mijenja se izvor podataka i terminologija — ostatak sistema ostaje isti.',
+    beyondItems: [
+      { title: 'Autobuske stanice', description: 'Polasci i dolasci autobusa, dodjela perona umjesto gate-ova, kašnjenja, i razglas na dva jezika. Odgovara i manjim stanicama bez skupog sistema.' },
+      { title: 'Željezničke stanice', description: 'Vozni red uživo, kolosijeci i peroni, izmjene i kašnjenja voza na svim ekranima u stanici, uz automatsku najavu.' },
+      { title: 'Luke i trajektni terminali', description: 'Polasci trajekata i brodova, dodjela vezova i ukrcavanja, informacije o kašnjenjima zbog vremena i najave putnicima.' },
+    ],
+    beyondNote: 'Radi se o prilagođavanju konektora i naziva (peron, kolosijek, vez) — ne o novom proizvodu. Javite nam vaš izvor podataka i procijenićemo šta je potrebno.',
+    setupBadge: 'Podešavanje klijenta',
+    setupTitle: 'Kiosk režim u Chrome-u: ekran spreman za par minuta',
+    setupSubtitle: 'Svaki ekran je obična web adresa. Dovoljan je običan računar ili mini-PC sa Chrome-om koji se sam pokrene preko cijelog ekrana i ostane tako — bez miša, tastature i prijave.',
+    setupTabs: { win: 'Windows', linux: 'Linux / Raspberry Pi' },
+    setupAddrTitle: '1. Odaberite adresu ekrana',
+    setupAddrText: 'Zamijenite osnovnu adresu vašom, ako koristite sopstveni domen.',
+    setupAddrs: [
+      ['Odlasci', '/departures'], ['Dolasci', '/arrivals'], ['Split Board', '/split-board'],
+      ['Kombinovani prikaz', '/combined'], ['Prtljag (traka 1)', '/baggage/1'],
+      ['Check-in šalter 3', '/ver2/ver2/checkin/3'], ['Gate 2', '/ver2/ver2/gate/2'], ['Razglas (zvuk)', '/pa'],
+    ],
+    setupStepsWin: [
+      { title: '2. Napravite prečicu', text: 'Desni klik na radnu površinu → Novo → Prečica. U polje lokacije zalijepite komandu ispod (po potrebi promijenite putanju do chrome.exe i adresu ekrana).' },
+      { title: '3. Pokretanje uz paljenje računara', text: 'Pritisnite Win+R, upišite shell:startup i prebacite prečicu u taj folder. Uključite i automatsku prijavu na Windows (netplwiz), da ekran krene bez ikoga.' },
+      { title: '4. Zabranite gašenje ekrana i spavanje', text: 'U PowerShell-u ili Command Prompt-u (kao administrator) pokrenite komande ispod.' },
+    ],
+    setupStepsLinux: [
+      { title: '2. Skripta za pokretanje', text: 'Sačuvajte skriptu ispod kao ~/fids-kiosk.sh i omogućite je (chmod +x). Ona gasi štednju ekrana i pokreće Chrome/Chromium preko cijelog ekrana.' },
+      { title: '3. Pokretanje uz paljenje računara', text: 'Dodajte stavku u autostart (fajl ispod, ~/.config/autostart/fids.desktop). Uključite automatsku prijavu korisnika u postavkama sistema. Na novijim Raspberry Pi OS (Wayland) autostart ide kroz labwc/autostart.' },
+    ],
+    setupCommandLabel: 'Komanda',
+    setupCopy: 'Kopiraj',
+    setupCopied: 'Kopirano',
+    setupExitTitle: 'Kako izaći iz kiosk režima',
+    setupExitText: 'Pritisnite Alt+F4 (zatvara Chrome). Za održavanje spojite tastaturu ili se povežite daljinski.',
+    setupTipsTitle: 'Provjera prije predaje ekrana',
+    setupTips: [
+      'Razlučivost ekrana na preporučenu, a skaliranje na 100% — tekst se tada tačno uklapa.',
+      'Za ekran sa zvukom (razglas /pa) obavezno koristite zastavicu --autoplay-policy, inače browser blokira zvuk.',
+      'Isključite obavještenja i automatska ažuriranja sistema u radnom vremenu aerodroma.',
+      'Chrome 109 je zadnja verzija za Windows 7/8.1 — sistem radi i na njoj.',
+      'Ako se poslije restarta ništa ne prikaže: provjerite automatsku prijavu i prečicu u startup folderu. Dok se stranica učitava ili veza obnavlja, ekran prikazuje neaktivni ekran sa pozadinom aerodroma i satom, ne crn ekran.',
+    ],
     diffBadge: 'Pozicioniranje',
     diffTitle: 'Napravljen za prazninu između dvije krajnosti',
     diffSubtitle: 'Veliki aerodromi imaju višegodišnje ugovore sa velikim FIDS dobavljačima. Mali aerodromi improvizuju sa TV-om i PowerPoint-om. TIV FIDS je za sve između.',
@@ -199,6 +267,8 @@ const T = {
     footerLive: 'Uživo letovi',
     footerPricing: 'Cjenovnik',
     footerSmart: 'Pametni prijedlozi',
+    footerHistory: 'Naša priča',
+    footerSetup: 'Podešavanje ekrana',
     footerAdmin: 'Admin',
   },
   en: {
@@ -207,6 +277,16 @@ const T = {
     heroTitle1: 'Modern FIDS',
     heroTitle2: 'for small and regional airports',
     heroTitleSuffix: '',
+    heroBoardTitle: 'Departures',
+    heroBoardNote: 'Illustration of a display — real screens are below',
+    heroBoardCols: ['Time', 'Destination', 'Desk', 'Gate', 'Status'],
+    heroStatus: { onTime: 'On time', checkin: 'Check-in', boarding: 'Boarding', closing: 'Final call', delayed: 'Delayed' },
+    heroStats: [
+      { value: '{liveYears}', label: 'years in operation' },
+      { value: '24/7', label: 'live, all year round' },
+      { value: '6', label: 'screen types' },
+      { value: '2', label: 'announcement languages' },
+    ],
     heroSubtitle: 'The same system that runs Tivat Airport every day — live flight schedules, gate and check-in desk management with smart assignment suggestions, and automated terminal announcements. Without the cost and complexity of traditional FIDS solutions.',
     ctaLive: 'See pricing',
     ctaDepartures: 'See it live at Tivat Airport',
@@ -242,6 +322,60 @@ const T = {
       { title: 'Stable suggestions & PDF plan', description: 'Suggestions do not flip over tiny differences, but operational changes (a delay, a broken desk) always win. The whole day exports as a printable A4 PDF plan of desks and gates.' },
     ],
     smartFootnote: 'Suggestions assist the dispatcher, they do not replace them: staff always decide and can change anything manually.',
+    historyBadge: 'Our story',
+    historyTitle: 'From a {devSince} VB6 project to a cloud system — {liveYears} years live',
+    historySubtitle: 'TIV FIDS did not appear overnight or from a slide deck. It grew over the years, alongside real flights, real staff, and real mistakes to learn from.',
+    historySteps: [
+      { year: '2009', title: 'Visual Basic 6', text: 'Development started in 2009 as a simple VB6 project — a first attempt to show flight information to passengers without an expensive off-the-shelf product.' },
+      { year: '2012', title: 'Public operation begins', text: 'After three years of development the system went live and started running at Tivat Airport, with real flights and real screens in the terminal.' },
+      { year: '2015', title: 'Automated announcements', text: 'Public address was added: the system announces flights on its own instead of staff doing it by hand.' },
+      { year: '2017–2020', title: 'Node.js and JavaScript', text: 'The system moved to Node and JavaScript — screens run in an ordinary browser, with no special hardware or desktop applications.' },
+      { year: '2023', title: 'TypeScript and modern cloud architecture', text: 'The code moved to TypeScript (Next.js, React), with live data on Redis and Ably realtime, on standard cloud hosting.' },
+      { year: 'Today', title: 'Smart planning', text: 'A desk and gate planner that learns from staff habits and independently checks every plan.' },
+    ],
+    historyFootnote: 'Patient evolution instead of a rewrite from scratch: every phase stayed in operation while the next one was being built.',
+    beyondBadge: 'Not only airports',
+    beyondTitle: 'The same system for any place where people wait for a departure',
+    beyondSubtitle: 'Departure boards, resource assignment, announcements and realtime screens are not tied to aircraft. The data source and terminology change — the rest of the system stays the same.',
+    beyondItems: [
+      { title: 'Bus stations', description: 'Bus departures and arrivals, platform assignment instead of gates, delays, and announcements in two languages. Fits smaller stations without an expensive system.' },
+      { title: 'Railway stations', description: 'A live timetable, tracks and platforms, train changes and delays on every station screen, with automatic announcements.' },
+      { title: 'Ports & ferry terminals', description: 'Ferry and ship departures, berth and boarding assignment, weather-delay information and passenger announcements.' },
+    ],
+    beyondNote: 'This is adapting the connector and terminology (platform, track, berth) — not building a new product. Tell us your data source and we will assess what is needed.',
+    setupBadge: 'Client setup',
+    setupTitle: 'Chrome kiosk mode: a screen ready in minutes',
+    setupSubtitle: 'Every screen is an ordinary web address. All you need is a regular PC or mini-PC with Chrome that starts full-screen on its own and stays that way — no mouse, keyboard or sign-in.',
+    setupTabs: { win: 'Windows', linux: 'Linux / Raspberry Pi' },
+    setupAddrTitle: '1. Pick the screen address',
+    setupAddrText: 'Replace the base address with yours if you use your own domain.',
+    setupAddrs: [
+      ['Departures', '/departures'], ['Arrivals', '/arrivals'], ['Split Board', '/split-board'],
+      ['Combined view', '/combined'], ['Baggage (belt 1)', '/baggage/1'],
+      ['Check-in desk 3', '/ver2/ver2/checkin/3'], ['Gate 2', '/ver2/ver2/gate/2'], ['Announcements (audio)', '/pa'],
+    ],
+    setupStepsWin: [
+      { title: '2. Create a shortcut', text: 'Right-click the desktop → New → Shortcut. Paste the command below into the location field (adjust the path to chrome.exe and the screen address if needed).' },
+      { title: '3. Start with the computer', text: 'Press Win+R, type shell:startup and move the shortcut into that folder. Also enable Windows auto sign-in (netplwiz) so the screen starts unattended.' },
+      { title: '4. Block screen-off and sleep', text: 'In PowerShell or Command Prompt (as administrator) run the commands below.' },
+    ],
+    setupStepsLinux: [
+      { title: '2. Launch script', text: 'Save the script below as ~/fids-kiosk.sh and make it executable (chmod +x). It disables screen blanking and launches Chrome/Chromium full-screen.' },
+      { title: '3. Start with the computer', text: 'Add an autostart entry (file below, ~/.config/autostart/fids.desktop). Enable automatic user sign-in in system settings. On newer Raspberry Pi OS (Wayland), autostart goes through labwc/autostart.' },
+    ],
+    setupCommandLabel: 'Command',
+    setupCopy: 'Copy',
+    setupCopied: 'Copied',
+    setupExitTitle: 'How to exit kiosk mode',
+    setupExitText: 'Press Alt+F4 (closes Chrome). Plug in a keyboard for maintenance, or connect remotely.',
+    setupTipsTitle: 'Checklist before handing over a screen',
+    setupTips: [
+      'Set the display to its recommended resolution and scaling to 100% so text fits exactly.',
+      'For a screen with audio (announcements, /pa) always use the --autoplay-policy flag, otherwise the browser blocks sound.',
+      'Turn off notifications and automatic system updates during operating hours.',
+      'Chrome 109 is the last version for Windows 7/8.1 — the system works on it too.',
+      'If nothing appears after a restart: check auto sign-in and the shortcut in the startup folder. While the page loads or the connection recovers, the screen shows an inactive screen with the airport background and a clock, never a black screen.',
+    ],
     diffBadge: 'Positioning',
     diffTitle: 'Built for the gap between two extremes',
     diffSubtitle: 'Large airports sign multi-year contracts with major FIDS vendors. Small airports improvise with a TV and a PowerPoint loop. TIV FIDS is for everything in between.',
@@ -339,6 +473,8 @@ const T = {
     footerLive: 'Live flights',
     footerPricing: 'Pricing',
     footerSmart: 'Smart suggestions',
+    footerHistory: 'Our story',
+    footerSetup: 'Screen setup',
     footerAdmin: 'Admin',
   },
 } as const;
@@ -358,6 +494,53 @@ const FEATURE_ICONS = [Zap, DoorOpen, Radio, MonitorSmartphone, ShieldCheck, Clo
 // dodato uz postojeći FEATURE_ICONS obrazac. Redoslijed mora pratiti
 // redoslijed stavki u T.me/T.en.pricingTiers / onboardingSteps.
 const SMART_ICONS = [Layers, Building, Brain, MessageSquareText, ShieldAlert, FileText];
+// Istorija: unesi samo početne godine — trajanje se računa automatski.
+const DEV_SINCE_YEAR = 2009;   // početak razvoja (VB6)
+const LIVE_SINCE_YEAR = 2012;  // početak javnog rada
+const fillHistory = (str: string) =>
+  str
+    .replace('{devSince}', String(DEV_SINCE_YEAR))
+    .replace('{liveYears}', String(new Date().getFullYear() - LIVE_SINCE_YEAR))
+    .replace('{devYears}', String(new Date().getFullYear() - DEV_SINCE_YEAR));
+// Hero "tabla": ilustrativni primjer prikaza (NIJE živi feed — nula API poziva).
+type HeroStatus = 'onTime' | 'checkin' | 'boarding' | 'closing' | 'delayed';
+const HERO_BOARD: { time: string; dest: { me: string; en: string }; desk: string; gate: string; seq: HeroStatus[] }[] = [
+  { time: '09:40', dest: { me: 'Beograd', en: 'Belgrade' }, desk: '3–4', gate: '2', seq: ['boarding', 'closing', 'boarding', 'checkin', 'checkin', 'boarding'] },
+  { time: '10:05', dest: { me: 'London', en: 'London' }, desk: '5–7', gate: '3', seq: ['checkin', 'checkin', 'boarding', 'boarding', 'closing', 'checkin'] },
+  { time: '10:30', dest: { me: 'Beč', en: 'Vienna' }, desk: '—', gate: '4', seq: ['onTime', 'checkin', 'checkin', 'boarding', 'onTime', 'onTime'] },
+  { time: '10:55', dest: { me: 'Tel Aviv', en: 'Tel Aviv' }, desk: '21–23', gate: '21', seq: ['delayed', 'delayed', 'checkin', 'delayed', 'checkin', 'checkin'] },
+  { time: '11:20', dest: { me: 'Istanbul', en: 'Istanbul' }, desk: '—', gate: '5', seq: ['onTime', 'onTime', 'onTime', 'checkin', 'onTime', 'delayed'] },
+];
+const HERO_STATUS_STYLE: Record<HeroStatus, string> = {
+  onTime: 'text-emerald-300',
+  checkin: 'text-sky-300',
+  boarding: 'text-amber-300',
+  closing: 'text-rose-300',
+  delayed: 'text-orange-300',
+};
+const BEYOND_ICONS = [Bus, TrainFront, Ship];
+// Kiosk komande (jezički neutralne). `{URL}` se zamjenjuje adresom ekrana.
+const KIOSK_FLAGS = '--kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble --no-first-run --disable-pinch --overscroll-history-navigation=0 --autoplay-policy=no-user-gesture-required --check-for-update-interval=31536000 --user-data-dir="C:\\fids-kiosk"';
+const kioskWinShortcut = (url: string) => `"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" ${KIOSK_FLAGS} ${url}`;
+const KIOSK_WIN_POWER = `powercfg /change monitor-timeout-ac 0
+powercfg /change monitor-timeout-dc 0
+powercfg /change standby-timeout-ac 0
+powercfg /change standby-timeout-dc 0`;
+const kioskLinuxScript = (url: string) => `#!/bin/bash
+# ~/fids-kiosk.sh — ekran uvijek upaljen, Chromium preko cijelog ekrana
+xset s off; xset -dpms; xset s noblank
+unclutter -idle 0.5 -root &   # sakrij miš (sudo apt install unclutter)
+chromium-browser --kiosk --noerrdialogs --disable-infobars \\
+  --disable-session-crashed-bubble --no-first-run --disable-pinch \\
+  --overscroll-history-navigation=0 \\
+  --autoplay-policy=no-user-gesture-required \\
+  --check-for-update-interval=31536000 ${url}`;
+const KIOSK_LINUX_AUTOSTART = `[Desktop Entry]
+Type=Application
+Name=FIDS Kiosk
+Exec=/home/pi/fids-kiosk.sh
+X-GNOME-Autostart-enabled=true`;
+const HISTORY_ICONS = [FileCode2, Hourglass, Megaphone, Terminal, Cloud, Brain];
 const PRICING_ICONS = [Zap, TrendingUp, Building2];
 const ONBOARDING_ICONS = [Mail, Palette, Eye, Rocket];
 // Indeks paketa koji se ističe kao "najpopularniji" — strukturno,
@@ -397,18 +580,48 @@ function useLang(): [Lang, (l: Lang) => void] {
   return [lang, setLang];
 }
 
+function CodeBlock({ code, label, copyLabel, copiedLabel, isDark }: { code: string; label: string; copyLabel: string; copiedLabel: string; isDark: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(async () => {
+    try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
+  }, [code]);
+  return (
+    <div className="rounded-xl border border-white/10 bg-[#050B16] overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-white/[0.03]">
+        <span className="text-[10px] uppercase tracking-widest text-slate-400">{label}</span>
+        <button onClick={copy} className={`flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-md transition-colors ${isDark ? 'text-sky-300 hover:bg-white/10' : 'text-sky-300 hover:bg-white/10'}`}>
+          {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} {copied ? copiedLabel : copyLabel}
+        </button>
+      </div>
+      <pre className="p-4 text-xs leading-relaxed text-slate-200 overflow-x-auto whitespace-pre font-mono"><code>{code}</code></pre>
+    </div>
+  );
+}
+
 export default function HomeClient() {
   // FIX (po zahtjevu — default tema je sad LIGHT, bila je dark)
   const { isDark, toggle } = useTheme(THEME_STORAGE_KEY, false);
   const { isAdmin, setIsAdmin } = useAdminAuthHint();
   const [lang, setLang] = useLang();
   const [clock, setClock] = useState('');
+  const [heroTick, setHeroTick] = useState(0);
+  const [setupTab, setSetupTab] = useState<'win' | 'linux'>('win');
+  const [setupAddr, setSetupAddr] = useState(0);
   const t = T[lang];
 
   useEffect(() => {
     const tick = () => setClock(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
     tick();
     const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Hero tabla: mijenja statuse svakih ~3.5 s (samo vizuelno, bez mreže); poštuje prefers-reduced-motion.
+  useEffect(() => {
+    let reduce = false;
+    try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch {}
+    if (reduce) return;
+    const id = setInterval(() => setHeroTick((n) => n + 1), 3500);
     return () => clearInterval(id);
   }, []);
 
@@ -503,53 +716,112 @@ export default function HomeClient() {
         </div>
       </header>
 
-      {/* ── Hero ────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden">
-        <div
-          className={`absolute inset-0 pointer-events-none ${isDark ? 'opacity-100' : 'opacity-60'}`}
-          style={{
-            background: isDark
-              ? 'radial-gradient(60% 50% at 50% 0%, rgba(56,189,248,0.14), transparent), radial-gradient(40% 40% at 85% 20%, rgba(110,231,183,0.10), transparent)'
-              : 'radial-gradient(60% 50% at 50% 0%, rgba(56,189,248,0.16), transparent), radial-gradient(40% 40% at 85% 20%, rgba(110,231,183,0.18), transparent)',
-          }}
-        />
-        <div className="relative max-w-3xl mx-auto px-6 pt-16 pb-20 text-center">
-          <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-6 ${
-            isDark ? 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20' : 'bg-emerald-500/10 text-emerald-700 border border-emerald-500/20'
-          }`}>
-            <Sparkles className="w-3.5 h-3.5" /> {t.heroBadge}
+      {/* ── Hero (v6, 2026-10-11): tamna "aerodromska" scena (navy + amber
+          tabla), uvijek tamna u obje teme radi kontrasta. Lijevo poruka i
+          CTA, desno ilustrativna tabla odlazaka sa statusima koji se
+          smjenjuju; dolje pista sa pokretnom središnjom linijom i
+          statistika. Sve je CSS/SVG — bez slika, bez mrežnih poziva. ── */}
+      <section className="relative overflow-hidden bg-[#06101F] text-white">
+        <style>{`
+          @keyframes hero-fly { 0% { transform: translate3d(-20vw, 0, 0); opacity: 0; } 8% { opacity: .9; } 92% { opacity: .9; } 100% { transform: translate3d(120vw, -60px, 0); opacity: 0; } }
+          @keyframes hero-flip { 0% { transform: rotateX(90deg); opacity: 0; } 100% { transform: rotateX(0); opacity: 1; } }
+          @keyframes hero-runway { to { background-position: -160px 0; } }
+          @keyframes hero-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+          .hero-plane { animation: hero-fly 26s linear infinite; }
+          .hero-flip { animation: hero-flip .45s ease-out; transform-origin: center bottom; }
+          .hero-runway { background-image: repeating-linear-gradient(90deg, rgba(251,191,36,.85) 0 56px, transparent 56px 112px); background-size: 112px 100%; animation: hero-runway 2.2s linear infinite; }
+          .hero-dot { animation: hero-pulse 1.8s ease-in-out infinite; }
+          @media (prefers-reduced-motion: reduce) { .hero-plane, .hero-flip, .hero-runway, .hero-dot { animation: none !important; } .hero-plane { opacity: .5; transform: translate3d(60vw,0,0); } }
+        `}</style>
+
+        {/* pozadina: sjaj + mreža */}
+        <div className="absolute inset-0 pointer-events-none" aria-hidden
+          style={{ background: 'radial-gradient(55% 60% at 15% 0%, rgba(56,189,248,.22), transparent), radial-gradient(45% 50% at 90% 30%, rgba(251,191,36,.12), transparent), linear-gradient(180deg, #06101F 0%, #0B1B33 100%)' }} />
+        <div className="absolute inset-0 pointer-events-none opacity-[0.07]" aria-hidden
+          style={{ backgroundImage: 'linear-gradient(rgba(255,255,255,.9) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.9) 1px, transparent 1px)', backgroundSize: '56px 56px', maskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)', WebkitMaskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)' }} />
+
+        {/* avion koji preleti */}
+        <div className="hero-plane absolute top-14 left-0 pointer-events-none text-sky-200/80" aria-hidden>
+          <PlaneTakeoff className="w-8 h-8" />
+        </div>
+
+        <div className="relative max-w-6xl mx-auto px-6 pt-16 sm:pt-20 pb-10 grid grid-cols-1 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] gap-12 items-center">
+          {/* ── lijevo: poruka ── */}
+          <div className="min-w-0">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-6 bg-emerald-400/10 text-emerald-300 border border-emerald-400/25">
+              <span className="hero-dot w-1.5 h-1.5 rounded-full bg-emerald-400" /> {t.heroBadge}
+            </div>
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black tracking-tight leading-[1.05] mb-6">
+              {t.heroTitle1}
+              <br />
+              <span className="bg-gradient-to-r from-sky-300 via-sky-400 to-amber-300 bg-clip-text text-transparent">{t.heroTitle2}</span>
+            </h1>
+            <p className="text-lg text-slate-300 max-w-xl mb-9 leading-relaxed">{t.heroSubtitle}</p>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+              <a
+                href="#pricing"
+                className="group flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white font-bold whitespace-nowrap shadow-lg shadow-sky-500/30 transition-all"
+              >
+                {t.ctaLive}
+                <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+              </a>
+              <a
+                href="#showcase"
+                className="flex items-center justify-center text-center px-6 py-3.5 rounded-xl font-bold border border-white/20 hover:bg-white/10 transition-colors"
+              >
+                {t.ctaDepartures}
+              </a>
+            </div>
           </div>
-          <h1 className="text-4xl sm:text-5xl font-black tracking-tight leading-[1.08] mb-6">
-            {t.heroTitle1}
-            <br />
-            <span className={isDark ? 'text-sky-400' : 'text-sky-600'}>{t.heroTitle2}</span>
-          </h1>
-          <p className={`text-lg max-w-xl mx-auto mb-10 ${textMuted}`}>
-            {t.heroSubtitle}
-          </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-            {/* NOVO (po zahtjevu — pivot ka SaaS prodaji): primarno dugme
-                sad vodi na cjenovnik (#pricing), ne na showcase galeriju —
-                primarni posjetilac koga ova stranica treba da ubijedi je
-                potencijalni kupac (drugi aerodrom), ne putnik. Sekundarno
-                dugme i dalje vodi na uživo showcase, zadržavajući
-                postojeću, stvarnu Tivat funkciju stranice. */}
-            <a
-              href="#pricing"
-              className="group flex items-center gap-2 px-7 py-3.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white font-bold shadow-lg shadow-sky-500/20 transition-all"
-            >
-              {t.ctaLive}
-              <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
-            </a>
-            <a
-              href="#showcase"
-              className={`px-7 py-3.5 rounded-xl font-bold border transition-colors ${
-                isDark ? 'border-white/15 hover:bg-white/5' : 'border-[#0B2545]/15 hover:bg-white'
-              }`}
-            >
-              {t.ctaDepartures}
-            </a>
+
+          {/* ── desno: ilustrativna tabla odlazaka ── */}
+          <div className="relative min-w-0">
+            <div className="absolute -inset-4 rounded-[2rem] bg-sky-500/10 blur-2xl pointer-events-none" aria-hidden />
+            <div className="relative rounded-2xl border border-white/10 bg-[#050B16]/90 shadow-2xl shadow-black/40 overflow-hidden backdrop-blur" role="img" aria-label={t.heroBoardNote}>
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/10 bg-white/[0.03]">
+                <div className="flex items-center gap-2.5">
+                  <PlaneTakeoff className="w-4 h-4 text-amber-300" />
+                  <span className="font-black tracking-wide uppercase text-sm text-amber-300">{t.heroBoardTitle}</span>
+                </div>
+                <span className="font-mono text-sm tabular-nums text-amber-200/90">{clock || '--:--'}</span>
+              </div>
+              <div className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[3.6rem_minmax(0,1fr)_4rem_2.6rem_7rem] gap-x-2 px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 border-b border-white/5">
+                {t.heroBoardCols.map((c, ci) => <span key={c} className={ci === 2 ? 'hidden sm:block' : undefined}>{c}</span>)}
+              </div>
+              <div className="divide-y divide-white/5 font-mono">
+                {HERO_BOARD.map((row, ri) => {
+                  const st = row.seq[(heroTick + ri) % row.seq.length];
+                  return (
+                    <div key={row.time} className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[3.6rem_minmax(0,1fr)_4rem_2.6rem_7rem] gap-x-2 items-center px-5 py-3 text-sm">
+                      <span className="text-amber-300 tabular-nums">{row.time}</span>
+                      <span className="text-white font-semibold truncate">{row.dest[lang]}</span>
+                      <span className="hidden sm:block text-slate-300 tabular-nums">{row.desk}</span>
+                      <span className="text-slate-300 tabular-nums">{row.gate}</span>
+                      <span key={st} className={`hero-flip text-xs font-bold uppercase tracking-wide truncate ${HERO_STATUS_STYLE[st]}`}>{t.heroStatus[st]}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="px-5 py-2.5 text-[11px] text-slate-500 border-t border-white/5 bg-white/[0.02]">{t.heroBoardNote}</div>
+            </div>
           </div>
+        </div>
+
+        {/* statistika */}
+        <div className="relative max-w-6xl mx-auto px-6 pb-12">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-px rounded-2xl overflow-hidden border border-white/10 bg-white/10">
+            {t.heroStats.map((st) => (
+              <div key={st.label} className="bg-[#08142A]/95 px-5 py-5 text-center">
+                <div className="text-3xl font-black tracking-tight text-white tabular-nums">{fillHistory(st.value)}</div>
+                <div className="text-xs uppercase tracking-widest text-slate-400 mt-1">{st.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* pista */}
+        <div className="relative h-8 bg-[#030811] border-t border-white/10" aria-hidden>
+          <div className="hero-runway absolute left-0 right-0 top-1/2 -translate-y-1/2 h-[3px]" />
         </div>
       </section>
 
@@ -698,6 +970,70 @@ export default function HomeClient() {
         </div>
       </section>
 
+      {/* ── Ne samo aerodromi — NOVO (2026-10-11): autobuske/željezničke
+          stanice i luke. ─────────────────────────────────────────── */}
+      <section id="beyond" className="max-w-6xl mx-auto px-6 py-20 scroll-mt-20">
+        <div className="text-center mb-14">
+          <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+            isDark ? 'bg-sky-500/10 text-sky-300 border border-sky-500/20' : 'bg-sky-500/10 text-sky-700 border border-sky-500/20'
+          }`}>
+            <Anchor className="w-3.5 h-3.5" /> {t.beyondBadge}
+          </div>
+          <h2 className="text-3xl font-black tracking-tight mb-3">{t.beyondTitle}</h2>
+          <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.beyondSubtitle}</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          {t.beyondItems.map((it, i) => {
+            const Icon = BEYOND_ICONS[i];
+            return (
+              <div key={it.title} className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-white'}`}>
+                <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-4 ${isDark ? 'bg-sky-500/15 text-sky-400' : 'bg-[#0B2545]/8 text-[#0B2545]'}`}>
+                  <Icon className="w-5 h-5" />
+                </div>
+                <h3 className="font-bold mb-1.5">{it.title}</h3>
+                <p className={`text-sm leading-relaxed ${textMuted}`}>{it.description}</p>
+              </div>
+            );
+          })}
+        </div>
+        <p className={`text-xs text-center max-w-xl mx-auto mt-8 ${textMuted}`}>{t.beyondNote}</p>
+      </section>
+
+      {/* ── Naša priča (istorija sistema) — NOVO (2026-10-11): VB6 →
+          live 2012 → razglas 2015 → Node/JS → TypeScript/cloud. ───── */}
+      <section id="history" className={`${bgAlt} border-y ${border} py-20 scroll-mt-20`}>
+        <div className="max-w-4xl mx-auto px-6">
+          <div className="text-center mb-14">
+            <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+              isDark ? 'bg-amber-400/10 text-amber-300 border border-amber-400/20' : 'bg-amber-500/10 text-amber-700 border border-amber-500/20'
+            }`}>
+              <History className="w-3.5 h-3.5" /> {t.historyBadge}
+            </div>
+            <h2 className="text-3xl font-black tracking-tight mb-3">{fillHistory(t.historyTitle)}</h2>
+            <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.historySubtitle}</p>
+          </div>
+          <ol className="relative">
+            <div className={`absolute left-5 top-2 bottom-2 w-px ${isDark ? 'bg-white/10' : 'bg-[#0B2545]/15'}`} aria-hidden />
+            {t.historySteps.map((step, i) => {
+              const Icon = HISTORY_ICONS[i];
+              return (
+                <li key={step.title} className="relative pl-16 pb-8 last:pb-0">
+                  <div className={`absolute left-0 top-0 w-10 h-10 rounded-xl flex items-center justify-center ${
+                    isDark ? 'bg-sky-500/15 text-sky-400' : 'bg-[#0B2545]/10 text-[#0B2545]'
+                  }`}>
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <div className={`text-xs font-black uppercase tracking-widest mb-1 ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>{step.year}</div>
+                  <h3 className="font-bold mb-1">{step.title}</h3>
+                  <p className={`text-sm leading-relaxed ${textMuted}`}>{step.text}</p>
+                </li>
+              );
+            })}
+          </ol>
+          <p className={`text-xs text-center max-w-xl mx-auto mt-10 ${textMuted}`}>{t.historyFootnote}</p>
+        </div>
+      </section>
+
       {/* ── Cjenovnik — NOVO (po zahtjevu, 2026-10-05): tri paketa
           umjesto jedne ilustrativne linije cijene, sa najpopularnijim
           paketom istaknutim (PRICING_HIGHLIGHT_INDEX). ──────────── */}
@@ -802,6 +1138,96 @@ export default function HomeClient() {
               </div>
             );
           })}
+        </div>
+      </section>
+
+      {/* ── Podešavanje klijenta (Chrome kiosk) — NOVO (2026-10-11). ── */}
+      <section id="setup" className={`${bgAlt} border-y ${border} py-20 scroll-mt-20`}>
+        <div className="max-w-4xl mx-auto px-6">
+          <div className="text-center mb-12">
+            <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+              isDark ? 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20' : 'bg-emerald-500/10 text-emerald-700 border border-emerald-500/20'
+            }`}>
+              <Monitor className="w-3.5 h-3.5" /> {t.setupBadge}
+            </div>
+            <h2 className="text-3xl font-black tracking-tight mb-3">{t.setupTitle}</h2>
+            <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.setupSubtitle}</p>
+          </div>
+
+          {/* 1. adresa ekrana */}
+          <div className={`rounded-2xl border ${border} p-6 mb-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+            <h3 className="font-bold mb-1">{t.setupAddrTitle}</h3>
+            <p className={`text-sm mb-4 ${textMuted}`}>{t.setupAddrText}</p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {t.setupAddrs.map(([label], i) => (
+                <button
+                  key={label}
+                  onClick={() => setSetupAddr(i)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+                    setupAddr === i
+                      ? 'bg-sky-500 border-sky-500 text-white'
+                      : `${border} ${isDark ? 'hover:bg-white/5' : 'hover:bg-white'}`
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <code className={`block text-xs sm:text-sm font-mono break-all rounded-lg px-3 py-2 ${isDark ? 'bg-black/30 text-sky-200' : 'bg-white border border-[#0B2545]/10 text-[#0B2545]'}`}>
+              {SITE_URL}{t.setupAddrs[setupAddr][1]}
+            </code>
+          </div>
+
+          {/* OS tabovi */}
+          <div className={`inline-flex rounded-lg border overflow-hidden mb-6 ${border}`}>
+            {(['win', 'linux'] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setSetupTab(k)}
+                className={`px-4 py-2 text-sm font-bold transition-colors ${
+                  setupTab === k ? (isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-[#0B2545] text-white') : textMuted
+                }`}
+              >
+                {t.setupTabs[k]}
+              </button>
+            ))}
+          </div>
+
+          {(() => {
+            const url = `${SITE_URL}${t.setupAddrs[setupAddr][1]}`;
+            const steps = setupTab === 'win' ? t.setupStepsWin : t.setupStepsLinux;
+            const blocks: { label: string; code: string }[][] = setupTab === 'win'
+              ? [[{ label: t.setupCommandLabel, code: kioskWinShortcut(url) }], [], [{ label: 'PowerShell / CMD', code: KIOSK_WIN_POWER }]]
+              : [[{ label: '~/fids-kiosk.sh', code: kioskLinuxScript(url) }], [{ label: '~/.config/autostart/fids.desktop', code: KIOSK_LINUX_AUTOSTART }]];
+            return (
+              <div className="space-y-5">
+                {steps.map((st, i) => (
+                  <div key={st.title} className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+                    <h3 className="font-bold mb-1">{st.title}</h3>
+                    <p className={`text-sm leading-relaxed mb-4 ${textMuted}`}>{st.text}</p>
+                    <div className="space-y-3">
+                      {(blocks[i] ?? []).map((b) => (
+                        <CodeBlock key={b.label} code={b.code} label={b.label} copyLabel={t.setupCopy} copiedLabel={t.setupCopied} isDark={isDark} />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mt-6">
+            <div className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+              <h3 className="font-bold mb-1 flex items-center gap-2"><Wrench className="w-4 h-4" /> {t.setupExitTitle}</h3>
+              <p className={`text-sm leading-relaxed ${textMuted}`}>{t.setupExitText}</p>
+            </div>
+            <div className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+              <h3 className="font-bold mb-2 flex items-center gap-2"><Check className="w-4 h-4" /> {t.setupTipsTitle}</h3>
+              <ul className={`text-sm leading-relaxed space-y-1.5 list-disc pl-5 ${textMuted}`}>
+                {t.setupTips.map((tip) => <li key={tip}>{tip}</li>)}
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -915,6 +1341,8 @@ export default function HomeClient() {
           <div className={`flex items-center gap-4 text-xs ${textMuted}`}>
             <a href="#showcase" className="hover:underline">{t.footerLive}</a>
             <a href="#smart" className="hover:underline">{t.footerSmart}</a>
+            <a href="#history" className="hover:underline">{t.footerHistory}</a>
+            <a href="#setup" className="hover:underline">{t.footerSetup}</a>
             <a href="#pricing" className="hover:underline">{t.footerPricing}</a>
             <Link href="/admin/login" className="hover:underline">{t.footerAdmin}</Link>
           </div>

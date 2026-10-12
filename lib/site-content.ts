@@ -68,7 +68,7 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
     },
     {
       q: 'Is it already used in production?',
-      a: 'Yes. It is the system that runs flight information at Tivat Airport every day, 24/7, including an automatic night mode when there are no flights.',
+      a: 'Yes. Development started in 2009 as a VB6 project, it went live at Tivat Airport in 2012, gained automated announcements in 2015, moved to Node.js/JavaScript between 2017 and 2020, and has been written in TypeScript since 2023. It runs flight information at Tivat Airport every day, 24/7, including an automatic night mode when there are no flights.',
     },
     {
       q: 'Can it suggest which check-in desks and gates to open?',
@@ -106,7 +106,7 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
     },
     {
       q: 'Da li se već koristi u produkciji?',
-      a: 'Da. To je sistem koji svakodnevno, 24/7, vodi informacije o letovima na Aerodromu Tivat, uključujući automatski noćni režim kada nema letova.',
+      a: 'Da. Razvoj je počeo 2009. kao VB6 projekat, u javni rad na Aerodromu Tivat pušten je 2012. godine, razglas je dodat 2015., između 2017. i 2020. prešao je na Node.js/JavaScript, a od 2023. je napisan u TypeScript-u. Svakodnevno, 24/7, vodi informacije o letovima na Aerodromu Tivat, uključujući automatski noćni režim kada nema letova.',
     },
     {
       q: 'Može li sistem predložiti koje check-in šaltere i gate-ove otvoriti?',

@@ -39,6 +39,7 @@ import {
 } from "react"
 import { useParams } from "next/navigation"
 import type { Flight } from "@/types/flight"
+import InactiveScreen from '@/components/InactiveScreen';
 import { getFlightsByBaggage } from "@/lib/flight-service"
 import { Plane, Luggage, MapPin, Clock, Users } from "lucide-react"
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from "@/lib/airline-logo"
@@ -67,11 +68,7 @@ class BaggageErrorBoundary extends Component<{ children: ReactNode }, BaggageEBS
   }
   render() {
     if (this.state.hasError) return (
-      <div className="h-screen bg-[#0f172a] flex flex-col items-center justify-center text-white gap-6">
-        <Luggage className="w-24 h-24 opacity-30 animate-pulse" />
-        <div className="text-3xl font-bold opacity-70">Reconnecting…</div>
-        <div className="text-lg opacity-50">{this.state.message}</div>
-      </div>
+      <InactiveScreen message="Reconnecting…" detail={this.state.message} />
     )
     return this.props.children
   }

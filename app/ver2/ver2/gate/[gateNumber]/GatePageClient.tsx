@@ -12,6 +12,7 @@ import {
   type CheckInStatus,
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
+import InactiveScreen from '@/components/InactiveScreen';
 import { isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import Image from 'next/image';
@@ -64,11 +65,7 @@ class GateErrorBoundary extends Component<{ children: ReactNode }, EBState> {
   }
   render() {
     if (this.state.hasError) return (
-      <div style={styles.splash}>
-        <div style={styles.splashIcon}>⚠</div>
-        <div style={styles.splashTitle}>Reconnecting…</div>
-        <div style={styles.splashSub}>{this.state.message}</div>
-      </div>
+      <InactiveScreen message="Reconnecting…" detail={this.state.message} />
     );
     return this.props.children;
   }
@@ -654,12 +651,7 @@ const effectiveStatus = useMemo(() => {
   // ------------------------------------------------------------
   // RENDER: Loading
   // ------------------------------------------------------------
-  if (loading) return (
-    <div style={styles.splash}>
-      <div style={styles.spinner} />
-      <div style={styles.splashTitle}>Loading gate information…</div>
-    </div>
-  );
+  if (loading) return <InactiveScreen message="Loading gate information…" />;
 
   // ------------------------------------------------------------
   // RENDER: Nema leta
