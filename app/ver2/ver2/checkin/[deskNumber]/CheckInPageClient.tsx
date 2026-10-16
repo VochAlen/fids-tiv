@@ -1,5 +1,8 @@
 'use client';
 
+import ClockDiagnostics from '@/components/ClockDiagnostics';
+import { pickFlightForNumber } from '@/lib/flight-pick';
+import { setDebug } from '@/lib/debug-state';
 import {
   useEffect,
   useState,
@@ -774,6 +777,7 @@ export default function CheckInPageClient() {
   return (
     <CheckInErrorBoundary>
       <CheckInDisplay />
+      <ClockDiagnostics label="check-in" />
     </CheckInErrorBoundary>
   );
 }
@@ -800,7 +804,7 @@ function CheckInDisplay() {
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
   const { data: liveFlightData, refetch: refetchFlights } = useRealtimeFlightData('checkin');
-const { deskEntries, connectionState, isSynced, lastSyncAtRef, refetch: refetchAssignments } = useRealtimeAssignments('checkin');
+const { deskEntries, connectionState, isSynced, lastSyncAtRef, refetch: refetchAssignments, verifyKey } = useRealtimeAssignments('checkin');
 
   // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
   // se zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27):
@@ -1127,6 +1131,7 @@ const computeAssignment = useCallback(async () => {
   setLoading(false);
 
 if (!myData.flightNumber || myData.status === null) {
+  setDebug('desk', `${deskNumberParam} → INACTIVE: nema unosa na serveru (status=${myData.status ?? 'null'})`);
   lastFlightNumberRef.current = '';
   detailsLoadedRef.current = false; // ← NOVO
   setAssignment(EMPTY_ASSIGNMENT);
@@ -1158,11 +1163,9 @@ lastFlightNumberRef.current = myData.flightNumber;
 
 let flightDetails: Partial<Flight> = {};
 if (liveFlightData) {
-  const allFlights: Flight[] = [
-    ...(liveFlightData.departures || []),
-    ...(liveFlightData.arrivals || []),
-  ];
-  const match = allFlights.find((f: Flight) => f.FlightNumber === myData.flightNumber);
+  // NOVO (2026-10-16): isti broj leta može biti u rasporedu više puta — vidi lib/flight-pick.ts.
+  const picked = pickFlightForNumber<Flight>(liveFlightData.departures || [], liveFlightData.arrivals || [], myData.flightNumber);
+  const match = picked.flight;
   // NOVO (po zahtjevu — bezbjednosna mreža, nezavisno od konačnog
   // uzroka prijavljenog "zatvoren/poletio let se i dalje prikazuje"):
   // ako je pronađeni let VEĆ poletio, NEMOGUĆE je da se prikaže na
@@ -1171,8 +1174,9 @@ if (liveFlightData) {
   // "departed/poletio" konvencija kao svugdje drugo u projektu (vidi
   // npr. GatePageClient.tsx, koji je ovu zaštitu već imao — checkin
   // stranica je nije imala).
-  const matchIsDeparted = match ? /(departed|poletio|take off)/i.test(match.StatusEN ?? '') : false;
+  const matchIsDeparted = picked.departed;
   if (match && matchIsDeparted) {
+    setDebug('desk', `${deskNumberParam} ${myData.status}/${myData.flightNumber} seq=${(myData as { seq?: number }).seq ?? '?'} → INACTIVE: let poletio (${match.StatusEN})`);
     detailsLoadedRef.current = false;
     setAssignment(EMPTY_ASSIGNMENT);
     return;
@@ -1206,6 +1210,7 @@ const sl = statusStr.toLowerCase().trim();
 const isCancelled = sl.includes('cancelled') || sl.includes('canceled') || sl.includes('annulé') || sl.includes('otkazan');
 const isDiverted = sl.includes('diverted') || sl.includes('preusmjeren') || sl.includes('dévié');
 
+setDebug('desk', `${deskNumberParam} ${myData.status}/${myData.flightNumber} seq=${(myData as { seq?: number }).seq ?? '?'} details=${flightDetails.FlightNumber ? 'da' : 'NE'}${isCancelled ? ' CANCELLED' : ''}${isDiverted ? ' DIVERTED' : ''}`);
 setAssignment({
   status: myData.status as 'open' | 'closed',
   flightNumber: myData.flightNumber,
@@ -1280,7 +1285,7 @@ useEffect(() => {
   //   (1) tab/prozor postaje vidljiv ili dobija fokus;
   //   (2) "drift" — interval od 5s se probudio >20s kasnije nego što je trebalo (sleep/zamrzavanje).
   useEffect(() => {
-    const resync = () => { refetchAssignments(); refetchFlights(); };
+    const resync = () => { refetchAssignments(); refetchFlights(); if (deskNumberParam) verifyKey('desk', deskNumberParam); };
     const onVisible = () => { if (!document.hidden) resync(); };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', resync);
@@ -1297,7 +1302,7 @@ useEffect(() => {
       window.removeEventListener('pageshow', resync);
       clearInterval(id);
     };
-  }, [refetchAssignments, refetchFlights]);
+  }, [refetchAssignments, refetchFlights, verifyKey, deskNumberParam]);
 
   // NOVO: šalter je otvoren, a podaci o letu još nisu stigli → povuci podatke o letovima.
   const flightDetailsMissing = isOpen && !assignment.destinationCity && !assignment.airlineName;
@@ -1311,6 +1316,27 @@ useEffect(() => {
   // ============================================================
   // RENDER: Loading
   // ============================================================
+  // NOVO (2026-10-16): NEZAVISNA provjera u bazi (/api/test/assignment-truth, bez ikakvog keša) —
+  // posljednja linija odbrane: ma kako se lokalno stanje pokvarilo (izgubljena poruka, zastarjeli
+  // snapshot, greška u merge-u), prikaz se vraća na ono što PIŠE u bazi.
+  //  a) 4 s poslije SVAKE promjene unosa ovog šaltera (poruka stigla → potvrdi u bazi),
+  //  b) povremeno dok je šalter inactive (180 s; 300 s noću) — 1 Redis GET po pozivu,
+  //  c) pri buđenju/fokusu (vidi resync efekat iznad).
+  const myEntry = deskEntries[deskNumberParam];
+  const mySig = `${myEntry?.status ?? 'x'}:${myEntry?.flightNumber ?? ''}:${myEntry?.seq ?? 0}`;
+  useEffect(() => {
+    if (!deskNumberParam) return;
+    const id = setTimeout(() => verifyKey('desk', deskNumberParam), 4_000);
+    return () => clearTimeout(id);
+  }, [mySig, deskNumberParam, verifyKey]);
+
+  useEffect(() => {
+    if (!deskNumberParam || isOpen) return;
+    const night = connectionState === 'night-sleep';
+    const id = setInterval(() => verifyKey('desk', deskNumberParam), (night ? 300_000 : 180_000) + Math.floor(Math.random() * 10_000));
+    return () => clearInterval(id);
+  }, [isOpen, connectionState, deskNumberParam, verifyKey]);
+
   // NOVO (2026-10-12): dok ne stigne prvi pouzdan podatak sa servera (poslije svakog reload-a /
   // restarta Electron klijenta), stvarno stanje šaltera je NEPOZNATO — ne smije se pokazati ni
   // "inactive" ni "active". Ranije je `loading` padao na false odmah pri mount-u (računanje sa

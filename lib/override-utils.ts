@@ -442,6 +442,7 @@ export async function resetExpiredCheckInOverrides(): Promise<number> {
 // trenutku rucno nesto radi na istom resursu, ova funkcija jednostavno
 // preskace taj ciklus (lock zauzet) i pokusa ponovo za 3 min.
 const AUTO_CLOSE_LOCK_TTL_SECONDS = 5;
+export const AUTO_CLOSE_GRACE_MS = 2 * 60_000;
 const AUTO_CLOSE_LOCK_WAIT_MAX_MS = 2_000;
 const AUTO_CLOSE_LOCK_WAIT_POLL_MS = 200;
 
@@ -516,9 +517,15 @@ async function autoCloseTerminatedInBlob(
     const closed: string[] = [];
     for (const [resourceNumber, entry] of Object.entries(all)) {
       if (!entry?.flightNumber) continue;
-      const flight = allFlights.find(f => f.FlightNumber === entry.flightNumber);
-      if (!flight) continue; // let nije u trenutnom rasporedu — ne diraj (npr. drugi dan)
-      if (isTerminatedStatus(flight.StatusEN || '')) {
+      // NOVO (2026-10-16): isti broj leta može biti u rasporedu više puta (npr. dolazak i odlazak, ili
+      // jučerašnji/sutrašnji let). Zatvaramo SAMO ako su SVI primjerci terminirani — `find()` je ranije
+      // uzimao prvi i mogao zatvoriti upravo dodijeljen let zbog starog primjerka.
+      const matches = allFlights.filter(f => f.FlightNumber === entry.flightNumber);
+      if (matches.length === 0) continue; // let nije u trenutnom rasporedu — ne diraj (npr. drugi dan)
+      // Odgoda: unos postavljen prije manje od AUTO_CLOSE_GRACE_MS je svježa namjerna radnja osoblja;
+      // raspored (keš) može biti stariji od nje. Sljedeći ciklus (3 min) će ga svakako obraditi.
+      if (entry.setAt && Date.now() - entry.setAt < AUTO_CLOSE_GRACE_MS) continue;
+      if (matches.every(f => isTerminatedStatus(f.StatusEN || ''))) {
         delete all[resourceNumber];
         closed.push(resourceNumber);
       }

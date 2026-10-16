@@ -113,6 +113,7 @@ const loadEmergencyCache = (): FlightData | null => {
 
 import { getSharedAbly, reportDynamicNightMode, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
+import { noteServerDate } from '@/lib/server-clock';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -179,6 +180,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
     // cache: 'no-store' — vidi napomenu u useRealtimeAssignments.ts.
     // Sprečava browser HTTP keš da servira stale flight podatke pri
     // remount-u komponente (npr. admin logout/login).
+    const clockSentAt = Date.now();
     fetch('/api/flights/snapshot', { cache: 'no-store', signal: controller.signal })
       .then(res => {
         // NOVO — eksplicitna provjera HTTP statusa, isti razlog kao
@@ -186,6 +188,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
         // praznim/neočekivanim tijelom mogao tiho "proći" umjesto da
         // završi u catch-u (i aktivira emergency cache fallback) ispod.
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        noteServerDate(res.headers.get('date'), clockSentAt, Date.now());
         return res.json() as Promise<FlightData>;
       })
       .then((snapshot: FlightData) => {

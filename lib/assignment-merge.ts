@@ -23,6 +23,12 @@ export type AssignmentEntry = {
   classType: string | null;
   setAt: number | null;
   seq: number;
+  /**
+   * Samo lokalno, postavlja ga mergeNewer: unos je LOKALNO očišćen jer ga snapshot nije sadržavao
+   * (vrijednost = `readAt` tog snapshot-a, 0 ako nepoznat). Takav unos se može "oživjeti" snapshotom
+   * koji je server pročitao POSLIJE (vidi mergeNewer) — lažno brisanje tako nikad nije trajno.
+   */
+  clearedReadAt?: number;
 };
 
 // NOVO (KRITIČNO — prijavljen bug, 2026-09-27 poslijepodne: "osoblje
@@ -187,10 +193,14 @@ const CLEARED_BY_SNAPSHOT: Omit<AssignmentEntry, 'setAt' | 'seq'> = {
 // NAKON što je ovaj snapshot zatražen — za njih snapshot koji je stariji od tog zahtjeva nema pravo
 // da kaže "obrisano", pa se `protectedKeys` NE čiste (unosi koje snapshot SADRŽI i dalje idu kroz
 // uobičajeno seq poređenje).
+/** Tolerancija između satova serverskih instanci (setAt piše jedna, readAt druga). */
+export const SNAPSHOT_READ_MARGIN_MS = 2_000;
+
 export function mergeNewer(
   prev: Record<string, AssignmentEntry>,
   incoming: Record<string, AssignmentEntry>,
-  protectedKeys?: ReadonlySet<string>
+  protectedKeys?: ReadonlySet<string>,
+  snapshotReadAt?: number
 ): Record<string, AssignmentEntry> {
   // Lijena alokacija: `result` ostaje `null` (i na kraju vraćamo tačno
   // `prev` referencu) dok se ne desi BAREM jedna stvarna izmjena. Ovo je
@@ -201,7 +211,12 @@ export function mergeNewer(
   for (const key of Object.keys(incoming)) {
     const existing = (result ?? prev)[key];
     const incomingEntry = incoming[key];
-    if (isIncomingNewer(existing, incomingEntry) && !entriesEqual(existing, incomingEntry)) {
+    // SIGURNOSNA MREŽA (2026-10-16): lokalno "očišćen snapshotom" unos + noviji snapshot (pročitan
+    // poslije tog brisanja) koji ga ima kao otvoren → server je izvor istine, oživi ga.
+    const revive = existing?.clearedReadAt !== undefined && incomingEntry.status !== null &&
+      snapshotReadAt !== undefined && snapshotReadAt > existing.clearedReadAt &&
+      incomingEntry.seq >= existing.seq - 1;
+    if (revive || (isIncomingNewer(existing, incomingEntry) && !entriesEqual(existing, incomingEntry))) {
       if (!result) result = { ...prev };
       result[key] = incomingEntry;
     }
@@ -212,8 +227,14 @@ export function mergeNewer(
     if (protectedKeys?.has(key)) continue; // svježe stigla Ably poruka — stariji snapshot ne smije da je briše
     const existing = prev[key];
     if (!existing || existing.status === null) continue;
+    // NOVO (2026-10-16 — uzrok "check-in ostaje inactive iako je let dodijeljen"): snapshot koji je
+    // server pročitao PRIJE nego što je unos postavljen (8s in-process keš + CDN) ne smije da kaže
+    // "obrisano". Lažno brisanje je NEPOVRATNO (lažni seq = existing+1 odbija i ispravan snapshot),
+    // pa kiosk ostaje inactive do sljedeće akcije na šalteru. setAt je sat servera, readAt također.
+    if (snapshotReadAt !== undefined && existing.setAt != null &&
+        existing.setAt > snapshotReadAt - SNAPSHOT_READ_MARGIN_MS) continue;
     if (!result) result = { ...prev };
-    result[key] = { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: (existing.seq ?? 0) + 1 };
+    result[key] = { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: (existing.seq ?? 0) + 1, clearedReadAt: snapshotReadAt ?? 0 };
   }
 
   return result ?? prev;
@@ -240,4 +261,33 @@ export function protectedKeysSince(touched: ReadonlyMap<string, number>, started
   const out = new Set<string>();
   for (const [key, at] of touched) if (at >= startedAt) out.add(key);
   return out;
+}
+
+
+/**
+ * NOVO (2026-10-16): primjena NEKEŠIRANOG odgovora servera za jedan ključ (`/api/test/assignment-truth`).
+ * Redis je jedini izvor istine, a ovaj odgovor je pročitan POSLIJE svega što je klijent primio prije
+ * `fetchStartedAt` — zato ga primjenjujemo bezuslovno (bez seq poređenja koje je znalo zaglavljivati).
+ * Jedini izuzetak: Ably poruka je za ključ stigla NAKON što je zahtjev krenuo (`protectedKeys`) — ona je
+ * novija od odgovora, pa se odgovor ignoriše.
+ */
+export function applyTruth(
+  prev: Record<string, AssignmentEntry>,
+  key: string,
+  serverEntry: AssignmentEntry | null,
+  readAt: number,
+  protectedKeys?: ReadonlySet<string>,
+): Record<string, AssignmentEntry> {
+  if (protectedKeys?.has(key)) return prev;
+  const existing = prev[key];
+  if (serverEntry && serverEntry.status !== null && serverEntry.flightNumber) {
+    if (existing && !existing.clearedReadAt && entriesEqual(existing, serverEntry) && existing.seq === serverEntry.seq) return prev;
+    return { ...prev, [key]: { ...serverEntry } };
+  }
+  // server nema (aktivan) unos za ključ
+  if (!existing || existing.status === null) return prev;
+  return {
+    ...prev,
+    [key]: { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: Math.max(existing.seq ?? 0, serverEntry?.seq ?? 0) + 1, clearedReadAt: readAt },
+  };
 }

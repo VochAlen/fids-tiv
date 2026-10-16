@@ -80,7 +80,7 @@ import * as Ably from 'ably';
 // Re-eksportovano ispod (export type { AssignmentEntry }) da
 // app/admin/assign-checkin/page.tsx i dalje može uvoziti tip odavde,
 // bez izmjene tog fajla.
-import { mergeNewer, mergeOne, protectedKeysSince, type AssignmentEntry } from '@/lib/assignment-merge';
+import { mergeNewer, mergeOne, applyTruth, protectedKeysSince, type AssignmentEntry } from '@/lib/assignment-merge';
 export type { AssignmentEntry };
 
 type AssignmentsResponse = {
@@ -91,10 +91,13 @@ type AssignmentsResponse = {
   // pouzdano pročitati stanje (Redis/circuit-breaker problem) — ovaj
   // odgovor NIJE punopravan snapshot i NE SMIJE se koristiti za merge.
   ok?: boolean;
+  /** Sat servera kad je snapshot pročitan iz Redis-a (vidi mergeNewer). */
+  readAt?: number;
 };
 
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
+import { noteServerDate } from '@/lib/server-clock';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -242,6 +245,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     // TCP timeout — i oslobađa inFlightRef da naredni pokušaj ne mora
     // čekati taj duži rok.
     const startedAt = Date.now();
+    const sentAt = startedAt;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_SNAPSHOT_TIMEOUT_MS);
 
@@ -257,6 +261,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         // odgovor sa praznim/neočekivanim tijelom mogao tiho "proći"
         // umjesto da završi u catch-u ispod.
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        noteServerDate(res.headers.get('date'), sentAt, Date.now());
         return res.json() as Promise<AssignmentsResponse>;
       })
       .then((data: AssignmentsResponse) => {
@@ -279,8 +284,8 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         // Ključevi dirnuti Ably porukom NAKON što je ovaj zahtjev krenuo: snapshot je stariji od njih.
         const protectedDesks = protectedKeysSince(touchedDeskRef.current, startedAt);
         const protectedGates = protectedKeysSince(touchedGateRef.current, startedAt);
-        setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks));
-        setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates));
+        setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks, data.readAt));
+        setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates, data.readAt));
         setIsSynced(true);
       })
       .catch(() => { /* ostani na trenutnom stanju (uklj. AbortError od
@@ -289,6 +294,39 @@ export function useRealtimeAssignments(role: AblyClientRole) {
       .finally(() => {
         clearTimeout(timeoutId);
         inFlightRef.current = false;
+      });
+  }, []);
+
+  // NOVO (2026-10-16): nezavisna provjera JEDNOG ključa direktno u bazi (bez ikakvog keša) —
+  // vidi app/api/test/assignment-truth/route.ts i applyTruth u lib/assignment-merge.ts.
+  const verifyInFlightRef = useRef<Set<string>>(new Set());
+  const verifyKey = useCallback((type: 'desk' | 'gate', key: string) => {
+    const id = `${type}:${key}`;
+    if (verifyInFlightRef.current.has(id)) return;
+    verifyInFlightRef.current.add(id);
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_SNAPSHOT_TIMEOUT_MS);
+    fetch(`/api/test/assignment-truth?type=${type}&key=${encodeURIComponent(key)}`, { cache: 'no-store', signal: controller.signal })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        noteServerDate(res.headers.get('date'), startedAt, Date.now());
+        return res.json() as Promise<{ ok?: boolean; entry?: AssignmentEntry | null; readAt?: number }>;
+      })
+      .then(data => {
+        if (!mountedRef.current || data.ok !== true) return;
+        lastSyncAtRef.current = Date.now();
+        const touched = type === 'desk' ? touchedDeskRef.current : touchedGateRef.current;
+        const prot = protectedKeysSince(touched, startedAt);
+        const apply = (prev: Record<string, AssignmentEntry>) =>
+          applyTruth(prev, key, data.entry ?? null, data.readAt ?? Date.now(), prot);
+        if (type === 'desk') setDeskEntries(apply); else setGateEntries(apply);
+        setIsSynced(true);
+      })
+      .catch(() => { /* ostani na trenutnom stanju */ })
+      .finally(() => {
+        clearTimeout(timeoutId);
+        verifyInFlightRef.current.delete(id);
       });
   }, []);
 
@@ -448,5 +486,5 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // dodatan resync na sopstvenom, kraćem rasporedu — vidi novi
   // "zatvoreno u 20s" watchdog u CheckInPageClient.tsx, koji ovo koristi
   // dok je šalter aktivno otvoren.
-  return { deskEntries, gateEntries, connectionState, isSynced, lastSyncAtRef, refetch: fetchSnapshot };
+  return { deskEntries, gateEntries, connectionState, isSynced, lastSyncAtRef, refetch: fetchSnapshot, verifyKey };
 }

@@ -174,3 +174,89 @@ describe('mergeNewer — zaštita od zakasnjelog snapshot-a (trka Ably poruka vs
     expect(mergeNewer(prev, { '3': open(19) }, new Set(['3']))['3'].seq).toBe(20);
   });
 });
+
+describe('mergeNewer — snapshot pročitan PRIJE postavljanja unosa (server keš)', () => {
+  const e = (seq: number, setAt: number, flightNumber = 'JU123'): AssignmentEntry =>
+    ({ status: 'open', flightNumber, classType: null, setAt, seq });
+
+  it('Ably poruka stigla prije zahtjeva, ali snapshot je iz keša starijeg od unosa → NE briše', () => {
+    const prev = { '5': e(20, 100_000) };
+    const out = mergeNewer(prev, {}, undefined, 90_000); // readAt < setAt
+    expect(out['5'].status).toBe('open');
+    expect(out['5'].seq).toBe(20);
+  });
+
+  it('ispravan kasniji snapshot (seq 20) i dalje prolazi — nema zaglavljivanja', () => {
+    let st: Record<string, AssignmentEntry> = { '5': e(20, 100_000) };
+    st = mergeNewer(st, {}, undefined, 90_000);            // star snapshot
+    st = mergeNewer(st, { '5': e(20, 100_000) }, undefined, 110_000); // svjež snapshot
+    expect(st['5'].status).toBe('open');
+  });
+
+  it('snapshot pročitan POSLIJE unosa koji ga ne sadrži → briše (stvarno obrisano)', () => {
+    const prev = { '5': e(20, 100_000) };
+    const out = mergeNewer(prev, {}, undefined, 120_000);
+    expect(out['5'].status).toBeNull();
+  });
+
+  it('tolerancija sata: readAt unutar 2 s ispred setAt-a ne briše', () => {
+    const prev = { '5': e(20, 100_000) };
+    expect(mergeNewer(prev, {}, undefined, 101_500)['5'].status).toBe('open');
+    expect(mergeNewer(prev, {}, undefined, 103_000)['5'].status).toBeNull();
+  });
+
+  it('bez readAt (stari server) ponašanje je nepromijenjeno', () => {
+    expect(mergeNewer({ '5': e(20, 100_000) }, {})['5'].status).toBeNull();
+  });
+});
+
+describe('mergeNewer — oživljavanje lažno očišćenog unosa (sigurnosna mreža)', () => {
+  const open = (seq: number, setAt: number): AssignmentEntry =>
+    ({ status: 'open', flightNumber: 'JU1', classType: null, setAt, seq });
+
+  it('snapshot pročitan poslije brisanja vraća otvoren unos istog seq-a', () => {
+    let st: Record<string, AssignmentEntry> = { '3': open(20, 1_000) };
+    st = mergeNewer(st, {}, undefined, 50_000);              // obrisano snapshotom (readAt 50 000)
+    expect(st['3'].status).toBeNull();
+    st = mergeNewer(st, { '3': open(20, 1_000) }, undefined, 60_000); // noviji snapshot kaže otvoren
+    expect(st['3'].status).toBe('open');
+  });
+
+  it('stariji/isti snapshot (readAt ≤ readAt brisanja) NE oživljava', () => {
+    let st: Record<string, AssignmentEntry> = { '3': open(20, 1_000) };
+    st = mergeNewer(st, {}, undefined, 50_000);
+    st = mergeNewer(st, { '3': open(20, 1_000) }, undefined, 40_000);
+    expect(st['3'].status).toBeNull();
+  });
+});
+
+import { applyTruth } from './assignment-merge';
+
+describe('applyTruth — nekeširan odgovor servera', () => {
+  const open = (seq: number, fn = 'JU1'): AssignmentEntry => ({ status: 'open', flightNumber: fn, classType: null, setAt: 5_000, seq });
+
+  it('server ima otvoren unos, klijent nema → otvara', () => {
+    expect(applyTruth({}, '5', open(30), 9_000)['5'].status).toBe('open');
+  });
+  it('zaglavljen lažni clear sa višim seq-om → ispravlja se bezuslovno', () => {
+    const stuck: Record<string, AssignmentEntry> = { '5': { status: null, flightNumber: '', classType: null, setAt: 1, seq: 31, clearedReadAt: 1 } };
+    const out = applyTruth(stuck, '5', open(30), 9_000);
+    expect(out['5'].status).toBe('open');
+    expect(out['5'].seq).toBe(30);
+  });
+  it('server nema unos, klijent prikazuje otvoren → čisti', () => {
+    expect(applyTruth({ '5': open(30) }, '5', null, 9_000)['5'].status).toBeNull();
+  });
+  it('Ably poruka stigla poslije početka zahtjeva (zaštićen ključ) → odgovor se ignoriše', () => {
+    const prev = { '5': open(40) };
+    expect(applyTruth(prev, '5', open(30), 9_000, new Set(['5']))).toBe(prev);
+  });
+  it('isto stanje → vraća istu referencu (bez re-rendera)', () => {
+    const prev = { '5': open(30) };
+    expect(applyTruth(prev, '5', open(30), 9_000)).toBe(prev);
+  });
+  it('server vraća closed sa letom → closed', () => {
+    const closed: AssignmentEntry = { status: 'closed', flightNumber: 'JU1', classType: null, setAt: 5_000, seq: 31 };
+    expect(applyTruth({ '5': open(30) }, '5', closed, 9_000)['5'].status).toBe('closed');
+  });
+});

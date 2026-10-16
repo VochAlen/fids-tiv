@@ -13,7 +13,9 @@ import {
 } from '@/lib/check-in-service';
 import { useWeather } from '@/hooks/use-weather';
 import InactiveScreen from '@/components/InactiveScreen';
-import { isNightHours } from '@/lib/night-hours';
+import { isNightHours, airportTimeToMs } from '@/lib/night-hours';
+import { nowMs } from '@/lib/server-clock';
+import ClockDiagnostics from '@/components/ClockDiagnostics';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import Image from 'next/image';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
@@ -174,11 +176,7 @@ const parseDepartureTime = (t: string): Date | null => {
     }
     const [h, m] = t.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
-    const d = new Date();
-    d.setHours(h, m, 0, 0);
-    const THREE_HOURS = 3 * 60 * 60 * 1000;
-    if (Date.now() - d.getTime() > THREE_HOURS) d.setDate(d.getDate() + 1);
-    return d;
+    return new Date(airportTimeToMs(h, m));
   } catch { return null; }
 };
 
@@ -297,8 +295,8 @@ const currentFlightRef    = useRef<Flight | null>(null);
 const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
-const { data: liveFlightData, connectionState: flightsConnState } = useRealtimeFlightData('gate');
-const { gateEntries, connectionState: assignConnState } = useRealtimeAssignments('gate');
+const { data: liveFlightData, connectionState: flightsConnState, refetch: refetchFlights } = useRealtimeFlightData('gate');
+const { gateEntries, connectionState: assignConnState, isSynced, lastSyncAtRef, refetch: refetchAssignments, verifyKey } = useRealtimeAssignments('gate');
 
 
 
@@ -321,7 +319,7 @@ const { gateEntries, connectionState: assignConnState } = useRealtimeAssignments
     const stdDep = parseDepartureTime(f.ScheduledDepartureTime || '');
     if (stdDep) {
       const ONE_MIN_MS = 60 * 1000;
-      if (Date.now() >= stdDep.getTime() - ONE_MIN_MS) return false;
+      if (nowMs() >= stdDep.getTime() - ONE_MIN_MS) return false;
     }
     return true;
   }, []);
@@ -343,7 +341,7 @@ const { gateEntries, connectionState: assignConnState } = useRealtimeAssignments
   const updateCountdown = useCallback((f: Flight | null) => {
     if (!f) { setTimeUntilDeparture(null); return; }
     const dep = getEffectiveDepartureTime(f);
-    if (dep) setTimeUntilDeparture(Math.floor((dep.getTime() - Date.now()) / 60_000));
+    if (dep) setTimeUntilDeparture(Math.floor((dep.getTime() - nowMs()) / 60_000));
     else     setTimeUntilDeparture(null);
   }, []);
 
@@ -446,7 +444,7 @@ const computeDisplay = useCallback(async () => {
   if (overrideStatus !== 'open' && current?.GateNumber &&
       currentFlightRef.current?.GateNumber !== current.GateNumber) {
     const prev = currentFlightRef.current?.GateNumber;
-    if (prev && prev !== '-') gateChangedAt = Date.now();
+    if (prev && prev !== '-') gateChangedAt = nowMs();
   }
 
   if (!isMountedRef.current) return;
@@ -487,7 +485,7 @@ useEffect(() => {
   const stdDep = parseDepartureTime(display.flight.ScheduledDepartureTime || '');
   if (!stdDep) return;
   const triggerAt = stdDep.getTime() - 60 * 1000;
-  const ms = triggerAt - Date.now();
+  const ms = triggerAt - nowMs();
   if (ms > 0) {
     stdSwitchTimerRef.current = setTimeout(() => {
       if (isMountedRef.current) computeDisplay();
@@ -620,7 +618,7 @@ useEffect(() => {
   // ------------------------------------------------------------
   const { isCancelled, isDiverted } = checkFlightStatus(display.flight?.StatusEN || '');
 // eslint-disable-next-line react-hooks/purity
-const isGateChanged = !!(display.gateChangedAt && (Date.now() - display.gateChangedAt < 15_000));  const hasDel = display.flight?.EstimatedDepartureTime &&
+const isGateChanged = !!(display.gateChangedAt && (nowMs() - display.gateChangedAt < 15_000));  const hasDel = display.flight?.EstimatedDepartureTime &&
     display.flight.EstimatedDepartureTime !== display.flight.ScheduledDepartureTime;
 
 const effectiveStatus = useMemo(() => {
@@ -633,12 +631,60 @@ const effectiveStatus = useMemo(() => {
   const dep = parseDepartureTime(refTime);
   if (!dep) return raw;
   // eslint-disable-next-line react-hooks/purity
-  const minUntil = Math.floor((dep.getTime() - Date.now()) / 60_000);
+  const minUntil = Math.floor((dep.getTime() - nowMs()) / 60_000);
   if (minUntil <= 30 && minUntil > 5) return 'Boarding';
   return raw;
 }, [display.flight, isCancelled, isDiverted]);
 
   const statusCfg = getStatusConfig(effectiveStatus);
+
+  // NOVO (2026-10-16): paritet sa check-in stranicom.
+  // 1) Upozorenje o pogrešnom satu: <ClockDiagnostics /> u renderu.
+  // 2) Dok gate NIJE prikazao let (prazan/zatvoren), povremeno provjeri stvarno stanje preko REST-a:
+  //    Ably poruka o otvaranju može da se izgubi (drop veze, noćni režim, throttling u Electronu).
+  const gateShowsFlight = !!display.flight;
+  useEffect(() => {
+    if (gateShowsFlight) return;
+    const night = assignConnState === 'night-sleep';
+    const delay = (night ? 45_000 : 20_000) + Math.floor(Math.random() * 3_000);
+    const id = setInterval(() => { refetchAssignments(); refetchFlights(); }, delay);
+    return () => clearInterval(id);
+  }, [gateShowsFlight, assignConnState, refetchAssignments, refetchFlights]);
+
+  // 3) Buđenje (sleep/throttling) ili skok sata: odmah resinhronizuj i preračunaj prikaz.
+  useEffect(() => {
+    let last = Date.now();
+    const resync = () => { refetchAssignments(); refetchFlights(); verifyKey('gate', gateNumber); };
+    const onVisible = () => { if (document.visibilityState === 'visible') resync(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', resync);
+    window.addEventListener('pageshow', resync);
+    const id = setInterval(() => {
+      const now = Date.now();
+      if (Math.abs(now - last - 5_000) > 20_000) resync();
+      last = now;
+    }, 5_000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', resync);
+      window.removeEventListener('pageshow', resync);
+      clearInterval(id);
+    };
+  }, [refetchAssignments, refetchFlights, verifyKey, gateNumber]);
+
+  // NOVO (2026-10-16): nezavisna provjera u bazi — vidi komentar u CheckInPageClient.tsx.
+  const myGateEntry = gateEntries[gateNumber];
+  const myGateSig = `${myGateEntry?.status ?? 'x'}:${myGateEntry?.flightNumber ?? ''}:${myGateEntry?.seq ?? 0}`;
+  useEffect(() => {
+    const id = setTimeout(() => verifyKey('gate', gateNumber), 4_000);
+    return () => clearTimeout(id);
+  }, [myGateSig, gateNumber, verifyKey]);
+  useEffect(() => {
+    if (gateShowsFlight) return;
+    const night = assignConnState === 'night-sleep';
+    const id = setInterval(() => verifyKey('gate', gateNumber), (night ? 300_000 : 180_000) + Math.floor(Math.random() * 10_000));
+    return () => clearInterval(id);
+  }, [gateShowsFlight, assignConnState, gateNumber, verifyKey]);
 
   // ------------------------------------------------------------
   // Weather
@@ -651,7 +697,7 @@ const effectiveStatus = useMemo(() => {
   // ------------------------------------------------------------
   // RENDER: Loading
   // ------------------------------------------------------------
-  if (loading) return <InactiveScreen message="Loading gate information…" />;
+  if (loading || !isSynced) return <InactiveScreen message="Loading gate information…" />;
 
   // ------------------------------------------------------------
   // RENDER: Nema leta
@@ -674,6 +720,7 @@ const effectiveStatus = useMemo(() => {
           <span style={{ opacity: .4 }}>•</span>
           <span>Next {nextUpdate}</span>
         </div>
+        <ClockDiagnostics label={`gate ${gateNumber}`} connectionState={assignConnState} lastSyncAtRef={lastSyncAtRef} extra={`entry=${gateEntries[gateNumber]?.status ?? '-'}`} />
       </div>
     );
   }
@@ -685,6 +732,7 @@ const effectiveStatus = useMemo(() => {
 
   return (
     <div style={styles.root} className="fids-root">
+      <ClockDiagnostics label={`gate ${gateNumber}`} connectionState={assignConnState} lastSyncAtRef={lastSyncAtRef} extra={`flight=${display.flight?.FlightNumber ?? '-'} entry=${gateEntries[gateNumber]?.status ?? '-'}`} />
 
       {/* TOP BAR */}
       <div style={styles.topBar} className="fids-topbar">

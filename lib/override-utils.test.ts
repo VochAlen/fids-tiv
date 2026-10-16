@@ -206,7 +206,7 @@ describe('autoCloseDepartedDesks/Gates — automatsko oslobađanje kad let polet
     // Tačan scenario iz zahtjeva: "AB100 poletio, osoblje zaboravilo da
     // zatvori šalter (npr. zadnji let dana, žurba da idu kući)".
     redisState.deskStatusAll = {
-      '5': { status: 'open', flightNumber: 'AB100', classType: null, setAt: Date.now() - 60_000, seq: 10 },
+      '5': { status: 'open', flightNumber: 'AB100', classType: null, setAt: Date.now() - 10 * 60_000, seq: 10 },
     };
     const allFlights = [{ FlightNumber: 'AB100', StatusEN: 'Departed' }];
 
@@ -237,7 +237,7 @@ describe('autoCloseDepartedDesks/Gates — automatsko oslobađanje kad let polet
 
   it('automatski zatvara gate čiji je let OTKAZAN', async () => {
     redisState.gateStatusAll = {
-      '12': { status: 'open', flightNumber: 'XY200', classType: null, setAt: Date.now(), seq: 3 },
+      '12': { status: 'open', flightNumber: 'XY200', classType: null, setAt: Date.now() - 10 * 60_000, seq: 3 },
     };
     const allFlights = [{ FlightNumber: 'XY200', StatusEN: 'Cancelled' }];
 
@@ -261,6 +261,26 @@ describe('autoCloseDepartedDesks/Gates — automatsko oslobađanje kad let polet
     const closed = await autoCloseDepartedDesks(allFlights);
 
     expect(closed).toEqual([]);
+    expect(redisState.deskStatusAll['5']).toBeDefined();
+  });
+
+  it('NOVO: isti broj leta dva puta u rasporedu (jedan poletio, drugi nije) — šalter se NE zatvara', async () => {
+    redisState.deskStatusAll = {
+      '5': { status: 'open', flightNumber: 'AB100', classType: null, setAt: Date.now() - 10 * 60_000, seq: 10 },
+    };
+    const allFlights = [
+      { FlightNumber: 'AB100', StatusEN: 'Departed' },
+      { FlightNumber: 'AB100', StatusEN: 'Scheduled' },
+    ];
+    expect(await autoCloseDepartedDesks(allFlights)).toEqual([]);
+    expect(redisState.deskStatusAll['5']).toBeDefined();
+  });
+
+  it('NOVO: tek dodijeljen unos (< 2 min) se ne zatvara čak ni ako raspored kaže Departed (stariji keš)', async () => {
+    redisState.deskStatusAll = {
+      '5': { status: 'open', flightNumber: 'AB100', classType: null, setAt: Date.now() - 20_000, seq: 10 },
+    };
+    expect(await autoCloseDepartedDesks([{ FlightNumber: 'AB100', StatusEN: 'Departed' }])).toEqual([]);
     expect(redisState.deskStatusAll['5']).toBeDefined();
   });
 });

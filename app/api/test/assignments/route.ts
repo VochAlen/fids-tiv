@@ -37,6 +37,7 @@ export async function GET() {
       // ── Admin panel format (deskNumber/gateNumber -> puni entry) ──
       deskEntries: raw.desks,
       gateEntries: raw.gates,
+      readAt: raw.readAt,
       ok: true,
     }, {
       headers: {

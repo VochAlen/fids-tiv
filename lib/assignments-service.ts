@@ -48,6 +48,10 @@ export type RawAssignments = {
   // tretirati identično kao neuspio fetch (zadrži trenutno stanje, probaj
   // ponovo na sledećem ciklusu).
   ok: boolean;
+  // NOVO (2026-10-16): trenutak (ms, SAT SERVERA) kad su podaci STVARNO pročitani iz Redis-a.
+  // Zbog 8s in-process keša (i CDN keša) odgovor može biti stariji od zahtjeva — klijent po ovome
+  // zna da snapshot NE MOŽE tvrditi "obrisano" za unos koji je postavljen poslije `readAt`.
+  readAt?: number;
 };
 
 export type SimpleAssignments = {
@@ -130,7 +134,7 @@ export async function getRawAssignments(): Promise<RawAssignments> {
   if (deskResult.value) { try { desks = JSON.parse(deskResult.value); } catch { desks = {}; } }
   if (gateResult.value) { try { gates = JSON.parse(gateResult.value); } catch { gates = {}; } }
 
-  cachedRaw = { desks, gates };
+  cachedRaw = { desks, gates, readAt: now };
   cachedRawExpiry = now + RAW_CACHE_TTL_MS;
   return { ...cachedRaw, ok: true };
 }

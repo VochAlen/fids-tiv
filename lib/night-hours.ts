@@ -39,6 +39,10 @@
 // zalaska sunca (vidi calculateSunsetMinutes niže). Za drugi aerodrom,
 // promijeni na NJEGOVE koordinate — nema drugih izmjena potrebnih bilo
 // gdje drugo u fajlu, isti obrazac kao TIMEZONE iznad.
+// NOVO (2026-10-16): vrijeme se uzima prema satu SERVERA (lib/server-clock.ts) — pogrešan sat
+// računara ne smije da pokrene "noćni režim" usred dana (ni obrnuto).
+import { nowMs } from '@/lib/server-clock';
+
 const NIGHT_MODE_CONFIG = {
   ENABLED: true,
   TIMEZONE: 'Europe/Podgorica',
@@ -125,7 +129,7 @@ function getMontenegroParts(date: Date): MontenegroParts {
 // KORISTITI OVO svuda gdje se poredi "da li je backup od danas" —
 // new Date().toISOString() daje UTC datum, što je pogrešno blizu ponoći
 // (Podgorica je UTC+1/+2, pa lokalni dan počinje ranije nego UTC dan).
-export function getPodgoricaDateString(date: Date = new Date()): string {
+export function getPodgoricaDateString(date: Date = new Date(nowMs())): string {
   const p = getMontenegroParts(date);
   const mm = String(p.month).padStart(2, '0');
   const dd = String(p.day).padStart(2, '0');
@@ -137,9 +141,24 @@ export function getPodgoricaDateString(date: Date = new Date()): string {
 // čisto brojevno "minuta od ponoći" po Podgorica lokalnom vremenu, bez
 // ijedne Date/timezone operacije nakon ovog poziva — potpuno imuno na
 // razliku između serverskog (UTC) i lokalnog vremena.
-export function getPodgoricaMinutesOfDay(date: Date = new Date()): number {
+export function getPodgoricaMinutesOfDay(date: Date = new Date(nowMs())): number {
   const p = getMontenegroParts(date);
   return p.hour * 60 + p.minute;
+}
+
+/**
+ * NOVO (2026-10-16): "HH:MM" (vrijeme na aerodromu) → apsolutni trenutak u ms, računato u zoni
+ * aerodroma i prema satu SERVERA. Ne ovisi ni o satu ni o vremenskoj zoni računara (kiosk sa
+ * pogrešnom zonom/satom je ranije pomjerao polazak i let bi nestao sa gate-a ili se zadržao).
+ * Ako je vrijeme više od 3 h u prošlosti, smatra se sutrašnjim (isto pravilo kao ranije).
+ */
+export function airportTimeToMs(hh: number, mm: number, now: number = nowMs()): number {
+  const p = getMontenegroParts(new Date(now));
+  const wallNowAsUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, 0, 0);
+  const offsetMs = wallNowAsUtc - Math.floor(now / 60_000) * 60_000;
+  let target = Date.UTC(p.year, p.month - 1, p.day, hh, mm, 0, 0) - offsetMs;
+  if (now - target > 3 * 3_600_000) target += 86_400_000;
+  return target;
 }
 
 // FIX (portovano iz glavnog sistema, generalizovano za bilo koju
@@ -309,7 +328,7 @@ function isWithinWindow(
   return nowMinutes >= startMinutes && nowMinutes < endMinutes;
 }
 
-export function isNightHours(date: Date = new Date()): boolean {
+export function isNightHours(date: Date = new Date(nowMs())): boolean {
   if (!NIGHT_MODE_CONFIG.ENABLED) return false;   // ← DODANO: aerodromi sa 24h operacijama
 
   const p = getMontenegroParts(date);
