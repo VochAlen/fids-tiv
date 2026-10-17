@@ -497,6 +497,56 @@ describe('v4: planiranje redoslijeda (optimizeOrder)', () => {
   });
 });
 
+describe('v6: faza alternativnih resursa (zabrane) u optimizeOrder', () => {
+  type S = import('./assignment-suggestions').Suggestion;
+  const mk = (flightNumber: string, resources: string[], wanted = 1) =>
+    ({ flightNumber, resources, wanted, reason: 'osnovni razlog' } as unknown as S);
+  // A pohlepno uzme X (jedini koji B može); ako je X zabranjen A uzme Y i B dobije X. Cijena: A:Y=+5, B bez X = 100.
+  const fakePlan = (_order: string[], bans?: Map<string, Set<string>>) => {
+    const a = bans?.get('A')?.has('X') ? 'Y' : 'X';
+    const b = a === 'X' ? [] : ['X'];
+    return { items: [mk('A', [a]), mk('B', b)], cost: (a === 'Y' ? 5 : 0) + (b.length ? 0 : 100) };
+  };
+  const cost = (x: S) => (x.flightNumber === 'A' ? (x.resources[0] === 'Y' ? 5 : 0) : x.resources.length ? 0 : 100);
+
+  it('zabrana se prihvata kad ukupna cijena padne, i razlog imenuje let kojem je pomogla', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    const out = optimizeOrder(['A', 'B'], fakePlan, x => x, cost);
+    expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['Y']);
+    expect(out.find(s => s.flightNumber === 'B')!.resources).toEqual(['X']);
+    const reason = out.find(s => s.flightNumber === 'A')!.reason;
+    expect(reason).toContain('osnovni razlog');
+    expect(reason).toMatch(/izbjegnuto X da B dobije bolji izbor \(ukupna ocjena plana −95\)/);
+  });
+
+  it('bez itemCost faza alternativa se ne pokreće (stari ugovor)', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    const out = optimizeOrder(['A', 'B'], fakePlan, x => x);
+    expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['X']);
+  });
+
+  it('zabrana koja povećava manjak resursa se odbija iako zbir bodova pada', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    // Zabrana A:X daje A prazan (manjak +1) ali "jeftiniji" zbir (npr. pogrešno nisko ocijenjen) → mora biti odbijena.
+    const plan = (_o: string[], bans?: Map<string, Set<string>>) => {
+      const banned = bans?.get('A')?.has('X');
+      return { items: [mk('A', banned ? [] : ['X']), mk('B', ['Z'])], cost: banned ? 10 : 200 };
+    };
+    const out = optimizeOrder(['A', 'B'], plan, x => x, () => 0);
+    expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['X']);
+  });
+
+  it('ograničen broj probnih planova i na velikom danu (vrijeme)', async () => {
+    const { computeAssignmentSuggestions } = await import('./assignment-suggestions');
+    const flights = Array.from({ length: 40 }, (_, i) =>
+      fl({ FlightNumber: `JU${100 + i}`, ScheduledDepartureTime: `${String(8 + Math.floor(i / 4)).padStart(2, '0')}:${String((i % 4) * 15).padStart(2, '0')}` }));
+    const t0 = performance.now();
+    const r = computeAssignmentSuggestions({ flights, currentDesks: {}, currentGates: {}, nowMin: 360 });
+    expect(performance.now() - t0).toBeLessThan(3000);
+    expect(r.desks.length).toBe(40);
+  });
+});
+
 describe('v5: upozorenja imenuju tačno ono što je zauzeto + plan bez rupa/drugog terminala', () => {
   const mkf = (fn: string, t: string, air = 'X') => fl({ FlightNumber: fn, AirlineName: air, ScheduledDepartureTime: t });
   it('upozorenje ne tvrdi da je cijeli bazen zauzet: navodi samo zauzete i ko ih drži', () => {

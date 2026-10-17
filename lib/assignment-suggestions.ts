@@ -496,7 +496,14 @@ export function suggestionCost(s: Suggestion, winterT1: boolean): number {
 /** Najveći broj probnih planova (svaki je jeftin — par stotina izbora resursa). */
 const MAX_PLAN_EVALS = 160;
 /** Koliko mjesta unaprijed se razmjenjuje / pomjera redoslijed (letovi blizu u vremenu). */
-const SWAP_REACH = 4; // let na poziciji i se mijenja sa letovima na i+1 … i+SWAP_REACH (najviše 4 mjesta unaprijed)
+const SWAP_REACH = 4;
+/** Faza 3 (alternativni resursi): najviše probnih planova i najmanja dobit (jedinice planCost) za zadržavanje zabrane. */
+const MAX_BAN_EVALS = 80;
+const BAN_MIN_GAIN = 5;
+const shortageOf = (items: Suggestion[]) => items.reduce((n, x) => n + Math.max(x.wanted - x.resources.length, 0), 0);
+const emptyOf = (items: Suggestion[]) => items.filter(x => x.resources.length === 0).length;
+/** Zabranjeni resursi po letu (samo za probne planove pretrage). */
+export type Bans = Map<string, Set<string>>; // let na poziciji i se mijenja sa letovima na i+1 … i+SWAP_REACH (najviše 4 mjesta unaprijed)
 
 /**
  * Pohlepni plan zavisi od REDOSLIJEDA letova. Pretraga je determinističa:
@@ -508,8 +515,10 @@ const SWAP_REACH = 4; // let na poziciji i se mijenja sa letovima na i+1 … i+S
  */
 export function optimizeOrder<T>(
   base: T[],
-  plan: (order: T[]) => { items: Suggestion[]; cost: number },
+  plan: (order: T[], bans?: Bans) => { items: Suggestion[]; cost: number },
   keyOf: (t: T) => string,
+  /** Cijena jednog prijedloga — uključuje fazu 3 (izbor ALTERNATIVNIH resursa). Bez nje faza 3 se preskače. */
+  itemCost?: (s: Suggestion) => number,
 ): Suggestion[] {
   let order = [...base];
   let best = plan(order);
@@ -543,6 +552,55 @@ export function optimizeOrder<T>(
       }
     }
   }
+
+  // ── FAZA 3 (2026-10-17): ALTERNATIVNI IZBOR RESURSA ──────────────────────────────
+  // Redoslijed sam ne pomaže kad je pohlepni izbor "najbolji za ovaj let" ono što kvari kasniji let
+  // (npr. let A uzme 10,11,12 iako bi mu 7,8,9 bili skoro jednako dobri, a let B u istom intervalu
+  // ima samo 10,11,12 kao uobičajene). Ovdje se za svaki let isproba ZABRANA njegovog izbora
+  // (cijeli blok, pa pojedinačni resursi) i plan se složi ponovo; zabrana se zadržava samo ako UKUPNA
+  // cijena plana padne za bar BAN_MIN_GAIN. Cijena je ona ista (planCost) kojom se mjeri sve ostalo,
+  // pa se ne može dobiti "jeftiniji" plan koji je lošiji po pravilima (terminal, rupe, bazen…).
+  const notes = new Map<string, string[]>();
+  if (itemCost && best.cost > 0 && base.length > 1) {
+    let bans: Bans = new Map();
+    let banEvals = 0;
+    let again = true;
+    while (again && banEvals < MAX_BAN_EVALS) {
+      again = false;
+      for (const it of [...best.items]) {
+        if (!it.resources.length) continue;
+        const key = it.flightNumber;
+        const cands: string[][] = [it.resources, ...(it.resources.length > 1 ? it.resources.map(r => [r]) : [])];
+        for (const ids of cands) {
+          if (banEvals >= MAX_BAN_EVALS) break;
+          const nb: Bans = new Map(bans);
+          nb.set(key, new Set([...(bans.get(key) ?? []), ...ids]));
+          const r = plan(order, nb);
+          banEvals++;
+          // Zabrana NIKAD ne smije povećati manjak resursa (ni broj letova bez ijednog resursa): jeftiniji plan
+          // dobijen tako što neki let dobije manje šaltera/gate-ova nije bolji plan, bez obzira na zbir bodova.
+          if (r.cost < best.cost - BAN_MIN_GAIN && shortageOf(r.items) <= shortageOf(best.items) && emptyOf(r.items) <= emptyOf(best.items)) {
+            const before = new Map(best.items.map(x => [x.flightNumber, itemCost(x)]));
+            const helped = r.items
+              .filter(x => x.flightNumber !== key && itemCost(x) < (before.get(x.flightNumber) ?? 0) - 1e-9)
+              .map(x => x.flightNumber);
+            const gain = Math.round(best.cost - r.cost);
+            const why = helped.length
+              ? `da ${helped.slice(0, 3).join(', ')}${helped.length > 3 ? ' i drugi' : ''} ${helped.length > 1 ? 'dobiju' : 'dobije'} bolji izbor`
+              : 'jer je plan u cjelini bolji';
+            notes.set(key, [...(notes.get(key) ?? []), `Plan: izbjegnuto ${ids.join(', ')} ${why} (ukupna ocjena plana −${gain})`]);
+            bans = nb; best = r; again = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (const it of best.items) {
+    const n = notes.get(it.flightNumber);
+    if (n?.length) it.reason = `${it.reason}; ${n.join('; ')}`;
+  }
+
   const idx = new Map(base.map((t, i) => [keyOf(t), i]));
   return [...best.items].sort((a, b) => (idx.get(a.flightNumber) ?? 0) - (idx.get(b.flightNumber) ?? 0));
 }
@@ -698,10 +756,12 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     .sort((a, b) => a.deskIv.start - b.deskIv.start || b.deskCount - a.deskCount);
 
   /** Jedan prolaz planiranja šaltera zadatim REDOSLIJEDOM letova (na kopiji zauzetosti). */
-  const planDesks = (order: Prep[]): { items: Suggestion[]; cost: number } => {
+  const planDesks = (order: Prep[], bans?: Bans): { items: Suggestion[]; cost: number } => {
     const bd = cloneBusy(busyDesks);
     const items: Suggestion[] = [];
     for (const p of order) {
+      const banned = bans?.get(p.f.FlightNumber);
+      const notBanned = (id: string) => !banned?.has(id);
       // Pin iz napomene: traženi šalteri idu prvi (ako su slobodni), ostatak običnim postupkom.
       const pinned = pinFor('desk', p.f.FlightNumber)
         .filter(id => isFree(bd.get(id), p.deskIv, buf)).slice(0, Math.max(p.deskCount, 1));
@@ -711,7 +771,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       // ISTI TERMINAL: svi šalteri jednog leta moraju biti u istom terminalu (nikad 7 + 21).
       // Terminal bira: pin (ako ga ima) → inače onaj u kojem se može dobiti najviše traženih
       // slobodnih šaltera → pa onaj u kojem su uobičajeni šalteri leta.
-      const freeDesk = (id: string) => availability(bd.get(id), p.deskIv, buf).ok;
+      const freeDesk = (id: string) => notBanned(id) && availability(bd.get(id), p.deskIv, buf).ok;
       // Model (samo ako je aktivan): vjerovatnoće po šalteru za ovaj let, uz već otvorene šaltere tog leta.
       const deskCtx: PredictCtx | null = input.model?.desk && input.dow !== undefined
         ? {
@@ -747,7 +807,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
         if (Object.keys(kept).length) termFallback[x] = kept;
       }
       const rest = need > 0
-        ? pickResources(need, p.deskPool.filter(inTerminal), DESKS.filter(inTerminal), bd, p.deskIv, buf, termFallback, true, deskModel)
+        ? pickResources(need, p.deskPool.filter(id => inTerminal(id) && notBanned(id)), DESKS.filter(id => inTerminal(id) && notBanned(id)), bd, p.deskIv, buf, termFallback, true, deskModel)
         : { picked: [] as string[], fromPool: 0, fromFallback: 0 };
       const picked = [...pinned, ...rest.picked].sort((a, b) => DESKS.indexOf(a) - DESKS.indexOf(b));
       const fromPool = rest.fromPool + pinned.length;
@@ -804,7 +864,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     }
     return { items, cost: items.reduce((c, it) => c + planCost(it, deskCountOf.get(it.flightNumber) ?? 1, winterT1), 0) };
   };
-  const deskPlan = optimizeOrder(deskOrder, planDesks, f => f.f.FlightNumber);
+  const deskPlan = optimizeOrder(deskOrder, planDesks, f => f.f.FlightNumber, it => planCost(it, deskCountOf.get(it.flightNumber) ?? 1, winterT1));
   desks.push(...deskPlan);
 
   // Gate ide u ISTI terminal kao šalteri tog leta (putnici se ne vode iz T2 u gate u T1).
@@ -819,10 +879,12 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     .filter(p => p.effAbs > nowMin)
     .sort((a, b) => a.gateIv.start - b.gateIv.start);
 
-  const planGates = (order: Prep[]): { items: Suggestion[]; cost: number } => {
+  const planGates = (order: Prep[], bans?: Bans): { items: Suggestion[]; cost: number } => {
     const bg = cloneBusy(busyGates);
     const items: Suggestion[] = [];
     for (const p of order) {
+      const bannedG = bans?.get(p.f.FlightNumber);
+      const okG = (id: string) => !bannedG?.has(id);
       const gatePin = pinFor('gate', p.f.FlightNumber);
       const gateCtx: PredictCtx | null = input.model?.gate && input.dow !== undefined
         ? {
@@ -843,10 +905,10 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       const inT = (id: string) => !wantT || deskTerminal(id) === wantT;
       let gr = pinnedGate
         ? { picked: [pinnedGate], fromPool: 1, fromFallback: 0 }
-        : pickResources(1, p.gatePool.filter(inT), GATES.filter(inT), bg, p.gateIv, buf, p.gateFallback, false, gateModel);
+        : pickResources(1, p.gatePool.filter(id => inT(id) && okG(id)), GATES.filter(id => inT(id) && okG(id)), bg, p.gateIv, buf, p.gateFallback, false, gateModel);
       let otherTerminal = false;
       if (!pinnedGate && wantT && !gr.picked.length) {
-        gr = pickResources(1, p.gatePool, GATES, bg, p.gateIv, buf, p.gateFallback, false, gateModel);
+        gr = pickResources(1, p.gatePool.filter(okG), GATES.filter(okG), bg, p.gateIv, buf, p.gateFallback, false, gateModel);
         otherTerminal = gr.picked.length > 0 && !!deskT;
       }
       const { picked, fromPool, fromFallback } = gr;
@@ -882,7 +944,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     }
     return { items, cost: items.reduce((c, it) => c + planCost(it, 1, winterT1), 0) };
   };
-  gates.push(...optimizeOrder(gateOrder, planGates, f => f.f.FlightNumber));
+  gates.push(...optimizeOrder(gateOrder, planGates, f => f.f.FlightNumber, it => planCost(it, 1, winterT1)));
 
   // Zauzeće PRIJE prijedloga (postojeće dodjele + blokade) — činjenice za nezavisnu provjeru.
   const occupancy: OccupancyItem[] = [];
