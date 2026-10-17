@@ -440,6 +440,25 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     };
   }, [role, fetchSnapshot]);
 
+  // ── 2b. NOVO (2026-10-17): dok NIJE stigao prvi pouzdan podatak, ponavljaj snapshot ──────────
+  // Ekrani ne smiju pogađati stanje prije prvog sync-a (isSynced), pa je neuspio PRVI fetch
+  // (hladan start funkcije, timeout, kratak ispad mreže) ranije držao "Loading" do sljedećeg
+  // reconcile-a (3 min). Sad retry sa backoff-om 3 s → 30 s — troši mrežu SAMO dok je u kvaru.
+  useEffect(() => {
+    if (isSynced) return;
+    let cancelled = false;
+    let delay = 3_000;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      fetchSnapshot();
+      delay = Math.min(delay * 2, 30_000);
+      timeoutId = setTimeout(tick, delay);
+    };
+    timeoutId = setTimeout(tick, delay);
+    return () => { cancelled = true; clearTimeout(timeoutId); };
+  }, [isSynced, fetchSnapshot]);
+
   // ── 3. Fallback polling kad Ably nije konektovan I nije night-sleep ──
   // FIX (po zahtjevu — eksponencijalni backoff, vidi opširan komentar
   // uz FALLBACK_POLL_INTERVAL_MS/FALLBACK_POLL_MAX_MS): setInterval

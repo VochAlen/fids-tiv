@@ -4,6 +4,7 @@ import {
   computeAssignmentSuggestions,
   getAirlineProfile,
   parseClockMinutes,
+  resolveWantedGateTerminal,
   formatClockMinutes,
   type SuggestionFlight,
 } from './assignment-suggestions';
@@ -626,5 +627,60 @@ describe('v7: samo uzastopni šalteri; easyJet standardno 2', () => {
   it('naučen/ručno zadan broj šaltera za easyJet se ne mijenja pravilom', () => {
     const r = run([f('U28812', '10:00', 'easyJet')], { constraints: { blocked: [], pins: [], counts: [{ flight: 'U28812', count: 2 }] } });
     expect(r.desks[0].resources).toHaveLength(2);
+  });
+});
+
+
+describe('parseClockMinutes — regresija (obje grupe regexa)', () => {
+  it('vraća prave minute, nikad NaN', () => {
+    expect(parseClockMinutes('09:30')).toBe(570);
+    expect(parseClockMinutes(' 9.05 ')).toBe(545);
+    expect(parseClockMinutes('00:00')).toBe(0);
+    expect(parseClockMinutes('23:59')).toBe(1439);
+    expect(parseClockMinutes('24:00')).toBeNull();
+    expect(parseClockMinutes('12:60')).toBeNull();
+    for (const v of ['09:30', '14:05', '00:01', '23:59']) expect(Number.isNaN(parseClockMinutes(v))).toBe(false);
+  });
+});
+
+describe('resolveWantedGateTerminal — bazen sa više terminala', () => {
+  it('bazen 5,6,21 i traženi T2 → ostaje T2 (21 je u T2)', () => {
+    expect(resolveWantedGateTerminal('T2', ['5', '6', '21'])).toBe('T2');
+  });
+  it('bazen samo T1 i traženi T2 → napušta se (navika osoblja)', () => {
+    expect(resolveWantedGateTerminal('T2', ['5', '6'])).toBeUndefined();
+  });
+  it('prazan bazen / nema traženog terminala → bez promjene', () => {
+    expect(resolveWantedGateTerminal('T2', [])).toBe('T2');
+    expect(resolveWantedGateTerminal(undefined, ['5'])).toBeUndefined();
+  });
+});
+
+describe('model + upozorenje "uobičajeni šalteri nisu slobodni"', () => {
+  const f = fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' });
+  const favored = () => { const o: Record<string, number> = {}; for (let i = 1; i <= 12; i++) o[String(i)] = i === 9 || i === 10 ? 0.4 : 0.01; return o; };
+  it('uobičajeni 4,5 zauzeti, model bira 9,10 van bazena → upozorenje se PRIKAZUJE', () => {
+    const holder = fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' });
+    const r = run([f, holder], { dow: 2, currentDesks: { '4': 'XX100', '5': 'XX100', '6': 'XX100' }, model: { desk: favored } });
+    const d = r.desks.find(x => x.flightNumber === 'JU681')!;
+    expect(d.resources).toEqual(['9', '10']);
+    expect(d.warnings.some(w => w.includes('Uobičajeni šalteri nisu slobodni'))).toBe(true);
+  });
+  it('uobičajeni slobodni, model ipak bira 9,10 (naučena navika) → bez upozorenja', () => {
+    const r = run([f], { dow: 2, model: { desk: favored } });
+    const d = r.desks.find(x => x.flightNumber === 'JU681')!;
+    expect(d.resources).toEqual(['9', '10']);
+    expect(d.warnings.some(w => w.includes('Uobičajeni šalteri nisu slobodni'))).toBe(false);
+  });
+});
+
+describe('toAbsolute pretpostavka — Scheduled let u 06:00 u 22:00 je sutrašnji; poletjeli se odbacuje po statusu', () => {
+  const at = (nowMin: number, flights: SuggestionFlight[]) =>
+    computeAssignmentSuggestions({ flights, currentDesks: {}, currentGates: {}, nowMin });
+  it('Scheduled 06:00 u 22:00 → planira se (sutra)', () => {
+    expect(at(22 * 60, [fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '06:00' })]).desks).toHaveLength(1);
+  });
+  it('Departed 06:00 u 22:00 → ne dobija šaltere', () => {
+    expect(at(22 * 60, [fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '06:00', StatusEN: 'Departed' })]).desks).toHaveLength(0);
   });
 });

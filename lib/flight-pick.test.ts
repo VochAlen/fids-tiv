@@ -28,3 +28,18 @@ describe('pickFlightForNumber', () => {
     expect(pickFlightForNumber([f('A1', 'Poletio')], [], 'A1').departed).toBe(true);
   });
 });
+
+describe('pickFlightForNumber — otkazan/preusmjeren primjerak', () => {
+  it('aktivan pobjeđuje otkazan (bez obzira na redoslijed)', () => {
+    const r = pickFlightForNumber([f('A1', 'Cancelled', 'c'), f('A1', 'Scheduled', 's')], [], 'A1');
+    expect(r.flight?.tag).toBe('s');
+  });
+  it('samo otkazan → vraća otkazan (ekran prikazuje otkazan), nije departed', () => {
+    const r = pickFlightForNumber([f('A1', 'Departed', 'd'), f('A1', 'Cancelled', 'c')], [], 'A1');
+    expect(r.flight?.tag).toBe('c');
+    expect(r.departed).toBe(false);
+  });
+  it('preusmjeren se prepoznaje', () => {
+    expect(pickFlightForNumber([f('A1', 'Diverted', 'x')], [], 'A1').departed).toBe(false);
+  });
+});

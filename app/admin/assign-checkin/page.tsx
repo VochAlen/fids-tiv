@@ -24,7 +24,7 @@ import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
-import { parseExamples, trainModel } from '@/lib/assignment-model';
+import { parseExamples, trainModel, predictorFromState, type ModelState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { SuggestionsCard } from './SuggestionsCard';
 // ─────────────────────────────────────────────
@@ -153,8 +153,6 @@ function isUrgentFlight(flight: Flight, assigned: boolean): boolean {
   return diff >= 0 && diff < URGENT_THRESHOLD_MIN;
 }
 
-const todayKey = () => new Date().toISOString().split('T')[0];
-
 // ─────────────────────────────────────────────
 // Stats API helpers — sve ide kroz /api/test/stats
 // ─────────────────────────────────────────────
@@ -165,6 +163,30 @@ const statsPost = (body: object) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }).catch(err => console.error('Stats API error:', err));
+
+// NOVO (2026-10-17): zajednički POST ka *-status-override rutama.
+//  • timeout 15 s — zaglavljen zahtjev inače zauvijek blokira red čekanja tog šaltera/gate-a
+//    (enqueueResourceOp čeka da prethodni završi) i ostavlja "removing" stanje zaglavljeno;
+//  • JEDAN ponovni pokušaj na 503 (lock konflikt) ili mrežnu grešku/timeout — sve akcije su
+//    idempotentne (open istog leta, clear, setClass). Dodatni zahtjev se šalje SAMO pri grešci.
+async function postOverride(endpoint: string, body: unknown): Promise<Response> {
+  const once = async (): Promise<Response> => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15_000);
+    try {
+      return await fetch(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal: ctrl.signal,
+      });
+    } finally { clearTimeout(t); }
+  };
+  try {
+    const res = await once();
+    if (res.status !== 503) return res;
+  } catch { /* mrežna greška/timeout → jedan retry */ }
+  await new Promise(r => setTimeout(r, 400));
+  return once();
+}
 
 const trackStart = (type: 'desk' | 'gate', resourceId: string, flight: Flight) =>
   statsPost({ action: 'start', type, resourceId, flight });
@@ -905,7 +927,6 @@ const router = useRouter();
   const { deskEntries, gateEntries, connectionState: assignConnState } = useRealtimeAssignments('board');
 
   // ── Izvedeni letovi — JEDINO mjesto gdje se 'flights' definiše ──
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
 const flights = useMemo(
     () => flightDataRaw ? processFlights(flightDataRaw.departures || []) : [],
     [flightDataRaw]
@@ -1124,6 +1145,10 @@ const assignFlightToResource = useCallback(async (
   };
 
   const setAssignments = resourceType === 'desk' ? setCheckinAssignments : setGateAssignments;
+  // Prethodna dodjela ovog resursa (ako je postojala) — optimistički je zamjenjujemo, pa je pri
+  // grešci MORAMO vratiti (inače admin vidi prazan šalter iako server još drži stari let).
+  const previousAssignment = (resourceType === 'desk' ? checkinAssignmentsRef.current : gateAssignmentsRef.current)
+    .find(a => a.resourceId === resourceId);
   setAssignments(list => [...list.filter(a => a.resourceId !== resourceId), optimisticAssignment]);
 
   // ── NOVO: optimistički skini PLUS sa prethodnog "prvog" gate-a, ako treba ──
@@ -1144,10 +1169,7 @@ const assignFlightToResource = useCallback(async (
     // obrnuti.
     const assignPromise = enqueueResourceOp(
       resourceType === 'desk' ? `desk:${resourceId}` : `gate:${resourceId}`,
-      () => fetch(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
+      () => postOverride(endpoint, payload)
     );
     const trackPromise = trackStart(resourceType, resourceId, flight);
 
@@ -1164,25 +1186,37 @@ const assignFlightToResource = useCallback(async (
         ? { deskNumber: resourceId, action: 'setClass', classType: autoClass }
         : { gateNumber: resourceId, action: 'setClass', classType: autoClass };
 
-      fetch(classEndpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(classBody),
-      }).catch(err => console.error('Auto class error:', err));
+      // Kroz ISTI red kao open/clear (redoslijed) + provjera statusa; pri trajnom neuspjehu vraćamo
+      // prikaz klase (inače admin vidi klasu koju server nema).
+      const qKey = resourceType === 'desk' ? `desk:${resourceId}` : `gate:${resourceId}`;
+      enqueueResourceOp(qKey, () => postOverride(classEndpoint, classBody))
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+        .catch(err => {
+          console.error('Auto class error:', err);
+          setAssignments(list => list.map(a => a.resourceId === resourceId ? { ...a, classType: null } : a));
+        });
     }
 
     // ── NOVO: pošalji i uklanjanje klase za "downgraded" gate na server ──
     if (gateToDowngrade) {
-      fetch(`${API_PREFIX}/gate-status-override`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gateNumber: gateToDowngrade, action: 'setClass', classType: null }),
-      }).catch(err => console.error('Gate downgrade error:', err));
+      const dgKey = `gate:${gateToDowngrade}`;
+      enqueueResourceOp(dgKey, () => postOverride(`${API_PREFIX}/gate-status-override`,
+        { gateNumber: gateToDowngrade, action: 'setClass', classType: null }))
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+        .catch(err => {
+          console.error('Gate downgrade error:', err);
+          setGateAssignments(list => list.map(a => a.resourceId === gateToDowngrade ? { ...a, classType: 'EASYJET_PLUS' } : a));
+        });
     }
 
     return true;
   } catch (err) {
     console.error('Greška pri dodjeli:', err);
     // Rollback — ukloni optimistički dodatu stavku
-    setAssignments(list => list.filter(a => a.resourceId !== resourceId));
+    setAssignments(list => {
+      const rest = list.filter(a => a.resourceId !== resourceId);
+      return previousAssignment ? [...rest, previousAssignment] : rest;
+    });
     // Rollback downgrade-a (vrati PLUS nazad na prethodni gate ako je poziv pao)
     if (gateToDowngrade) {
       setGateAssignments(list => list.map(a =>
@@ -1191,7 +1225,7 @@ const assignFlightToResource = useCallback(async (
     }
     return false;
   }
-}, []);
+}, [enqueueResourceOp]);
 
   // ── NOVO (2026-10-07): "AI sugestija" — prijedlog dodjele šaltera/gate-ova ──
   // Algoritam je ČISTA funkcija (lib/assignment-suggestions.ts, bez mreže i AI
@@ -1205,6 +1239,7 @@ const assignFlightToResource = useCallback(async (
   const [learned, setLearned] = useState<LearnedIndex | undefined>(undefined);
   const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
   const [examplesRaw, setExamplesRaw] = useState<Record<string, string> | null>(null);
+  const [modelStates, setModelStates] = useState<{ desk: ModelState; gate: ModelState } | null>(null);
   const [todayISO, setTodayISO] = useState<string | null>(null);
   const [constraints, setConstraints] = useState<SuggestionConstraints>(EMPTY_CONSTRAINTS);
   const [noteError, setNoteError] = useState<string | null>(null);
@@ -1243,6 +1278,7 @@ const assignFlightToResource = useCallback(async (
         if (cancelled || !j?.data) return;
         setLearnedRaw(j.data as Record<string, string>);
         setExamplesRaw((j.examples ?? {}) as Record<string, string>);
+        setModelStates(j.model && j.model.desk && j.model.gate ? { desk: j.model.desk as ModelState, gate: j.model.gate as ModelState } : null);
         setLearned(parseLearned(j.data as Record<string, string>));
       })
       .catch(() => { /* bez učenja važe ručni profili */ });
@@ -1251,11 +1287,17 @@ const assignFlightToResource = useCallback(async (
 
   // Model koji uči iz ručnih dodjela (treniranje u pregledniku, ≈ms; bez troška na serveru).
   // Prvih 7 dana samo uči; u prijedloge ulazi tek kad dokaže da pogađa bolje od brojača.
+  // 2026-10-17: model se trenira CENTRALNO na serveru (jedno stanje za sve admine, po serverskom satu);
+  // ovdje se samo rekonstruiše istorija iz primjera. Ako server stanje nije stiglo → lokalno treniranje (kao prije).
   const models = useMemo(() => {
-    if (!examplesRaw || !todayISO) return null;
+    if (!examplesRaw) return null;
     const ex = parseExamples(examplesRaw);
+    if (modelStates) {
+      return { desk: predictorFromState(modelStates.desk, ex, 'desk'), gate: predictorFromState(modelStates.gate, ex, 'gate') };
+    }
+    if (!todayISO) return null;
     return { desk: trainModel(ex, 'desk', todayISO), gate: trainModel(ex, 'gate', todayISO) };
-  }, [examplesRaw, todayISO]);
+  }, [examplesRaw, todayISO, modelStates]);
 
   const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
 
@@ -1278,6 +1320,9 @@ const assignFlightToResource = useCallback(async (
     });
     // Stabilnost: zadrži prethodni prijedlog ako i dalje važi, a novi je samo marginalno bolji.
     const signature = planSignature({ constraints, summer: isSummer, openLeadByIata });
+    // Namjerno čitanje ref-a u memo-u: prethodni plan služi samo za stabilnost prijedloga (upisuje se u effect-u ispod);
+    // pretvaranje u state bi izazvalo petlju preračunavanja.
+    // eslint-disable-next-line react-hooks/refs
     return stabilizePlan(prevPlanRef.current, fresh, signature);
   }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints, models]);
 
@@ -1465,10 +1510,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
     const [, deskRes] = await Promise.all([
       trackEnd('desk', deskNumber),
       enqueueResourceOp(`desk:${deskNumber}`, () =>
-        fetch(`${API_PREFIX}/desk-status-override`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deskNumber, action: 'clear' }),
-        })
+        postOverride(`${API_PREFIX}/desk-status-override`, { deskNumber, action: 'clear' })
       ),
     ]);
     if (!deskRes.ok) throw new Error(`HTTP ${deskRes.status}`);
@@ -1508,10 +1550,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
     const [, gateRes] = await Promise.all([
       trackEnd('gate', gateNumber),
       enqueueResourceOp(`gate:${gateNumber}`, () =>
-        fetch(`${API_PREFIX}/gate-status-override`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ gateNumber, action: 'clear' }),
-        })
+        postOverride(`${API_PREFIX}/gate-status-override`, { gateNumber, action: 'clear' })
       ),
     ]);
     if (!gateRes.ok) throw new Error(`HTTP ${gateRes.status}`);
@@ -1618,10 +1657,10 @@ const handleClearAll = useCallback(async () => {
         ? { deskNumber: resourceId, action: 'setClass', classType: next }
         : { gateNumber: resourceId, action: 'setClass', classType: next };
 
-      const res = await fetch(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const res = await enqueueResourceOp(
+        resourceType === 'desk' ? `desk:${resourceId}` : `gate:${resourceId}`,
+        () => postOverride(endpoint, body),
+      );
       if (!res.ok) throw new Error('setClass failed');
       
    //   isDirty = true;
@@ -1631,7 +1670,7 @@ const handleClearAll = useCallback(async () => {
         a.resourceId === resourceId ? { ...a, classType: prev } : a
       ));
     }
-  }, []);
+  }, [enqueueResourceOp]);
 
   const isFlightAssigned = (flightNumber: string, tab: TabType) =>
     tab === 'checkin'

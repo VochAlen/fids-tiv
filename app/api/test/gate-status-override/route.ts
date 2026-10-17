@@ -20,6 +20,7 @@
 //    polling-a na 20s (vidi useRealtimeAssignments hook).
 // ─────────────────────────────────────────────────────────────
 
+import { ASSIGNMENT_MAX_AGE_MS, ASSIGNMENT_TTL_SECONDS } from '@/lib/assignment-limits';
 import { NextResponse, after } from 'next/server';
 import { safeRedisGet, safeRedisGetStrict, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
@@ -31,8 +32,9 @@ import { sanitizeLearningContext } from '@/lib/assignment-learning';
 
 export const dynamic = 'force-dynamic';
 
-const MAX_AGE_MS = 6 * 60 * 60 * 1000;   // 6 sati — unosi stariji se brišu
-const TTL_SECONDS = 21_600;              // 6h — TTL na blob ključu
+// Rok dodjele i TTL ključa: vidi lib/assignment-limits.ts (ranije 6h).
+const MAX_AGE_MS = ASSIGNMENT_MAX_AGE_MS;
+const TTL_SECONDS = ASSIGNMENT_TTL_SECONDS;
 // FIX (isti uzrok kao app/api/test/desk-status-override/route.ts —
 // vidi opširan komentar tamo za pun kontekst): preimenovano da nikad
 // ne kolidira sa glavnim (polling) sistemom.

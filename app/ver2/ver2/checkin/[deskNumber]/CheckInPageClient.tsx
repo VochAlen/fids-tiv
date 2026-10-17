@@ -1,7 +1,7 @@
 'use client';
 
 import ClockDiagnostics from '@/components/ClockDiagnostics';
-import { pickFlightForNumber } from '@/lib/flight-pick';
+import { deriveDeskView } from '@/lib/desk-view';
 import { setDebug } from '@/lib/debug-state';
 import {
   useEffect,
@@ -86,21 +86,8 @@ const DATA_STALE_CHECK_INTERVAL_MS = 20_000;
 // pokreće — nema dodatnog troška na neaktivnim šalterima.
 const OPEN_DESK_CLOSE_VERIFY_INTERVAL_MS = 12_000;
 
-// NOVO (2026-10-12 — prijavljeno: "kad je šalter inactive, ponekad se ne otvori šalter koji
-// osoblje otvori u assign-checkin"): postojao je watchdog samo za ZATVARANJE (iznad), ali NIJEDAN
-// za OTVARANJE. Dok je šalter neaktivan, ekran se oslanjao isključivo na Ably poruku; ako ona
-// ne stigne (Ably zatvoren u noćnom/dinamičkom režimu — fallback poll se tada namjerno ne
-// pokreće ili je spor, kratak ispad, zaglavljen kanal), jedini siguran put je bio 3-min
-// reconciliation u hook-u. Sada se i neaktivan šalter sam provjerava na serveru:
-//   • 20s (+0–5s jitter) u normalnom radu → kašnjenje otvaranja je najviše ~25s i u najgorem slučaju;
-//   • 45s (+jitter) dok je Ably u 'night-sleep' (noćna ušteda; vidi lib/ably-client.ts).
-// Trošak: ~48 zahtjeva/min za 18 šaltera (CDN keš s-maxage=2 sabija pozive ka funkciji) —
-// konstante ispod se mogu povećati ako Edge Requests postanu problem.
-const INACTIVE_DESK_OPEN_VERIFY_INTERVAL_MS = 20_000;
-const INACTIVE_DESK_OPEN_VERIFY_NIGHT_INTERVAL_MS = 45_000;
-const inactiveVerifyDelay = (night: boolean) =>
-  (night ? INACTIVE_DESK_OPEN_VERIFY_NIGHT_INTERVAL_MS : INACTIVE_DESK_OPEN_VERIFY_INTERVAL_MS) +
-  Math.floor(Math.random() * 5_000);
+// 2026-10-17: periodična provjera "inactive" šaltera (20s/45s) je UKLONJENA zbog troška — vidi komentar uz
+// događajnu provjeru u bazi (verifyKey) i 3-min reconcile u hooks/useRealtimeAssignments.ts.
 // Detalji leta (destinacija/kompanija) dolaze iz liveFlightData; ako šalter postane otvoren a
 // let još nije u podacima (npr. podaci o letovima su zastarjeli iz noćnog režima), povuci ih
 // ponovo na svakih 10s dok se ne pojave.
@@ -1161,35 +1148,18 @@ const classType: string | null = myData.classType ?? null;
 // sigurnost prikaza.
 lastFlightNumberRef.current = myData.flightNumber;
 
-let flightDetails: Partial<Flight> = {};
-if (liveFlightData) {
-  // NOVO (2026-10-16): isti broj leta može biti u rasporedu više puta — vidi lib/flight-pick.ts.
-  const picked = pickFlightForNumber<Flight>(liveFlightData.departures || [], liveFlightData.arrivals || [], myData.flightNumber);
-  const match = picked.flight;
-  // NOVO (po zahtjevu — bezbjednosna mreža, nezavisno od konačnog
-  // uzroka prijavljenog "zatvoren/poletio let se i dalje prikazuje"):
-  // ako je pronađeni let VEĆ poletio, NEMOGUĆE je da se prikaže na
-  // check-in monitoru kao aktivan — bez obzira ODAKLE je taj podatak
-  // stigao (Ably poruka, REST snapshot, bilo koji budući izvor). Ista
-  // "departed/poletio" konvencija kao svugdje drugo u projektu (vidi
-  // npr. GatePageClient.tsx, koji je ovu zaštitu već imao — checkin
-  // stranica je nije imala).
-  const matchIsDeparted = picked.departed;
-  if (match && matchIsDeparted) {
-    setDebug('desk', `${deskNumberParam} ${myData.status}/${myData.flightNumber} seq=${(myData as { seq?: number }).seq ?? '?'} → INACTIVE: let poletio (${match.StatusEN})`);
-    detailsLoadedRef.current = false;
-    setAssignment(EMPTY_ASSIGNMENT);
-    return;
-  }
-  if (match) {
-    flightDetails = match;
-    detailsLoadedRef.current = true;   // zadržano radi kompatibilnosti/dijagnostike (više ne kontroliše granu)
-  } else {
-    detailsLoadedRef.current = false;  // ← NOVO — probaj ponovo idući put
-  }
-} else {
-  detailsLoadedRef.current = false;    // ← NOVO — liveFlightData još nije stigao, probaj ponovo
+// NOVO (2026-10-17): odluka je u ČISTOJ funkciji (lib/desk-view.ts) sa testiranim scenarijima.
+// Otvoren šalter se nikad ne gasi zato što podaci o letu nedostaju; gasi ga samo stvaran kraj leta.
+const view = deriveDeskView<Flight>(myData, liveFlightData);
+if (view.kind === 'inactive' && view.reason === 'departed') {
+  setDebug('desk', `${deskNumberParam} ${myData.status}/${myData.flightNumber} seq=${(myData as { seq?: number }).seq ?? '?'} → INACTIVE: let poletio`);
+  detailsLoadedRef.current = false;
+  setAssignment(EMPTY_ASSIGNMENT);
+  return;
 }
+const pickedFlight = view.kind === 'open' || view.reason === 'cancelled' || view.reason === 'diverted' ? view.flight : undefined;
+const flightDetails: Partial<Flight> = pickedFlight ?? {};
+detailsLoadedRef.current = !!pickedFlight;
 
 const icao = flightDetails.AirlineICAO || myData.flightNumber.substring(0, 2).toUpperCase();
 let logoUrl = '/airlines/placeholder.jpg';
@@ -1259,24 +1229,9 @@ useEffect(() => {
     };
   }, [isOpen, refetchAssignments]);
 
-  // NOVO (vidi komentar uz INACTIVE_DESK_OPEN_VERIFY_INTERVAL_MS): dok šalter NIJE otvoren,
-  // povremeno provjeri stvarno stanje na serveru, da propuštena Ably poruka ne zadrži
-  // "inactive" ekran na šalteru koji je osoblje već otvorilo.
-  useEffect(() => {
-    if (isOpen) return;
-    let cancelled = false;
-    let timeoutId: ReturnType<typeof setTimeout>;
-    const tick = () => {
-      if (cancelled) return;
-      refetchAssignments();
-      timeoutId = setTimeout(tick, inactiveVerifyDelay(connectionState === 'night-sleep'));
-    };
-    timeoutId = setTimeout(tick, inactiveVerifyDelay(connectionState === 'night-sleep'));
-    return () => {
-      cancelled = true;
-      clearTimeout(timeoutId);
-    };
-  }, [isOpen, connectionState, refetchAssignments]);
+  // 2026-10-17: periodično "inactive" pollanje UKLONJENO (trošak): propuštenu poruku hvata postojeći
+  // 3-minutni reconcile u hook-u (sad otporan na zastarjeli snapshot), a događajna provjera u bazi
+  // ispod potvrđuje svaku promjenu ovog šaltera. Nema dodatnog mrežnog saobraćaja u mirovanju.
 
   // NOVO (2026-10-12 — Electron/kiosk klijent): kad se prozor vrati iz pozadine/zaključavanja/
   // spavanja monitora, Chromium je timere throttlovao ili zaledio (backgroundThrottling,
@@ -1285,7 +1240,14 @@ useEffect(() => {
   //   (1) tab/prozor postaje vidljiv ili dobija fokus;
   //   (2) "drift" — interval od 5s se probudio >20s kasnije nego što je trebalo (sleep/zamrzavanje).
   useEffect(() => {
-    const resync = () => { refetchAssignments(); refetchFlights(); if (deskNumberParam) verifyKey('desk', deskNumberParam); };
+    // najviše jednom u 30 s — "oluja" focus/visibility događaja ne smije praviti dodatne zahtjeve (trošak)
+    let lastResync = 0;
+    const resync = () => {
+      const t = Date.now();
+      if (t - lastResync < 30_000) return;
+      lastResync = t;
+      refetchAssignments(); refetchFlights(); if (deskNumberParam) verifyKey('desk', deskNumberParam);
+    };
     const onVisible = () => { if (!document.hidden) resync(); };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', resync);
@@ -1320,8 +1282,8 @@ useEffect(() => {
   // posljednja linija odbrane: ma kako se lokalno stanje pokvarilo (izgubljena poruka, zastarjeli
   // snapshot, greška u merge-u), prikaz se vraća na ono što PIŠE u bazi.
   //  a) 4 s poslije SVAKE promjene unosa ovog šaltera (poruka stigla → potvrdi u bazi),
-  //  b) povremeno dok je šalter inactive (180 s; 300 s noću) — 1 Redis GET po pozivu,
-  //  c) pri buđenju/fokusu (vidi resync efekat iznad).
+  //  b) pri buđenju/fokusu (vidi resync efekat iznad).
+  //  Nema periodičnog pollanja — samo događajno (nekoliko poziva dnevno po šalteru).
   const myEntry = deskEntries[deskNumberParam];
   const mySig = `${myEntry?.status ?? 'x'}:${myEntry?.flightNumber ?? ''}:${myEntry?.seq ?? 0}`;
   useEffect(() => {
@@ -1329,13 +1291,6 @@ useEffect(() => {
     const id = setTimeout(() => verifyKey('desk', deskNumberParam), 4_000);
     return () => clearTimeout(id);
   }, [mySig, deskNumberParam, verifyKey]);
-
-  useEffect(() => {
-    if (!deskNumberParam || isOpen) return;
-    const night = connectionState === 'night-sleep';
-    const id = setInterval(() => verifyKey('desk', deskNumberParam), (night ? 300_000 : 180_000) + Math.floor(Math.random() * 10_000));
-    return () => clearInterval(id);
-  }, [isOpen, connectionState, deskNumberParam, verifyKey]);
 
   // NOVO (2026-10-12): dok ne stigne prvi pouzdan podatak sa servera (poslije svakog reload-a /
   // restarta Electron klijenta), stvarno stanje šaltera je NEPOZNATO — ne smije se pokazati ni

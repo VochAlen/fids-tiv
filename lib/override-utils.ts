@@ -1,4 +1,5 @@
 // lib/override-utils.ts
+import { ASSIGNMENT_TTL_SECONDS } from '@/lib/assignment-limits';
 import { getRedisClient, safeRedisGetStrict, safeRedisSet } from '@/lib/redis';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
@@ -306,7 +307,7 @@ export async function runAutoReset(allFlights: FlightLike[]): Promise<AutoResetR
             }
           });
           if (changed) {
-            await redis.set('ably-fids:desk-status:all', JSON.stringify(all), 'EX', 4 * 60 * 60);
+            await redis.set('ably-fids:desk-status:all', JSON.stringify(all), 'EX', ASSIGNMENT_TTL_SECONDS);
             console.log(`[auto-reset] Očišćeno ${actuallyDeleted.length} desk-status unosa`);
             // FIX (KRITIČNO — po zahtjevu, prijavljen bug: "dodijelim
             // let, pojavi se stari let sa jutra" i "klasa se ne mijenja
@@ -555,7 +556,7 @@ export async function autoCloseDepartedDesks(allFlights: FlightLike[]): Promise<
     'ably-fids:desk-status:all',
     'ably-fids:lock:desk-status:override',
     'ably-fids:seq:desk-status',
-    4 * 60 * 60,
+    ASSIGNMENT_TTL_SECONDS,
     'assignments:desks',
     'deskNumber',
     allFlights
@@ -567,7 +568,7 @@ export async function autoCloseDepartedGates(allFlights: FlightLike[]): Promise<
     'ably-fids:gate-status:all',
     'ably-fids:lock:gate-status:override',
     'ably-fids:seq:gate-status',
-    6 * 60 * 60,
+    ASSIGNMENT_TTL_SECONDS,
     'assignments:gates',
     'gateNumber',
     allFlights

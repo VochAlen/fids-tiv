@@ -5,7 +5,8 @@ import { parseFlightTimeToDate, computeDisruptionIndex, disruptionLevel } from '
 describe('parseFlightTimeToDate', () => {
   it('parsira ISO string deterministički', () => {
     const d = parseFlightTimeToDate('2026-01-01T08:50:00');
-    expect(d?.toISOString().startsWith('2026-01-01T08:50')).toBe(true);
+    // Vrijeme bez zone se tumači lokalno — poredimo lokalne komponente (test ne zavisi od TZ mašine).
+    expect(d && [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()]).toEqual([2026, 0, 1, 8, 50]);
   });
 
   it('vraća null za prazne/placeholder vrijednosti', () => {

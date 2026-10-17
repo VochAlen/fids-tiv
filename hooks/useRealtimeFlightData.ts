@@ -155,6 +155,8 @@ const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
 
 export function useRealtimeFlightData(role: AblyClientRole) {
   const [data, setData] = useState<FlightData | null>(null);
+  // true tek kad je stigao ŽIV podatak (REST ili Ably) — emergency keš ne računa (vidi retry efekat ispod).
+  const [gotLive, setGotLive] = useState(false);
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'night-sleep'>('connecting');
   const mountedRef = useRef(true);
   // NOVO — isti razlog kao inFlightRef u useRealtimeAssignments.ts: ovaj
@@ -202,6 +204,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
           return snapshot;
         });
         saveEmergencyCache(snapshot);
+        setGotLive(true);
         // FIX (po zahtjevu — dinamički noćni režim): javi ably-client.ts
         // najnoviju server-računatu vrijednost (statička ILI dinamička,
         // vidi computeDynamicNightMode u lib/flight-data-service.ts) —
@@ -305,6 +308,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
         return newData;
       });
       saveEmergencyCache(newData);
+      setGotLive(true);
       // FIX (po zahtjevu — dinamički noćni režim, vidi opširan
       // komentar iznad kod fetchSnapshot).
       reportDynamicNightMode(!!newData?.isNightMode);
@@ -327,6 +331,23 @@ export function useRealtimeFlightData(role: AblyClientRole) {
   }, [role, fetchSnapshot]);
 
   // ── 3. Fallback polling kad Ably nije konektovan I nije night-sleep ──
+  // NOVO (2026-10-17): dok nijedan podatak o letovima još nije stigao, ponavljaj snapshot (3 s → 30 s
+  // backoff) — troši mrežu samo dok je u kvaru. Ranije: neuspio prvi fetch = čekanje do 3-min reconcile-a.
+  useEffect(() => {
+    if (gotLive) return;
+    let cancelled = false;
+    let delay = 3_000;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      fetchSnapshot();
+      delay = Math.min(delay * 2, 30_000);
+      timeoutId = setTimeout(tick, delay);
+    };
+    timeoutId = setTimeout(tick, delay);
+    return () => { cancelled = true; clearTimeout(timeoutId); };
+  }, [gotLive, fetchSnapshot]);
+
   // FIX (po zahtjevu — eksponencijalni backoff, vidi opširan komentar
   // uz FALLBACK_POLL_MAX_MS): rekurzivan setTimeout lanac umjesto
   // fiksnog setInterval-a — svaki naredni poziv duplira čekanje.

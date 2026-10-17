@@ -2,8 +2,10 @@
 //
 // NOVO (2026-10-10): mali MODEL koji UČI iz ručnih dodjela šaltera/gate-ova i
 // predviđa "koji resurs će osoblje sljedeći izabrati". Čista logika (bez Redis-a,
-// bez React-a, bez mreže) — trenira se u PREGLEDNIKU admin stranice, pa nema
-// nikakvog troška na serveru (nema cron-a, nema dodatnih funkcija).
+// bez React-a, bez mreže). 2026-10-17: treniranje je CENTRALIZOVANO na serveru
+// (lib/assignment-model-server.ts) — trenira se najviše jednom po novom primjeru / danu, unutar
+// POSTOJEĆEG zahtjeva admin stranice (nema cron-a, nema novih funkcija), a rezultat (težine + status)
+// se čuva u Redis-u i isti je na svakom računaru. Preglednik samo rekonstruiše istoriju (bez treniranja).
 //
 // POSTUPAK (isti koraci kao što je traženo):
 //   1. Model dobije kontekst (let, dan, šta je već zauzeto/odabrano) i za svaki
@@ -280,13 +282,25 @@ function daysSince(firstTs: number, todayISO: string): number {
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-export function trainModel(all: Example[], kind: LearnKind, todayISO: string): TrainedModel {
+/**
+ * SERIJALIZABILNO stanje istreniranog modela — to je ono što server čuva u Redis-u i šalje svim adminima
+ * (lib/assignment-model-server.ts). Težine + status; istorija (brojači) se na klijentu rekonstruiše iz
+ * primjera, pa nema treniranja u pregledniku.
+ */
+export interface ModelState {
+  info: ModelInfo;
+  /** Konačne težine; null dok model ne smije da utiče na prijedloge (učenje / sjena). */
+  weights: number[] | null;
+}
+
+/** Treniranje (gradijentno spuštanje) — čista funkcija; poziva je SERVER (vidi assignment-model-server.ts). */
+export function trainModelState(all: Example[], kind: LearnKind, todayISO: string): ModelState {
   const ex = all.filter(e => e.kind === kind);
   const n = ex.length;
   const day = n ? daysSince(ex[0].ts, todayISO) : 0;
-  const learning = (text: string): TrainedModel => ({
+  const learning = (text: string): ModelState => ({
     info: { phase: 'learning', examples: n, day, modelRate: null, baselineRate: null, tested: 0, text },
-    predictor: null,
+    weights: null,
   });
 
   if (n === 0) return learning('Model trenutno uči — još nema ručnih dodjela za učenje.');
@@ -300,7 +314,7 @@ export function trainModel(all: Example[], kind: LearnKind, todayISO: string): T
     return learning(`Model trenutno uči · skupljeno ${n} od ${MIN_EXAMPLES} potrebnih ručnih dodjela. Još ne utiče na prijedloge.`);
   }
 
-  const { rows, history } = buildRows(ex, kind);
+  const { rows } = buildRows(ex, kind);
   const split = Math.max(rows.length - testN, 0);
   const wTrain = trainWeights(rows.slice(0, split));
   const test = rows.slice(split);
@@ -315,10 +329,19 @@ export function trainModel(all: Example[], kind: LearnKind, todayISO: string): T
       ? `Model aktivan: pogađa ${pct(mRate)} naspram ${pct(bRate)} kod brojača (test na ${test.length} dodjela).`
       : `Model još ne utiče na prijedloge: pogađa ${pct(mRate)} naspram ${pct(bRate)} kod brojača (test na ${test.length} dodjela). Nastavlja da uči.`,
   };
-  if (!better) return { info, predictor: null };
+  if (!better) return { info, weights: null };
+  return { info, weights: trainWeights(rows) }; // konačni model: svi primjeri, 10 prolaza
+}
 
-  const wFinal = trainWeights(rows); // konačni model: svi primjeri, 10 prolaza
+/** Predictor iz gotovih težina — BEZ treniranja (samo rekonstrukcija istorije iz primjera). */
+export function predictorFromState(state: ModelState, all: Example[], kind: LearnKind): TrainedModel {
+  const wFinal = state.weights;
+  if (!wFinal) return { info: state.info, predictor: null };
+  const ex = all.filter(e => e.kind === kind);
   const ids = universeOf(kind);
+  const history = new History();
+  for (const e of ex) if (ids.indexOf(e.chosen) >= 0) history.add(e); // isto kao buildRows
+  const info = state.info;
   const predict = (ctx: PredictCtx) => {
     const logits = history.features(ctx, ids).map(f => dot(wFinal, f));
     const p = softmax(logits);
@@ -345,4 +368,17 @@ export function trainModel(all: Example[], kind: LearnKind, todayISO: string): T
   };
   const predictor: Predictor = Object.assign(predict, { explain });
   return { info, predictor };
+}
+
+/** Zadržano radi kompatibilnosti: trenira i odmah pravi predictor (koristi se u testovima / kao rezervni put). */
+export function trainModel(all: Example[], kind: LearnKind, todayISO: string): TrainedModel {
+  return predictorFromState(trainModelState(all, kind, todayISO), all, kind);
+}
+
+/** Otisak skupa primjera — mijenja se kad stigne novi primjer ili se skrate stari. */
+export function examplesSignature(raw: Record<string, string> | null | undefined): string {
+  const keys = Object.keys(raw ?? {});
+  let max = '';
+  for (const k of keys) if (k > max) max = k;
+  return `${keys.length}:${max}`;
 }

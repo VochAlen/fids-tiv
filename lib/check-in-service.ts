@@ -65,7 +65,13 @@ export async function loadCheckInConfig(): Promise<void> {
   configLoadPromise = (async () => {
     try {
       console.log('📡 Loading check-in config from API...');
-      const response = await fetch('/api/checkin-config');
+      // NOVO (2026-10-17): fetch BEZ timeout-a je mogao ostati zakačen zauvijek, a svi pozivi
+      // (configLoadPromise) čekaju isti promise → gate je ostajao na "Loading"/starom prikazu.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8_000);
+      let response: Response;
+      try { response = await fetch('/api/checkin-config', { signal: controller.signal }); }
+      finally { clearTimeout(timer); }
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);

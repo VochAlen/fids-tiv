@@ -22,6 +22,7 @@ import { NextResponse, after } from 'next/server';
 import { safeRedisGet, safeRedisGetStrict, safeRedisSet, getRedisClient } from '@/lib/redis';
 import { createHash } from 'crypto';
 import { publishToChannel } from '@/lib/ably-server';
+import { ASSIGNMENT_MAX_AGE_MS, ASSIGNMENT_TTL_SECONDS } from '@/lib/assignment-limits';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
 import { recordAssignmentLearning } from '@/lib/assignment-learning-server';
@@ -30,8 +31,9 @@ import { sanitizeLearningContext } from '@/lib/assignment-learning';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const MAX_AGE_MS = 4 * 60 * 60 * 1000;   // 4 sata — unosi stariji se brišu
-const TTL_SECONDS = 4 * 60 * 60;          // 4h — TTL na blob ključu
+// Rok dodjele i TTL ključa: vidi lib/assignment-limits.ts (ranije 4h — dodjela je tiho nestajala dok je let aktivan).
+const MAX_AGE_MS = ASSIGNMENT_MAX_AGE_MS;
+const TTL_SECONDS = ASSIGNMENT_TTL_SECONDS;
 // FIX (KRITIČNO — pravi, konačan uzrok prijavljenog "neki letovi se
 // ne otvaraju na check-in/gate, radi tek nakon zaobilaznice"):
 // glavni (polling, ne-Ably) FIDS sistem koristi IDENTIČNO ime ključa

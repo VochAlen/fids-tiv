@@ -222,7 +222,12 @@ export function formatClockMinutes(totalMin: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
-/** Let poslije ponoći dok je sad prije ponoći → +1440 (isti obrazac kao isUrgentFlight). */
+/**
+ * Let poslije ponoći dok je sad prije ponoći → +1440 (isti obrazac kao isUrgentFlight).
+ * PRETPOSTAVKA (namjerno): lista letova nosi samo sat bez datuma, a letovi koji su već poletjeli/otkazani se
+ * odbacuju po STATUSU (vidi filter u computeAssignmentSuggestions) — pa let sa statusom "Scheduled" koji je
+ * po satu >12 h u prošlosti je SUTRAŠNJI, ne jučerašnji. Zato 06:00 u 22:00 postaje sutra 06:00.
+ */
 function toAbsolute(minOfDay: number, nowMin: number): number {
   return minOfDay - nowMin < -720 ? minOfDay + 1440 : minOfDay;
 }
@@ -305,6 +310,18 @@ function longestRun(ids: string[]): number {
   return best;
 }
 
+/**
+ * Traženi terminal gate-a (npr. terminal šaltera leta) se napušta SAMO kad nijedan od uobičajenih gate-ova
+ * leta nije u njemu (tada se poštuje navika osoblja). Ranije se gledao samo prvi gate iz bazena.
+ */
+export function resolveWantedGateTerminal(
+  wantT: 'T1' | 'T2' | undefined,
+  gatePool: readonly string[],
+): 'T1' | 'T2' | undefined {
+  if (wantT && gatePool.length && !gatePool.some(id => deskTerminal(id) === wantT)) return undefined;
+  return wantT;
+}
+
 function pickResources(
   count: number,
   pool: string[],
@@ -327,9 +344,16 @@ function pickResources(
   let picked: string[] = [];
 
   // ── MODEL (ako je aktivan): jedan resurs = najvjerovatniji iskoristiv ──────────
+  // `poolCredit`: koliko od izabranih računamo kao "iz bazena" za upozorenje "uobičajeni nisu slobodni".
+  // Model smije izabrati i resurs van bazena (naučena navika) — to NIJE razlog za upozorenje dok je neki
+  // uobičajeni resurs slobodan. Ali ako NIJEDAN uobičajeni nije slobodan, izbor van bazena se mora
+  // prijaviti (ranije se uvijek vraćalo fromPool=1 pa se upozorenje gubilo).
+  const poolHasFree = poolIds.some(free);
+  const poolCredit = (ids: string[]) =>
+    model && poolHasFree ? ids.length : ids.filter(id => poolIds.includes(id)).length;
   if (model && count === 1) {
     const cand = universe.filter(usable).sort((a, b) => (model[b] ?? 0) - (model[a] ?? 0));
-    if (cand.length) return { picked: [cand[0]], fromPool: 1, fromFallback: 0 };
+    if (cand.length) return { picked: [cand[0]], fromPool: poolCredit([cand[0]]), fromFallback: 0 };
   }
 
   // ── VIŠE RESURSA: SAMO uzastopni brojevi (npr. 2,3,4 — nikad 1,4,12 ni 2,5) ───────
@@ -373,7 +397,7 @@ function pickResources(
         const w = best.w;
         return {
           picked: w,
-          fromPool: model ? w.length : w.filter(id => poolIds.includes(id)).length,
+          fromPool: poolCredit(w),
           fromFallback: w.filter(id => !poolIds.includes(id) && fbTargets.has(id)).length,
         };
       }
@@ -382,20 +406,8 @@ function pickResources(
     return pickResources(1, pool, universe, busy, iv, buf, fallback, allowWait, model);
   }
 
-  // 1) Najbolji SUSJEDNI blok od `count` slobodnih iz bazena (npr. 10,11,12 umjesto 10,12,21).
-  //    Ocjena bloka = zbir prioriteta (raniji u bazenu = veći prioritet).
-  if (count > 1 && poolIds.length >= count) {
-    const nums = [...poolIds].sort((a, b) => Number(a) - Number(b));
-    let bestScore = -1;
-    for (let i = 0; i + count <= nums.length; i++) {
-      const block = nums.slice(i, i + count);
-      const consecutive = block.every((id, k) => k === 0 || Number(id) === Number(block[k - 1]) + 1);
-      if (!consecutive || !block.every(free)) continue;
-      const score = block.reduce((s, id) => s + (poolIds.length - poolIds.indexOf(id)), 0);
-      if (score > bestScore) { bestScore = score; picked = block; }
-    }
-  }
-  // 2) Inače prvih `count` slobodnih iz bazena po prioritetu.
+  // ── JEDAN RESURS (count === 1; count > 1 je u cijelosti obrađen iznad i uvijek vraća rezultat) ──
+  // 1) Prvi slobodan iz bazena po prioritetu.
   if (picked.length === 0) picked = poolIds.filter(free).slice(0, count);
   // Nijedan uobičajeni nije slobodan odmah, ali neki se uskoro oslobađa → nudi njega ("po zatvaranju").
   if (picked.length === 0 && allowWait) {
@@ -403,7 +415,7 @@ function pickResources(
   }
   const fromPool = picked.length;
 
-  // 2b) NAUČENA ZAMJENA: za zauzet uobičajeni X nudi Y koji je osoblje do sad najčešće biralo.
+  // 2) NAUČENA ZAMJENA: za zauzet uobičajeni X nudi Y koji je osoblje do sad najčešće biralo.
   let fromFallback = 0;
   if (picked.length < count) {
     for (const x of poolIds) {
@@ -484,7 +496,7 @@ export function suggestionCost(s: Suggestion, winterT1: boolean): number {
 /** Najveći broj probnih planova (svaki je jeftin — par stotina izbora resursa). */
 const MAX_PLAN_EVALS = 160;
 /** Koliko mjesta unaprijed se razmjenjuje / pomjera redoslijed (letovi blizu u vremenu). */
-const SWAP_REACH = 4;
+const SWAP_REACH = 4; // let na poziciji i se mijenja sa letovima na i+1 … i+SWAP_REACH (najviše 4 mjesta unaprijed)
 
 /**
  * Pohlepni plan zavisi od REDOSLIJEDA letova. Pretraga je determinističa:
@@ -825,8 +837,9 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       const deskT = deskTermOf.get(p.f.FlightNumber);
       // Bez šaltera leta: zimi prvo T1 gate-ovi (osim kad je uobičajeni gate leta u T2).
       let wantT: 'T1' | 'T2' | undefined = deskT ?? (winterT1 ? 'T1' : undefined);
-      // Uobičajeni (profil/naučeni) gate-ovi leta su u drugom terminalu → poštuj naviku osoblja.
-      if (wantT && p.gatePool.length && deskTerminal(p.gatePool[0]) !== wantT) wantT = undefined;
+      // Nijedan uobičajeni (profil/naučeni) gate leta nije u traženom terminalu → poštuj naviku osoblja.
+      // (Ranije se gledao samo gatePool[0]: bazen T1,T1,T2 sa traženim T2 bi bez razloga odustao od T2.)
+      wantT = resolveWantedGateTerminal(wantT, p.gatePool);
       const inT = (id: string) => !wantT || deskTerminal(id) === wantT;
       let gr = pinnedGate
         ? { picked: [pinnedGate], fromPool: 1, fromFallback: 0 }

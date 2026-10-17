@@ -16,6 +16,7 @@ import InactiveScreen from '@/components/InactiveScreen';
 import { isNightHours, airportTimeToMs } from '@/lib/night-hours';
 import { nowMs } from '@/lib/server-clock';
 import ClockDiagnostics from '@/components/ClockDiagnostics';
+import { gateOverrideCandidates, isPlaceholderFlight } from '@/lib/gate-view';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import Image from 'next/image';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
@@ -199,7 +200,14 @@ const formatTimeRemaining = (min: number): string => {
 const flightChanged = (a: Flight | null, b: Flight | null): boolean =>
   a?.FlightNumber !== b?.FlightNumber ||
   a?.ScheduledDepartureTime !== b?.ScheduledDepartureTime ||
-  a?.StatusEN !== b?.StatusEN;
+  a?.StatusEN !== b?.StatusEN ||
+  // NOVO (2026-10-17): ranije se ekran osvježavao samo na promjenu broja/STD/statusa — promjena ETD-a,
+  // odredišta, terminala ili punjenje placeholder-a pravim podacima je ostajala nevidljiva.
+  a?.EstimatedDepartureTime !== b?.EstimatedDepartureTime ||
+  a?.DestinationCityName !== b?.DestinationCityName ||
+  a?.AirlineName !== b?.AirlineName ||
+  a?.Terminal !== b?.Terminal ||
+  a?.GateNumber !== b?.GateNumber;
 
 // ------------------------------------------------------------
 // Status helpers
@@ -295,6 +303,8 @@ const currentFlightRef    = useRef<Flight | null>(null);
 const currentStatusRef    = useRef<CheckInStatus | null>(null);
 const manualGateStatusRef = useRef<string | null>(null);
 const stdSwitchTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+const computeRunRef       = useRef(0);
+const wasNightRef         = useRef(false);
 const { data: liveFlightData, connectionState: flightsConnState, refetch: refetchFlights } = useRealtimeFlightData('gate');
 const { gateEntries, connectionState: assignConnState, isSynced, lastSyncAtRef, refetch: refetchAssignments, verifyKey } = useRealtimeAssignments('gate');
 
@@ -354,7 +364,10 @@ const { gateEntries, connectionState: assignConnState, isSynced, lastSyncAtRef, 
 const computeDisplay = useCallback(async () => {
   if (!isMountedRef.current) return;
   if (isNightHours()) { setLoading(false); return; }
-  if (!liveFlightData) return; // čekaj prvi Ably/snapshot podatak
+  // NOVO (2026-10-17): gate prikazuje ISKLJUČIVO ručne dodjele, pa podaci o letovima nisu preduslov za
+  // odluku "otvoren/zatvoren/prazan". Ranije je `if (!liveFlightData) return` držao ekran na "Loading"
+  // dok flights snapshot ne stigne (ili zauvijek ako ne stigne). Detalji leta se dopune naknadno.
+  const runId = ++computeRunRef.current; // zaštita od zastarjelog (sporijeg) izvršavanja
 
   const gateEntry = gateEntries[gateNumber];
   const overrideStatus = gateEntry?.status ?? null;
@@ -378,12 +391,11 @@ const computeDisplay = useCallback(async () => {
     return;
   }
 
-  const data = liveFlightData; // { departures, arrivals }
-
   let candidates: Flight[] = [];
   if (overrideStatus === 'open' && overrideFlightNumber) {
-    const overriddenFlight = data.departures.find(f => f.FlightNumber === overrideFlightNumber);
-    if (overriddenFlight) candidates = [overriddenFlight];
+    // NOVO (2026-10-17): ako lista letova (još) ne sadrži dodijeljeni let → otvoren gate sa brojem leta
+    // (placeholder), NE "nema letova". Vidi lib/gate-view.ts.
+    candidates = gateOverrideCandidates(liveFlightData?.departures, overrideFlightNumber);
   }
   // FIX (po zahtjevu — potpuno uklonjena automatska detekcija leta
   // preko GateNumber polja iz sirovog aerodromskog izvora podataka):
@@ -400,9 +412,10 @@ const computeDisplay = useCallback(async () => {
   // slučaju (funkcija flightMatchesGate je uklonjena u potpunosti,
   // više se nigdje ne koristi).
 
-  const withStatus = await Promise.all(
-    candidates.map(async f => ({ ...f, checkInStatus: await getFlightCheckInStatus(f) }))
-  );
+  // NOVO (2026-10-17): checkInStatus služi samo za tekst o zatvaranju check-ina — NE SMIJE blokirati
+  // prikaz leta (getEnhancedCheckInStatus radi mrežni poziv /api/checkin-config; zakačen zahtjev je
+  // ranije držao gate na "Loading"/starom prikazu). Prikaz ide odmah, status se dopuni naknadno.
+  const withStatus = candidates.map(f => ({ ...f, checkInStatus: null as CheckInStatus | null }));
 
   const sorted = [...withStatus].sort((a, b) =>
     overrideStatus === 'open'
@@ -431,6 +444,9 @@ const computeDisplay = useCallback(async () => {
   // Sad se `shouldDisplayFlight` dosljedno primjenjuje u OBA slučaja.
   const current: (typeof sorted)[number] | null =
     sorted.find(f => shouldDisplayFlight(f)) ?? null;
+
+  // Ako je u međuvremenu pokrenuto novije izračunavanje, ovo je zastarjelo — odbaci.
+  if (runId !== computeRunRef.current) return;
 
   let nextFlight: (typeof sorted)[number] | null = null;
   const idx = current ? sorted.findIndex(f => f.FlightNumber === current!.FlightNumber) : -1;
@@ -465,6 +481,19 @@ const computeDisplay = useCallback(async () => {
   setLastUpdate(new Date().toLocaleTimeString('en-GB'));
   setNextUpdate(new Date(Date.now() + REFRESH_INTERVAL_MS).toLocaleTimeString('en-GB'));
   setLoading(false);
+
+  // Dopuna check-in statusa (ne blokira prikaz; najviše 3 s čekanja, greška = bez teksta).
+  if (current && !isPlaceholderFlight(current)) {
+    const fn = current.FlightNumber;
+    Promise.race([
+      getFlightCheckInStatus(current),
+      new Promise<null>(res => setTimeout(() => res(null), 3_000)),
+    ]).then(st => {
+      if (!st || !isMountedRef.current || runId !== computeRunRef.current) return;
+      currentStatusRef.current = st;
+      setDisplay(prev => (prev.flight?.FlightNumber === fn ? { ...prev, checkInStatus: st } : prev));
+    }).catch(() => { /* bez teksta o zatvaranju */ });
+  }
 }, [gateNumber, gateEntries, liveFlightData, getFlightCheckInStatus, updateCountdown, shouldDisplayFlight]);
 
 // Reaguj na promjenu Ably podataka umjesto poll-a
@@ -640,21 +669,43 @@ const effectiveStatus = useMemo(() => {
 
   // NOVO (2026-10-16): paritet sa check-in stranicom.
   // 1) Upozorenje o pogrešnom satu: <ClockDiagnostics /> u renderu.
-  // 2) Dok gate NIJE prikazao let (prazan/zatvoren), povremeno provjeri stvarno stanje preko REST-a:
-  //    Ably poruka o otvaranju može da se izgubi (drop veze, noćni režim, throttling u Electronu).
-  const gateShowsFlight = !!display.flight;
+  // 2) (uklonjeno 2026-10-17: periodično pollanje praznog gate-a — trošak; pokriva ga 3-min reconcile.)
+  // NOVO (2026-10-17): kraj noćnog režima. computeDisplay za vrijeme noći ne radi ništa, a ništa drugo
+  // ne okida preračunavanje u trenutku kad noć prođe → gate bi pokazivao stanje od večeri/noći dok
+  // ne stigne nova poruka. Lokalna provjera na 20 s (bez mreže): na prelazu noć→dan preračunaj i povuci stanje.
   useEffect(() => {
-    if (gateShowsFlight) return;
-    const night = assignConnState === 'night-sleep';
-    const delay = (night ? 45_000 : 20_000) + Math.floor(Math.random() * 3_000);
-    const id = setInterval(() => { refetchAssignments(); refetchFlights(); }, delay);
+    wasNightRef.current = isNightHours();
+    const id = setInterval(() => {
+      const night = isNightHours();
+      if (wasNightRef.current && !night) {
+        computeDisplay();
+        refetchAssignments(); refetchFlights(); verifyKey('gate', gateNumber);
+      }
+      wasNightRef.current = night;
+    }, 20_000);
     return () => clearInterval(id);
-  }, [gateShowsFlight, assignConnState, refetchAssignments, refetchFlights]);
+  }, [computeDisplay, refetchAssignments, refetchFlights, verifyKey, gateNumber]);
+
+  // NOVO (2026-10-17): gate je otvoren, a podaci o letu su samo placeholder → povuci letove (10 s dok se ne pojave).
+  const gateShowsPlaceholder = isPlaceholderFlight(display.flight);
+  useEffect(() => {
+    if (!gateShowsPlaceholder) return;
+    refetchFlights();
+    const id = setInterval(() => refetchFlights(), 10_000);
+    return () => clearInterval(id);
+  }, [gateShowsPlaceholder, refetchFlights]);
 
   // 3) Buđenje (sleep/throttling) ili skok sata: odmah resinhronizuj i preračunaj prikaz.
   useEffect(() => {
     let last = Date.now();
-    const resync = () => { refetchAssignments(); refetchFlights(); verifyKey('gate', gateNumber); };
+    // najviše jednom u 30 s — "oluja" focus/visibility događaja ne smije praviti dodatne zahtjeve (trošak)
+    let lastResync = 0;
+    const resync = () => {
+      const t = Date.now();
+      if (t - lastResync < 30_000) return;
+      lastResync = t;
+      refetchAssignments(); refetchFlights(); verifyKey('gate', gateNumber);
+    };
     const onVisible = () => { if (document.visibilityState === 'visible') resync(); };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', resync);
@@ -679,13 +730,6 @@ const effectiveStatus = useMemo(() => {
     const id = setTimeout(() => verifyKey('gate', gateNumber), 4_000);
     return () => clearTimeout(id);
   }, [myGateSig, gateNumber, verifyKey]);
-  useEffect(() => {
-    if (gateShowsFlight) return;
-    const night = assignConnState === 'night-sleep';
-    const id = setInterval(() => verifyKey('gate', gateNumber), (night ? 300_000 : 180_000) + Math.floor(Math.random() * 10_000));
-    return () => clearInterval(id);
-  }, [gateShowsFlight, assignConnState, gateNumber, verifyKey]);
-
   // ------------------------------------------------------------
   // Weather
   // ------------------------------------------------------------
