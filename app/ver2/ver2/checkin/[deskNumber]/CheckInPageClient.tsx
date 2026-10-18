@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
+import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 // FIX (portovano iz glavnog/polling sistema — potrebno za praznične
 // kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
@@ -1318,117 +1319,23 @@ useEffect(() => {
   // RENDER: Inactive (nema dodjele / zatvoreno / otkazano)
   // ============================================================
   if (!isOpen) {
-    const wallpaperSrc = isPortrait ? '/wallpaper.jpg' : '/wallpaper-landscape.jpg';
-
+    // Redizajn 2026-10-18: zajednički ekran (components/AirportIdleScreen.tsx), isti stil kao gate.
     return (
-      <div className="min-h-screen relative gpu-accelerated bg-slate-900">
-        <div className="absolute inset-0 z-0">
-          <Image
-            src={wallpaperSrc}
-            alt="Airport Wallpaper"
-            fill
-            className="object-cover"
-            priority
-            quality={90}
-            placeholder="blur"
-            blurDataURL={BLUR_DATA_URL}
-            sizes="100vw"
-            decoding="async"
-            unoptimized
-          />
-          <div className="absolute inset-0 bg-black/50" />
-        </div>
-
-        <div className="relative z-10 min-h-screen flex items-center justify-center p-4 text-white">
-          <div
-            className={`text-center bg-slate-800/80 rounded-3xl p-6 sm:p-12 border border-white/20 shadow-2xl w-full ${
-              isPortrait ? 'max-w-md sm:max-w-4xl' : 'max-w-6xl'
-            } mx-auto`}
-          >
-            {assignment.isCancelled ? (
-              <XCircle className="w-16 h-16 sm:w-32 sm:h-32 text-red-500 mx-auto mb-4 sm:mb-8" />
-            ) : assignment.isDiverted ? (
-              <Plane className="w-16 h-16 sm:w-32 sm:h-32 text-orange-500 mx-auto mb-4 sm:mb-8" />
-            ) : (
-              <CheckCircle className="w-16 h-16 sm:w-32 sm:h-32 text-white/60 mx-auto mb-4 sm:mb-8" />
-            )}
-
-            <div className="text-center mb-4 sm:mb-8">
-              {/* NOVO (po zahtjevu — mobilna optimizacija, 2026-09-27):
-                  mobilna (default) veličina ostaje čitljiva na telefonu
-                  (npr. Motorola G34 5G, Redmi 13/14 — CSS širina ~390-412px);
-                  puna kiosk veličina se aktivira tek od `sm:` (640px) naviše,
-                  što pravi kiosk monitor u portretu (npr. 1080×1920) uvijek
-                  ispunjava — nema potrebe za JS detekcijom uređaja. */}
-              <div
-                className={`font-bold text-white/80 mb-2 sm:mb-4 ${
-                  isPortrait ? 'text-3xl sm:text-[6rem]' : 'text-[4rem]'
-                }`}
-              >
-                Check-in
-              </div>
-              <div
-                className={`font-black text-orange-400 leading-none drop-shadow-2xl ${
-                  isPortrait ? 'text-7xl sm:text-[20rem]' : 'text-[15rem]'
-                }`}
-              >
-                {deskNumberParam}
-              </div>
-            </div>
-
-            {assignment.isCancelled ? (
-              <div
-                className={`text-red-500 mb-3 sm:mb-6 font-semibold ${
-                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
-                }`}
-              >
-                ✈️ Flight {assignment.flightNumber} CANCELLED
-              </div>
-            ) : assignment.isDiverted ? (
-              <div
-                className={`text-orange-500 mb-3 sm:mb-6 font-semibold ${
-                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
-                }`}
-              >
-                ✈️ Flight {assignment.flightNumber} DIVERTED
-              </div>
-            ) : (
-              <div
-                className={`text-white/90 mb-3 sm:mb-6 font-semibold ${
-                  isPortrait ? 'text-xl sm:text-4xl' : 'text-3xl'
-                }`}
-              >
-                {hasFlight
-                  ? 'Check-in is currently closed'
-                  : 'No flights currently checking in here'}
-              </div>
-            )}
-
-            {hasFlight && !assignment.isCancelled && !assignment.isDiverted && (
-              <div
-                className={`text-orange-300 mb-3 sm:mb-6 font-medium bg-black/30 py-2 px-4 sm:py-3 sm:px-6 rounded-2xl ${
-                  isPortrait ? 'text-base sm:text-3xl' : 'text-2xl'
-                }`}
-              >
-                <div>
-                  Flight: {assignment.flightNumber} → {assignment.destinationCity}
-                </div>
-                {assignment.scheduledTime && (
-                  <div className={isPortrait ? 'text-sm sm:text-xl mt-1 sm:mt-2' : 'text-xl mt-2'}>
-                    Scheduled: {assignment.scheduledTime}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div
-              className={`text-white/70 mb-2 sm:mb-4 ${isPortrait ? 'text-xs sm:text-xl' : 'text-lg'}`}
-            >
-              Updated at: {lastUpdate || 'Never'}
-            </div>
-          </div>
-        </div>
-      </div>
+      <AirportIdleScreen
+        label="CHECK-IN"
+        number={deskNumberParam}
+        closed={hasFlight}
+        statusText={hasFlight ? 'CHECK-IN CLOSED' : 'NO FLIGHTS CHECKING IN'}
+        flightLine={hasFlight ? (
+          <>
+            {assignment.flightNumber}{assignment.destinationCity ? ` → ${assignment.destinationCity}` : ''}
+            {assignment.scheduledTime ? ` · ${assignment.scheduledTime}` : ''}
+          </>
+        ) : undefined}
+        hintEn="Please check the main flight information screens for your check-in desk."
+        hintLocal="Molimo provjerite glavne informativne ekrane za vaš šalter."
+        lastUpdate={lastUpdate}
+      />
     );
   }
 
@@ -1438,6 +1345,7 @@ useEffect(() => {
   if (isPortrait) {
     return (
       <div className="min-h-screen sm:h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white sm:overflow-hidden flex flex-col">
+        <DevCredit />
         {/* Header — mobilna veličina (telefon) je default, kiosk-veličina
             (text-[4rem]) tek od sm: naviše, isti obrazac kao gore. */}
         <div className="flex-shrink-0 p-2 bg-slate-800/80 border-b border-white/10 sm:mt-[0.3cm] gpu-accelerated">
@@ -1672,6 +1580,7 @@ useEffect(() => {
   // ============================================================
   return (
     <div className="w-[99vw] h-[100vh] mx-auto rounded-3xl border-2 border-white/10 shadow-2xl overflow-hidden gpu-accelerated">
+      <DevCredit />
       <div className="h-full grid grid-cols-12 gap-8 p-3 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
 
         {/* Lijeva kolona */}

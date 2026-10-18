@@ -21,6 +21,7 @@ import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import Image from 'next/image';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 
 // ------------------------------------------------------------
 // Konstante
@@ -277,6 +278,7 @@ function LiveClock() {
 function Divider() {
   return <div style={styles.divider} className="fids-divider" />;
 }
+
 
 // ------------------------------------------------------------
 // Glavna komponenta — klijentska logika (nepromijenjena)
@@ -749,23 +751,19 @@ const effectiveStatus = useMemo(() => {
   if (!display.flight) {
     const closed = display.manualGateStatus === 'closed';
     return (
-      <div style={styles.splash} className="fids-splash">
-        <div style={{ ...styles.gateLabel, fontSize: 'clamp(5rem,18vw,14rem)', lineHeight: 1 }}>
-          {gateNumber}
-        </div>
-        <div style={{
-          fontSize: '2rem', fontWeight: 600, letterSpacing: '.08em',
-          color: closed ? '#ef4444' : '#475569', marginTop: '1rem',
-        }}>
-          {closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
-        </div>
-        <div style={styles.metaRow}>
-          <span>Updated {lastUpdate}</span>
-          <span style={{ opacity: .4 }}>•</span>
-          <span>Next {nextUpdate}</span>
-        </div>
-        <ClockDiagnostics label={`gate ${gateNumber}`} connectionState={assignConnState} lastSyncAtRef={lastSyncAtRef} extra={`entry=${gateEntries[gateNumber]?.status ?? '-'}`} />
-      </div>
+      <AirportIdleScreen
+        label="GATE"
+        number={gateNumber}
+        closed={closed}
+        statusText={closed ? 'GATE CLOSED' : 'NO FLIGHTS SCHEDULED'}
+        hintEn="Please check the main flight information screens for your gate."
+        hintLocal="Molimo provjerite glavne informativne ekrane za vaš gate."
+        lastUpdate={lastUpdate}
+        nextUpdate={nextUpdate}
+        diagnostics={
+          <ClockDiagnostics label={`gate ${gateNumber}`} connectionState={assignConnState} lastSyncAtRef={lastSyncAtRef} extra={`entry=${gateEntries[gateNumber]?.status ?? '-'}`} />
+        }
+      />
     );
   }
 
@@ -986,6 +984,8 @@ const effectiveStatus = useMemo(() => {
           </div>
         )}
       </div>
+
+      <DevCredit />
 
       {/* GLOBAL STYLES */}
       <style>{`
