@@ -104,6 +104,8 @@ function ipMatchesEntry(ip: string, entry: string): boolean {
   return ip === entry;
 }
 
+let warnedNoAllowList = false;
+
 function isAllowedAirportIp(request: NextRequest): boolean {
   const allowList = (process.env.AIRPORT_ALLOWED_IPS || '')
     .split(',').map(s => s.trim()).filter(Boolean);
@@ -111,7 +113,10 @@ function isAllowedAirportIp(request: NextRequest): boolean {
   if (allowList.length === 0) {
     // Fail-open — vidi opširan komentar iznad. Upozorenje samo
     // jednom po hladnom startu funkcije, ne po svakom zahtjevu.
-    console.warn('[middleware] AIRPORT_ALLOWED_IPS nije podešena — IP zaštita kiosk stranica je NEAKTIVNA.');
+    if (!warnedNoAllowList) {
+      warnedNoAllowList = true;
+      console.warn('[middleware] AIRPORT_ALLOWED_IPS nije podešena — IP zaštita kiosk stranica je NEAKTIVNA.');
+    }
     return true;
   }
 
@@ -195,6 +200,6 @@ if (request.nextUrl.pathname.startsWith('/api/')) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon\\.ico|airlines|city-images|british|reklame|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
+    '/((?!api/|_next/static|_next/image|favicon\\.ico|airlines|city-images|british|reklame|wallpaper|wallpaper-landscape|dgr-gate\\.png|api/test|api/flights).*)',
   ],
 }

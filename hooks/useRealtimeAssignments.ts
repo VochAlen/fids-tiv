@@ -146,7 +146,8 @@ const FALLBACK_POLL_MAX_MS = 60_000;
 // 3 min je balans: dovoljno rijetko da ne dodaje značajan trošak
 // (Edge Requests optimizacija ranije ove sesije), dovoljno često da
 // "zaglavljeno" stanje nikad ne traje predugo u praksi.
-const RECONCILE_INTERVAL_MS = 3 * 60_000;
+// 2026-10-18: 3 → 5 min (smanjenje Vercel poziva/CPU; Ably push + verifyKey i dalje pokrivaju promjene).
+const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 // NOVO (po predlogu — 2026-10-04): `fetchSnapshot` ranije nije imao
 // nikakav timeout/prekid — na flaky kiosk mreži, `fetch()` bez
@@ -491,7 +492,10 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // sam čita, pa se kiosk samostalno usklađuje ako je ikad "zaostao"
   // bez ijedne izgubljene poruke koja bi ga upozorila.
   useEffect(() => {
-    const id = setInterval(fetchSnapshot, RECONCILE_INTERVAL_MS);
+    // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
+    // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
+    // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
+    const id = setInterval(() => { if (!isNightHours()) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSnapshot]);
 

@@ -91,7 +91,7 @@ export async function GET(request: Request) {
     const cached = await safeRedisGet(cacheKey);
     if (cached) {
       return NextResponse.json(JSON.parse(cached), {
-        headers: { 'X-Weather-Cache': 'hit' },
+        headers: { 'X-Weather-Cache': 'hit', 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600' },
       });
     }
 
@@ -108,7 +108,7 @@ export async function GET(request: Request) {
       const retryCache = await safeRedisGet(cacheKey);
       if (retryCache) {
         return NextResponse.json(JSON.parse(retryCache), {
-          headers: { 'X-Weather-Cache': 'hit-after-wait' },
+          headers: { 'X-Weather-Cache': 'hit-after-wait', 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600' },
         });
       }
       // I dalje ništa u kešu (rijedak slučaj — onaj koji je držao
@@ -125,7 +125,7 @@ export async function GET(request: Request) {
     // umjesto greške/0°C — vidi catch blok ispod.
     await safeRedisSet(staleKey, freshJson, STALE_TTL_SECONDS);
 
-    return NextResponse.json(fresh, { headers: { 'X-Weather-Cache': 'miss' } });
+    return NextResponse.json(fresh, { headers: { 'X-Weather-Cache': 'miss', 'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600' } });
   } catch (err) {
     console.error('[api/weather] greška:', err);
 

@@ -29,7 +29,10 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json(config);
+    // Konfiguracija dolazi iz settings.ini (mijenja se samo deployom) — CDN je smije keširati.
+    return NextResponse.json(config, {
+      headers: { 'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=86400' },
+    });
   } catch (error) {
     console.error('❌ Error loading check-in config:', error);
     return NextResponse.json({ default: 120 }, { status: 500 });

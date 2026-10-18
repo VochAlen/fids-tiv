@@ -32,7 +32,7 @@ import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
 // namjerno OSTAJE van upotrebe u ovom Ably sistemu (drugačiji model
 // troška, ne treba polling-skip logika).
-import { getPodgoricaDateString } from '@/lib/night-hours';
+import { getPodgoricaDateString, isNightHours } from '@/lib/night-hours';
 import { getInitialAirlineLogoSrc } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
@@ -64,7 +64,11 @@ const getIntervalWithJitter = () => POLL_INTERVAL + Math.floor(Math.random() * 5
 // rizikovalo lažni reload ako jedan reconciliation ciklus kasni
 // (spor Redis/Vercel cold start, kratak mrežni zastoj) — 5 min ostaje
 // siguran razmak uz duplo brži oporavak nego ranije.
-const DATA_STALE_AFTER_MS = 5 * 60_000;
+// 2026-10-18: reconcile u hook-u je sada 5 min (i preskače se noću) → prag podignut na 12 min (> 2× reconcile),
+// a watchdog ispod ne radi noću niti prvih NIGHT_END_GRACE_MS nakon noći (jutarnji Ably 'connected' resync
+// ažurira lastSyncAtRef). Bez ovoga bi 5-min prag i 5-min reconcile izazivali lažne reload-e.
+const DATA_STALE_AFTER_MS = 12 * 60_000;
+const NIGHT_END_GRACE_MS = 3 * 60_000;
 const DATA_STALE_CHECK_INTERVAL_MS = 20_000;
 
 // NOVO (po zahtjevu — TVRD ZAHTJEV: kad osoblje zatvori check-in šalter,
@@ -808,7 +812,10 @@ const { deskEntries, connectionState, isSynced, lastSyncAtRef, refetch: refetchA
   // pri normalnom radu — znači da su bar 2-3 uzastopna pokušaja
   // sinhronizacije promašila prije nego što ovo uopšte razmotri reload.
   useEffect(() => {
+    let lastNightSeen = isNightHours() ? Date.now() : 0;
     const id = setInterval(() => {
+      if (isNightHours()) { lastNightSeen = Date.now(); return; }
+      if (Date.now() - lastNightSeen < NIGHT_END_GRACE_MS) return;
       const gap = Date.now() - lastSyncAtRef.current;
       if (gap > DATA_STALE_AFTER_MS) {
         console.error(
