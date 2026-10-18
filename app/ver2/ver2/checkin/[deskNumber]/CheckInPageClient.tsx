@@ -1157,7 +1157,14 @@ if (view.kind === 'inactive' && view.reason === 'departed') {
   setAssignment(EMPTY_ASSIGNMENT);
   return;
 }
-const pickedFlight = view.kind === 'open' || view.reason === 'cancelled' || view.reason === 'diverted' ? view.flight : undefined;
+// Cancelled/diverted letovi se NIKAD ne prikazuju na check-in monitoru (zahtjev 2026-10-18).
+if (view.kind === 'inactive' && (view.reason === 'cancelled' || view.reason === 'diverted')) {
+  setDebug('desk', `${deskNumberParam} ${myData.status}/${myData.flightNumber} → INACTIVE: ${view.reason}`);
+  detailsLoadedRef.current = false;
+  setAssignment(EMPTY_ASSIGNMENT);
+  return;
+}
+const pickedFlight = view.kind === 'open' ? view.flight : undefined;
 const flightDetails: Partial<Flight> = pickedFlight ?? {};
 detailsLoadedRef.current = !!pickedFlight;
 

@@ -319,8 +319,8 @@ const { gateEntries, connectionState: assignConnState, isSynced, lastSyncAtRef, 
   // ------------------------------------------------------------
   const shouldDisplayFlight = useCallback((f: Flight): boolean => {
     const s = (f.StatusEN || '').toLowerCase().trim();
-    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan')) return false;
-    if (s.includes('diverted')  || s.includes('preusmjeren')) return false;
+    if (s.includes('cancelled') || s.includes('canceled') || s.includes('otkazan') || s.includes('annulé')) return false;
+    if (s.includes('diverted')  || s.includes('preusmjeren') || s.includes('dévié')) return false;
     if (manualGateStatusRef.current === 'open') {
       if (s.includes('departed') || s.includes('poletio')) return false;
       return true;

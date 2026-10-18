@@ -18,8 +18,11 @@ export function makePlaceholderFlight(flightNumber: string): Flight {
   } as Flight;
 }
 
+// FIX (2026-10-18, produkcija: svi gate monitori "Reconnecting… Cannot read properties of undefined (reading 'startsWith')"):
+// pravi letovi iz feeda NEMAJU uvijek `id` (tip kaže string, podatak ne garantuje) — `f.id.startsWith` je rušio render
+// gate ekrana čim se pojavi pravi let. Placeholder se prepoznaje SAMO po svom `id`, ali bez pretpostavke da postoji.
 export const isPlaceholderFlight = (f: Flight | null | undefined): boolean =>
-  !!f && f.id.startsWith('placeholder-');
+  !!f && typeof f.id === 'string' && f.id.startsWith('placeholder-');
 
 /** Kandidati za ručno otvoren gate: pravi let ako postoji, inače placeholder. */
 export function gateOverrideCandidates(departures: readonly Flight[] | undefined, flightNumber: string): Flight[] {
