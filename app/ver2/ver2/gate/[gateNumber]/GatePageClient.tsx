@@ -714,7 +714,8 @@ const effectiveStatus = useMemo(() => {
     window.addEventListener('pageshow', resync);
     const id = setInterval(() => {
       const now = Date.now();
-      if (Math.abs(now - last - 5_000) > 20_000) resync();
+      // Sakriven prozor (throttlovani tajmeri) ne smije pokretati resync svake minute — vidljivost okida vlastiti resync.
+      if (!document.hidden && Math.abs(now - last - 5_000) > 20_000) resync();
       last = now;
     }, 5_000);
     return () => {

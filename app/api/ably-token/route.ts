@@ -25,7 +25,7 @@
 // }
 // app/api/ably-token/route.ts
 import { NextResponse } from 'next/server';
-import type { capabilityOp } from 'ably';
+import type { capabilityOp, TokenDetails } from 'ably';
 import { getAblyRest } from '@/lib/ably-server';
 import { getRedisClient } from '@/lib/redis';
 
@@ -130,6 +130,10 @@ const ROLE_CAPABILITIES: Record<string, Record<string, capabilityOp[]>> = {
 };
 
 const VALID_ROLES = Object.keys(ROLE_CAPABILITIES);
+
+// Keš tokena po ulozi (po instanci funkcije) — vidi komentar u GET ispod.
+const TOKEN_MEM_REUSE_MS = 30 * 60 * 1000;
+const tokenCache = new Map<string, { details: TokenDetails; at: number }>();
 
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
@@ -245,13 +249,23 @@ export async function GET(request: Request) {
     // ~1.230/mjesec), promijeni na 24 * 60 * 60 * 1000.
     const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
-    const client = getAblyRest();
-    const tokenRequest = await client.auth.createTokenRequest({
-      capability,
-      ttl: TOKEN_TTL_MS,
-    });
+    // NOVO (2026-10-18 — smanjenje Vercel poziva/CPU): umjesto jednokratnog TokenRequest-a (svaki zahtjev
+    // = novi potpis, ne može se keširati) vraćamo pravi TokenDetails (reusable token) i:
+    //  a) držimo ga u memoriji instance do TOKEN_MEM_REUSE_MS po ulozi (nema ponovnog poziva ka Ably-ju),
+    //  b) dozvoljavamo CDN-u da ga servira bez pokretanja funkcije (s-maxage).
+    // Token živi 12 h, a najstariji koji se ikad servira ima ≤ ~40 min — klijent uvijek dobija ≥ 11 h važenja.
+    // Ably klijent (authUrl) prihvata TokenDetails isto kao TokenRequest; capability je i dalje po ulozi.
+    const cached = tokenCache.get(role);
+    let details: TokenDetails | null = cached && Date.now() - cached.at < TOKEN_MEM_REUSE_MS ? cached.details : null;
+    if (!details) {
+      const client = getAblyRest();
+      details = await client.auth.requestToken({ capability, ttl: TOKEN_TTL_MS });
+      tokenCache.set(role, { details, at: Date.now() });
+    }
 
-    return NextResponse.json(tokenRequest);
+    return NextResponse.json(details, {
+      headers: { 'Cache-Control': 'public, max-age=0, s-maxage=600' },
+    });
   } catch (err) {
     console.error('[ably-token] error:', err);
     return NextResponse.json({ error: 'Token generation failed' }, { status: 500 });

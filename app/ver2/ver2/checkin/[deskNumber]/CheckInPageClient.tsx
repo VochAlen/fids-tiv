@@ -1263,7 +1263,8 @@ useEffect(() => {
     let last = Date.now();
     const id = setInterval(() => {
       const now = Date.now();
-      if (now - last > 20_000) resync();
+      // Sakriven prozor (throttlovani tajmeri) ne smije pokretati resync svake minute — vidljivost okida vlastiti resync.
+      if (!document.hidden && now - last > 20_000) resync();
       last = now;
     }, 5_000);
     return () => {

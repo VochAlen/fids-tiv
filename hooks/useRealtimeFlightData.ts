@@ -94,6 +94,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Ably from 'ably';
 import type { FlightData } from '@/types/flight';
+import { sanitizeFlightData } from '@/lib/flight-sanitize';
 
 const EMERGENCY_CACHE_KEY = 'flight_board_emergency_v2';
 
@@ -107,7 +108,7 @@ const loadEmergencyCache = (): FlightData | null => {
     const raw = localStorage.getItem(EMERGENCY_CACHE_KEY);
     if (!raw) return null;
     const { data, timestamp } = JSON.parse(raw);
-    return Date.now() - timestamp > 60 * 60_000 ? null : data; // vrijedi 1h
+    return Date.now() - timestamp > 60 * 60_000 ? null : sanitizeFlightData(data as FlightData); // vrijedi 1h
   } catch { return null; }
 };
 
@@ -191,7 +192,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
         // završi u catch-u (i aktivira emergency cache fallback) ispod.
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         noteServerDate(res.headers.get('date'), clockSentAt, Date.now());
-        return res.json() as Promise<FlightData>;
+        return res.json().then((j: FlightData) => sanitizeFlightData(j));
       })
       .then((snapshot: FlightData) => {
         if (!mountedRef.current) return;
@@ -282,7 +283,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
     const channel = ably.channels.get('flights:combined');
     const handler = (msg: Ably.Message) => {
       if (!mountedRef.current) return;
-      const newData = msg.data as FlightData;
+      const newData = sanitizeFlightData(msg.data as FlightData);
       // FIX (KRITIČNO — pronađeno pri ponovnoj analizi osnovnog problema,
       // 2026-09-28): `fetchSnapshot` iznad VEĆ ima zaštitu od prepisivanja
       // novijeg podatka starijim REST snapshot-om koji je mrežno kasnio
@@ -380,7 +381,10 @@ export function useRealtimeFlightData(role: AblyClientRole) {
   // NOVO — periodičan reconciliation fetch, radi UVIJEK (vidi opširan
   // komentar uz RECONCILE_INTERVAL_MS).
   useEffect(() => {
-    const id = setInterval(fetchSnapshot, RECONCILE_INTERVAL_MS);
+    // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
+    // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
+    // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
+    const id = setInterval(() => { if (!isNightHours()) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSnapshot]);
 
