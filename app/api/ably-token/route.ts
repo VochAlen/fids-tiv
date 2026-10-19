@@ -259,8 +259,33 @@ export async function GET(request: Request) {
     let details: TokenDetails | null = cached && Date.now() - cached.at < TOKEN_MEM_REUSE_MS ? cached.details : null;
     if (!details) {
       const client = getAblyRest();
-      details = await client.auth.requestToken({ capability, ttl: TOKEN_TTL_MS });
-      tokenCache.set(role, { details, at: Date.now() });
+      try {
+        const fresh = await client.auth.requestToken({ capability, ttl: TOKEN_TTL_MS });
+        // ZAŠTITA: u keš i na CDN ide SAMO odgovor koji je stvarno ispravan TokenDetails
+        // (neprazan token, issued/expires brojevi, ≥ 11 h važenja). Ably SDK (auth.ts) prepoznaje
+        // TokenDetails po polju `issued`; sve drugo ne smije do klijenta kao "keširan token".
+        const valid =
+          !!fresh &&
+          typeof fresh.token === 'string' && fresh.token.length > 0 &&
+          typeof fresh.issued === 'number' &&
+          typeof fresh.expires === 'number' && fresh.expires - Date.now() > 11 * 60 * 60 * 1000;
+        if (valid) {
+          details = fresh;
+          tokenCache.set(role, { details, at: Date.now() });
+        } else {
+          console.error('[ably-token] requestToken vratio neispravan TokenDetails — fallback na TokenRequest', {
+            hasToken: !!fresh?.token, issued: fresh?.issued, expires: fresh?.expires,
+          });
+        }
+      } catch (e) {
+        console.error('[ably-token] requestToken pao — fallback na TokenRequest:', e);
+      }
+    }
+
+    if (!details) {
+      // Fallback = ranije provjereno ponašanje (jednokratni TokenRequest, bez keša).
+      const tokenRequest = await getAblyRest().auth.createTokenRequest({ capability, ttl: TOKEN_TTL_MS });
+      return NextResponse.json(tokenRequest, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     return NextResponse.json(details, {

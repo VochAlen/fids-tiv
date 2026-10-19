@@ -13,7 +13,7 @@ import type { Flight } from '@/types/flight';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments, type AssignmentEntry } from '@/hooks/useRealtimeAssignments';
 import { logoutAndRedirect } from '@/lib/admin-logout';
-import { getPodgoricaMinutesOfDay, getPodgoricaDateString } from '@/lib/night-hours';
+import { getPodgoricaMinutesOfDay, getPodgoricaDateString, isNightHours } from '@/lib/night-hours';
 import { computeAssignmentSuggestions, formatClockMinutes, type Suggestion, type SuggestionResult } from '@/lib/assignment-suggestions';
 import { stabilizePlan, planSignature, type PreviousPlan } from '@/lib/plan-stability';
 import { buildPlanHtml, buildDayFlights, openPlanForPrint } from '@/lib/plan-document';
@@ -973,6 +973,9 @@ const flights = useMemo(
   useEffect(() => {
     const STALE_THRESHOLD_MS = 3 * 60_000;
     const id = setInterval(() => {
+      // 2026-10-18: dok je tab skriven ili je noć, periodični refetch (ispod) se namjerno preskače,
+      // pa "zastarjelo" upozorenje ne smije da se pali — pri povratku u tab radi se odmah refetch.
+      if (document.hidden || isNightHours()) { setIsDataStale(false); return; }
       const ts = lastUpdateTimestampRef.current;
       setIsDataStale(ts !== null && Date.now() - ts > STALE_THRESHOLD_MS);
     }, 30_000);
@@ -1068,8 +1071,21 @@ const handleRefresh = useCallback(async () => {
 // već uredno radi — u tom slučaju samo potvrdi isto stanje, bez efekta.
 useEffect(() => {
   const REFRESH_GUARANTEE_MS = 3.5 * 60_000;
-  const id = setInterval(() => { refetchFlights(); }, REFRESH_GUARANTEE_MS);
-  return () => clearInterval(id);
+  // 2026-10-18 (smanjenje Vercel poziva): preskače se kad je tab skriven/telefon zaključan i noću
+  // (cron noću ne sinkronizuje, Ably push i dalje donosi dodjele). Čim tab ponovo postane vidljiv
+  // radi se jedan refetch, pa osoblje odmah vidi svježe podatke.
+  const id = setInterval(() => {
+    if (document.hidden || isNightHours()) return;
+    refetchFlights();
+  }, REFRESH_GUARANTEE_MS);
+  const onVisible = () => {
+    if (!document.hidden && !isNightHours()) refetchFlights();
+  };
+  document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    clearInterval(id);
+    document.removeEventListener('visibilitychange', onVisible);
+  };
 }, [refetchFlights]);
 
 // NOVO (2026-10-08): zadnji prijedlog po resursu+letu ("desk:LY1234"). Služi za
