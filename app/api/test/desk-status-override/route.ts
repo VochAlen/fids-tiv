@@ -25,7 +25,7 @@ import { publishToChannel } from '@/lib/ably-server';
 import { ASSIGNMENT_MAX_AGE_MS, ASSIGNMENT_TTL_SECONDS } from '@/lib/assignment-limits';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
 import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceAction } from '@/lib/resource-mutations';
-import { recordAssignmentLearning, undoAssignmentLearning } from '@/lib/assignment-learning-server';
+import { recordAssignmentLearning } from '@/lib/assignment-learning-server';
 import { sanitizeLearningContext } from '@/lib/assignment-learning';
 import { requireAdmin } from '@/lib/admin-auth';
 
@@ -388,15 +388,12 @@ export async function POST(request: Request) {
     // Uči se SAMO iz ručne 'open' dodjele (ne iz AI sugestije, ne iz ponovnog
     // otvaranja istog resursa za isti let).
     let learnEligible = false;
-    // Prethodna dodjela koja se ovim zahtjevom uklanja (clear) ili zamjenjuje drugim letom — ako je bila SVJEŽA, učenje se poništava.
-    let supersededPrev: { flight: string; setAt: number | null } | null = null;
     let busyPreferred: string[] = [];
     let busyIds: string[] = [];
     const learnCtx = sanitizeLearningContext(body);
     let openCountForFlight = 0;
     const result = await mutateAll((all) => {
       learnEligible = false;
-      supersededPrev = null;
       busyPreferred = [];
       busyIds = [];
       const existingEntry = (all as unknown as Record<string, ResourceEntry>)[deskNumber];
@@ -409,10 +406,6 @@ export async function POST(request: Request) {
         classType,
         now
       );
-      if (outcome.changed && existingEntry?.status === 'open' && existingEntry.flightNumber
-          && (action === 'clear' || (action === 'open' && flightNumber && existingEntry.flightNumber !== flightNumber))) {
-        supersededPrev = { flight: existingEntry.flightNumber, setAt: existingEntry.setAt ?? null };
-      }
       if (outcome.changed && action === 'open' && flightNumber) {
         const sameAsBefore = existingEntry?.status === 'open' && existingEntry.flightNumber === flightNumber;
         if (!sameAsBefore) {
@@ -483,14 +476,8 @@ export async function POST(request: Request) {
     // (after() — vidi objašnjenje u gate-status-override/route.ts).
     // Response se vraća odmah. Ako publish ipak padne, kiosci će
     // dobiti promjenu preko fallback polling-a.
-    const superseded = supersededPrev as { flight: string; setAt: number | null } | null;
-    if (superseded || (learnEligible && flightNumber)) {
-      // JEDAN after(): poništavanje učenja prethodne (brzo uklonjene/zamijenjene) dodjele MORA završiti prije upisa nove —
-      // oba čitaju/pišu isti zapis "na čekanju" po resursu (vidi lib/learning-undo.ts).
-      after(async () => {
-        if (superseded) await undoAssignmentLearning({ kind: 'desk', resourceId: deskNumber, flightNumber: superseded.flight, setAt: superseded.setAt });
-        if (learnEligible && flightNumber) {
-          await recordAssignmentLearning({
+    if (learnEligible && flightNumber) {
+      after(() => recordAssignmentLearning({
         kind: 'desk',
         resourceId: deskNumber,
         flightNumber,
@@ -499,9 +486,7 @@ export async function POST(request: Request) {
         busyPreferred,
         busyIds,
         context: learnCtx,
-      });
-        }
-      });
+      }));
     }
 
     if (result.publishedEntry) {
