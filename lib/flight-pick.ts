@@ -12,6 +12,8 @@
 
 export interface PickableFlight { FlightNumber?: string; StatusEN?: string }
 
+export const normFlightNumber = (s: unknown): string => String(s ?? '').replace(/\s+/g, '').toUpperCase();
+
 export const DEPARTED_RE = /(departed|poletio|take off)/i;
 const CANCELLED_RE = /(cancelled|canceled|otkazan|annulé)/i;
 const DIVERTED_RE = /(diverted|preusmjeren|dévié)/i;
@@ -21,8 +23,11 @@ export function pickFlightForNumber<T extends PickableFlight>(
   arrivals: readonly T[],
   flightNumber: string,
 ): { flight: T | undefined; departed: boolean } {
-  const dep = departures.filter(f => f.FlightNumber === flightNumber);
-  const arr = arrivals.filter(f => f.FlightNumber === flightNumber);
+  // Poređenje bez obzira na velika/mala slova i razmake ("ju681", " JU681 "): dodijeljen broj leta i feed ne moraju
+  // biti identično zapisani; ranije bi se tada prikazao samo broj leta (bez detalja) ili ništa.
+  const want = normFlightNumber(flightNumber);
+  const dep = departures.filter(f => normFlightNumber(f.FlightNumber) === want);
+  const arr = arrivals.filter(f => normFlightNumber(f.FlightNumber) === want);
   const all = [...dep, ...arr];
   if (all.length === 0) return { flight: undefined, departed: false };
   const st = (f: T) => f.StatusEN ?? '';

@@ -26,6 +26,7 @@ import {
 } from '@/lib/suggestion-constraints';
 import { parseExamples, trainModel, predictorFromState, type ModelState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
+import { gateLearnedRaw } from '@/lib/learning-gate';
 import { SuggestionsCard } from './SuggestionsCard';
 // ─────────────────────────────────────────────
 // Konstante
@@ -1255,11 +1256,17 @@ const assignFlightToResource = useCallback(async (
   const [suggestNowMin, setSuggestNowMin] = useState<number | null>(null);
   const [openLeadByIata, setOpenLeadByIata] = useState<Record<string, number>>({});
   const [isSummer, setIsSummer] = useState(false);
-  const [learned, setLearned] = useState<LearnedIndex | undefined>(undefined);
   const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
   const [examplesRaw, setExamplesRaw] = useState<Record<string, string> | null>(null);
   const [modelStates, setModelStates] = useState<{ desk: ModelState; gate: ModelState } | null>(null);
   const [todayISO, setTodayISO] = useState<string | null>(null);
+  // NOVO (2026-10-20): samoprovjera — ako su naučeni šabloni zadnje 4 sedmice jasno gori od ručnog profila,
+  // privremeno se ne koriste (lib/learning-gate.ts). Bez podataka o tačnosti ništa se ne mijenja.
+  const learnedGate = useMemo(() => gateLearnedRaw(learnedRaw, todayISO), [learnedRaw, todayISO]);
+  const learned: LearnedIndex | undefined = useMemo(
+    () => (learnedGate.raw ? parseLearned(learnedGate.raw) : undefined),
+    [learnedGate],
+  );
   const [constraints, setConstraints] = useState<SuggestionConstraints>(EMPTY_CONSTRAINTS);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteUnparsed, setNoteUnparsed] = useState<string[]>([]);
@@ -1298,7 +1305,6 @@ const assignFlightToResource = useCallback(async (
         setLearnedRaw(j.data as Record<string, string>);
         setExamplesRaw((j.examples ?? {}) as Record<string, string>);
         setModelStates(j.model && j.model.desk && j.model.gate ? { desk: j.model.desk as ModelState, gate: j.model.gate as ModelState } : null);
-        setLearned(parseLearned(j.data as Record<string, string>));
       })
       .catch(() => { /* bez učenja važe ručni profili */ });
     return () => { cancelled = true; };
@@ -2048,6 +2054,7 @@ const handleClearAll = useCallback(async () => {
           onApply={handleApplySuggestion}
           onApplyDue={handleApplyDueSuggestions}
           accuracy={accuracyByKind ? (activeTab === 'checkin' ? accuracyByKind.desk : accuracyByKind.gate) : null}
+          learnedNote={(activeTab === 'checkin' ? learnedGate.notes.desk : learnedGate.notes.gate) ?? null}
           modelInfo={models ? (activeTab === 'checkin' ? models.desk.info : models.gate.info) : null}
           chips={constraintChips}
           unparsed={noteUnparsed}

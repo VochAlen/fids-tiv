@@ -238,8 +238,8 @@ describe('naučeni šabloni', () => {
   });
 
   it('naučeni broj šaltera (3) za kompaniju', () => {
-    const learned = parseLearned(raw(scopeCount('A', 'JU', 'W'), { '1': 10, '2': 10, '3': 9 }));
-    const r = run([fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '15:00' })], { learned });
+    const learned = parseLearned(raw(scopeCount('A', 'FR', 'W'), { '1': 10, '2': 10, '3': 9 }));
+    const r = run([fl({ FlightNumber: 'FR681', ScheduledDepartureTime: '15:00' })], { learned });
     expect(r.desks[0].resources).toHaveLength(3);
   });
 
@@ -259,8 +259,9 @@ describe('naučeni šabloni', () => {
   });
 
   it('naučeni gate', () => {
-    const learned = parseLearned(raw(scopeResource('gate', 'A', 'FR', 'W'), { '23': 8 }));
-    const r = run([fl({ FlightNumber: 'FR100', ScheduledDepartureTime: '15:00' })], { learned });
+    // Ljeto: T2 gate-ovi su dozvoljeni. (Zimi bi se naučeni T2 gate ignorisao — vidi "T2 zimi" testove.)
+    const learned = parseLearned(raw(scopeResource('gate', 'A', 'FR', 'S'), { '23': 8 }));
+    const r = run([fl({ FlightNumber: 'FR100', ScheduledDepartureTime: '15:00' })], { learned, summer: true });
     expect(r.gates[0].resources).toEqual(['23']);
   });
 });
@@ -374,7 +375,9 @@ describe('v2: svi šalteri leta u istom terminalu', () => {
     const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' }), holder('XX100')], { currentDesks: busyAllButTwo });
     const d = r.desks.find(x => x.flightNumber === 'LY5111')!;
     expect(new Set(d.resources.map(T1_OF)).size).toBeLessThanOrEqual(1);
-    expect(d.warnings.join(' ')).toContain('Nema dovoljno');
+    // 3→2 je dozvoljeno pravilom (jedan manje), pa upozorenje to kaže; nikad miješanje terminala.
+    expect(d.resources).toEqual(['7', '8']);
+    expect(d.warnings.join(' ')).toContain('dozvoljeno pravilom');
   });
 
   it('naučena zamjena preko terminala se ignoriše', () => {
@@ -497,43 +500,68 @@ describe('v4: planiranje redoslijeda (optimizeOrder)', () => {
   });
 });
 
-describe('v6: faza alternativnih resursa (zabrane) u optimizeOrder', () => {
+describe('v6: faza 3 (zabrane + smanjenje) u optimizeOrder, leksikografski', () => {
   type S = import('./assignment-suggestions').Suggestion;
-  const mk = (flightNumber: string, resources: string[], wanted = 1) =>
-    ({ flightNumber, resources, wanted, reason: 'osnovni razlog' } as unknown as S);
-  // A pohlepno uzme X (jedini koji B može); ako je X zabranjen A uzme Y i B dobije X. Cijena: A:Y=+5, B bez X = 100.
-  const fakePlan = (_order: string[], bans?: Map<string, Set<string>>) => {
-    const a = bans?.get('A')?.has('X') ? 'Y' : 'X';
+  type Ctx = import('./assignment-suggestions').SearchCtx;
+  const mk = (flightNumber: string, resources: string[], wanted = 1, extra: Partial<S> = {}) =>
+    ({ flightNumber, resources, wanted, reason: 'osnovni razlog', ...extra } as unknown as S);
+  // A pohlepno uzme X (jedini koji B može); ako je X zabranjen A uzme Y i B dobije X.
+  const fakePlan = (_order: string[], ctx?: Ctx) => {
+    const a = ctx?.bans.get('A')?.has('X') ? 'Y' : 'X';
     const b = a === 'X' ? [] : ['X'];
-    return { items: [mk('A', [a]), mk('B', b)], cost: (a === 'Y' ? 5 : 0) + (b.length ? 0 : 100) };
+    const items = [mk('A', [a]), mk('B', b)];
+    return { items, cost: (a === 'Y' ? 5 : 0) + (b.length ? 0 : 100), score: [b.length ? 0 : 1, 0, b.length ? 0 : 1, 0, a === 'Y' ? 5 : 0] };
   };
   const cost = (x: S) => (x.flightNumber === 'A' ? (x.resources[0] === 'Y' ? 5 : 0) : x.resources.length ? 0 : 100);
 
-  it('zabrana se prihvata kad ukupna cijena padne, i razlog imenuje let kojem je pomogla', async () => {
+  it('zabrana se prihvata kad plan leksikografski poboljša, i razlog imenuje let kojem je pomogla', async () => {
     const { optimizeOrder } = await import('./assignment-suggestions');
     const out = optimizeOrder(['A', 'B'], fakePlan, x => x, cost);
     expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['Y']);
     expect(out.find(s => s.flightNumber === 'B')!.resources).toEqual(['X']);
     const reason = out.find(s => s.flightNumber === 'A')!.reason;
     expect(reason).toContain('osnovni razlog');
-    expect(reason).toMatch(/izbjegnuto X da B dobije bolji izbor \(ukupna ocjena plana −95\)/);
+    expect(reason).toMatch(/Plan: izbjegnuto X da B dobije bolji izbor/);
   });
 
-  it('bez itemCost faza alternativa se ne pokreće (stari ugovor)', async () => {
+  it('bez itemCost faza 3 se ne pokreće (stari ugovor)', async () => {
     const { optimizeOrder } = await import('./assignment-suggestions');
     const out = optimizeOrder(['A', 'B'], fakePlan, x => x);
     expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['X']);
   });
 
-  it('zabrana koja povećava manjak resursa se odbija iako zbir bodova pada', async () => {
+  it('niži nivo nikad ne pobjeđuje viši: jeftiniji zbir sa nekompletnim letom se odbija', async () => {
     const { optimizeOrder } = await import('./assignment-suggestions');
-    // Zabrana A:X daje A prazan (manjak +1) ali "jeftiniji" zbir (npr. pogrešno nisko ocijenjen) → mora biti odbijena.
-    const plan = (_o: string[], bans?: Map<string, Set<string>>) => {
-      const banned = bans?.get('A')?.has('X');
-      return { items: [mk('A', banned ? [] : ['X']), mk('B', ['Z'])], cost: banned ? 10 : 200 };
+    // Zabrana A:X daje A prazan (nekompletan: nivo 0 raste) uz "jeftiniji" zadnji nivo → mora biti odbijena.
+    const plan = (_o: string[], ctx?: Ctx) => {
+      const banned = ctx?.bans.get('A')?.has('X');
+      return { items: [mk('A', banned ? [] : ['X']), mk('B', ['Z'])], cost: banned ? 10 : 200, score: [banned ? 1 : 0, 0, banned ? 1 : 0, 0, banned ? 10 : 200] };
     };
     const out = optimizeOrder(['A', 'B'], plan, x => x, () => 0);
     expect(out.find(s => s.flightNumber === 'A')!.resources).toEqual(['X']);
+  });
+
+  it('smanjenje broja (3→2) se prihvata samo ako spašava nekompletan let; razlog to kaže', async () => {
+    const { optimizeOrder } = await import('./assignment-suggestions');
+    // C (reducible, traži 3) uzima 3 → D ostaje sa 0 (nekompletan). Smanjen na 2 → D dobija 2.
+    const plan = (_o: string[], ctx?: Ctx) => {
+      const red = ctx?.reduce.has('C');
+      const c = mk('C', red ? ['1', '2'] : ['1', '2', '3'], 3, { reducible: true });
+      const d = mk('D', red ? ['3', '4'] : [], 2, { reducible: true });
+      const incomplete = (red ? 0 : 1);
+      return { items: [c, d], cost: red ? 30 : 100, score: [incomplete, 0, red ? 1 : 2, 0, red ? 30 : 100] };
+    };
+    const out = optimizeOrder(['C', 'D'], plan, x => x, s => (s.resources.length < s.wanted - 1 ? 100 : 0));
+    expect(out.find(s => s.flightNumber === 'C')!.resources).toEqual(['1', '2']);
+    expect(out.find(s => s.flightNumber === 'C')!.reason).toMatch(/smanjeno na 2 \(umjesto 3\) da D dobije/);
+  });
+
+  it('lexLess: viši nivo odlučuje, zadnji nivo ima prag', async () => {
+    const { lexLess } = await import('./assignment-suggestions');
+    expect(lexLess([0, 0, 1], [1, 0, 0])).toBe(true);
+    expect(lexLess([1, 0, 0], [0, 0, 999])).toBe(false);
+    expect(lexLess([0, 3], [0, 5], 5)).toBe(false); // razlika 2 < prag 5
+    expect(lexLess([0, 3], [0, 10], 5)).toBe(true);
   });
 
   it('ograničen broj probnih planova i na velikom danu (vrijeme)', async () => {
@@ -732,5 +760,125 @@ describe('toAbsolute pretpostavka — Scheduled let u 06:00 u 22:00 je sutrašnj
   });
   it('Departed 06:00 u 22:00 → ne dobija šaltere', () => {
     expect(at(22 * 60, [fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '06:00', StatusEN: 'Departed' })]).desks).toHaveLength(0);
+  });
+});
+
+// ── 2026-10-18: vremena oko ponoći ──────────────────────────────────────
+describe('v7: normalizacija vremena (STD+ETD zajedno, ponoć)', () => {
+  it('resolveFlightTimes: kašnjenje preko ponoći gledano poslije ponoći pripada prethodnom danu', async () => {
+    const { resolveFlightTimes } = await import('./assignment-suggestions');
+    // STD 23:40, ETD 00:40, sad 00:20 → polazi za 20 min (ETD = 40), STD je bio prije 20 min (−20)
+    expect(resolveFlightTimes(23 * 60 + 40, 40, 20)).toEqual({ stdAbs: -20, effAbs: 40, delay: 60 });
+    // isti let gledan u 22:00 → večeras: STD 1420, ETD 1480
+    expect(resolveFlightTimes(23 * 60 + 40, 40, 22 * 60)).toEqual({ stdAbs: 1420, effAbs: 1480, delay: 60 });
+    // bez kašnjenja: staro ponašanje (Scheduled 23:40 u 00:20 je večerašnji)
+    expect(resolveFlightTimes(23 * 60 + 40, null, 20)).toEqual({ stdAbs: 1420, effAbs: 1420, delay: 0 });
+    // ETD "prije" STD (≥ 12 h) se ignoriše
+    expect(resolveFlightTimes(600, 540, 300).delay).toBe(0);
+    // sutrašnji rani let gledan uveče
+    expect(resolveFlightTimes(30, 90, 23 * 60)).toEqual({ stdAbs: 1470, effAbs: 1530, delay: 60 });
+    // kašnjenje koje ne prelazi ponoć
+    expect(resolveFlightTimes(600, 660, 540)).toEqual({ stdAbs: 600, effAbs: 660, delay: 60 });
+  });
+
+  it('planer: let 23:40→00:40 gledan u 00:20 dobija gate ZA 20 MIN (ne večeras u 23:40)', () => {
+    const r = computeAssignmentSuggestions({
+      flights: [fl({ FlightNumber: 'JU101', ScheduledDepartureTime: '23:40', EstimatedDepartureTime: '00:40', StatusEN: 'Delayed' })],
+      currentDesks: {}, currentGates: {}, nowMin: 20,
+    });
+    const g = r.gates[0];
+    expect(g.openAt).toBe(10);   // 00:10 = ETD − 30
+    expect(g.closeAt).toBe(40);  // 00:40
+    expect(r.desks).toEqual([]); // check-in je zatvoren (STD−30 je prošlo) → nema prijedloga za šalter
+  });
+
+  it('planer: kasni preko ponoći gledano uveče — zauzeće ide preko 1440, sutrašnji let ne dira', () => {
+    const r = computeAssignmentSuggestions({
+      flights: [
+        fl({ FlightNumber: 'JU101', ScheduledDepartureTime: '23:50', EstimatedDepartureTime: '00:40', StatusEN: 'Delayed' }),
+        fl({ FlightNumber: 'TK202', ScheduledDepartureTime: '00:30' }),
+      ],
+      currentDesks: {}, currentGates: {}, nowMin: 22 * 60,
+    });
+    const g = Object.fromEntries(r.gates.map(x => [x.flightNumber, x]));
+    expect(g['JU101'].closeAt).toBe(1480);        // 00:40 sutradan
+    expect(g['TK202'].closeAt).toBe(1470);        // 00:30 sutradan
+    expect(g['JU101'].resources[0]).not.toBe(g['TK202'].resources[0]); // gate-ovi se preklapaju → različiti
+  });
+
+  it('granice intervala su poluotvorene: razmak tačno TURNOVER (1 min) je slobodan, 0 min je konflikt', () => {
+    const a = fl({ FlightNumber: 'LY1', ScheduledDepartureTime: '14:00' });
+    const ok = run([a, fl({ FlightNumber: 'TK2', ScheduledDepartureTime: '15:31' })], { openLeadByIata: { LY: 180, default: 120 } });
+    expect(ok.desks.find(d => d.flightNumber === 'TK2')!.waitNotes).toEqual([]);
+  });
+});
+
+// ── 2026-10-18: pravila Air Serbia zimi, 3→2 / 2→1, T2 zimi ────────────────
+describe('v8: Air Serbia zimi = 2 šaltera; pravilo 3→2, 2→1; T2 zimi se izbjegava', () => {
+  const raw = (scope: string, counts: Record<string, number>) =>
+    Object.fromEntries(Object.entries(counts).map(([id, n]) => [fieldOf(scope, id), String(n)]));
+  it('Air Serbia zimi: 2 šaltera čak i kad je naučen prosjek kompanije 3; ljeti važi naučeno', () => {
+    const learnedW = parseLearned(raw(scopeCount('A', 'JU', 'W'), { '1': 10, '2': 10, '3': 9 }));
+    const w = run([fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '15:00' })], { learned: learnedW });
+    expect(w.desks[0].resources).toHaveLength(2);
+    const learnedS = parseLearned(raw(scopeCount('A', 'JU', 'S'), { '1': 10, '2': 10, '3': 9 }));
+    const sm = run([fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '15:00' })], { learned: learnedS, summer: true });
+    expect(sm.desks[0].resources).toHaveLength(3);
+  });
+
+  it('naučen broj za TAJ LET (nivo leta) i zimi pregazi pravilo', () => {
+    const learned = parseLearned(raw(scopeCount('F', 'JU681', 'W'), { '1': 10, '2': 10, '3': 9 }));
+    const r = run([fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '15:00' })], { learned });
+    expect(r.desks[0].resources).toHaveLength(3);
+  });
+
+  it('3→2: kad nema bloka od 3, daje se 2 (sa objašnjenjem), nikad rastrgano', () => {
+    const busy: Record<string, string> = {};
+    ['1', '2', '3', '4', '5', '6', '9', '10', '11', '12'].forEach(d => { busy[d] = 'XX100'; });
+    const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' }), fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' })], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'LY5111')!;
+    expect(d.resources).toEqual(['7', '8']);
+    expect(d.reducible).toBe(true);
+    expect(d.warnings.join(' ')).toContain('3→2');
+  });
+
+  it('2→1: Air Serbia (2) kad nema para uzastopnih dobija 1', () => {
+    const busy: Record<string, string> = {};
+    ['1', '3', '5', '7', '9', '11'].forEach(d => { busy[d] = 'XX100'; }); // slobodni 2,4,6,8,10,12 — nijedan par
+    const r = run([fl({ FlightNumber: 'JU681', ScheduledDepartureTime: '14:00' }), fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' })], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'JU681')!;
+    expect(d.resources).toHaveLength(1);
+  });
+
+  it('jedno odredište (KVO) i napomena osoblja se ne smanjuju', () => {
+    const r = run([fl({ FlightNumber: 'JU655', ScheduledDepartureTime: '16:00', DestinationAirportCode: 'KVO' })]);
+    expect(r.desks[0].reducible).toBe(false);
+    expect(r.desks[0].resources).toHaveLength(1);
+  });
+
+  it('T2 zimi: ne koristi se dok u T1 ima i jedan slobodan šalter (čak ni za 3 umjesto 2)', () => {
+    const busy: Record<string, string> = {};
+    ['1', '2', '3', '4', '5', '6', '9', '10', '11', '12'].forEach(d => { busy[d] = 'XX100'; }); // T1: slobodni 7,8
+    const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' }), fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' })], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'LY5111')!;
+    expect(d.resources.every(id => Number(id) < 20)).toBe(true);
+  });
+
+  it('T2 zimi: koristi se samo kad u T1 nema nijednog slobodnog — uz jasno upozorenje', () => {
+    const busy: Record<string, string> = {};
+    for (let i = 1; i <= 12; i++) busy[String(i)] = 'XX100';
+    const r = run([fl({ FlightNumber: 'LY5111', ScheduledDepartureTime: '14:00' }), fl({ FlightNumber: 'XX100', ScheduledDepartureTime: '14:00' })], { currentDesks: busy });
+    const d = r.desks.find(x => x.flightNumber === 'LY5111')!;
+    expect(d.resources.length).toBeGreaterThan(0);
+    expect(d.resources.every(id => Number(id) >= 20)).toBe(true);
+    expect(d.warnings.join(' ')).toContain('T2 zimi ne radi');
+  });
+
+  it('T2 zimi: naučeni (ljetni) T2 gate se ne nudi dok ima slobodnog T1 gate-a; uz "T2 radi" nudi se', () => {
+    const learned = parseLearned(raw(scopeResource('gate', 'A', 'FR', 'W'), { '23': 8 }));
+    const w = run([fl({ FlightNumber: 'FR100', ScheduledDepartureTime: '15:00' })], { learned });
+    expect(Number(w.gates[0].resources[0])).toBeLessThan(20);
+    const t2 = run([fl({ FlightNumber: 'FR100', ScheduledDepartureTime: '15:00' })], { learned, constraints: { blocked: [], pins: [], counts: [], t2: true } });
+    expect(t2.gates[0].resources).toEqual(['23']);
   });
 });

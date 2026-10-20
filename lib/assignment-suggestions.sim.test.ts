@@ -39,22 +39,27 @@ export function genDay(seed: number, n: number): SuggestionFlight[] {
 }
 
 describe('sim: kvalitet plana', () => {
-  it('statistika', () => {
-    let cost = 0, short = 0, empty = 0, warn = 0, ms = 0, days = 0, maxMs = 0;
-    for (const summer of [false, true]) for (let seed = 1; seed <= 40; seed++) {
-      const flights = genDay(seed * 7 + (summer ? 1 : 0), 14 + (seed % 16));
-      const t0 = performance.now();
-      const r = computeAssignmentSuggestions({ flights, currentDesks: {}, currentGates: {}, nowMin: 5 * 60, summer, openLeadByIata: { default: 120, LY: 180 } });
-      const dt = performance.now() - t0; ms += dt; maxMs = Math.max(maxMs, dt); days++;
-      cost += r.cost.desks + r.cost.gates;
-      for (const s of [...r.desks, ...r.gates]) {
-        short += Math.max(s.wanted - s.resources.length, 0);
-        if (!s.resources.length) empty++;
-        warn += s.warnings.length;
+  it('statistika po sezoni', () => {
+    for (const summer of [false, true]) {
+      let costSum = 0, flightsN = 0, short = 0, incomplete = 0, empty = 0, t2 = 0, waits = 0, warn = 0, ms = 0, maxMs = 0, days = 0;
+      for (let seed = 1; seed <= 40; seed++) {
+        const flights = genDay(seed * 7 + (summer ? 1 : 0), 14 + (seed % 16));
+        const t0 = performance.now();
+        const r = computeAssignmentSuggestions({ flights, currentDesks: {}, currentGates: {}, nowMin: 5 * 60, summer, openLeadByIata: { default: 120, LY: 180 } });
+        costSum += r.cost.desks + r.cost.gates;
+        const dt = performance.now() - t0; ms += dt; maxMs = Math.max(maxMs, dt); days++;
+        for (const s of [...r.desks, ...r.gates]) {
+          flightsN++;
+          short += Math.max(s.wanted - s.resources.length, 0);
+          if (s.resources.length < (s.wanted >= 2 ? s.wanted - 1 : s.wanted)) incomplete++;
+          if (!s.resources.length) empty++;
+          if (s.waitMin) waits += s.waitMin >= 10 ? 1 : 0;
+          t2 += s.resources.filter(id => Number(id) >= 20).length;
+          warn += s.warnings.length;
+        }
       }
+      console.log('SIM', summer ? 'ljeto' : 'zima', JSON.stringify({ days, cost: Math.round(costSum), items: flightsN, short, incomplete, empty, t2Resources: t2, waits10: waits, warn, avgMs: +(ms / days).toFixed(1), maxMs: +maxMs.toFixed(1) }));
     }
-    console.log('SIM', JSON.stringify({ days, cost: Math.round(cost), short, empty, warn, avgMs: +(ms / days).toFixed(1), maxMs: +maxMs.toFixed(1) }));
-    expect(days).toBe(80);
   }, 60_000);
 });
 
@@ -107,6 +112,12 @@ describe('sim: invarijante plana', () => {
     }
   });
 
+  it('T2 resurs u zimskom planu uvijek nosi upozorenje "T2 zimi ne radi" (nikad tiho)', () => {
+    for (const { r } of days) if (r.winterT1) for (const s of [...r.desks, ...r.gates]) {
+      if (s.resources.some(id => Number(id) >= 20)) expect(s.warnings.join(' ')).toContain('T2 zimi ne radi');
+    }
+  });
+
   it('let sa manjkom resursa uvijek ima upozorenje (osoblje ne vidi tihi manjak)', () => {
     for (const { r } of days) for (const s of all(r)) if (s.resources.length < s.wanted) expect(s.warnings.length).toBeGreaterThan(0);
   });
@@ -119,8 +130,8 @@ describe('sim: invarijante plana', () => {
   });
 
   it('objašnjenje: kad je alternativa izabrana, razlog to kaže', () => {
-    const notes = days.flatMap(d => all(d.r)).filter(s => s.reason.includes('Plan: izbjegnuto'));
+    const notes = days.flatMap(d => all(d.r)).filter(s => s.reason.includes('Plan: '));
     console.log('PLAN-NOTES', notes.length, notes[0]?.flightNumber, notes[0]?.reason);
-    for (const s of notes) expect(s.reason).toMatch(/Plan: izbjegnuto [\d, ]+ .*ukupna ocjena plana −\d+/);
+    for (const s of notes) expect(s.reason).toMatch(/Plan: (izbjegnuto [\d, ]+|smanjeno na \d \(umjesto \d\)) (da .* (dobije|dobiju) bolji izbor|jer je plan u cjelini bolji)/);
   });
 });

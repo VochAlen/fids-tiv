@@ -30,6 +30,8 @@ interface Props {
   onApplyDue: (list: Suggestion[]) => void;
   /** Tačnost prijedloga (zadnje sedmice) za ovaj tip, ili null dok se ne učita. */
   accuracy: AccuracySummary | null;
+  /** Poruka kad su naučeni šabloni privremeno isključeni zbog slabe tačnosti (lib/learning-gate.ts). */
+  learnedNote?: string | null;
   /** Stanje modela koji uči iz ručnih dodjela (uči / u sjeni / aktivan) ili null dok se ne učita. */
   modelInfo: ModelInfo | null;
   /** Pročitana ograničenja iz napomena (čipovi) + dijelovi teksta koji nisu pretvoreni. */
@@ -48,7 +50,7 @@ const SOURCE_LABEL: Record<AccuracySource, string> = {
 
 function SuggestionsCardImpl({
   type, suggestions, nowMin, isDark, applyingKey, onApply, onApplyDue,
-  accuracy, modelInfo, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
+  accuracy, learnedNote, modelInfo, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
 }: Props) {
   const [note, setNote] = useState('');
   // Zatvoren po zadanom — korisnik ga otvara klikom (po zahtjevu).
@@ -279,6 +281,10 @@ function SuggestionsCardImpl({
                 );
               })}
             </div>
+          )}
+
+          {learnedNote && (
+            <div className={`mt-3 text-[11px] ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>{learnedNote}</div>
           )}
 
           {accuracy && (
