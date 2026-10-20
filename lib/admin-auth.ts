@@ -30,7 +30,7 @@ export interface AdminSession {
  *   if (auth.error) return auth.error;
  *   // ... nastavi sa admin logikom, auth.session.username dostupan
  */
-export async function requireAdmin(_request: Request): Promise<{ session: AdminSession | null; error: NextResponse | null }> {
+export async function requireAdmin(_request?: Request): Promise<{ session: AdminSession | null; error: NextResponse | null }> {
   try {
     const cookieStore = await cookies();
     const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;

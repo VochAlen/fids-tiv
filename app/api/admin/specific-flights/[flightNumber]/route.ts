@@ -71,6 +71,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ flightNumber: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     console.log('=== GET SPECIFIC FLIGHT API ===');
     
@@ -141,6 +142,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ flightNumber: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     console.log('=== UPDATE FLIGHT API ===');
     
@@ -251,6 +253,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ flightNumber: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     console.log('=== DELETE FLIGHT API ===');
     

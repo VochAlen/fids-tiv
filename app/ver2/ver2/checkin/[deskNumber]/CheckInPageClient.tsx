@@ -282,6 +282,18 @@ const EMPTY_ASSIGNMENT: DeskAssignment = {
 };
 
 // ============================================================
+// RELOAD SA RAZLOGOM (2026-10-19)
+// Svaki pun reload ove stranice prolazi kroz ovu funkciju: razlog se upiše u localStorage, a nakon reload-a
+// se 25 s prikazuje sitnim tekstom pri dnu ekrana (vidi efekat "reload breadcrumb"). Kiosk nema dostupnu
+// konzolu — ovako se vidi ŠTA je izazvalo povremeni "Loading check-in information..." treptaj.
+// ============================================================
+const RELOAD_REASON_KEY = 'checkin_last_reload_v1';
+function reloadWithReason(reason: string) {
+  try { localStorage.setItem(RELOAD_REASON_KEY, JSON.stringify({ t: Date.now(), reason })); } catch { /* ignore */ }
+  window.location.reload();
+}
+
+// ============================================================
 // ERROR BOUNDARY
 // ============================================================
 class CheckInErrorBoundary extends Component<
@@ -340,7 +352,7 @@ class CheckInErrorBoundary extends Component<
         `🚨 CheckIn ErrorBoundary: ${this.consecutiveErrorCount} grešaka u ` +
         `${Math.round(CheckInErrorBoundary.ERROR_WINDOW_MS / 1000)}s — soft reset očigledno ne pomaže, radim pun reload.`
       );
-      window.location.reload();
+      reloadWithReason('error-boundary: ' + String(error?.message ?? error).slice(0, 80));
       return;
     }
 
@@ -822,7 +834,7 @@ const { deskEntries, connectionState, isSynced, lastSyncAtRef, refetch: refetchA
           `[checkin-${deskNumberParam}] Nema uspješne sinhronizacije ${Math.round(gap / 1000)}s ` +
           `— Ably kanal je vjerovatno "zombie" (izgleda povezan, ne isporučuje), restartujem stranicu.`
         );
-        window.location.reload();
+        reloadWithReason(`data-stale ${Math.round(gap / 1000)}s`);
       }
     }, DATA_STALE_CHECK_INTERVAL_MS);
     return () => clearInterval(id);
@@ -910,6 +922,27 @@ const fixedHolidayImage = getFixedHolidayImage();
   }, []);
 
 
+  // ── reload breadcrumb (2026-10-19): ako je stranica upravo reload-ovana, 25 s prikaži razlog (sitno, pri dnu) ──
+  useEffect(() => {
+    let el: HTMLDivElement | null = null;
+    let t: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const raw = localStorage.getItem(RELOAD_REASON_KEY);
+      if (raw) {
+        const { t: at, reason } = JSON.parse(raw) as { t: number; reason: string };
+        if (Date.now() - at < 90_000) {
+          el = document.createElement('div');
+          el.textContent = `reload: ${reason} @ ${new Date(at).toLocaleTimeString('en-GB')}`;
+          el.style.cssText = 'position:fixed;left:50%;bottom:2px;transform:translateX(-50%);z-index:2147483647;font:10px monospace;color:rgba(255,160,160,.6);pointer-events:none';
+          document.body.appendChild(el);
+          t = setTimeout(() => { el?.remove(); el = null; }, 25_000);
+        }
+        localStorage.removeItem(RELOAD_REASON_KEY);
+      }
+    } catch { /* ignore */ }
+    return () => { if (t) clearTimeout(t); el?.remove(); };
+  }, []);
+
   // ── v5: Memory pressure auto-reload ──────────────────────
   // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
   // poruke, image cache, DOM čvorovi). Kad usedJSHeapSize pređe
@@ -924,7 +957,7 @@ const fixedHolidayImage = getFixedHolidayImage();
         const pct = used / limit;
         if (pct > 0.85) {
           console.warn(`Memory pressure ${Math.round(pct * 100)}% — auto reload`);
-          window.location.reload();
+          reloadWithReason(`memory ${Math.round(pct * 100)}%`);
         }
       }
     };
@@ -962,7 +995,9 @@ const fixedHolidayImage = getFixedHolidayImage();
   // ne dešava — brži, jeftiniji oporavak, bez vizuelnog "treptaja" ekrana.
   useEffect(() => {
     let reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+    let recheckTimeout: ReturnType<typeof setTimeout> | null = null;
     const ONLINE_RELOAD_DEBOUNCE_MS = 8_000;
+    const ONLINE_RECHECK_MS = 15_000;
     // Dovoljno manje od DATA_STALE_AFTER_MS (5 min) da se ne čeka
     // predugo poslije STVARNOG mrežnog ispada, ali dovoljno veće od
     // normalnog Ably reconnect+resync vremena (sub-sekunda do par
@@ -976,10 +1011,21 @@ const fixedHolidayImage = getFixedHolidayImage();
         if (!navigator.onLine) return; // ponovo offline u međuvremenu — odustani
         const gap = Date.now() - lastSyncAtRef.current;
         if (gap > STALE_AFTER_RECONNECT_MS) {
-          console.warn(
-            `Network restored but no successful sync in ${Math.round(gap / 1000)}s — reloading to resync state`
-          );
-          window.location.reload();
+          // 2026-10-19: reconcile je rijedak (minute), pa je gap SKORO UVIJEK > 15 s — raniji kod je zato
+          // reload-ovao stranicu na svaki mrežni treptaj (vidljiv "Loading..." usred prikazanog leta).
+          // Sad: prvo tihi resync (podaci ostaju na ekranu), pa reload TEK ako ni poslije toga nema sinhronizacije.
+          console.warn(`Network restored, last sync ${Math.round(gap / 1000)}s ago — soft resync first`);
+          refetchAssignments();
+          refetchFlights();
+          if (recheckTimeout !== null) clearTimeout(recheckTimeout);
+          recheckTimeout = setTimeout(() => {
+            recheckTimeout = null;
+            if (!navigator.onLine) return;
+            const gap2 = Date.now() - lastSyncAtRef.current;
+            if (gap2 > ONLINE_RECHECK_MS + 5_000) {
+              reloadWithReason(`online-no-sync ${Math.round(gap2 / 1000)}s`);
+            }
+          }, ONLINE_RECHECK_MS);
         } else {
           console.warn('Network restored — Ably/polling already resynced, skipping reload');
         }
@@ -990,6 +1036,10 @@ const fixedHolidayImage = getFixedHolidayImage();
         clearTimeout(reloadTimeout);
         reloadTimeout = null;
       }
+      if (recheckTimeout !== null) {
+        clearTimeout(recheckTimeout);
+        recheckTimeout = null;
+      }
       console.warn('Network lost — Ably will retry, showing cached data');
     };
     window.addEventListener('online', handleOnline);
@@ -998,8 +1048,9 @@ const fixedHolidayImage = getFixedHolidayImage();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       if (reloadTimeout !== null) clearTimeout(reloadTimeout);
+      if (recheckTimeout !== null) clearTimeout(recheckTimeout);
     };
-  }, [lastSyncAtRef]);
+  }, [lastSyncAtRef, refetchAssignments, refetchFlights]);
 
   // ── v5.3: Visibilitychange — auto-focus kiosk tab ────────
   // Ako neko otvori drugi prozor preko kiosk taba (Windows update
@@ -1032,7 +1083,7 @@ const fixedHolidayImage = getFixedHolidayImage();
       refocusTimeout = setTimeout(() => {
         refocusTimeout = null;
         if (document.hidden) {
-          window.location.reload();
+          reloadWithReason('tab-hidden 2s');
         }
       }, 2_000);
     };
@@ -1047,7 +1098,7 @@ const fixedHolidayImage = getFixedHolidayImage();
   // reload svih desk ekrana u istoj sekundi) ──────────────────
   useEffect(() => {
     const jitteredResetMs = 6 * 60 * 60 * 1000 + Math.floor(Math.random() * 30 * 60 * 1000); // +0 do 30 min
-    const id = setTimeout(() => window.location.reload(), jitteredResetMs);
+    const id = setTimeout(() => reloadWithReason('6h-reset'), jitteredResetMs);
     return () => clearTimeout(id);
   }, []);
 

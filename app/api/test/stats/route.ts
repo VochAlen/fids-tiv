@@ -24,6 +24,7 @@
 import { NextResponse } from 'next/server';
 import { getRedisClient } from '@/lib/redis';
 import { getPodgoricaDateString } from '@/lib/night-hours';
+import { requireAdmin } from '@/lib/admin-auth';
 
 interface StatSession {
   flight: string;
@@ -78,6 +79,7 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(request: Request) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const { searchParams } = new URL(request.url);
     const date = searchParams.get('date') || getPodgoricaDateString();
@@ -104,6 +106,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   let body: StatsRequestBody;
   try {
     body = await request.json();

@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Script from "next/script";
 import "./globals.css";
 import { ConsoleSuppressor } from "@/components/ConsoleSuppressor";
 import { ServiceWorkerRegistration } from "@/components/ServiceWorkerRegistration";
@@ -70,11 +69,80 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
 (function () {
   if (!/\\/checkin\\//.test(location.pathname)) return;
   var DEADLINE_MS = 20000;
+  // DIJAGNOSTIKA (2026-10-18): kiosk nema dostupnu konzolu → greške se ispisuju sitnim crvenim tekstom
+  // u donjem lijevom uglu (i pamte u sessionStorage preko watchdog reload-a). Ništa ne mijenja ako grešaka nema.
+  try {
+    var KEY = '__checkin_diag__';
+    var lines = [];
+    try { lines = JSON.parse(sessionStorage.getItem(KEY) || '[]'); } catch (e) {}
+    var box = null;
+    var render = function () {
+      try {
+        if (!document.body) return;
+        if (!box) {
+          box = document.createElement('div');
+          box.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483647;max-width:96vw;max-height:40vh;overflow:hidden;background:rgba(0,0,0,.85);color:#ff6b6b;font:12px/1.3 monospace;padding:6px;white-space:pre-wrap;word-break:break-all;pointer-events:none';
+          document.body.appendChild(box);
+        }
+        box.textContent = lines.slice(-8).join('\\n');
+      } catch (e) {}
+    };
+    var add = function (t) {
+      try {
+        lines.push(new Date().toLocaleTimeString('en-GB') + ' ' + String(t).slice(0, 260));
+        if (lines.length > 12) lines = lines.slice(-12);
+        sessionStorage.setItem(KEY, JSON.stringify(lines));
+        render();
+      } catch (e) {}
+    };
+    window.addEventListener('error', function (ev) {
+      var tg = ev && ev.target;
+      if (tg && tg !== window && (tg.src || tg.href)) add('LOAD FAIL: ' + (tg.src || tg.href));
+      else add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
+    }, true);
+    window.addEventListener('unhandledrejection', function (ev) {
+      add('REJECT: ' + (ev && ev.reason && (ev.reason.message || ev.reason)));
+    });
+    var ce = console.error;
+    console.error = function () {
+      try { add('console.error: ' + Array.prototype.slice.call(arguments).map(String).join(' ')); } catch (e) {}
+      return ce.apply(console, arguments);
+    };
+    window.__CHECKIN_DIAG_ADD__ = add;
+    document.addEventListener('DOMContentLoaded', render);
+  } catch (e) {}
+  // 2026-10-20: SAMOLIJEČENJE bez fizičkog brisanja keša. 1. neuspjeh → običan reload. 2. uzastopni neuspjeh
+  // (brojač u sessionStorage, preživljava reload) → odjavi service worker-e, obriši Cache Storage, pa učitaj
+  // stranicu sa svježim parametrom. Skripta je inline u HTML-u, pa radi i kad JS paketi stranice ne mogu da se izvrše.
+  var WD_KEY = '__checkin_wd_fail__';
   setTimeout(function () {
-    if (!window.__CHECKIN_APP_MOUNTED__) {
-      console.warn('[checkin-hydration-watchdog] Stranica se nije hidrirala za ' + (DEADLINE_MS / 1000) + 's (vjerovatno spora/prekinuta mreza) — reload.');
-      location.reload();
+    var n = 0;
+    try { n = parseInt(sessionStorage.getItem(WD_KEY) || '0', 10) || 0; } catch (e) {}
+    if (window.__CHECKIN_APP_MOUNTED__) {
+      try { sessionStorage.removeItem(WD_KEY); } catch (e) {}
+      return;
     }
+    n += 1;
+    try { sessionStorage.setItem(WD_KEY, String(n)); } catch (e) {}
+    console.warn('[checkin-hydration-watchdog] Stranica se nije hidrirala za ' + (DEADLINE_MS / 1000) + 's (pokusaj ' + n + ') — reload.');
+    if (window.__CHECKIN_DIAG_ADD__) window.__CHECKIN_DIAG_ADD__('hydration watchdog: pokusaj ' + n);
+    if (n < 2) { location.reload(); return; }
+    var done = false;
+    var go = function () {
+      if (done) return; done = true;
+      try { sessionStorage.setItem(WD_KEY, '0'); } catch (e) {}
+      location.replace(location.pathname + '?cb=' + Date.now());
+    };
+    setTimeout(go, 4000); // sigurnosni rok ako cišcenje ne završi
+    try {
+      var p1 = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
+        ? navigator.serviceWorker.getRegistrations().then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); })
+        : Promise.resolve();
+      var p2 = (window.caches && caches.keys)
+        ? caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); })
+        : Promise.resolve();
+      Promise.all([p1, p2]).then(go, go);
+    } catch (e) { go(); }
   }, DEADLINE_MS);
 })();
 `;
@@ -90,21 +158,16 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
+        {/* 2026-10-20: PRAVI inline <script> (prvi u <body>). Ranije je watchdog išao kroz next/script
+            (beforeInteractive), a Next ga u App Router-u ne izvršava kao inline kod nego preko
+            `self.__next_s.push(...)` koji tek obrađuje klijentski JS paket — pa kad se paketi ne učitaju
+            (pokvaren keš, prekid mreže), watchdog NIKAD ne bi krenuo i stranica bi zauvijek ostala na
+            "Loading...". Ovako je dio samog HTML-a i radi bez ijednog JS fajla. (U dev režimu React može
+            upisati upozorenje o script tagu — u produkciji ga nema.) */}
+        <script id="checkin-hydration-watchdog" suppressHydrationWarning dangerouslySetInnerHTML={{ __html: CHECKIN_HYDRATION_WATCHDOG_SCRIPT }} />
         <ConsoleSuppressor />
         <ServiceWorkerRegistration />
         {children}
-        {/* NOVO (2026-10-06): next/script sa beforeInteractive, ali UNUTAR
-            <body> (ne u <head>, ne kao dijete <html>) — Next ga sam ubaci u
-            <head> i izvrši prije hidratacije/React bundle-a, pa watchdog radi
-            isto kao i ranije. Ručni <script> u <head> je u dev režimu
-            izazivao React 19 upozorenje "Encountered a script tag while
-            rendering React component". */}
-        <Script
-          id="checkin-hydration-watchdog"
-          strategy="beforeInteractive"
-        >
-          {CHECKIN_HYDRATION_WATCHDOG_SCRIPT}
-        </Script>
       </body>
     </html>
   );

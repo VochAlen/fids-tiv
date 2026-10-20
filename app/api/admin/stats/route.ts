@@ -13,6 +13,7 @@ import { requireAdmin } from '@/lib/admin-auth';
 const FLIGHT_API_URL = 'https://montenegroairports.com/aerodromixs/cache-flights.php?airport=tv';
 
 export async function GET() {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const backupService = FlightBackupService.getInstance();
  const latestBackup = await backupService.getLatestBackup();

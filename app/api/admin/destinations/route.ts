@@ -6,6 +6,7 @@ import { and, eq, desc } from 'drizzle-orm';
 import { requireAdmin } from '@/lib/admin-auth';
 
 export async function GET() {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const destinations = await db.select().from(destinationsTable).orderBy(desc(destinationsTable.createdAt));
     
@@ -31,6 +32,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const body = await request.json();
     

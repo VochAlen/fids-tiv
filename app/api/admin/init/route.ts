@@ -3,6 +3,7 @@ import { initializeDatabase } from '@/lib/db';
 import { requireAdmin } from '@/lib/admin-auth';
 
 export async function POST() {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     await initializeDatabase();
     return NextResponse.json({ 

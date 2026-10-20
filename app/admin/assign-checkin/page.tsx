@@ -174,10 +174,13 @@ async function postOverride(endpoint: string, body: unknown): Promise<Response> 
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 15_000);
     try {
-      return await fetch(endpoint, {
+      const res = await fetch(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body), signal: ctrl.signal,
       });
+      // 2026-10-20: rute za dodjelu sad traže admin sesiju (24 h). Istekla sesija → na prijavu, ne tiha greška.
+      if (res.status === 401 && typeof window !== 'undefined') window.location.href = '/admin/login';
+      return res;
     } finally { clearTimeout(t); }
   };
   try {

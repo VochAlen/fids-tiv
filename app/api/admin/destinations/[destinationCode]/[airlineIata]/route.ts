@@ -8,6 +8,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const { destinationCode, airlineIata } = await params;
     
@@ -53,6 +54,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const { destinationCode, airlineIata } = await params;
     const body = await request.json();
@@ -107,6 +109,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ destinationCode: string; airlineIata: string }> }
 ) {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
   try {
     const { destinationCode, airlineIata } = await params;
 
