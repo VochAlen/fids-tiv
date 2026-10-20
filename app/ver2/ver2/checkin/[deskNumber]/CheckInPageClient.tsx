@@ -1384,7 +1384,7 @@ useEffect(() => {
         label="CHECK-IN"
         number={deskNumberParam}
         closed={hasFlight}
-        statusText={hasFlight ? 'CHECK-IN CLOSED' : 'NO FLIGHTS CHECKING IN'}
+        statusText={hasFlight ? 'CHECK-IN CLOSED' : undefined}
         flightLine={hasFlight ? (
           <>
             {assignment.flightNumber}{assignment.destinationCity ? ` → ${assignment.destinationCity}` : ''}

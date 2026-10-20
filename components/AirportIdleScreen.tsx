@@ -60,7 +60,8 @@ export interface AirportIdleScreenProps {
   number: string;
   /** true = narandžasto (zatvoreno), false = sky blue (nema letova) */
   closed: boolean;
-  statusText: string;
+  /** Tekst u "pill"-u; prazno/izostavljeno = pill se ne prikazuje. */
+  statusText?: string;
   hintEn: string;
   hintLocal: string;
   /** opciono: red sa podacima o dodijeljenom letu (npr. kad je check-in zatvoren) */
@@ -108,15 +109,17 @@ export default function AirportIdleScreen(p: AirportIdleScreenProps) {
           {p.number}
         </div>
 
-        <div style={{
-          display: 'inline-flex', alignItems: 'center', gap: '1rem',
-          padding: '.3em 1.3em', borderRadius: 999,
-          border: `3px solid ${accent}`, background: p.closed ? 'rgba(255,138,31,.14)' : 'rgba(56,189,248,.12)',
-          color: accent, fontSize: 'clamp(1.6rem, 3.2vw, 3.2rem)', fontWeight: 700, letterSpacing: '.16em',
-        }}>
-          <span style={{ width: '.45em', height: '.45em', borderRadius: '50%', background: accent, display: 'inline-block' }} />
-          {p.statusText}
-        </div>
+        {p.statusText && (
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: '1rem',
+            padding: '.3em 1.3em', borderRadius: 999,
+            border: `3px solid ${accent}`, background: p.closed ? 'rgba(255,138,31,.14)' : 'rgba(56,189,248,.12)',
+            color: accent, fontSize: 'clamp(1.6rem, 3.2vw, 3.2rem)', fontWeight: 700, letterSpacing: '.16em',
+          }}>
+            <span style={{ width: '.45em', height: '.45em', borderRadius: '50%', background: accent, display: 'inline-block' }} />
+            {p.statusText}
+          </div>
+        )}
 
         {p.flightLine && (
           <div style={{ marginTop: 'clamp(.5rem, 1.4vh, 1.1rem)', color: C.orange, fontSize: 'clamp(1.2rem, 2.4vw, 2.4rem)', fontWeight: 700, letterSpacing: '.08em', textAlign: 'center' }}>
