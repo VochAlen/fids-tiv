@@ -1,121 +1,245 @@
 // app/api/admin/health/route.ts
 //
-// NOVO (FIDS Innovation Harness — idea #1): jednostavna, read-only
-// dijagnostička ruta koja agregira nekoliko brzih provjera u JEDAN
-// poziv. Motivacija: kroz ovu sesiju smo satima lovili probleme (Redis
-// WRONGTYPE greška, kolizija ključeva sa glavnim sistemom, potpuno
-// pokvarena statistika mjesecima) koji su bili NEVIDLJIVI dok korisnik
-// nije slučajno pokazao server log — ova ruta čini tu klasu problema
-// vidljivom za par sekundi, na zahtjev, umjesto tek kroz naknadnu
-// istragu. Ne dodaje NIŠTA kiosk ekranima — čisto administrativna
-// vidljivost, pozvana samo kad neko otvori admin health prikaz, ne na
-// interval/polling.
+// Read-only dijagnostička ruta: agregira brze provjere (Redis, Ably, podaci o letovima, dodjele, učenje,
+// sistem) u JEDAN poziv. Poziva se samo kad neko otvori /admin/health (i dok je tab vidljiv) — ne dira
+// kiosk ekrane i nema vlastiti interval.
 //
-// STALE_ASSIGNMENT_HOURS prag (3h) je namjerno konzervativan — cilj je
-// uhvatiti OČIGLEDNO zaboravljene dodjele (šalter otvoren cijelo
-// prijepodne jer ga niko nije zatvorio), ne da lažno uzbunjuje za
-// legitimno duge letove. Formulisano kao "provjeri", ne "greška".
+// 2026-10-20: (1) zaštićeno requireAdmin (ranije javno); (2) dodato: Ably, Redis INFO (memorija, ključevi,
+// hit rate), starost podataka o letovima, lista SVIH otvorenih dodjela, učenje (tačnost + samoprovjera),
+// sistemski podaci, trajanje provjere, i lista "issues" sa preporukom šta uraditi.
+//
+// STALE pragovi (zaboravljene dodjele): šalter 4 h, gate 3 h — gornja granica uobičajenog trajanja.
 import { NextResponse } from 'next/server';
+import { requireAdmin } from '@/lib/admin-auth';
 import { getRedisClient, isCircuitOpen, getCircuitFailureCount } from '@/lib/redis';
 import { getCurrentFlightDataSafe } from '@/lib/flight-data-service';
 import { getRawAssignments } from '@/lib/assignments-service';
+import { getAblyRest } from '@/lib/ably-server';
+import { getPodgoricaMinutesOfDay, getPodgoricaDateString, isNightHours } from '@/lib/night-hours';
+import { LEARN_HASH_KEY, summarizeAccuracy, recentWeekKeys, type LearnKind } from '@/lib/assignment-learning';
+import { EXAMPLES_HASH_KEY } from '@/lib/assignment-model';
+import { decideGate } from '@/lib/learning-gate';
+import type {
+  HealthIssue, HealthResponse, OpenAssignment, LearningKindSummary, RedisCheck, AblyCheck,
+} from '@/lib/health-types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// NOVO (po zahtjevu — odvojeni pragovi po tipu resursa): check-in
-// šalter normalno može ostati otvoren duže (do 3-4h za veći/raniji
-// let), gate obično kraće (do 2-3h) — jedinstven prag od 3h za oba bi
-// ili lažno uzbunjivao za legitimno duge šaltere, ili prekasno hvatao
-// zaboravljene gate-ove. Postavljeno na GORNJU granicu date procjene
-// za svaki tip (4h šalter, 3h gate) — iznad toga je skoro sigurno
-// zaboravljeno, ne legitiman rad.
-const STALE_ASSIGNMENT_HOURS: Record<'desk' | 'gate', number> = {
-  desk: 4,
-  gate: 3,
+const STALE_ASSIGNMENT_HOURS: Record<'desk' | 'gate', number> = { desk: 4, gate: 3 };
+const REDIS_SLOW_MS = 200;
+const ABLY_SLOW_MS = 1500;
+const ABLY_TIMEOUT_MS = 3000;
+const FLIGHT_STALE_WARN_MIN = 10;
+const FLIGHT_STALE_ERROR_MIN = 30;
+const MEMORY_WARN_RATIO = 0.8;
+
+function parseInfo(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf(':');
+    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+const num = (v: string | undefined): number | null => {
+  if (v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 };
 
-interface StaleAssignment {
-  type: 'desk' | 'gate';
-  resourceId: string;
-  flightNumber: string;
-  openSinceMinutesAgo: number;
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, rej) => { t = setTimeout(() => rej(new Error(`timeout ${ms} ms`)), ms); });
+  try { return await Promise.race([p, timeout]); } finally { clearTimeout(t!); }
 }
 
-export async function GET() {
-  const checks = {
-    redis: { ok: true, circuitOpen: false, recentFailures: 0, latencyMs: null as number | null },
-    flightData: { ok: true, source: 'unknown', isOfflineMode: false, lastUpdated: null as string | null, totalFlights: 0, warning: null as string | null },
-    assignments: { openDesks: 0, openGates: 0, staleAssignments: [] as StaleAssignment[] },
+async function checkRedis(): Promise<RedisCheck> {
+  const r: RedisCheck = {
+    ok: true, circuitOpen: false, recentFailures: 0, latencyMs: null,
+    version: null, uptimeSec: null, usedMemoryBytes: null, maxMemoryBytes: null,
+    connectedClients: null, keys: null, hitRate: null, evictedKeys: null,
   };
-
-  // ── Redis: čist ping + trenutno stanje circuit breaker-a ──────
   try {
-    const start = Date.now();
     const client = getRedisClient();
+    const start = Date.now();
     await client.ping();
-    checks.redis.latencyMs = Date.now() - start;
-    checks.redis.circuitOpen = isCircuitOpen();
-    checks.redis.recentFailures = getCircuitFailureCount();
-    checks.redis.ok = !checks.redis.circuitOpen;
+    r.latencyMs = Date.now() - start;
+    r.circuitOpen = isCircuitOpen();
+    r.recentFailures = getCircuitFailureCount();
+    r.ok = !r.circuitOpen;
+    // Dopunski podaci — greška ovdje (npr. INFO zabranjen) NE znači da Redis ne radi.
+    try {
+      const [info, keys] = await Promise.all([client.info(), client.dbsize()]);
+      const m = parseInfo(info);
+      r.version = m.redis_version ?? null;
+      r.uptimeSec = num(m.uptime_in_seconds);
+      r.usedMemoryBytes = num(m.used_memory);
+      const max = num(m.maxmemory);
+      r.maxMemoryBytes = max && max > 0 ? max : null;
+      r.connectedClients = num(m.connected_clients);
+      r.keys = keys;
+      const hits = num(m.keyspace_hits) ?? 0, misses = num(m.keyspace_misses) ?? 0;
+      r.hitRate = hits + misses > 0 ? hits / (hits + misses) : null;
+      r.evictedKeys = num(m.evicted_keys);
+    } catch { /* INFO nije dostupan */ }
   } catch (err) {
-    checks.redis.ok = false;
+    r.ok = false;
     console.error('[admin/health] Redis ping failed:', err);
   }
+  return r;
+}
 
-  // ── Flight podaci: izvor i svježina ────────────────────────────
+async function checkAbly(): Promise<AblyCheck> {
+  if (!process.env.ABLY_API_KEY) return { ok: false, configured: false, latencyMs: null, error: 'ABLY_API_KEY nije postavljen' };
+  const start = Date.now();
+  try {
+    await withTimeout(getAblyRest().time(), ABLY_TIMEOUT_MS);
+    return { ok: true, configured: true, latencyMs: Date.now() - start, error: null };
+  } catch (err) {
+    return { ok: false, configured: true, latencyMs: null, error: err instanceof Error ? err.message : 'greška' };
+  }
+}
+
+async function checkFlights(): Promise<HealthResponse['checks']['flightData']> {
+  const f: HealthResponse['checks']['flightData'] = {
+    ok: true, source: 'unknown', isOfflineMode: false, lastUpdated: null, ageMinutes: null,
+    totalFlights: 0, departures: 0, arrivals: 0, warning: null,
+  };
   try {
     const data = await getCurrentFlightDataSafe();
-    checks.flightData.source = data.source || 'unknown';
-    checks.flightData.isOfflineMode = !!data.isOfflineMode;
-    checks.flightData.lastUpdated = data.lastUpdated;
-    checks.flightData.totalFlights = (data.departures?.length || 0) + (data.arrivals?.length || 0);
-    checks.flightData.warning = data.warning || null;
-    checks.flightData.ok = !data.isOfflineMode;
+    f.source = data.source || 'unknown';
+    f.isOfflineMode = !!data.isOfflineMode;
+    f.lastUpdated = data.lastUpdated;
+    f.departures = data.departures?.length || 0;
+    f.arrivals = data.arrivals?.length || 0;
+    f.totalFlights = f.departures + f.arrivals;
+    f.warning = data.warning || null;
+    f.ok = !data.isOfflineMode;
+    const t = data.lastUpdated ? Date.parse(data.lastUpdated) : NaN;
+    if (Number.isFinite(t)) f.ageMinutes = Math.max(0, Math.round((Date.now() - t) / 60_000));
   } catch (err) {
-    checks.flightData.ok = false;
+    f.ok = false;
     console.error('[admin/health] Flight data check failed:', err);
   }
+  return f;
+}
 
-  // ── Dodjele: brojevi + provjera "zaglavljenih" (predugo otvorenih) ──
+async function checkAssignments(): Promise<HealthResponse['checks']['assignments']> {
+  const a: HealthResponse['checks']['assignments'] = { openDesks: 0, openGates: 0, staleAssignments: [], open: [] };
   try {
     const raw = await getRawAssignments();
     const now = Date.now();
-
-    const findStale = (type: 'desk' | 'gate', entries: typeof raw.desks | typeof raw.gates): StaleAssignment[] => {
-      const stale: StaleAssignment[] = [];
-      for (const [resourceId, entry] of Object.entries(entries)) {
-        if (entry?.status !== 'open' || !entry.setAt) continue;
-        const openMinutes = Math.round((now - entry.setAt) / 60_000);
-        if (openMinutes >= STALE_ASSIGNMENT_HOURS[type] * 60) {
-          stale.push({
-            type,
-            resourceId,
-            flightNumber: entry.flightNumber || '',
-            openSinceMinutesAgo: openMinutes,
-          });
-        }
+    const collect = (type: 'desk' | 'gate', entries: Record<string, { status: 'open' | 'closed' | null; flightNumber: string | null; setAt: number | null }>) => {
+      for (const [resourceId, e] of Object.entries(entries)) {
+        if (e?.status !== 'open') continue;
+        const mins = e.setAt ? Math.max(0, Math.round((now - e.setAt) / 60_000)) : 0;
+        const stale = !!e.setAt && mins >= STALE_ASSIGNMENT_HOURS[type] * 60;
+        const item: OpenAssignment = { type, resourceId, flightNumber: e.flightNumber || '', openSinceMinutesAgo: mins, stale };
+        a.open.push(item);
+        if (stale) a.staleAssignments.push({ type, resourceId, flightNumber: item.flightNumber, openSinceMinutesAgo: mins });
+        if (type === 'desk') a.openDesks++; else a.openGates++;
       }
-      return stale;
     };
-
-    const openDesks = Object.values(raw.desks).filter(e => e?.status === 'open').length;
-    const openGates = Object.values(raw.gates).filter(e => e?.status === 'open').length;
-
-    checks.assignments.openDesks = openDesks;
-    checks.assignments.openGates = openGates;
-    checks.assignments.staleAssignments = [
-      ...findStale('desk', raw.desks),
-      ...findStale('gate', raw.gates),
-    ];
+    collect('desk', raw.desks);
+    collect('gate', raw.gates);
+    const byNum = (x: OpenAssignment, y: OpenAssignment) => Number(x.resourceId) - Number(y.resourceId);
+    a.open.sort((x, y) => (x.type === y.type ? byNum(x, y) : x.type === 'desk' ? -1 : 1));
   } catch (err) {
     console.error('[admin/health] Assignments check failed:', err);
   }
+  return a;
+}
 
-  const allOk = checks.redis.ok && checks.flightData.ok && checks.assignments.staleAssignments.length === 0;
+async function checkLearning(redisOk: boolean): Promise<HealthResponse['checks']['learning']> {
+  if (!redisOk) return null;
+  try {
+    const client = getRedisClient();
+    const [raw, exampleCount] = await Promise.all([client.hgetall(LEARN_HASH_KEY), client.hlen(EXAMPLES_HASH_KEY)]);
+    const today = getPodgoricaDateString();
+    const weeks = recentWeekKeys(today, 4);
+    const summarize = (kind: LearnKind): LearningKindSummary => {
+      const s = summarizeAccuracy(raw, kind, weeks);
+      const bySource = (Object.entries(s.bySource) as Array<[string, { hit: number; miss: number }]>)
+        .filter(([src, b]) => src !== 'none' && b.hit + b.miss > 0)
+        .map(([source, b]) => ({ source, n: b.hit + b.miss, rate: b.hit / (b.hit + b.miss) }));
+      return { hitRate: s.hitRate, evaluated: s.evaluated, applied: s.total.applied, bySource, distrust: decideGate(raw, kind, today).distrust };
+    };
+    return { counterFields: Object.keys(raw ?? {}).length, exampleCount, desk: summarize('desk'), gate: summarize('gate') };
+  } catch (err) {
+    console.error('[admin/health] Learning check failed:', err);
+    return null;
+  }
+}
 
-  return NextResponse.json(
-    { status: allOk ? 'healthy' : 'degraded', checks, checkedAt: new Date().toISOString() },
-    { status: 200, headers: { 'Cache-Control': 'no-store' } }
-  );
+function buildIssues(c: HealthResponse['checks'], night: boolean): HealthIssue[] {
+  const out: HealthIssue[] = [];
+  const { redis, ably, flightData: fd, assignments, learning } = c;
+  if (!redis.ok) {
+    out.push({
+      severity: 'error',
+      title: redis.circuitOpen ? 'Redis: circuit breaker je otvoren' : 'Redis ne odgovara',
+      hint: 'Dodjele i sinhronizacija mogu zakasniti. Provjeri Redis servis; sistem se sam oporavlja kad Redis proradi.',
+    });
+  } else {
+    if (redis.latencyMs !== null && redis.latencyMs > REDIS_SLOW_MS) out.push({ severity: 'warn', title: `Redis je spor (${redis.latencyMs} ms)`, hint: 'Normalno je ispod ~50 ms. Povremeni skokovi nisu problem; stalno visoko jeste.' });
+    if (redis.usedMemoryBytes !== null && redis.maxMemoryBytes && redis.usedMemoryBytes / redis.maxMemoryBytes > MEMORY_WARN_RATIO) {
+      out.push({ severity: 'warn', title: 'Redis memorija je preko 80%', hint: 'Provjeri ključeve koji rastu (npr. lib/redis cleanup cron).' });
+    }
+    if (redis.evictedKeys) out.push({ severity: 'warn', title: `Redis je izbacio ${redis.evictedKeys} ključeva zbog memorije`, hint: 'Ključevi su brisani zbog nedostatka memorije.' });
+  }
+  if (!ably.configured) out.push({ severity: 'error', title: 'Ably nije podešen', hint: 'ABLY_API_KEY nedostaje u okruženju.' });
+  else if (!ably.ok) out.push({ severity: 'error', title: 'Ably nije dostupan', hint: `Realtime ne radi (${ably.error}). Kiosci se oslanjaju na periodično osvježavanje (do 5 min kašnjenja).` });
+  else if (ably.latencyMs !== null && ably.latencyMs > ABLY_SLOW_MS) out.push({ severity: 'warn', title: `Ably je spor (${ably.latencyMs} ms)` });
+  if (fd.isOfflineMode) out.push({ severity: 'error', title: 'Podaci o letovima su u offline modu', hint: fd.warning ?? 'Izvor podataka nije dostupan; prikazuje se zadnja sačuvana verzija.' });
+  if (fd.ageMinutes !== null && !night) {
+    if (fd.ageMinutes >= FLIGHT_STALE_ERROR_MIN) out.push({ severity: 'error', title: `Podaci o letovima stari ${fd.ageMinutes} min`, hint: 'Cron flight-sync bi trebalo da osvježava svaka 3 min. Provjeri Vercel Cron i izvor podataka.' });
+    else if (fd.ageMinutes >= FLIGHT_STALE_WARN_MIN) out.push({ severity: 'warn', title: `Podaci o letovima stari ${fd.ageMinutes} min`, hint: 'Očekivano je osvježavanje svaka ~3 min.' });
+  }
+  if (assignments.staleAssignments.length) {
+    out.push({ severity: 'warn', title: `${assignments.staleAssignments.length} dodjela otvoreno predugo`, hint: 'Provjeri da nisu zaboravljene (vidi tabelu ispod).' });
+  }
+  if (learning) {
+    for (const [label, k] of [['šalteri', learning.desk], ['gate-ovi', learning.gate]] as const) {
+      if (k.distrust) out.push({ severity: 'warn', title: `Učenje (${label}): naučeni šabloni privremeno isključeni`, hint: 'Zadnje 4 sedmice pogađaju jasno lošije od ručnog profila; važi profil dok se ne poprave.' });
+    }
+  }
+  if (night) out.push({ severity: 'info', title: 'Noćni režim je aktivan', hint: 'Automatska osvježavanja kiosaka i admin telefona su pauzirana.' });
+  const rank = { error: 0, warn: 1, info: 2 } as const;
+  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
+export async function GET() {
+  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  const started = Date.now();
+
+  const [redis, ably, flightData, assignments] = await Promise.all([checkRedis(), checkAbly(), checkFlights(), checkAssignments()]);
+  const learning = await checkLearning(redis.ok);
+
+  const night = isNightHours();
+  const mins = getPodgoricaMinutesOfDay();
+  const checks = { redis, ably, flightData, assignments, learning };
+  const issues = buildIssues(checks, night);
+  const status: HealthResponse['status'] = !redis.ok ? 'down' : issues.some(i => i.severity !== 'info') ? 'degraded' : 'healthy';
+
+  const body: HealthResponse = {
+    status,
+    checkedAt: new Date().toISOString(),
+    durationMs: Date.now() - started,
+    issues,
+    checks,
+    system: {
+      nodeVersion: process.version,
+      region: process.env.VERCEL_REGION ?? null,
+      environment: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? null,
+      commit: process.env.VERCEL_GIT_COMMIT_SHA ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) : null,
+      commitMessage: process.env.VERCEL_GIT_COMMIT_MESSAGE ? process.env.VERCEL_GIT_COMMIT_MESSAGE.slice(0, 80) : null,
+      uptimeSec: Math.round(process.uptime()),
+      memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+      airportTime: `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`,
+      isNight: night,
+    },
+  };
+  return NextResponse.json(body, { status: 200, headers: { 'Cache-Control': 'no-store' } });
 }

@@ -15,6 +15,7 @@ const GUARDED: Record<string, string[]> = {
   'admin/specific-flights/[flightNumber]/route.ts': ['GET', 'PUT', 'DELETE'],
   'admin/init/route.ts': ['POST'],
   'admin/stats/route.ts': ['GET'],
+  'admin/health/route.ts': ['GET'],
 };
 
 describe('admin/assignment rute traže admin sesiju (statička provjera)', () => {

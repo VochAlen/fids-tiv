@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import {
   RefreshCw, Trash2, LogOut, Home, CheckSquare, GitBranch,
   X, Plane, Clock, Sun, Moon, Fingerprint, BarChart2,
-  AlertTriangle, Search,
+  AlertTriangle, Search, Activity,
 } from 'lucide-react';
 import type { Flight } from '@/types/flight';
 
@@ -1974,6 +1974,11 @@ const handleClearAll = useCallback(async () => {
               }`}
             >
               <Trash2 size={16} className={`${isDark ? 'text-red-400' : 'text-red-600'} ${clearingAll ? 'animate-pulse' : ''}`} />
+            </button>
+
+            <button onClick={() => router.push('/admin/health')} title="Stanje sistema (health)"
+              className={`p-3 rounded-2xl border transition-all active:scale-95 ${isDark ? 'bg-white/5 hover:bg-white/10 border-white/10' : 'bg-white hover:bg-gray-50 border-gray-200 shadow-sm'}`}>
+              <Activity size={16} className={isDark ? 'text-emerald-400' : 'text-emerald-600'} />
             </button>
 
             <button onClick={() => router.push('/admin')}
