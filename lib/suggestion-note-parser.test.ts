@@ -55,3 +55,22 @@ describe('terminal u napomeni', () => {
     expect(r.unparsed).toEqual([]);
   });
 });
+
+describe('nejasne fraze se ne pogađaju (idu u unparsed)', () => {
+  const none = (r: ReturnType<typeof parseSuggestionNote>) =>
+    r.constraints.blocked.length + r.constraints.pins.length + r.constraints.counts.length;
+  it.each([
+    'šalter 5 ne radi, ali 6 radi',
+    'šalter 5 ne radi prije 10',
+    'šalter 5 ne radi poslije 10',
+    'šalter 5 ne radi do podne',
+    'LY1234 ne na 10',
+    'LY1234 bez šaltera 10',
+    'LY1234 kasni 40 min',
+    'LY1234 na 10 a TK1085 na 11',
+  ])('%s', (txt) => {
+    const r = parseSuggestionNote(txt, FL);
+    expect(none(r)).toBe(0);
+    expect(r.unparsed.length).toBeGreaterThan(0);
+  });
+});

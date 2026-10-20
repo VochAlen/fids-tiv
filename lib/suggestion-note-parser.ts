@@ -23,6 +23,9 @@ export interface NoteParseResult {
 }
 
 const BLOCK_RE = /\b(ne\s+rad\w*|kvar\w*|u\s+kvaru|pokvaren\w*|zatvoren\w*|van\s+funkcij\w*|nedostup\w*|ne\s+koristi\w*|blokiran\w*)/;
+// Riječi zbog kojih parser NE SMIJE pogađati (negacija, izuzetak, "prije/poslije", opisna vremena,
+// kašnjenje/otkaz): fraza ide u `unparsed` da je osoblje provjeri, umjesto da tiho uradi suprotno.
+const AMBIGUOUS_RE = /\b(ne\s+na|bez|osim|ali|umjesto|prije|poslije|nakon|podne|ponoc|kasni\w*|otkaz\w*)\b/;
 const WORD_NUM: Record<string, number> = { jedan: 1, jedna: 1, dva: 2, dvije: 2, tri: 3, cetiri: 4, pet: 5, sest: 6 };
 
 /** Mala slova + bez dijakritika (š→s, č/ć→c, đ→d, ž→z). */
@@ -47,6 +50,14 @@ export function parseSuggestionNote(text: string, knownFlights: string[] = []): 
 
   for (const original of clauses) {
     let c = fold(original);
+
+    // 0) nejasne fraze (negacija, "prije/poslije", više letova u jednoj frazi) se ne pogađaju
+    const flightsInClause = [...c.matchAll(/\b([a-z0-9]{2})\s?(\d{1,4}[a-z]?)\b/g)]
+      .filter(m => /[a-z]/.test(m[1]) && known.has(`${m[1]}${m[2]}`.toUpperCase()));
+    if (AMBIGUOUS_RE.test(c) || new Set(flightsInClause.map(m => `${m[1]}${m[2]}`)).size > 1) {
+      unparsed.push(original.slice(0, 120));
+      continue;
+    }
 
     // 1) vremena: "od 9:30", "do 14"
     let from: string | null = null, to: string | null = null;
