@@ -78,18 +78,19 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     var box = null;
     var render = function () {
       try {
-        if (!document.body) return;
+        if (!document.documentElement) return;
         if (!box) {
           box = document.createElement('div');
           box.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483647;max-width:96vw;max-height:40vh;overflow:hidden;background:rgba(0,0,0,.85);color:#ff6b6b;font:12px/1.3 monospace;padding:6px;white-space:pre-wrap;word-break:break-all;pointer-events:none';
-          document.body.appendChild(box);
+          // Izvan <body> (dijete <html>): React upravlja djecom body-ja, pa strani čvor tamo ne smije biti.
+          document.documentElement.appendChild(box);
         }
-        box.textContent = lines.slice(-8).join('\\n');
+        box.textContent = lines.slice(-6).join('\\n');
       } catch (e) {}
     };
     var add = function (t) {
       try {
-        lines.push(new Date().toLocaleTimeString('en-GB') + ' ' + String(t).slice(0, 260));
+        lines.push(new Date().toLocaleTimeString('en-GB') + ' ' + String(t).slice(0, 520));
         if (lines.length > 12) lines = lines.slice(-12);
         sessionStorage.setItem(KEY, JSON.stringify(lines));
         render();
@@ -103,9 +104,18 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     window.addEventListener('unhandledrejection', function (ev) {
       add('REJECT: ' + (ev && ev.reason && (ev.reason.message || ev.reason)));
     });
+    // Čitljiv ispis argumenata: Error → poruka + prva 3 reda stack-a; objekat sa componentStack (React ErrorInfo)
+    // → prvih 5 komponenti. (Ranije se ispisivalo "[object Object]" i uzrok se nije vidio.)
+    var fmt = function (a) {
+      try {
+        if (a && a.stack) return String(a.name || 'Error') + ': ' + String(a.message || '') + ' | ' + String(a.stack).split('\\n').slice(1, 4).map(function (x) { return x.trim(); }).join(' < ');
+        if (a && typeof a === 'object' && a.componentStack) return 'COMPONENTS: ' + String(a.componentStack).split('\\n').map(function (x) { return x.trim(); }).filter(Boolean).slice(0, 5).join(' < ');
+      } catch (e) {}
+      return String(a);
+    };
     var ce = console.error;
     console.error = function () {
-      try { add('console.error: ' + Array.prototype.slice.call(arguments).map(String).join(' ')); } catch (e) {}
+      try { add('console.error: ' + Array.prototype.slice.call(arguments).map(fmt).join(' ')); } catch (e) {}
       return ce.apply(console, arguments);
     };
     window.__CHECKIN_DIAG_ADD__ = add;

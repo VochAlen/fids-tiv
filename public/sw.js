@@ -12,6 +12,14 @@
 //     zatrovane unose — bez ikakvog fizičkog čišćenja keša na računaru. Za buduće čišćenje dovoljno je podići broj.
 const CACHE_VERSION = 'fids-static-v2';
 
+// v2.1: gornja granica broja unosa — nakon svakog deploy-a hash imena se mijenjaju pa bi stari fajlovi inače ostajali zauvijek.
+const MAX_ENTRIES = 150;
+
+async function prune(cache) {
+  const keys = await cache.keys(); // redoslijed umetanja: najstariji prvi
+  for (let i = 0; i < keys.length - MAX_ENTRIES; i++) await cache.delete(keys[i]);
+}
+
 const OK_TYPE = /(javascript|ecmascript|css|font|woff|image\/|octet-stream|wasm|json)/i;
 
 self.addEventListener('install', () => {
@@ -41,6 +49,7 @@ self.addEventListener('fetch', (event) => {
       const type = response.headers.get('content-type') || '';
       if (response.status === 200 && response.type === 'basic' && OK_TYPE.test(type) && !/text\/html/i.test(type)) {
         await cache.put(event.request, response.clone());
+        event.waitUntil(prune(cache).catch(() => {}));
       }
     } catch (e) { /* keširanje je best-effort — odgovor se svejedno vraća */ }
     return response;

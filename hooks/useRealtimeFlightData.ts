@@ -154,8 +154,27 @@ const RECONCILE_INTERVAL_MS = 3 * 60_000;
 // ova izmjena samo zatvara identičnu rupu i ovdje.
 const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
 
-export function useRealtimeFlightData(role: AblyClientRole) {
+// TOPLI START (2026-10-21) — vidi komentar uz WARM_CACHE_KEY u hooks/useRealtimeAssignments.ts.
+const WARM_FLIGHT_MAX_AGE_MS = 10 * 60_000;
+const loadWarmFlightCache = (): FlightData | null => {
+  try {
+    const raw = localStorage.getItem(EMERGENCY_CACHE_KEY);
+    if (!raw) return null;
+    const { data, timestamp } = JSON.parse(raw);
+    return typeof timestamp === 'number' && Date.now() - timestamp <= WARM_FLIGHT_MAX_AGE_MS ? sanitizeFlightData(data as FlightData) : null;
+  } catch { return null; }
+};
+
+export function useRealtimeFlightData(role: AblyClientRole, opts?: { warmStart?: boolean }) {
+  const warmStart = !!opts?.warmStart;
   const [data, setData] = useState<FlightData | null>(null);
+  // Topli start: odmah prikaži zadnje potvrđene letove (mlađe od 10 min) dok ne stigne živi snapshot. `gotLive` ostaje false.
+  useEffect(() => {
+    if (!warmStart) return;
+    const cached = loadWarmFlightCache();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (cached) setData(prev => prev ?? cached);
+  }, [warmStart]);
   // true tek kad je stigao ŽIV podatak (REST ili Ably) — emergency keš ne računa (vidi retry efekat ispod).
   const [gotLive, setGotLive] = useState(false);
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'night-sleep'>('connecting');
@@ -384,7 +403,7 @@ export function useRealtimeFlightData(role: AblyClientRole) {
     // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
     // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
     // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
-    const id = setInterval(() => { if (!isNightHours()) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
+    const id = setInterval(() => { if (!isNightHours() && !document.hidden) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSnapshot]);
 

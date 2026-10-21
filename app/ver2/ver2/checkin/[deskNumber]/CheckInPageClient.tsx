@@ -778,11 +778,53 @@ const OpenDurationLabel = memo(function OpenDurationLabel({
 // GLAVNA KOMPONENTA — klijentska logika (nepromijenjena)
 // ============================================================
 export default function CheckInPageClient() {
+  // 2026-10-20: NIŠTA se više ne ubacuje u DOM ručno (document.head/body.appendChild) — to je bio sumnjivi uzrok
+  // "removeChild … not a child of this node" greške. <style>, breadcrumb i sakriveni kursor su sad običan React.
+  const hideCursor = useElectronCursorHidden();
   return (
-    <CheckInErrorBoundary>
-      <CheckInDisplay />
-      <ClockDiagnostics label="check-in" />
-    </CheckInErrorBoundary>
+    <div style={hideCursor ? { cursor: 'none' } : undefined}>
+      <style id="checkin-animations" dangerouslySetInnerHTML={{ __html: CSS_ANIMATIONS }} />
+      <CheckInErrorBoundary>
+        <CheckInDisplay />
+        <ClockDiagnostics label="check-in" />
+      </CheckInErrorBoundary>
+      <ReloadBreadcrumb />
+    </div>
+  );
+}
+
+/** Kursor se sakriva samo u Electron kiosku (u običnom browseru ostaje vidljiv) — zamjena za ubacivanje CSS-a iz main.js. */
+function useElectronCursorHidden(): boolean {
+  const [hide, setHide] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setHide(/Electron\//i.test(navigator.userAgent)); }, []);
+  return hide;
+}
+
+/** Razlog zadnjeg reload-a (25 s poslije reload-a, sitno pri dnu) — React element umjesto document.body.appendChild. */
+function ReloadBreadcrumb() {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const raw = localStorage.getItem(RELOAD_REASON_KEY);
+      if (raw) {
+        const { t: at, reason } = JSON.parse(raw) as { t: number; reason: string };
+        if (Date.now() - at < 90_000) {
+          // eslint-disable-next-line react-hooks/set-state-in-effect
+          setText(`reload: ${reason} @ ${new Date(at).toLocaleTimeString('en-GB')}`);
+          t = setTimeout(() => setText(null), 25_000);
+        }
+        localStorage.removeItem(RELOAD_REASON_KEY);
+      }
+    } catch { /* ignore */ }
+    return () => { if (t) clearTimeout(t); };
+  }, []);
+  if (!text) return null;
+  return (
+    <div style={{ position: 'fixed', left: '50%', bottom: 2, transform: 'translateX(-50%)', zIndex: 2147483647, font: '10px monospace', color: 'rgba(255,160,160,.6)', pointerEvents: 'none' }}>
+      {text}
+    </div>
   );
 }
 
@@ -807,8 +849,8 @@ function CheckInDisplay() {
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState('');
   const [isPortrait, setIsPortrait] = useState(false);
-  const { data: liveFlightData, refetch: refetchFlights } = useRealtimeFlightData('checkin');
-const { deskEntries, connectionState, isSynced, lastSyncAtRef, refetch: refetchAssignments, verifyKey } = useRealtimeAssignments('checkin');
+  const { data: liveFlightData, refetch: refetchFlights } = useRealtimeFlightData('checkin', { warmStart: true });
+const { deskEntries, connectionState, isSynced, warm, lastSyncAtRef, refetch: refetchAssignments, verifyKey } = useRealtimeAssignments('checkin', { warmStart: true });
 
   // NOVO (po zahtjevu — prijavljen ponavljajući bug "check-in display
   // se zaglavi na jednom letu i ne može se zatvoriti", 2026-09-27):
@@ -898,16 +940,6 @@ const showArkiaHoliday = useMemo((): boolean => {
 // novogodišnja slika). Jeftina provjera (par brojeva, 4 stavke).
 const fixedHolidayImage = getFixedHolidayImage();
 
-  // ── CSS injection ──────────────────────────────────────────
-  useEffect(() => {
-    if (document.getElementById('checkin-animations')) return;
-    const el = document.createElement('style');
-    el.id = 'checkin-animations';
-    el.textContent = CSS_ANIMATIONS;
-    document.head.appendChild(el);
-    return () => { document.getElementById('checkin-animations')?.remove(); };
-  }, []);
-
   // ── Kiosk mode ─────────────────────────────────────────────
   useEffect(() => {
     const preventDefault = (e: Event) => e.preventDefault();
@@ -922,26 +954,6 @@ const fixedHolidayImage = getFixedHolidayImage();
   }, []);
 
 
-  // ── reload breadcrumb (2026-10-19): ako je stranica upravo reload-ovana, 25 s prikaži razlog (sitno, pri dnu) ──
-  useEffect(() => {
-    let el: HTMLDivElement | null = null;
-    let t: ReturnType<typeof setTimeout> | null = null;
-    try {
-      const raw = localStorage.getItem(RELOAD_REASON_KEY);
-      if (raw) {
-        const { t: at, reason } = JSON.parse(raw) as { t: number; reason: string };
-        if (Date.now() - at < 90_000) {
-          el = document.createElement('div');
-          el.textContent = `reload: ${reason} @ ${new Date(at).toLocaleTimeString('en-GB')}`;
-          el.style.cssText = 'position:fixed;left:50%;bottom:2px;transform:translateX(-50%);z-index:2147483647;font:10px monospace;color:rgba(255,160,160,.6);pointer-events:none';
-          document.body.appendChild(el);
-          t = setTimeout(() => { el?.remove(); el = null; }, 25_000);
-        }
-        localStorage.removeItem(RELOAD_REASON_KEY);
-      }
-    } catch { /* ignore */ }
-    return () => { if (t) clearTimeout(t); el?.remove(); };
-  }, []);
 
   // ── v5: Memory pressure auto-reload ──────────────────────
   // Chrome na 24/7 kiosk ekranima polako curi memoriju (Ably
@@ -1078,14 +1090,11 @@ const fixedHolidayImage = getFixedHolidayImage();
 
       console.warn('Kiosk tab lost focus — attempting to refocus');
       window.focus();
-
+      // 2026-10-21: reload poslije 2 s skrivenosti UKLONJEN. Electron klijent pri "swap-u" namjerno sakrije stari
+      // prozor (ostaje živ iza novog) — ovaj reload je tada bespotrebno ponovo učitavao skriven prozor (dodatni
+      // pozivi ka serveru svaka ~3 min). Pri povratku u fokus stranica ionako radi resync (vidi `onVisible` ispod).
       if (refocusTimeout !== null) clearTimeout(refocusTimeout);
-      refocusTimeout = setTimeout(() => {
-        refocusTimeout = null;
-        if (document.hidden) {
-          reloadWithReason('tab-hidden 2s');
-        }
-      }, 2_000);
+      refocusTimeout = null;
     };
 
     document.addEventListener('visibilitychange', handleVisibility);
@@ -1363,7 +1372,8 @@ useEffect(() => {
   // restarta Electron klijenta), stvarno stanje šaltera je NEPOZNATO — ne smije se pokazati ni
   // "inactive" ni "active". Ranije je `loading` padao na false odmah pri mount-u (računanje sa
   // praznim deskEntries), pa je otvoren šalter prvih par sekundi bljeskao kao inactive.
-  if (loading || !isSynced) {
+  // `warm` = prikaz zadnjeg potvrđenog stanja iz keša (najviše 20 s, vidi hooks/useRealtimeAssignments.ts) — bez treptaja pri Electron swap-u.
+  if (loading || (!isSynced && !warm)) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white flex items-center justify-center p-4">
         <div className="text-center">

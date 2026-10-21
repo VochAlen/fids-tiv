@@ -168,7 +168,20 @@ const RECONCILE_INTERVAL_MS = 5 * 60_000;
 // watchdog na 12-15s) i onako pokuša ponovo.
 const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
 
-export function useRealtimeAssignments(role: AblyClientRole) {
+// ── TOPLI START (2026-10-21) ─────────────────────────────────────────────────────────────────────────
+// Electron klijent svake ~3 min radi "swap": učita istu stranicu u DRUGOM (skrivenom) prozoru pa ga prikaže
+// ~0.5 s poslije did-finish-load. Nova stranica tada još nema prvi sync (isSynced=false) → na ekranu se 1–2 s
+// vidi "Loading check-in information..." (treptaj). Rješenje bez izmjene exe-a: zadnje POTVRĐENO stanje se čuva u
+// localStorage (dijele ga oba prozora) i nova stranica ga odmah prikaže ("warm"), dok pravi sync ne stigne.
+//   • važi samo ako je keš mlađi od WARM_MAX_AGE_MS i samo prvih WARM_MAX_SHOW_MS poslije učitavanja
+//     (ako pravi sync tada ne stigne, vraća se na "Loading" — stanje je opet nepoznato);
+//   • piše se samo poslije USPJEŠNOG sync-a (snapshot/Ably), nikad iz keša.
+const WARM_CACHE_KEY = 'assign_warm_cache_v1';
+const WARM_MAX_AGE_MS = 10 * 60_000;
+const WARM_MAX_SHOW_MS = 20_000;
+
+export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?: boolean }) {
+  const warmStart = !!opts?.warmStart;
   const [deskEntries, setDeskEntries] = useState<Record<string, AssignmentEntry>>({});
   const [gateEntries, setGateEntries] = useState<Record<string, AssignmentEntry>>({});
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'night-sleep'>('connecting');
@@ -224,6 +237,46 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // Dok je false, stranica ne smije pogađati "inactive" — stvarno stanje šaltera joj je još nepoznato
   // (npr. prvih par sekundi poslije svakog reload-a/restarta Electron klijenta).
   const [isSynced, setIsSynced] = useState(false);
+  // TOPLI START: true dok se prikazuje keširano (zadnje potvrđeno) stanje, prije prvog pravog sync-a.
+  const [warm, setWarm] = useState(false);
+  const [syncTick, setSyncTick] = useState(0);
+  const latestRef = useRef<{ desk: Record<string, AssignmentEntry>; gate: Record<string, AssignmentEntry> }>({ desk: {}, gate: {} });
+  useEffect(() => { latestRef.current = { desk: deskEntries, gate: gateEntries }; }, [deskEntries, gateEntries]);
+
+  // Obnovi keš pri mount-u (samo klijent — izbjegava hydration neslaganje).
+  useEffect(() => {
+    if (!warmStart) return;
+    try {
+      const raw = localStorage.getItem(WARM_CACHE_KEY);
+      if (!raw) return;
+      const c = JSON.parse(raw) as { t?: number; role?: string; desk?: Record<string, AssignmentEntry>; gate?: Record<string, AssignmentEntry> };
+      if (!c || typeof c.t !== 'number' || c.role !== role || !c.desk || !c.gate) return;
+      if (Date.now() - c.t > WARM_MAX_AGE_MS) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDeskEntries(prev => (Object.keys(prev).length ? prev : c.desk!));
+      setGateEntries(prev => (Object.keys(prev).length ? prev : c.gate!));
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setWarm(true);
+    } catch { /* bez keša → obično "Loading" */ }
+  }, [warmStart, role]);
+  // Topli prikaz traje najviše WARM_MAX_SHOW_MS; i čim stigne pravi sync, više ne treba.
+  useEffect(() => {
+    if (!warm) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (isSynced) { setWarm(false); return; }
+    const id = setTimeout(() => setWarm(false), WARM_MAX_SHOW_MS);
+    return () => clearTimeout(id);
+  }, [warm, isSynced]);
+  // Upis keša: poslije svake PROMJENE i svakog uspješnog snapshot-a (syncTick), samo kad je stanje pravo.
+  useEffect(() => {
+    if (!warmStart || !isSynced) return;
+    const id = setTimeout(() => {
+      try {
+        localStorage.setItem(WARM_CACHE_KEY, JSON.stringify({ t: Date.now(), role, desk: latestRef.current.desk, gate: latestRef.current.gate }));
+      } catch { /* quota */ }
+    }, 1_000);
+    return () => clearTimeout(id);
+  }, [warmStart, isSynced, role, deskEntries, gateEntries, syncTick]);
   // FIX (po zahtjevu — garantovano zatvaranje check-in šaltera u 20s,
   // 2026-09-29): umotano u useCallback (isti obrazac kao
   // hooks/useRealtimeFlightData.ts) tako da funkcija ima STABILAN
@@ -288,6 +341,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks, data.readAt));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates, data.readAt));
         setIsSynced(true);
+        setSyncTick(t => t + 1);
       })
       .catch(() => { /* ostani na trenutnom stanju (uklj. AbortError od
         timeout-a iznad) — NE dodirujemo lastSyncAtRef ovdje: neuspio
@@ -474,7 +528,9 @@ export function useRealtimeAssignments(role: AblyClientRole) {
 
     const tick = () => {
       if (cancelled) return;
-      fetchSnapshot();
+      // Skriven prozor (Electron "swap": stari prozor ostaje živ iza novog) ne treba polling — pri povratku u
+      // fokus stranica sama radi resync (vidi CheckInPageClient). Prvi snapshot (mount) i retry do prvog sync-a nisu zahvaćeni.
+      if (!document.hidden) fetchSnapshot();
       delay = Math.min(delay * 2, FALLBACK_POLL_MAX_MS);
       timeoutId = setTimeout(tick, delay);
     };
@@ -495,7 +551,7 @@ export function useRealtimeAssignments(role: AblyClientRole) {
     // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
     // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
     // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
-    const id = setInterval(() => { if (!isNightHours()) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
+    const id = setInterval(() => { if (!isNightHours() && !document.hidden) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSnapshot]);
 
@@ -509,5 +565,5 @@ export function useRealtimeAssignments(role: AblyClientRole) {
   // dodatan resync na sopstvenom, kraćem rasporedu — vidi novi
   // "zatvoreno u 20s" watchdog u CheckInPageClient.tsx, koji ovo koristi
   // dok je šalter aktivno otvoren.
-  return { deskEntries, gateEntries, connectionState, isSynced, lastSyncAtRef, refetch: fetchSnapshot, verifyKey };
+  return { deskEntries, gateEntries, connectionState, isSynced, warm, lastSyncAtRef, refetch: fetchSnapshot, verifyKey };
 }
