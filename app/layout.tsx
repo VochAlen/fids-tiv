@@ -73,24 +73,33 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
   // u donjem lijevom uglu (i pamte u sessionStorage preko watchdog reload-a). Ništa ne mijenja ako grešaka nema.
   try {
     var KEY = '__checkin_diag__';
+    // 2026-10-22: zapis ostaje u sessionStorage (za dijagnostiku), ali se na ekranu prikazuju SAMO redovi mlađi od
+    // SHOW_MS — ranije je sitni crveni tekst ostajao zauvijek vidljiv putnicima (i poslije reload-a, i kad je greška davno prošla).
+    var SHOW_MS = 90000;
     var lines = [];
     try { lines = JSON.parse(sessionStorage.getItem(KEY) || '[]'); } catch (e) {}
+    if (!Array.isArray(lines)) lines = [];
+    // stari format (običan string, bez vremena) se odbacuje
+    lines = lines.filter(function (l) { return l && typeof l === 'object' && typeof l.t === 'number'; });
     var box = null;
     var render = function () {
       try {
         if (!document.documentElement) return;
+        var cutoff = Date.now() - SHOW_MS;
+        var vis = lines.filter(function (l) { return l.t >= cutoff; });
+        if (!vis.length) { if (box && box.parentNode) box.parentNode.removeChild(box); box = null; return; }
         if (!box) {
           box = document.createElement('div');
           box.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:2147483647;max-width:96vw;max-height:40vh;overflow:hidden;background:rgba(0,0,0,.85);color:#ff6b6b;font:12px/1.3 monospace;padding:6px;white-space:pre-wrap;word-break:break-all;pointer-events:none';
           // Izvan <body> (dijete <html>): React upravlja djecom body-ja, pa strani čvor tamo ne smije biti.
           document.documentElement.appendChild(box);
         }
-        box.textContent = lines.slice(-6).join('\\n');
+        box.textContent = vis.slice(-6).map(function (l) { return l.s; }).join('\\n');
       } catch (e) {}
     };
     var add = function (t) {
       try {
-        lines.push(new Date().toLocaleTimeString('en-GB') + ' ' + String(t).slice(0, 520));
+        lines.push({ t: Date.now(), s: new Date().toLocaleTimeString('en-GB') + ' ' + String(t).slice(0, 520) });
         if (lines.length > 12) lines = lines.slice(-12);
         sessionStorage.setItem(KEY, JSON.stringify(lines));
         render();
@@ -98,7 +107,22 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     };
     window.addEventListener('error', function (ev) {
       var tg = ev && ev.target;
-      if (tg && tg !== window && (tg.src || tg.href)) add('LOAD FAIL: ' + (tg.src || tg.href));
+      if (tg && tg !== window && (tg.src || tg.href)) {
+        add('LOAD FAIL: ' + (tg.src || tg.href));
+        // Stranica učitana prije deploy-a traži JS dio (chunk) koji više ne postoji. Jedan reload (najviše na 5 min)
+        // povlači svježi HTML sa novim imenima fajlova. Bez ovoga stara stranica ostaje polu-funkcionalna do sljedećeg swapa.
+        try {
+          if (tg.tagName === 'SCRIPT' && /\\/_next\\/static\\//.test(tg.src || '')) {
+            var CK = '__chunk_reload_at__';
+            var last = parseInt(sessionStorage.getItem(CK) || '0', 10) || 0;
+            if (Date.now() - last > 300000) {
+              sessionStorage.setItem(CK, String(Date.now()));
+              add('chunk nedostupan — reload za 3s');
+              setTimeout(function () { location.reload(); }, 3000);
+            }
+          }
+        } catch (e2) {}
+      }
       else add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
     }, true);
     window.addEventListener('unhandledrejection', function (ev) {
@@ -120,6 +144,7 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     };
     window.__CHECKIN_DIAG_ADD__ = add;
     document.addEventListener('DOMContentLoaded', render);
+    setInterval(render, 10000); // sakrij box kad redovi ostare
   } catch (e) {}
   // 2026-10-20: SAMOLIJEČENJE bez fizičkog brisanja keša. 1. neuspjeh → običan reload. 2. uzastopni neuspjeh
   // (brojač u sessionStorage, preživljava reload) → odjavi service worker-e, obriši Cache Storage, pa učitaj
