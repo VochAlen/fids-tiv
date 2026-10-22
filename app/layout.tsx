@@ -76,6 +76,11 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     // 2026-10-22: zapis ostaje u sessionStorage (za dijagnostiku), ali se na ekranu prikazuju SAMO redovi mlađi od
     // SHOW_MS — ranije je sitni crveni tekst ostajao zauvijek vidljiv putnicima (i poslije reload-a, i kad je greška davno prošla).
     var SHOW_MS = 90000;
+    var SHOW_DIAG = false;
+    try {
+      if (/[?&]diag=1/.test(location.search)) sessionStorage.setItem('__checkin_diag_on__', '1');
+      SHOW_DIAG = sessionStorage.getItem('__checkin_diag_on__') === '1';
+    } catch (e) {}
     var lines = [];
     try { lines = JSON.parse(sessionStorage.getItem(KEY) || '[]'); } catch (e) {}
     if (!Array.isArray(lines)) lines = [];
@@ -85,6 +90,9 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     var render = function () {
       try {
         if (!document.documentElement) return;
+        // 2026-10-22: overlay se NE prikazuje putnicima. Uključuje se samo za dijagnostiku: dodati ?diag=1 u URL
+        // (pamti se u sessionStorage do zatvaranja aplikacije). Zapis grešaka u sessionStorage radi uvijek.
+        if (!SHOW_DIAG) return;
         var cutoff = Date.now() - SHOW_MS;
         var vis = lines.filter(function (l) { return l.t >= cutoff; });
         if (!vis.length) { if (box && box.parentNode) box.parentNode.removeChild(box); box = null; return; }

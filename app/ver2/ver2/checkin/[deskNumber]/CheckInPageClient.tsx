@@ -393,6 +393,12 @@ const AirlineLogo = memo(function AirlineLogo({
   airlineName: string;
   portrait: boolean;
 }) {
+// Omjer stranica stvarne slike (poslije učitavanja) — da kontejner prati logo bez bijelih traka.
+const [ratio, setRatio] = useState(2);
+const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+  const { naturalWidth, naturalHeight } = e.currentTarget;
+  if (naturalWidth > 0 && naturalHeight > 0) setRatio(Math.min(6, Math.max(0.5, naturalWidth / naturalHeight)));
+}, []);
 const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
   const img = e.currentTarget;
   if (img.dataset.fallback === 'true') return; // već smo probali fallback, stop
@@ -405,13 +411,19 @@ const handleError = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
 // AirlineLogo komponenta - portrait verzija
 if (portrait) {
   return (
-    <div className="relative w-full max-w-[90vw] bg-white rounded-xl shadow-lg mb-3 flex items-center justify-center" style={{ height: 'clamp(120px, 18vh, 280px)' }}>
+    // 2026-10-22: bez bijelog okvira oko loga — kontejner prati omjer same slike: širina = min(100% kartice,
+    // visina * omjer), visina iz omjera. Logo tako popunjava cijeli bijeli kontejner (bez traka gore/dolje ili sa strane).
+    <div
+      className="relative bg-white rounded-xl shadow-lg mb-3 overflow-hidden"
+      style={{ aspectRatio: String(ratio), width: `min(100%, calc(clamp(120px, 18vh, 280px) * ${ratio}))` }}
+    >
       <Image
         src={logoUrl}
         alt={airlineName}
         width={800}
         height={400}
-        className="object-contain p-4 w-full h-full"
+        className="block object-contain w-full h-full"
+        onLoad={handleLoad}
         priority
         fetchPriority="high"
         loading="eager"

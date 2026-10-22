@@ -225,6 +225,8 @@ export function useRealtimeFlightData(role: AblyClientRole, opts?: { warmStart?:
         });
         saveEmergencyCache(snapshot);
         setGotLive(true);
+        // Electron main.js (health check) čita ovu vrijednost: ako stranica >20 min nije dobila nijedan uspješan snapshot, kiosk se sam oporavlja.
+        try { (window as unknown as { __fidsLastDataAt?: number }).__fidsLastDataAt = Date.now(); } catch { /* ignore */ }
         // FIX (po zahtjevu — dinamički noćni režim): javi ably-client.ts
         // najnoviju server-računatu vrijednost (statička ILI dinamička,
         // vidi computeDynamicNightMode u lib/flight-data-service.ts) —
