@@ -45,6 +45,8 @@ export interface KioskReport {
   pageAgeSec: number;
   /** Zadnja klijentska greška (kratko), '' ako nema. */
   err: string;
+  /** Sekundi od zadnjeg uspješnog učitavanja podataka o letovima; -1 = stranica to ne mjeri. */
+  dataAgeSec: number;
   /** true = klijent zna da se restartuje cijela aplikacija (Electron sa novim main.js/preload.js); inače se samo reloaduje stranica. */
   canRestart: boolean;
 }
@@ -75,6 +77,7 @@ export function parseBeacon(sp: URLSearchParams): KioskReport | null {
     client: sp.get('u') === 'e' ? 'electron' : 'chrome',
     pageAgeSec: Number.isFinite(age) && age >= 0 ? Math.min(Math.round(age), 30 * 86_400) : 0,
     err: clean(sp.get('e'), 80),
+    dataAgeSec: Number.isFinite(Number(sp.get('d'))) && sp.get('d') !== null && sp.get('d') !== '' ? Math.max(-1, Math.min(Math.round(Number(sp.get('d'))), 30 * 86_400)) : -1,
     canRestart: sp.get('r') === '1',
   };
 }
@@ -116,6 +119,8 @@ export function beaconQuery(): string {
     q.set('b', getClientBuild());
     q.set('u', /Electron\//i.test(navigator.userAgent) ? 'e' : 'c');
     q.set('a', String(Math.round(performance.now() / 1000)));
+    const lastData = (window as unknown as { __fidsLastDataAt?: number }).__fidsLastDataAt;
+    if (typeof lastData === 'number') q.set('d', String(Math.max(0, Math.round((Date.now() - lastData) / 1000))));
     if (typeof (window as unknown as { electronAPI?: { restartApp?: unknown } }).electronAPI?.restartApp === 'function') q.set('r', '1');
     const e = lastClientError();
     if (e) q.set('e', e);

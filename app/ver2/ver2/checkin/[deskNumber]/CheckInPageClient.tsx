@@ -1653,6 +1653,7 @@ useEffect(() => {
               height={20}
               unoptimized
               className="inline-block"
+              onError={(e) => { e.currentTarget.style.display = 'none'; }}
             />
             <a
               href="mailto:alen.vocanec@apm.co.me"

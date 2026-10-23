@@ -232,6 +232,29 @@ export default function AdminHealthPage() {
     }
   }, []);
 
+  // Jedan klik za sve monitore koji su zaglavljeni (razlika prema bazi ili zastarjeli podaci). Trošak: jedna Ably poruka po monitoru.
+  const sendRestartMany = useCallback(async (targets: KioskInfo[]) => {
+    if (!targets.length) return;
+    const names = targets.map(k => `${k.id} (${k.canRestart ? 'restart' : 'reload'})`).join(', ');
+    if (!window.confirm(`Poslati komandu na ${targets.length} monitor(a)?\n\n${names}`)) return;
+    const at = Date.now();
+    setCmds(p => { const n = { ...p }; targets.forEach(k => { n[k.id] = { status: 'sending', at }; }); return n; });
+    for (const k of targets) {
+      try {
+        const res = await fetch('/api/admin/kiosk-command', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: k.id, cmd: 'restart' }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j?.error || `HTTP ${res.status}`);
+        setCmds(p => ({ ...p, [k.id]: { status: 'sent', at: Date.now() } }));
+      } catch (e) {
+        setCmds(p => ({ ...p, [k.id]: { status: 'error', at: Date.now(), msg: e instanceof Error ? e.message : 'greška' } }));
+      }
+    }
+    setTimeout(() => fetchHealthRef.current(), 25_000);
+    setTimeout(() => fetchHealthRef.current(), 60_000);
+  }, []);
+
   const fetchHealth = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -436,18 +459,38 @@ export default function AdminHealthPage() {
             <Panel t={t} title="Monitori" icon={<Monitor size={16} />}
               tone={c.kiosks.some(k => k.status === 'silent') ? 'bad' : c.kiosks.some(k => k.status === 'mismatch') ? 'warn' : 'ok'}
               right={<span className={`text-xs ${t.sub}`}>javljaju se uz svaku provjeru (~5 min) · verzija: <span className="font-mono">{data.system.build.slice(0, 7)}</span></span>}>
+              {c.kiosks.length > 0 && (() => {
+                const cnt = (s: string) => c.kiosks.filter(k => k.status === s).length;
+                const fixable = c.kiosks.filter(k => k.status === 'mismatch' || k.status === 'stale');
+                return (
+                  <div className={`mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs ${t.sub}`}>
+                    <span>Ukupno: <b className={t.text}>{c.kiosks.length}</b></span>
+                    <span>ok: <b className="text-emerald-500">{cnt('ok')}</b></span>
+                    {cnt('silent') > 0 && <span>ne javlja se: <b className="text-red-500">{cnt('silent')}</b></span>}
+                    {cnt('mismatch') > 0 && <span>razlika: <b className="text-amber-500">{cnt('mismatch')}</b></span>}
+                    {cnt('stale') > 0 && <span>zastarjeli podaci: <b className="text-amber-500">{cnt('stale')}</b></span>}
+                    {cnt('night') > 0 && <span>noć: <b className={t.text}>{cnt('night')}</b></span>}
+                    {fixable.length > 0 && (
+                      <button type="button" onClick={() => sendRestartMany(fixable)}
+                        className={`ml-auto rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 ${t.btn}`}>
+                        Restart problematičnih ({fixable.length})
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
               {c.kiosks.length === 0 ? (
                 <p className={`py-2 text-sm ${t.sub}`}>Još nijedan monitor nije javio status. Javljaju se čim učitaju ovu verziju aplikacije (nakon reload-a ili sljedećeg swap-a).</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className={t.faint}>
-                      <tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Stanje</th><th className="pr-3 font-medium">Prikazuje</th><th className="pr-3 font-medium">Zadnji put</th><th className="pr-3 font-medium">Klijent</th><th className="pr-3 font-medium">Verzija</th><th className="pr-3 font-medium">Greška</th><th className="font-medium">Akcija</th></tr>
+                      <tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Stanje</th><th className="pr-3 font-medium">Prikazuje</th><th className="pr-3 font-medium">Zadnji put</th><th className="pr-3 font-medium">Podaci</th><th className="pr-3 font-medium">Klijent</th><th className="pr-3 font-medium">Verzija</th><th className="pr-3 font-medium">Greška</th><th className="font-medium">Akcija</th></tr>
                     </thead>
                     <tbody>
                       {c.kiosks.map(k => {
-                        const color = k.status === 'silent' ? 'text-red-500' : k.status === 'mismatch' ? 'text-amber-500' : k.status === 'night' ? t.sub : 'text-emerald-500';
-                        const label = k.status === 'silent' ? 'ne javlja se' : k.status === 'mismatch' ? 'razlika' : k.status === 'night' ? 'noć' : 'ok';
+                        const color = k.status === 'silent' ? 'text-red-500' : k.status === 'mismatch' || k.status === 'stale' ? 'text-amber-500' : k.status === 'night' ? t.sub : 'text-emerald-500';
+                        const label = k.status === 'silent' ? 'ne javlja se' : k.status === 'mismatch' ? 'razlika' : k.status === 'stale' ? 'zastarjeli podaci' : k.status === 'night' ? 'noć' : 'ok';
                         const ago = k.ageSec < 90 ? `${k.ageSec} s` : k.ageSec < 5400 ? `${Math.round(k.ageSec / 60)} min` : fmtMinutes(Math.round(k.ageSec / 60));
                         return (
                           <tr key={k.id} className={`border-t ${t.row}`}>
@@ -455,6 +498,7 @@ export default function AdminHealthPage() {
                             <td className={`pr-3 font-semibold ${color}`}>{label}</td>
                             <td className="pr-3">{k.view === 'open' ? (k.flight || 'otvoren') : k.view}{k.expected ? <span className="text-amber-500"> (treba {k.expected})</span> : null}</td>
                             <td className="pr-3 tabular-nums">prije {ago}</td>
+                            <td className={`pr-3 tabular-nums ${k.status === 'stale' ? 'text-amber-500' : ''}`}>{k.dataAgeMin === null ? '—' : k.dataAgeMin < 1 ? '<1 min' : `${k.dataAgeMin} min`}</td>
                             <td className="pr-3">{k.client === 'electron' ? 'Electron' : 'Chrome'}</td>
                             <td className={`pr-3 font-mono ${k.buildCurrent ? '' : 'text-amber-500'}`}>{k.build ? k.build.slice(0, 7) : '—'}{k.buildCurrent ? '' : ' ↻'}</td>
                             <td className={`max-w-[18rem] truncate pr-3 ${k.err ? 'text-red-400' : t.faint}`} title={k.err}>{k.err || '—'}</td>

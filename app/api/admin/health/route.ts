@@ -248,6 +248,11 @@ function buildIssues(c: HealthResponse['checks'], night: boolean): HealthIssue[]
     const names = mism.slice(0, 6).map((k) => `${k.id} (prikazuje ${k.view === 'open' ? k.flight || '?' : k.view}, treba ${k.expected})`).join('; ');
     out.push({ severity: 'warn', title: `${mism.length} monitor(a) prikazuje drugo od onoga što piše u bazi: ${names}`, hint: 'Dodjela postoji duže nego što je monitor to javio — monitor je vjerovatno propustio poruku. Sam bi trebalo da se ispravi pri sljedećoj provjeri.' });
   }
+  const stale = kiosks.filter((k) => k.status === 'stale');
+  if (stale.length) {
+    const names = stale.slice(0, 6).map((k) => `${k.id} (podaci stari ${k.dataAgeMin} min)`).join(', ');
+    out.push({ severity: 'warn', title: `${stale.length} monitor(a) ima zastarjele podatke o letovima: ${names}`, hint: 'Monitor se javlja, ali već duže nije dobio nove podatke — prikaz je vjerovatno zaglavljen. Pošalji Restart/Reload iz kartice Monitori.' });
+  }
   const oldBuild = kiosks.filter((k) => !k.buildCurrent && k.status !== 'silent' && k.status !== 'night');
   if (oldBuild.length) out.push({ severity: 'info', title: `${oldBuild.length} monitor(a) na staroj verziji`, hint: 'Osvježit će se sama čim ekran bude idle (ili najkasnije oko 04:00).' });
   if (night) out.push({ severity: 'info', title: 'Noćni režim je aktivan', hint: 'Automatska osvježavanja kiosaka i admin telefona su pauzirana.' });

@@ -8,7 +8,9 @@ export const KIOSK_SILENT_AFTER_MIN = 17;   // reconcile je svakih ~5 min; ~1 od
 export const KIOSK_DAY_GRACE_MIN = 15;      // poslije kraja noći kiosci se javljaju čim se Ably ponovo otvori
 export const KIOSK_FORGET_AFTER_DAYS = 14;  // unosi starije od ovoga se brišu iz hash-a
 
-export type KioskStatus = 'ok' | 'silent' | 'mismatch' | 'night';
+export const KIOSK_STALE_DATA_MIN = 20;     // podaci o letovima stariji od ovoga (a monitor se javlja) = zaglavljen prikaz
+
+export type KioskStatus = 'ok' | 'silent' | 'mismatch' | 'stale' | 'night';
 
 export interface KioskInfo {
   id: string;
@@ -23,6 +25,8 @@ export interface KioskInfo {
   /** Starost stranice (min) u trenutku izvještaja. */
   pageAgeMin: number;
   err: string;
+  /** Starost podataka o letovima u min (u trenutku izvještaja); null = nije poznato. */
+  dataAgeMin: number | null;
   /** true = dugme šalje restart cijele aplikacije; false = samo reload stranice. */
   canRestart: boolean;
   /** Za 'mismatch': šta piše u bazi. */
@@ -70,15 +74,16 @@ export function classifyKiosks(
           }
         }
       }
+      if (status === 'ok' && typeof k.dataAgeSec === 'number' && k.dataAgeSec >= KIOSK_STALE_DATA_MIN * 60) status = 'stale';
     }
 
     return {
       id: k.id, status, view: k.view, flight: k.flight, client: k.client, build: k.build, buildCurrent,
-      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, canRestart: !!k.canRestart, ...(expected ? { expected } : {}),
+      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, dataAgeMin: typeof k.dataAgeSec === 'number' && k.dataAgeSec >= 0 ? Math.round(k.dataAgeSec / 60) : null, canRestart: !!k.canRestart, ...(expected ? { expected } : {}),
     };
   });
 
-  const rank: Record<KioskStatus, number> = { silent: 0, mismatch: 1, ok: 2, night: 3 };
+  const rank: Record<KioskStatus, number> = { silent: 0, mismatch: 1, stale: 2, ok: 3, night: 4 };
   return out.sort((a, b) => rank[a.status] - rank[b.status] || a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
 

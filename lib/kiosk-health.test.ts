@@ -5,7 +5,7 @@ import { dailyJitterMinutes, inDailyWindow } from '@/hooks/useKioskSupervisor';
 
 const NOW = 1_800_000_000_000;
 const k = (o: Partial<StoredKiosk>): StoredKiosk => ({
-  id: 'checkin-4', view: 'idle', flight: '', build: 'B1', client: 'chrome', pageAgeSec: 3600, err: '', canRestart: false, seen: NOW - 60_000, ...o,
+  id: 'checkin-4', view: 'idle', flight: '', build: 'B1', client: 'chrome', pageAgeSec: 3600, err: '', dataAgeSec: -1, canRestart: false, seen: NOW - 60_000, ...o,
 });
 const base = { now: NOW, night: false, minutesSinceDayStart: 600, currentBuild: 'B1' };
 const open = (o: Partial<OpenTruth>): OpenTruth => ({ type: 'desk', resourceId: '4', flightNumber: 'JU681', openSinceMinutesAgo: 30, ...o });
@@ -36,6 +36,12 @@ describe('classifyKiosks', () => {
   it('trka: dodjela otvorena TEK prije izvještaja nije mismatch', () => {
     expect(classifyKiosks([k({ view: 'idle' })], [open({ openSinceMinutesAgo: 1 })], base)[0].status).toBe('ok');
     expect(classifyKiosks([k({ view: 'idle', seen: NOW - 5 * 60_000 })], [open({ openSinceMinutesAgo: 6 })], base)[0].status).toBe('ok');
+  });
+  it('monitor koji se javlja, a podaci o letovima su stariji od 20 min = stale; svjež ili nepoznat = ok', () => {
+    expect(classifyKiosks([k({ dataAgeSec: 21 * 60 })], [], base)[0].status).toBe('stale');
+    expect(classifyKiosks([k({ dataAgeSec: 21 * 60 })], [], base)[0].dataAgeMin).toBe(21);
+    expect(classifyKiosks([k({ dataAgeSec: 120 })], [], base)[0].status).toBe('ok');
+    expect(classifyKiosks([k({ dataAgeSec: -1 })], [], base)[0].dataAgeMin).toBeNull();
   });
   it('loading nikad nije mismatch; gate-ovi se uparuju sa gate dodjelama', () => {
     expect(classifyKiosks([k({ view: 'loading' })], [open({})], base)[0].status).toBe('ok');
