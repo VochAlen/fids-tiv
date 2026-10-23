@@ -5,7 +5,7 @@ import { dailyJitterMinutes, inDailyWindow } from '@/hooks/useKioskSupervisor';
 
 const NOW = 1_800_000_000_000;
 const k = (o: Partial<StoredKiosk>): StoredKiosk => ({
-  id: 'checkin-4', view: 'idle', flight: '', build: 'B1', client: 'chrome', pageAgeSec: 3600, err: '', seen: NOW - 60_000, ...o,
+  id: 'checkin-4', view: 'idle', flight: '', build: 'B1', client: 'chrome', pageAgeSec: 3600, err: '', canRestart: false, seen: NOW - 60_000, ...o,
 });
 const base = { now: NOW, night: false, minutesSinceDayStart: 600, currentBuild: 'B1' };
 const open = (o: Partial<OpenTruth>): OpenTruth => ({ type: 'desk', resourceId: '4', flightNumber: 'JU681', openSinceMinutesAgo: 30, ...o });

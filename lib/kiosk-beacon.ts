@@ -7,7 +7,22 @@
 // Ovaj fajl: zajednički tipovi + validacija parametara (server) + stanje i sastavljanje upita (klijent).
 
 export const KIOSK_HASH_KEY = 'fids:kiosks';
+/**
+ * Daljinske komande idu na POSTOJEĆI Ably kanal 'flights:combined' pod VLASTITIM nazivom događaja. Svi kiosk klijenti već
+ * slušaju taj kanal samo za događaj 'update' (filter po nazivu), pa komandu ignorišu — bez novog kanala, bez promjene
+ * Ably capability-ja i bez ikakvog periodičnog troška: trošak nastaje samo pri kliku (jedna poruka).
+ */
+export const KIOSK_CMD_CHANNEL = 'flights:combined';
+export const KIOSK_CMD_EVENT = 'kiosk-cmd';
 
+export interface KioskCommand {
+  /** Id ciljanog monitora (npr. 'checkin-4'). */
+  id: string;
+  cmd: 'restart';
+  /** Serverski sat (ms) u trenutku slanja — kiosk ignoriše komande starije od 2 min. */
+  ts: number;
+  nonce: string;
+}
 export type KioskView = 'loading' | 'idle' | 'open' | 'closed' | 'other';
 export type KioskClient = 'electron' | 'chrome';
 
@@ -15,6 +30,10 @@ const VIEWS: readonly KioskView[] = ['loading', 'idle', 'open', 'closed', 'other
 // Dozvoljeni prefiksi i oblik id-a: ograničava prostor ključeva (endpoint je javan, neautentifikovan).
 const ID_RE = /^(checkin|gate|board|combined|departures|split)(-[a-z0-9]{1,6})?$/;
 const FLIGHT_RE = /^[A-Z0-9]{0,8}$/;
+
+export function isValidKioskId(id: string): boolean {
+  return ID_RE.test(id);
+}
 
 export interface KioskReport {
   id: string;
@@ -26,6 +45,8 @@ export interface KioskReport {
   pageAgeSec: number;
   /** Zadnja klijentska greška (kratko), '' ako nema. */
   err: string;
+  /** true = klijent zna da se restartuje cijela aplikacija (Electron sa novim main.js/preload.js); inače se samo reloaduje stranica. */
+  canRestart: boolean;
 }
 
 export interface StoredKiosk extends KioskReport {
@@ -54,6 +75,7 @@ export function parseBeacon(sp: URLSearchParams): KioskReport | null {
     client: sp.get('u') === 'e' ? 'electron' : 'chrome',
     pageAgeSec: Number.isFinite(age) && age >= 0 ? Math.min(Math.round(age), 30 * 86_400) : 0,
     err: clean(sp.get('e'), 80),
+    canRestart: sp.get('r') === '1',
   };
 }
 
@@ -94,6 +116,7 @@ export function beaconQuery(): string {
     q.set('b', getClientBuild());
     q.set('u', /Electron\//i.test(navigator.userAgent) ? 'e' : 'c');
     q.set('a', String(Math.round(performance.now() / 1000)));
+    if (typeof (window as unknown as { electronAPI?: { restartApp?: unknown } }).electronAPI?.restartApp === 'function') q.set('r', '1');
     const e = lastClientError();
     if (e) q.set('e', e);
     return q.toString();

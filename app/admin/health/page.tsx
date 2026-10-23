@@ -13,7 +13,7 @@ import {
   Activity, AlertTriangle, ArrowLeft, Brain, Check, CheckCircle2, Clock, Copy, Database, Info,
   ListChecks, Monitor, Moon, Plane, RefreshCw, Server, Sun, XCircle,
 } from 'lucide-react';
-import type { HealthResponse, HealthIssue, LearningKindSummary } from '@/lib/health-types';
+import type { HealthResponse, HealthIssue, LearningKindSummary, KioskInfo } from '@/lib/health-types';
 
 const HISTORY_MAX = 30;
 const REFRESH_OPTIONS: Array<{ label: string; ms: number }> = [
@@ -209,6 +209,30 @@ export default function AdminHealthPage() {
     });
   };
 
+  // Daljinski restart monitora (dugme u tabeli "Monitori"): stanje po id-u monitora.
+  const [cmds, setCmds] = useState<Record<string, { status: 'sending' | 'sent' | 'error'; at: number; msg?: string }>>({});
+  const fetchHealthRef = useRef<() => void>(() => {});
+
+  const sendRestart = useCallback(async (k: KioskInfo, isNight: boolean) => {
+    const what = k.canRestart ? 'Restartovati aplikaciju na' : 'Ponovo učitati stranicu na';
+    const note = isNight ? '\n\nNapomena: noćni režim je aktivan — monitor je možda isključen iz realtime veze i neće primiti komandu.' : '';
+    if (!window.confirm(`${what} monitoru ${k.id}?${note}`)) return;
+    setCmds(p => ({ ...p, [k.id]: { status: 'sending', at: Date.now() } }));
+    try {
+      const res = await fetch('/api/admin/kiosk-command', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: k.id, cmd: 'restart' }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `HTTP ${res.status}`);
+      setCmds(p => ({ ...p, [k.id]: { status: 'sent', at: Date.now() } }));
+      // monitor se nakon restarta odmah javlja — osvježi pregled da se potvrda vidi bez čekanja
+      setTimeout(() => fetchHealthRef.current(), 25_000);
+      setTimeout(() => fetchHealthRef.current(), 60_000);
+    } catch (e) {
+      setCmds(p => ({ ...p, [k.id]: { status: 'error', at: Date.now(), msg: e instanceof Error ? e.message : 'greška' } }));
+    }
+  }, []);
+
   const fetchHealth = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -230,6 +254,7 @@ export default function AdminHealthPage() {
     }
   }, []);
 
+  useEffect(() => { fetchHealthRef.current = fetchHealth; }, [fetchHealth]);
   useEffect(() => { fetchHealth(); }, [fetchHealth]);
 
   useEffect(() => {
@@ -418,7 +443,7 @@ export default function AdminHealthPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className={t.faint}>
-                      <tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Stanje</th><th className="pr-3 font-medium">Prikazuje</th><th className="pr-3 font-medium">Zadnji put</th><th className="pr-3 font-medium">Klijent</th><th className="pr-3 font-medium">Verzija</th><th className="font-medium">Greška</th></tr>
+                      <tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Stanje</th><th className="pr-3 font-medium">Prikazuje</th><th className="pr-3 font-medium">Zadnji put</th><th className="pr-3 font-medium">Klijent</th><th className="pr-3 font-medium">Verzija</th><th className="pr-3 font-medium">Greška</th><th className="font-medium">Akcija</th></tr>
                     </thead>
                     <tbody>
                       {c.kiosks.map(k => {
@@ -433,7 +458,28 @@ export default function AdminHealthPage() {
                             <td className="pr-3 tabular-nums">prije {ago}</td>
                             <td className="pr-3">{k.client === 'electron' ? 'Electron' : 'Chrome'}</td>
                             <td className={`pr-3 font-mono ${k.buildCurrent ? '' : 'text-amber-500'}`}>{k.build ? k.build.slice(0, 7) : '—'}{k.buildCurrent ? '' : ' ↻'}</td>
-                            <td className={`max-w-[18rem] truncate ${k.err ? 'text-red-400' : t.faint}`} title={k.err}>{k.err || '—'}</td>
+                            <td className={`max-w-[18rem] truncate pr-3 ${k.err ? 'text-red-400' : t.faint}`} title={k.err}>{k.err || '—'}</td>
+                            <td className="whitespace-nowrap">
+                              {(() => {
+                                const cmd = cmds[k.id];
+                                const seenAt = Date.parse(data.checkedAt) - k.ageSec * 1000;
+                                const confirmed = !!cmd && cmd.status === 'sent' && seenAt > cmd.at && k.pageAgeMin < 2;
+                                const waiting = !!cmd && cmd.status === 'sent' && !confirmed;
+                                const noReply = waiting && Date.parse(data.checkedAt) - cmd!.at > 3 * 60_000;
+                                return (
+                                  <span className="flex items-center gap-2">
+                                    <button type="button" disabled={cmd?.status === 'sending'} onClick={() => sendRestart(k, data.system.isNight)}
+                                      className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 disabled:opacity-50 ${t.btn}`}>
+                                      {cmd?.status === 'sending' ? 'šalje…' : k.canRestart ? 'Restart' : 'Reload'}
+                                    </button>
+                                    {confirmed && <span className="text-emerald-500">✓ ponovo pokrenut</span>}
+                                    {waiting && !noReply && <span className={t.sub}>poslano…</span>}
+                                    {noReply && <span className="text-amber-500">bez odgovora</span>}
+                                    {cmd?.status === 'error' && <span className="text-red-500" title={cmd.msg}>nije poslano</span>}
+                                  </span>
+                                );
+                              })()}
+                            </td>
                           </tr>
                         );
                       })}

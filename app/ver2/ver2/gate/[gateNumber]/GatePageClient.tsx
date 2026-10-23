@@ -737,6 +737,7 @@ const effectiveStatus = useMemo(() => {
   // 2026-10-23: nadzornik kioska (beacon prema /admin/health, dnevni samoreload ~04:00, osvježavanje poslije deploya).
   useKioskSupervisor({
     id: `gate-${gateNumber}`,
+    role: 'gate',
     view: loading || !isSynced ? 'loading' : display.flight ? 'open' : display.manualGateStatus === 'closed' ? 'closed' : 'idle',
     flight: display.flight?.FlightNumber || '',
     reload: () => window.location.reload(),

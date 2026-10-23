@@ -1376,6 +1376,7 @@ useEffect(() => {
   // 2026-10-23: nadzornik kioska (beacon prema /admin/health, dnevni samoreload ~04:00, osvježavanje poslije deploya).
   useKioskSupervisor({
     id: `checkin-${deskNumberParam}`,
+    role: 'checkin',
     view: loading || (!isSynced && !warm) ? 'loading' : isOpen ? 'open' : hasFlight ? 'closed' : 'idle',
     flight: assignment.flightNumber || '',
     reload: reloadWithReason,

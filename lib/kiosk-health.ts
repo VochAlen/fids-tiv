@@ -23,6 +23,8 @@ export interface KioskInfo {
   /** Starost stranice (min) u trenutku izvještaja. */
   pageAgeMin: number;
   err: string;
+  /** true = dugme šalje restart cijele aplikacije; false = samo reload stranice. */
+  canRestart: boolean;
   /** Za 'mismatch': šta piše u bazi. */
   expected?: string;
 }
@@ -72,7 +74,7 @@ export function classifyKiosks(
 
     return {
       id: k.id, status, view: k.view, flight: k.flight, client: k.client, build: k.build, buildCurrent,
-      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, ...(expected ? { expected } : {}),
+      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, canRestart: !!k.canRestart, ...(expected ? { expected } : {}),
     };
   });
 
