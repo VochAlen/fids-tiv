@@ -180,6 +180,17 @@ const WARM_CACHE_KEY = 'assign_warm_cache_v1';
 const WARM_MAX_AGE_MS = 10 * 60_000;
 const WARM_MAX_SHOW_MS = 20_000;
 
+// Dijagnostika (samo check-in stranice imaju ovu funkciju — vidi inline skriptu u app/layout.tsx; vidljiva uz ?diag=1).
+function diag(msg: string) {
+  try { (window as unknown as { __CHECKIN_DIAG_ADD__?: (t: string) => void }).__CHECKIN_DIAG_ADD__?.(msg); } catch { /* ignore */ }
+}
+
+// 2026-10-23: poslije NEUSPJELOG snapshota (HTTP greška, timeout, ili server javi ok:false jer Redis nije pročitan)
+// ponovi brzo sa backoff-om (5 s → 60 s) umjesto da čekaš sljedeći 5-min reconcile. Ranije je jedan neuspio
+// pokušaj (npr. hladan start / Redis blip) ostavljao monitor na starom stanju do 5 min, iako je Ably 'connected'.
+const FAIL_RETRY_START_MS = 5_000;
+const FAIL_RETRY_MAX_MS = 60_000;
+
 export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?: boolean }) {
   const warmStart = !!opts?.warmStart;
   const [deskEntries, setDeskEntries] = useState<Record<string, AssignmentEntry>>({});
@@ -226,6 +237,10 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   // ispravno podnosi i da dva odgovora stignu van reda, pa ovo ne
   // mijenja nikakvu postojeću logiku zatvaranja/otvaranja šaltera.
   const inFlightRef = useRef(false);
+  const failRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const failRetryDelayRef = useRef(FAIL_RETRY_START_MS);
+  const fetchSnapshotRef = useRef<() => void>(() => {});
+  const [channelDegraded, setChannelDegraded] = useState(false);
 
   // NOVO (2026-10-12): kad je zadnji put ključ dirnut Ably porukom (ms). fetchSnapshot() ovo koristi da
   // zakasnjeli snapshot (zatražen PRIJE poruke) ne obriše svježe stigao unos — vidi komentar uz
@@ -255,7 +270,6 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setDeskEntries(prev => (Object.keys(prev).length ? prev : c.desk!));
       setGateEntries(prev => (Object.keys(prev).length ? prev : c.gate!));
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setWarm(true);
     } catch { /* bez keša → obično "Loading" */ }
   }, [warmStart, role]);
@@ -285,6 +299,20 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   // stranice (npr. brzi "zatvoren u 20s" watchdog u
   // CheckInPageClient.tsx), bez ponovnog kreiranja intervala pri svakom
   // re-renderu.
+  const scheduleFailRetry = useCallback((why: string) => {
+    if (!mountedRef.current) return;
+    diag(`assignments ${why} — ponovni pokušaj`);
+    if (failRetryTimerRef.current) clearTimeout(failRetryTimerRef.current);
+    const delay = failRetryDelayRef.current;
+    failRetryDelayRef.current = Math.min(delay * 2, FAIL_RETRY_MAX_MS);
+    failRetryTimerRef.current = setTimeout(() => {
+      failRetryTimerRef.current = null;
+      // sakriven prozor: resync pri povratku vidljivosti; noću: nema pollanja (namjerno gašenje)
+      if (!mountedRef.current || document.hidden || isNightHours()) return;
+      fetchSnapshotRef.current();
+    }, delay);
+  }, []);
+
   const fetchSnapshot = useCallback(() => {
     // Preskoči ako je prethodni poziv i dalje u letu (vidi komentar uz
     // inFlightRef iznad) — izbjegava gomilanje paralelnih zahtjeva ka
@@ -331,7 +359,8 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
         // bio privremeno nedostupan. Tretiraj identično kao mrežni
         // fetch fail ispod (catch): zadrži trenutno stanje, probaj
         // ponovo na sledećem ciklusu (fallback poll / 3min reconcile).
-        if (data.ok === false) return;
+        if (data.ok === false) { scheduleFailRetry('server ok:false (Redis nije pročitan)'); return; }
+        failRetryDelayRef.current = FAIL_RETRY_START_MS;
         // Uspješan round-trip — dotakni sync bez obzira da li je
         // sadržaj promijenjen (dokazuje da fetch/mreža/API rade).
         lastSyncAtRef.current = Date.now();
@@ -343,14 +372,17 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
         setIsSynced(true);
         setSyncTick(t => t + 1);
       })
-      .catch(() => { /* ostani na trenutnom stanju (uklj. AbortError od
-        timeout-a iznad) — NE dodirujemo lastSyncAtRef ovdje: neuspio
-        fetch NIJE znak života. */ })
+      .catch((err: unknown) => {
+        // ostani na trenutnom stanju (uklj. AbortError od timeout-a iznad) — NE dodirujemo lastSyncAtRef:
+        // neuspio fetch NIJE znak života. Ali probaj ponovo uskoro (backoff).
+        scheduleFailRetry(`snapshot: ${(err as Error)?.message || err}`);
+      })
       .finally(() => {
         clearTimeout(timeoutId);
         inFlightRef.current = false;
       });
-  }, []);
+  }, [scheduleFailRetry]);
+  useEffect(() => { fetchSnapshotRef.current = fetchSnapshot; }, [fetchSnapshot]);
 
   // NOVO (2026-10-16): nezavisna provjera JEDNOG ključa direktno u bazi (bez ikakvog keša) —
   // vidi app/api/test/assignment-truth/route.ts i applyTruth u lib/assignment-merge.ts.
@@ -482,8 +514,51 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     deskChannel?.subscribe(onDeskMsg)?.catch(() => {});
     gateChannel?.subscribe(onGateMsg)?.catch(() => {});
 
+    // 2026-10-23: nadzor STANJA KANALA (do sada se pratilo samo stanje konekcije). Veza može biti 'connected', a
+    // kanal pao/ponovo se pridružio uz prekid kontinuiteta (resumed=false) → poruke su propuštene, a nijedan
+    // postojeći mehanizam to nije vidio (fallback poll radi samo kad konekcija NIJE connected). Besplatno: nema
+    // dodatnih zahtjeva dok je sve u redu.
+    const chans: Array<{ ch: Ably.RealtimeChannel; name: string; attachedOnce: boolean }> = [];
+    if (deskChannel) chans.push({ ch: deskChannel, name: 'desks', attachedOnce: false });
+    if (gateChannel) chans.push({ ch: gateChannel, name: 'gates', attachedOnce: false });
+    const degradedSet = new Set<string>();
+    const reattachTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const stateHandlers = chans.map(c => {
+      const handler = (change: Ably.ChannelStateChange) => {
+        if (!mountedRef.current) return;
+        const cur = change.current;
+        if (cur === 'attached') {
+          if (degradedSet.delete(c.name) && degradedSet.size === 0) setChannelDegraded(false);
+          // ponovno pridruživanje (ne prvo) ili 'update' bez nastavka (resumed=false) = moguće propuštene poruke
+          if ((c.attachedOnce && !change.resumed) || (change.previous === 'attached' && !change.resumed)) {
+            diag(`kanal ${c.name}: prekid kontinuiteta — resync`);
+            fetchSnapshot();
+          }
+          c.attachedOnce = true;
+          return;
+        }
+        // Noću se konekcija namjerno gasi pa kanali prelaze u 'detached' — to NIJE kvar.
+        if (ably.connection.state !== 'connected') return;
+        if (cur === 'failed' || cur === 'suspended' || cur === 'detached') {
+          diag(`kanal ${c.name}: ${cur}${change.reason ? ' — ' + (change.reason.message || change.reason.code) : ''}`);
+          degradedSet.add(c.name);
+          setChannelDegraded(true);
+          if (cur === 'failed' || cur === 'detached') {
+            reattachTimers.push(setTimeout(() => {
+              if (mountedRef.current && ably.connection.state === 'connected') c.ch.attach().catch(() => {});
+            }, 5_000));
+          }
+        }
+      };
+      c.ch.on(handler);
+      return handler;
+    });
+
     return () => {
       mountedRef.current = false;
+      if (failRetryTimerRef.current) { clearTimeout(failRetryTimerRef.current); failRetryTimerRef.current = null; }
+      reattachTimers.forEach(clearTimeout);
+      chans.forEach((c, i) => c.ch.off(stateHandlers[i]));
       deskChannel?.unsubscribe(onDeskMsg);
       gateChannel?.unsubscribe(onGateMsg);
       ably.connection.off('connected', onConnected);
@@ -520,7 +595,8 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   // (fiksan razmak) zamijenjen rekurzivnim setTimeout lancem — svaki
   // naredni poziv duplira čekanje, do plafona.
   useEffect(() => {
-    if (connectionState === 'connected' || connectionState === 'night-sleep') return;
+    // 2026-10-23: i kad je konekcija 'connected', ali je KANAL pao (channelDegraded) → fallback poll radi
+    if (connectionState === 'night-sleep' || (connectionState === 'connected' && !channelDegraded)) return;
 
     let cancelled = false;
     let delay = FALLBACK_POLL_INTERVAL_MS;
@@ -537,7 +613,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     timeoutId = setTimeout(tick, delay);
 
     return () => { cancelled = true; clearTimeout(timeoutId); };
-  }, [connectionState, fetchSnapshot]);
+  }, [connectionState, channelDegraded, fetchSnapshot]);
 
   // ── 4. Periodičan "reconciliation" fetch — RADI UVIJEK, nezavisno
   // od connectionState-a (vidi opširan komentar uz
