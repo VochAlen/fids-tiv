@@ -92,7 +92,12 @@ export interface SystemInfo {
   memoryMb: number;
   airportTime: string;
   isNight: boolean;
+  /** Identifikator deploya (lib/build-id.ts). */
+  build: string;
 }
+
+import type { KioskInfo } from '@/lib/kiosk-health';
+export type { KioskInfo };
 
 export interface HealthResponse {
   status: 'healthy' | 'degraded' | 'down';
@@ -105,6 +110,7 @@ export interface HealthResponse {
     flightData: FlightDataCheck;
     assignments: AssignmentsCheck;
     learning: LearningCheck | null;
+    kiosks: KioskInfo[];
   };
   system: SystemInfo;
 }

@@ -22,6 +22,7 @@ import Image from 'next/image';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
+import { useKioskSupervisor } from '@/hooks/useKioskSupervisor';
 
 // ------------------------------------------------------------
 // Konstante
@@ -733,6 +734,13 @@ const effectiveStatus = useMemo(() => {
     const id = setTimeout(() => verifyKey('gate', gateNumber), 4_000);
     return () => clearTimeout(id);
   }, [myGateSig, gateNumber, verifyKey]);
+  // 2026-10-23: nadzornik kioska (beacon prema /admin/health, dnevni samoreload ~04:00, osvježavanje poslije deploya).
+  useKioskSupervisor({
+    id: `gate-${gateNumber}`,
+    view: loading || !isSynced ? 'loading' : display.flight ? 'open' : display.manualGateStatus === 'closed' ? 'closed' : 'idle',
+    flight: display.flight?.FlightNumber || '',
+    reload: () => window.location.reload(),
+  });
   // ------------------------------------------------------------
   // Weather
   // ------------------------------------------------------------

@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowLeft, Brain, Check, CheckCircle2, Clock, Copy, Database, Info,
-  ListChecks, Moon, Plane, RefreshCw, Server, Sun, XCircle,
+  ListChecks, Monitor, Moon, Plane, RefreshCw, Server, Sun, XCircle,
 } from 'lucide-react';
 import type { HealthResponse, HealthIssue, LearningKindSummary } from '@/lib/health-types';
 
@@ -404,6 +404,41 @@ export default function AdminHealthPage() {
                       ))}
                     </div>
                   ))}
+                </div>
+              )}
+            </Panel>
+
+            {/* Monitori (kiosci) */}
+            <Panel t={t} title="Monitori" icon={<Monitor size={16} />}
+              tone={c.kiosks.some(k => k.status === 'silent') ? 'bad' : c.kiosks.some(k => k.status === 'mismatch') ? 'warn' : 'ok'}
+              right={<span className={`text-xs ${t.sub}`}>javljaju se uz svaku provjeru (~5 min) · verzija: <span className="font-mono">{data.system.build.slice(0, 7)}</span></span>}>
+              {c.kiosks.length === 0 ? (
+                <p className={`py-2 text-sm ${t.sub}`}>Još nijedan monitor nije javio status. Javljaju se čim učitaju ovu verziju aplikacije (nakon reload-a ili sljedećeg swap-a).</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className={t.faint}>
+                      <tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Stanje</th><th className="pr-3 font-medium">Prikazuje</th><th className="pr-3 font-medium">Zadnji put</th><th className="pr-3 font-medium">Klijent</th><th className="pr-3 font-medium">Verzija</th><th className="font-medium">Greška</th></tr>
+                    </thead>
+                    <tbody>
+                      {c.kiosks.map(k => {
+                        const color = k.status === 'silent' ? 'text-red-500' : k.status === 'mismatch' ? 'text-amber-500' : k.status === 'night' ? t.sub : 'text-emerald-500';
+                        const label = k.status === 'silent' ? 'ne javlja se' : k.status === 'mismatch' ? 'razlika' : k.status === 'night' ? 'noć' : 'ok';
+                        const ago = k.ageSec < 90 ? `${k.ageSec} s` : k.ageSec < 5400 ? `${Math.round(k.ageSec / 60)} min` : fmtMinutes(Math.round(k.ageSec / 60));
+                        return (
+                          <tr key={k.id} className={`border-t ${t.row}`}>
+                            <td className="py-1.5 pr-3 font-mono font-semibold">{k.id}</td>
+                            <td className={`pr-3 font-semibold ${color}`}>{label}</td>
+                            <td className="pr-3">{k.view === 'open' ? (k.flight || 'otvoren') : k.view}{k.expected ? <span className="text-amber-500"> (treba {k.expected})</span> : null}</td>
+                            <td className="pr-3 tabular-nums">prije {ago}</td>
+                            <td className="pr-3">{k.client === 'electron' ? 'Electron' : 'Chrome'}</td>
+                            <td className={`pr-3 font-mono ${k.buildCurrent ? '' : 'text-amber-500'}`}>{k.build ? k.build.slice(0, 7) : '—'}{k.buildCurrent ? '' : ' ↻'}</td>
+                            <td className={`max-w-[18rem] truncate ${k.err ? 'text-red-400' : t.faint}`} title={k.err}>{k.err || '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </Panel>

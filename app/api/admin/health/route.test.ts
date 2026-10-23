@@ -8,7 +8,7 @@ const redis = {
   ping: vi.fn(async () => 'PONG'),
   info: vi.fn(async () => '# Server\r\nredis_version:7.2.4\r\nuptime_in_seconds:3600\r\nconnected_clients:3\r\nused_memory:1048576\r\nmaxmemory:2097152\r\nkeyspace_hits:90\r\nkeyspace_misses:10\r\nevicted_keys:0\r\n'),
   dbsize: vi.fn(async () => 42),
-  hgetall: vi.fn(async () => ({})),
+  hgetall: vi.fn(async (_key?: string): Promise<Record<string, string>> => ({})),
   hlen: vi.fn(async () => 7),
 };
 vi.mock('@/lib/redis', () => ({
@@ -74,5 +74,28 @@ describe('GET /api/admin/health', () => {
     const body = await (await GET()).json();
     expect(body.status).toBe('down');
     expect(body.checks.learning).toBeNull();
+  });
+
+  it('monitori: prijavljuje one koji se ne javljaju i one sa razlikom prema bazi, u issues i checks.kiosks', async () => {
+    const now = Date.now();
+    const rec = (o: Record<string, unknown>) => JSON.stringify({ view: 'idle', flight: '', build: 'dev', client: 'chrome', pageAgeSec: 100, err: '', seen: now - 60_000, ...o });
+    redis.hgetall.mockImplementation(async (key?: string): Promise<Record<string, string>> => key === 'fids:kiosks' ? {
+      'checkin-3': rec({ id: 'checkin-3' }),                              // šalter 3 je u bazi otvoren 5 h → razlika
+      'checkin-9': rec({ id: 'checkin-9', seen: now - 40 * 60_000 }),     // ne javlja se 40 min
+      'gate-5': rec({ id: 'gate-5', view: 'open', flight: 'TK1085' }),    // ok
+    } : {});
+    const body = await (await GET()).json();
+    const byId = Object.fromEntries(body.checks.kiosks.map((k: { id: string; status: string }) => [k.id, k.status]));
+    if (body.system.isNight) {
+      expect(Object.values(byId).every(v => v === 'night')).toBe(true); // noću nema alarma zbog tišine
+    } else {
+      expect(byId['checkin-9']).toBe('silent');
+      expect(byId['checkin-3']).toBe('mismatch');
+      expect(byId['gate-5']).toBe('ok');
+      expect(body.issues.some((i: { severity: string; title: string }) => i.severity === 'error' && i.title.includes('checkin-9'))).toBe(true);
+      expect(body.issues.some((i: { severity: string; title: string }) => i.severity === 'warn' && i.title.includes('checkin-3'))).toBe(true);
+    }
+    expect(typeof body.system.build).toBe('string');
+    redis.hgetall.mockImplementation(async () => ({}));
   });
 });

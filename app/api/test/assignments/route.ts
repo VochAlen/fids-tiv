@@ -1,10 +1,23 @@
 // app/api/test/assignments/route.ts
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
+import { BUILD_ID } from '@/lib/build-id';
+import { recordKioskBeacon } from '@/lib/kiosk-beacon-server';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
+  // 2026-10-23: kiosk u HEADER-u x-kiosk šalje kratki "beacon" (k=id&s=stanje&...) — upisuje se u Redis POSLIJE odgovora
+  // (after), pa ne utiče na brzinu ni pouzdanost ove rute. Namjerno header, a ne query: URL ostaje isti za sve, pa CDN
+  // keš (s-maxage=2) i dalje služi više kioska jednim pozivom funkcije (nema dodatnog troška na Vercelu). Zahtjev koji
+  // CDN odgovori iz keša ne izvršava funkciju, pa tada ni beacon — zato je prag "ne javlja se" 17 min, ne 12.
+  try {
+    const hdr = request.headers.get('x-kiosk');
+    if (hdr) {
+      const sp = new URLSearchParams(hdr.slice(0, 400));
+      if (sp.has('k')) after(() => recordKioskBeacon(sp));
+    }
+  } catch { /* beacon je opcionalan */ }
   try {
     const raw = await getRawAssignments();
     const simple = buildSimpleMaps(raw);
@@ -27,6 +40,7 @@ export async function GET() {
         deskEntries: raw.desks,
         gateEntries: raw.gates,
         ok: false,
+        build: BUILD_ID,
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
@@ -39,6 +53,7 @@ export async function GET() {
       gateEntries: raw.gates,
       readAt: raw.readAt,
       ok: true,
+      build: BUILD_ID,
     }, {
       headers: {
         // FIX (KRITIČNO — pravi uzrok prijavljenog "i nakon reload-a let
@@ -67,7 +82,7 @@ export async function GET() {
     // popravljenoj logici) protumačio kao "sve obrisano na serveru".
     // `ok: false` govori klijentu da ovaj odgovor potpuno ignoriše.
     return NextResponse.json(
-      { desks: {}, gates: {}, deskEntries: {}, gateEntries: {}, ok: false },
+      { desks: {}, gates: {}, deskEntries: {}, gateEntries: {}, ok: false, build: BUILD_ID },
       { status: 200, headers: { 'Cache-Control': 'no-store' } }
     );
   }

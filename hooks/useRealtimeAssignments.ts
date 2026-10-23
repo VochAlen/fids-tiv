@@ -91,6 +91,8 @@ type AssignmentsResponse = {
   // pouzdano pročitati stanje (Redis/circuit-breaker problem) — ovaj
   // odgovor NIJE punopravan snapshot i NE SMIJE se koristiti za merge.
   ok?: boolean;
+  /** Identifikator deploya na serveru (lib/build-id.ts) — kiosk se osvježi kad se razlikuje od njegovog. */
+  build?: string;
   /** Sat servera kad je snapshot pročitan iz Redis-a (vidi mergeNewer). */
   readAt?: number;
 };
@@ -98,6 +100,7 @@ type AssignmentsResponse = {
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
 import { noteServerDate } from '@/lib/server-clock';
+import { beaconQuery, noteServerBuild } from '@/lib/kiosk-beacon';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -336,7 +339,10 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     // koji je ispravan za CDN/kioske, ali bez ovoga bi admin panel
     // mogao dobiti stale podatak iz browser HTTP keša pri svakom
     // remount-u (npr. nakon logout/login), umjesto svježeg stanja.
-    fetch('/api/test/assignments', { cache: 'no-store', signal: controller.signal })
+    // Beacon (ko sam i šta prikazujem) putuje uz ISTI zahtjev koji ionako postoji, kao HEADER (ne u URL-u): URL ostaje
+    // identičan za sve kioske, pa Vercel CDN i dalje dijeli odgovor (s-maxage=2) — nema dodatnih poziva ni funkcija.
+    const bq = beaconQuery();
+    fetch('/api/test/assignments', { cache: 'no-store', signal: controller.signal, ...(bq ? { headers: { 'x-kiosk': bq } } : {}) })
       .then(res => {
         // NOVO (po predlogu): eksplicitna provjera HTTP statusa —
         // ranije se `res.json()` pozivao bezuslovno, pa bi npr. 500
@@ -348,6 +354,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
       })
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
+        noteServerBuild(data.build);
         // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
         // lib/assignments-service.ts i AssignmentsResponse iznad):
         // `ok === false` znači server NIJE uspio pouzdano pročitati

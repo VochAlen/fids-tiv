@@ -27,6 +27,7 @@ import {
 import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
+import { useKioskSupervisor } from '@/hooks/useKioskSupervisor';
 // FIX (portovano iz glavnog/polling sistema — potrebno za praznične
 // kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
@@ -1372,6 +1373,14 @@ useEffect(() => {
   //  a) 4 s poslije SVAKE promjene unosa ovog šaltera (poruka stigla → potvrdi u bazi),
   //  b) pri buđenju/fokusu (vidi resync efekat iznad).
   //  Nema periodičnog pollanja — samo događajno (nekoliko poziva dnevno po šalteru).
+  // 2026-10-23: nadzornik kioska (beacon prema /admin/health, dnevni samoreload ~04:00, osvježavanje poslije deploya).
+  useKioskSupervisor({
+    id: `checkin-${deskNumberParam}`,
+    view: loading || (!isSynced && !warm) ? 'loading' : isOpen ? 'open' : hasFlight ? 'closed' : 'idle',
+    flight: assignment.flightNumber || '',
+    reload: reloadWithReason,
+  });
+
   const myEntry = deskEntries[deskNumberParam];
   const mySig = `${myEntry?.status ?? 'x'}:${myEntry?.flightNumber ?? ''}:${myEntry?.seq ?? 0}`;
   useEffect(() => {

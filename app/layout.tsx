@@ -1,3 +1,4 @@
+import { BUILD_ID } from '@/lib/build-id';
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
@@ -207,7 +208,7 @@ export default function RootLayout({
             (pokvaren keš, prekid mreže), watchdog NIKAD ne bi krenuo i stranica bi zauvijek ostala na
             "Loading...". Ovako je dio samog HTML-a i radi bez ijednog JS fajla. (U dev režimu React može
             upisati upozorenje o script tagu — u produkciji ga nema.) */}
-        <script id="checkin-hydration-watchdog" suppressHydrationWarning dangerouslySetInnerHTML={{ __html: CHECKIN_HYDRATION_WATCHDOG_SCRIPT }} />
+        <script id="checkin-hydration-watchdog" suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `window.__BUILD_ID__=${JSON.stringify(BUILD_ID)};` + CHECKIN_HYDRATION_WATCHDOG_SCRIPT }} />
         <ConsoleSuppressor />
         <ServiceWorkerRegistration />
         {children}

@@ -19,6 +19,9 @@ import { getPodgoricaMinutesOfDay, getPodgoricaDateString, isNightHours } from '
 import { LEARN_HASH_KEY, summarizeAccuracy, recentWeekKeys, type LearnKind } from '@/lib/assignment-learning';
 import { EXAMPLES_HASH_KEY } from '@/lib/assignment-model';
 import { decideGate } from '@/lib/learning-gate';
+import { BUILD_ID } from '@/lib/build-id';
+import { KIOSK_HASH_KEY } from '@/lib/kiosk-beacon';
+import { classifyKiosks, parseStoredKiosks, KIOSK_FORGET_AFTER_DAYS, type KioskInfo } from '@/lib/kiosk-health';
 import type {
   HealthIssue, HealthResponse, OpenAssignment, LearningKindSummary, RedisCheck, AblyCheck,
 } from '@/lib/health-types';
@@ -152,6 +155,36 @@ async function checkAssignments(): Promise<HealthResponse['checks']['assignments
   return a;
 }
 
+/** Minuta od kraja noćnog režima (null = noć je). Traži unazad u koracima od 5 min (max 12 h). */
+function minutesSinceDayStart(now: number): number | null {
+  if (isNightHours(new Date(now))) return null;
+  for (let m = 5; m <= 12 * 60; m += 5) {
+    if (isNightHours(new Date(now - m * 60_000))) return m;
+  }
+  return 12 * 60;
+}
+
+async function checkKiosks(redisOk: boolean, open: OpenAssignment[]): Promise<KioskInfo[]> {
+  if (!redisOk) return [];
+  try {
+    const client = getRedisClient();
+    const hash = await client.hgetall(KIOSK_HASH_KEY);
+    const stored = parseStoredKiosks(hash);
+    const now = Date.now();
+    // zaboravi monitore koji se nisu javili 14 dana (ugašeni/preimenovani) — da lista ne raste
+    const old = stored.filter((k) => now - k.seen > KIOSK_FORGET_AFTER_DAYS * 86_400_000).map((k) => k.id);
+    if (old.length) client.hdel(KIOSK_HASH_KEY, ...old).catch(() => {});
+    return classifyKiosks(
+      stored.filter((k) => !old.includes(k.id)),
+      open,
+      { now, night: isNightHours(), minutesSinceDayStart: minutesSinceDayStart(now), currentBuild: BUILD_ID },
+    );
+  } catch (err) {
+    console.error('[admin/health] Kiosks check failed:', err);
+    return [];
+  }
+}
+
 async function checkLearning(redisOk: boolean): Promise<HealthResponse['checks']['learning']> {
   if (!redisOk) return null;
   try {
@@ -175,7 +208,7 @@ async function checkLearning(redisOk: boolean): Promise<HealthResponse['checks']
 
 function buildIssues(c: HealthResponse['checks'], night: boolean): HealthIssue[] {
   const out: HealthIssue[] = [];
-  const { redis, ably, flightData: fd, assignments, learning } = c;
+  const { redis, ably, flightData: fd, assignments, learning, kiosks } = c;
   if (!redis.ok) {
     out.push({
       severity: 'error',
@@ -205,6 +238,18 @@ function buildIssues(c: HealthResponse['checks'], night: boolean): HealthIssue[]
       if (k.distrust) out.push({ severity: 'warn', title: `Učenje (${label}): naučeni šabloni privremeno isključeni`, hint: 'Zadnje 4 sedmice pogađaju jasno lošije od ručnog profila; važi profil dok se ne poprave.' });
     }
   }
+  const silent = kiosks.filter((k) => k.status === 'silent');
+  if (silent.length) {
+    const names = silent.slice(0, 6).map((k) => k.id).join(', ') + (silent.length > 6 ? ` +${silent.length - 6}` : '');
+    out.push({ severity: 'error', title: `${silent.length} monitor(a) se ne javlja: ${names}`, hint: 'Nema izvještaja duže od 17 min. Provjeri da je računar uključen, da aplikacija radi i da ima mreže; ako je tab zaglavljen, restart klijenta.' });
+  }
+  const mism = kiosks.filter((k) => k.status === 'mismatch');
+  if (mism.length) {
+    const names = mism.slice(0, 6).map((k) => `${k.id} (prikazuje ${k.view === 'open' ? k.flight || '?' : k.view}, treba ${k.expected})`).join('; ');
+    out.push({ severity: 'warn', title: `${mism.length} monitor(a) prikazuje drugo od onoga što piše u bazi: ${names}`, hint: 'Dodjela postoji duže nego što je monitor to javio — monitor je vjerovatno propustio poruku. Sam bi trebalo da se ispravi pri sljedećoj provjeri.' });
+  }
+  const oldBuild = kiosks.filter((k) => !k.buildCurrent && k.status !== 'silent' && k.status !== 'night');
+  if (oldBuild.length) out.push({ severity: 'info', title: `${oldBuild.length} monitor(a) na staroj verziji`, hint: 'Osvježit će se sama čim ekran bude idle (ili najkasnije oko 04:00).' });
   if (night) out.push({ severity: 'info', title: 'Noćni režim je aktivan', hint: 'Automatska osvježavanja kiosaka i admin telefona su pauzirana.' });
   const rank = { error: 0, warn: 1, info: 2 } as const;
   return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
@@ -215,11 +260,11 @@ export async function GET() {
   const started = Date.now();
 
   const [redis, ably, flightData, assignments] = await Promise.all([checkRedis(), checkAbly(), checkFlights(), checkAssignments()]);
-  const learning = await checkLearning(redis.ok);
+  const [learning, kiosks] = await Promise.all([checkLearning(redis.ok), checkKiosks(redis.ok, assignments.open)]);
 
   const night = isNightHours();
   const mins = getPodgoricaMinutesOfDay();
-  const checks = { redis, ably, flightData, assignments, learning };
+  const checks = { redis, ably, flightData, assignments, learning, kiosks };
   const issues = buildIssues(checks, night);
   const status: HealthResponse['status'] = !redis.ok ? 'down' : issues.some(i => i.severity !== 'info') ? 'degraded' : 'healthy';
 
@@ -239,6 +284,7 @@ export async function GET() {
       memoryMb: Math.round(process.memoryUsage().rss / 1048576),
       airportTime: `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`,
       isNight: night,
+      build: BUILD_ID,
     },
   };
   return NextResponse.json(body, { status: 200, headers: { 'Cache-Control': 'no-store' } });
