@@ -195,11 +195,10 @@ export default function AdminHealthPage() {
   const [copied, setCopied] = useState(false);
   const inFlight = useRef(false);
 
-  // Tema: isti ključ kao assign-checkin; bez zapisa → prati sistem.
+  // Tema: isti ključ kao assign-checkin; bez zapisa → svijetla (default).
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('theme');
-      setIsDark(stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches);
+      setIsDark(localStorage.getItem('theme') === 'dark');
     } catch { /* ostaje svijetla */ }
   }, []);
   const toggleTheme = () => {
