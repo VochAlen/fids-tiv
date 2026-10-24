@@ -119,7 +119,9 @@ function lastClientError(): string {
     const real = Array.isArray(arr) ? arr.filter((l) => !/ERR: undefined/.test(String(l?.s ?? ''))) : [];
     const last = real.length ? real[real.length - 1] : null;
     if (!last || typeof last.t !== 'number' || Date.now() - last.t > 30 * 60_000) return '';
-    return String(last.s ?? '').replace(/^\d{2}:\d{2}:\d{2}\s+/, '').slice(0, 80);
+    // starost greške na kraju ('[3m]'), da se vidi je li stara (sessionStorage preživi reload) ili se ponavlja
+    const ageMin = Math.max(0, Math.round((Date.now() - last.t) / 60_000));
+    return (String(last.s ?? '').replace(/^\d{2}:\d{2}:\d{2}\s+/, '').slice(0, 72) + ' [' + ageMin + 'm]').slice(0, 80);
   } catch { return ''; }
 }
 
