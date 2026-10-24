@@ -115,7 +115,9 @@ function lastClientError(): string {
     const raw = sessionStorage.getItem('__checkin_diag__');
     if (!raw) return '';
     const arr = JSON.parse(raw) as Array<{ t?: number; s?: string }>;
-    const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
+    // stare lažne linije (resursni događaji bez poruke, npr. slika) se ne prijavljuju
+    const real = Array.isArray(arr) ? arr.filter((l) => !/ERR: undefined/.test(String(l?.s ?? ''))) : [];
+    const last = real.length ? real[real.length - 1] : null;
     if (!last || typeof last.t !== 'number' || Date.now() - last.t > 30 * 60_000) return '';
     return String(last.s ?? '').replace(/^\d{2}:\d{2}:\d{2}\s+/, '').slice(0, 80);
   } catch { return ''; }

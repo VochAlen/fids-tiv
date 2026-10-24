@@ -134,7 +134,7 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
           }
         } catch (e2) {}
       }
-      else add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
+      else if (ev && ev.message) add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
     }, true);
     window.addEventListener('unhandledrejection', function (ev) {
       add('REJECT: ' + (ev && ev.reason && (ev.reason.message || ev.reason)));
