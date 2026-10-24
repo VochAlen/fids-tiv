@@ -51,6 +51,36 @@ export function useKioskSupervisor(opts: { id: string; role: AblyClientRole; vie
   setKioskInfo({ id });
   useEffect(() => { setKioskInfo({ id, view, flight }); }, [id, view, flight]);
 
+  // 0) Screen Wake Lock: traži od preglednika/Windowsa da NE gasi ekran i ne uspava stranicu dok kiosk radi.
+  // Besplatno (nema mrežnih zahtjeva). Preglednik oslobodi lock kad stranica postane skrivena, pa se traži ponovo čim
+  // postane vidljiva i svake minute ako ga nemamo. Nije podržano svuda: bez podrške se ništa ne dešava (tiho).
+  useEffect(() => {
+    type Lock = { released: boolean; release: () => Promise<void>; addEventListener: (t: string, f: () => void) => void };
+    const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<Lock> } }).wakeLock;
+    if (!wl) return;
+    let lock: Lock | null = null;
+    let stopped = false;
+    const acquire = () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      if (lock && !lock.released) return;
+      wl.request('screen').then((l) => {
+        if (stopped) { l.release().catch(() => {}); return; }
+        lock = l;
+        l.addEventListener('release', () => { if (lock === l) lock = null; });
+      }).catch(() => { /* odbijeno (npr. nema baterije/dozvole) — probaćemo ponovo */ });
+    };
+    acquire();
+    const onVis = () => acquire();
+    document.addEventListener('visibilitychange', onVis);
+    const id = setInterval(acquire, 60_000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+      lock?.release().catch(() => {});
+    };
+  }, []);
+
   // 4) daljinske komande (nema ni periodičnih zahtjeva ni novih kanala: samo slušanje poruke na kanalu koji kiosk već ima)
   useEffect(() => {
     let ch: ReturnType<ReturnType<typeof getSharedAbly>['channels']['get']> | null = null;
