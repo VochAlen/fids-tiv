@@ -92,6 +92,16 @@ export function setKioskInfo(p: Partial<typeof info>): void {
   info.flight = info.flight.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8);
 }
 
+/**
+ * true = provjere (reconcile/poll) smiju ići i kad preglednik javi document.hidden.
+ * Samo za kiosk u običnom Chrome-u: tamo je jedini prozor, pa "hidden" znači da ga je nešto prekrilo/minimiziralo (Chrome
+ * tada usporava tajmere), a monitor ipak mora ostati sinhronizovan. U Electronu NE: tamo je skriven prozor rezervna
+ * stranica (standby) iza aktivne — ona ne smije dupliti zahtjeve (trošak na Vercelu), a aktivni prozor nikad nije hidden.
+ */
+export function pollWhileHidden(): boolean {
+  try { return !!info.id && !/Electron\//i.test(navigator.userAgent); } catch { return false; }
+}
+
 export function getClientBuild(): string {
   try { return String((window as unknown as { __BUILD_ID__?: string }).__BUILD_ID__ || ''); } catch { return ''; }
 }

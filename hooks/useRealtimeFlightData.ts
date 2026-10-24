@@ -115,6 +115,7 @@ const loadEmergencyCache = (): FlightData | null => {
 import { getSharedAbly, reportDynamicNightMode, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
 import { noteServerDate } from '@/lib/server-clock';
+import { pollWhileHidden } from '@/lib/kiosk-beacon';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -405,7 +406,7 @@ export function useRealtimeFlightData(role: AblyClientRole, opts?: { warmStart?:
     // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
     // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
     // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
-    const id = setInterval(() => { if (!isNightHours() && !document.hidden) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
+    const id = setInterval(() => { if (!isNightHours() && (!document.hidden || pollWhileHidden())) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchSnapshot]);
 
