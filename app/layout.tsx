@@ -127,6 +127,7 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
             if (Date.now() - last > 300000) {
               sessionStorage.setItem(CK, String(Date.now()));
               add('chunk nedostupan — reload za 3s');
+              try { localStorage.setItem('checkin_last_reload_v1', JSON.stringify({ t: Date.now(), reason: 'chunk ' + String(tg.src).split('/').pop().slice(0, 40) })); } catch (e3) {}
               setTimeout(function () { location.reload(); }, 3000);
             }
           }

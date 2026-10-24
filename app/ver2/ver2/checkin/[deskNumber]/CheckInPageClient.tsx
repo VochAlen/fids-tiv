@@ -289,7 +289,31 @@ const EMPTY_ASSIGNMENT: DeskAssignment = {
 // konzolu — ovako se vidi ŠTA je izazvalo povremeni "Loading check-in information..." treptaj.
 // ============================================================
 const RELOAD_REASON_KEY = 'checkin_last_reload_v1';
+// ZAŠTITA OD PETLJE: ako se stranica automatski reloaduje 4+ puta u 10 min, dalji AUTOMATSKI reload-i se pauziraju 20 min
+// (ekran ostaje na prikazu umjesto da treperi bijelo/plavo). Ručni Restart/Reload iz health stranice i dnevni reload idu mimo ovoga.
+const RELOAD_LOG_KEY = 'checkin_reload_log_v1';
+const RELOAD_LOOP_MAX = 4;
+const RELOAD_LOOP_WINDOW_MS = 10 * 60_000;
+const RELOAD_LOOP_PAUSE_MS = 20 * 60_000;
 function reloadWithReason(reason: string) {
+  const manual = /^(remote-|daily)/.test(reason);
+  try {
+    const now = Date.now();
+    let st: { log: number[]; pausedUntil: number } = { log: [], pausedUntil: 0 };
+    try { st = JSON.parse(localStorage.getItem(RELOAD_LOG_KEY) || '') || st; } catch { /* ignore */ }
+    st.log = (Array.isArray(st.log) ? st.log : []).filter((t) => now - t < RELOAD_LOOP_WINDOW_MS);
+    if (!manual) {
+      if (now < (st.pausedUntil || 0)) { console.error(`[reload-loop] preskočen reload (${reason}) — pauza do ${new Date(st.pausedUntil).toLocaleTimeString('en-GB')}`); return; }
+      if (st.log.length >= RELOAD_LOOP_MAX) {
+        st.pausedUntil = now + RELOAD_LOOP_PAUSE_MS;
+        localStorage.setItem(RELOAD_LOG_KEY, JSON.stringify(st));
+        console.error(`[reload-loop] ${st.log.length} reload-a u 10 min (zadnji razlog: ${reason}) — automatski reload pauziran 20 min`);
+        return;
+      }
+    }
+    st.log.push(now);
+    localStorage.setItem(RELOAD_LOG_KEY, JSON.stringify(st));
+  } catch { /* ignore */ }
   try { localStorage.setItem(RELOAD_REASON_KEY, JSON.stringify({ t: Date.now(), reason })); } catch { /* ignore */ }
   window.location.reload();
 }
@@ -716,15 +740,20 @@ const AdRotator = memo(function AdRotator({
     if (adImages.length < 2) return;
     let inner1: ReturnType<typeof setTimeout> | null = null;
     let inner2: ReturnType<typeof setTimeout> | null = null;
+    const FADE_MS = 600; // CSS prijelaz je 0.5 s (.ad-image)
     const id = setInterval(() => {
+      // 1) uključi prijelaz: "next" slika (index+1) se utapa preko trenutne
       setIsAdTransitioning(true);
       inner1 = setTimeout(() => {
-        setNextAdIndex((prev) => (prev + 1) % adImages.length);
+        // 2) tek POSLIJE kraja prijelaza trenutna slika postaje index+1 (ista slika kao "next" — bez treptaja)
+        setCurrentAdIndex((prev) => (prev + 1) % adImages.length);
+        setIsAdTransitioning(false);
+        // 3) a "next" dobija sljedeću sliku tek kad je potpuno providan (ranije je to bilo usred prijelaza,
+        //    pa se na ~0.4 s pojavljivala pogrešna slika = "slike se prebrzo mijenjaju")
         inner2 = setTimeout(() => {
-          setCurrentAdIndex((prev) => (prev + 1) % adImages.length);
-          setIsAdTransitioning(false);
-        }, 300);
-      }, 100);
+          setNextAdIndex((prev) => (prev + 1) % adImages.length);
+        }, FADE_MS);
+      }, FADE_MS);
     }, AD_SWITCH_INTERVAL);
     return () => {
       clearInterval(id);
