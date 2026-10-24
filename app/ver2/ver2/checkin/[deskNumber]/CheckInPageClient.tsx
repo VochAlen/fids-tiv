@@ -28,6 +28,7 @@ import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 import { useKioskSupervisor } from '@/hooks/useKioskSupervisor';
+import { setKioskInfo } from '@/lib/kiosk-beacon';
 // FIX (portovano iz glavnog/polling sistema — potrebno za praznične
 // kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
@@ -1412,6 +1413,8 @@ useEffect(() => {
   });
 
   const myEntry = deskEntries[deskNumberParam];
+  // dijagnostika za health stranicu: da li je OVAJ klijent uopšte primio dodjelu (odvaja "nije stiglo" od "stiglo, ali se ne prikazuje")
+  useEffect(() => { setKioskInfo({ entry: myEntry?.status === 'open' ? 'open' : myEntry?.status === 'closed' ? 'closed' : 'none' }); }, [myEntry?.status]);
   const mySig = `${myEntry?.status ?? 'x'}:${myEntry?.flightNumber ?? ''}:${myEntry?.seq ?? 0}`;
   useEffect(() => {
     if (!deskNumberParam) return;

@@ -47,6 +47,8 @@ export interface KioskReport {
   err: string;
   /** Sekundi od zadnjeg uspješnog učitavanja podataka o letovima; -1 = stranica to ne mjeri. */
   dataAgeSec: number;
+  /** Šta KLIJENT zna o svom šalteru: 'open' = primio otvorenu dodjelu, 'closed', 'none' = nema dodjele; '' = stranica to ne javlja. */
+  entry?: 'open' | 'closed' | 'none' | '';
   /** true = klijent zna da se restartuje cijela aplikacija (Electron sa novim main.js/preload.js); inače se samo reloaduje stranica. */
   canRestart: boolean;
 }
@@ -78,13 +80,14 @@ export function parseBeacon(sp: URLSearchParams): KioskReport | null {
     pageAgeSec: Number.isFinite(age) && age >= 0 ? Math.min(Math.round(age), 30 * 86_400) : 0,
     err: clean(sp.get('e'), 80),
     dataAgeSec: Number.isFinite(Number(sp.get('d'))) && sp.get('d') !== null && sp.get('d') !== '' ? Math.max(-1, Math.min(Math.round(Number(sp.get('d'))), 30 * 86_400)) : -1,
+    entry: ((v) => (v === 'o' ? 'open' : v === 'c' ? 'closed' : v === 'n' ? 'none' : ''))(sp.get('g')),
     canRestart: sp.get('r') === '1',
   };
 }
 
 // ───────────────────────── klijent ─────────────────────────
 
-let info: { id: string; view: KioskView; flight: string } = { id: '', view: 'loading', flight: '' };
+let info: { id: string; view: KioskView; flight: string; entry: 'open' | 'closed' | 'none' | '' } = { id: '', view: 'loading', flight: '', entry: '' };
 let serverBuild = '';
 
 export function setKioskInfo(p: Partial<typeof info>): void {
@@ -125,6 +128,7 @@ export function beaconQuery(): string {
     const q = new URLSearchParams();
     q.set('k', info.id);
     q.set('s', info.view);
+    if (info.entry) q.set('g', info.entry === 'open' ? 'o' : info.entry === 'closed' ? 'c' : 'n');
     if (info.flight) q.set('f', info.flight);
     q.set('b', getClientBuild());
     q.set('u', /Electron\//i.test(navigator.userAgent) ? 'e' : 'c');
