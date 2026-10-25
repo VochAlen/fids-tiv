@@ -14,6 +14,13 @@ export const KIOSK_HASH_KEY = 'fids:kiosks';
  */
 export const KIOSK_CMD_CHANNEL = 'flights:combined';
 export const KIOSK_CMD_EVENT = 'kiosk-cmd';
+/**
+ * REZERVNI put komande preko običnog HTTP-a (kad Ably klijentu ne isporučuje): admin ruta upiše komandu u ovaj Redis hash,
+ * a /api/test/assignments je (samo kad postoji) priloži odgovoru kao `cmds`. Kiosk je pročita uz reconcile koji ionako radi
+ * (nema ni jednog dodatnog zahtjeva), pa komanda stiže najkasnije za ~5 min čak i kad Ably ne radi.
+ */
+export const KIOSK_CMD_HASH_KEY = 'fids:kiosk-cmds';
+export const KIOSK_CMD_TTL_SEC = 600;
 
 export interface KioskCommand {
   /** Id ciljanog monitora (npr. 'checkin-4'). */
@@ -144,6 +151,23 @@ export function beaconQuery(): string {
     if (e) q.set('e', e);
     return q.toString();
   } catch { return ''; }
+}
+
+type CmdListener = (c: { ts: number; nonce: string }) => void;
+const cmdListeners = new Set<CmdListener>();
+/** Supervisor se prijavljuje da dobije komandu iz HTTP odgovora (vidi KIOSK_CMD_HASH_KEY). Vraća funkciju za odjavu. */
+export function onServerCommand(cb: CmdListener): () => void {
+  cmdListeners.add(cb);
+  return () => { cmdListeners.delete(cb); };
+}
+/** Poziva useRealtimeAssignments sa `data.cmds` iz svakog uspješnog snapshota. */
+export function noteServerCommands(cmds: unknown): void {
+  try {
+    if (!cmds || typeof cmds !== 'object' || !info.id) return;
+    const mine = (cmds as Record<string, unknown>)[info.id] as { ts?: unknown; nonce?: unknown } | undefined;
+    if (!mine || typeof mine.ts !== 'number' || typeof mine.nonce !== 'string') return;
+    cmdListeners.forEach((f) => f({ ts: mine.ts as number, nonce: mine.nonce as string }));
+  } catch { /* komanda nikad ne smije srušiti stranicu */ }
 }
 
 export function noteServerBuild(b: unknown): void {

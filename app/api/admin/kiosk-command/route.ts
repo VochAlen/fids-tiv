@@ -6,6 +6,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/admin-auth';
 import { publishToChannel } from '@/lib/ably-server';
+import { writeKioskCmd } from '@/lib/kiosk-cmd-server';
 import { KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, isValidKioskId, type KioskCommand } from '@/lib/kiosk-beacon';
 
 export const dynamic = 'force-dynamic';
@@ -26,11 +27,16 @@ export async function POST(request: Request) {
   }
 
   const command: KioskCommand = { id, cmd: 'restart', ts: Date.now(), nonce: Math.random().toString(36).slice(2, 10) };
-  try {
-    await publishToChannel(KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, command);
-  } catch (err) {
-    console.error('[admin/kiosk-command] Ably publish nije uspio:', err instanceof Error ? err.message : err);
-    return NextResponse.json({ error: 'Komanda nije poslana (Ably nedostupan)' }, { status: 502 });
+  // Dva puta istovremeno: Ably (odmah, ako klijent prima) + Redis/HTTP rezerva (stiže uz reconcile, najkasnije ~5 min, i kad Ably ne radi).
+  const [ably, backup] = await Promise.all([
+    publishToChannel(KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, command).then(() => true, (err) => {
+      console.error('[admin/kiosk-command] Ably publish nije uspio:', err instanceof Error ? err.message : err);
+      return false;
+    }),
+    writeKioskCmd(id, command.ts, command.nonce),
+  ]);
+  if (!ably && !backup) {
+    return NextResponse.json({ error: 'Komanda nije poslana (Ably i Redis nedostupni)' }, { status: 502 });
   }
-  return NextResponse.json({ ok: true, id, sentAt: command.ts }, { headers: { 'Cache-Control': 'no-store' } });
+  return NextResponse.json({ ok: true, id, sentAt: command.ts, via: { ably, backup } }, { headers: { 'Cache-Control': 'no-store' } });
 }

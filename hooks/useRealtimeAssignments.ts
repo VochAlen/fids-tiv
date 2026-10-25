@@ -100,7 +100,7 @@ type AssignmentsResponse = {
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
 import { noteServerDate } from '@/lib/server-clock';
-import { beaconQuery, noteServerBuild, pollWhileHidden } from '@/lib/kiosk-beacon';
+import { beaconQuery, noteServerBuild, noteServerCommands, pollWhileHidden } from '@/lib/kiosk-beacon';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -227,6 +227,12 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   // obrazac koji se već koristi na više mjesta u projektu (npr.
   // CheckInPageClient.tsx).
   const lastSyncAtRef = useRef<number>(0);
+  // Za spoljne čuvare (Electron main.js, Chrome čuvar na računaru): trenutak zadnje uspješne sinhronizacije dodjela.
+  useEffect(() => {
+    try {
+      Object.defineProperty(window, '__fidsLastSyncAt', { get: () => lastSyncAtRef.current, configurable: true });
+    } catch { /* ignore */ }
+  }, []);
   useEffect(() => {
     if (lastSyncAtRef.current === 0) lastSyncAtRef.current = Date.now();
   }, []);
@@ -355,6 +361,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
         noteServerBuild(data.build);
+        noteServerCommands((data as { cmds?: unknown }).cmds);
         // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
         // lib/assignments-service.ts i AssignmentsResponse iznad):
         // `ok === false` znači server NIJE uspio pouzdano pročitati
