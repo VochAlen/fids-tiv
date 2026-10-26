@@ -641,8 +641,17 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
     // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
     // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
-    const id = setInterval(() => { if (!isNightHours() && (!document.hidden || pollWhileHidden())) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
-    return () => clearInterval(id);
+    // Svaki ciklus ima nasumično odstupanje (±60 s, prosjek ostaje 5 min → isti broj poziva, NULA dodatnog troška).
+    // Razlog: kad se više kioska pokrene u istoj sekundi (npr. dnevni restart u 04:00), njihovi fiksni 5-min tajmeri ostanu
+    // u koraku, pa CDN keš (s-maxage=2) svaki put isti kiosk(e) opsluži iz keša i funkcija nikad ne vidi njihov beacon
+    // → health ih vodi kao "ne javlja se", iako stranica radi. Jitter razbija taj korak.
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (!isNightHours() && (!document.hidden || pollWhileHidden())) fetchSnapshot();
+      timer = setTimeout(tick, RECONCILE_INTERVAL_MS + Math.round((Math.random() * 2 - 1) * 60_000));
+    };
+    timer = setTimeout(tick, RECONCILE_INTERVAL_MS + Math.round((Math.random() * 2 - 1) * 60_000));
+    return () => clearTimeout(timer);
   }, [fetchSnapshot]);
 
   // NOVO — vidi komentar uz lastSyncAtRef iznad. Vraćamo REF (ne state)
