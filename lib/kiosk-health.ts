@@ -25,6 +25,8 @@ export interface KioskInfo {
   /** Starost stranice (min) u trenutku izvještaja. */
   pageAgeMin: number;
   err: string;
+  /** Šta klijent zna o svom šalteru (vidi KioskReport.entry). */
+  entry: 'open' | 'closed' | 'none' | '';
   /** Starost podataka o letovima u min (u trenutku izvještaja); null = nije poznato. */
   dataAgeMin: number | null;
   /** true = dugme šalje restart cijele aplikacije; false = samo reload stranice. */
@@ -79,7 +81,7 @@ export function classifyKiosks(
 
     return {
       id: k.id, status, view: k.view, flight: k.flight, client: k.client, build: k.build, buildCurrent,
-      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, dataAgeMin: typeof k.dataAgeSec === 'number' && k.dataAgeSec >= 0 ? Math.round(k.dataAgeSec / 60) : null, canRestart: !!k.canRestart, ...(expected ? { expected } : {}),
+      ageSec, pageAgeMin: Math.round(k.pageAgeSec / 60), err: k.err, entry: k.entry ?? '', dataAgeMin: typeof k.dataAgeSec === 'number' && k.dataAgeSec >= 0 ? Math.round(k.dataAgeSec / 60) : null, canRestart: !!k.canRestart, ...(expected ? { expected } : {}),
     };
   });
 

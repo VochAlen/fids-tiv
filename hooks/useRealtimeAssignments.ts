@@ -100,7 +100,7 @@ type AssignmentsResponse = {
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { isNightHours } from '@/lib/night-hours';
 import { noteServerDate } from '@/lib/server-clock';
-import { beaconQuery, noteServerBuild } from '@/lib/kiosk-beacon';
+import { beaconQuery, noteServerBuild, noteServerCommands, pollWhileHidden } from '@/lib/kiosk-beacon';
 
 // ── Fallback polling — aktivan SAMO kad Ably nije 'connected' I nije
 // namjerno u noćnom režimu ('night-sleep' — vidi lib/ably-client.ts).
@@ -227,6 +227,12 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   // obrazac koji se već koristi na više mjesta u projektu (npr.
   // CheckInPageClient.tsx).
   const lastSyncAtRef = useRef<number>(0);
+  // Za spoljne čuvare (Electron main.js, Chrome čuvar na računaru): trenutak zadnje uspješne sinhronizacije dodjela.
+  useEffect(() => {
+    try {
+      Object.defineProperty(window, '__fidsLastSyncAt', { get: () => lastSyncAtRef.current, configurable: true });
+    } catch { /* ignore */ }
+  }, []);
   useEffect(() => {
     if (lastSyncAtRef.current === 0) lastSyncAtRef.current = Date.now();
   }, []);
@@ -311,7 +317,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     failRetryTimerRef.current = setTimeout(() => {
       failRetryTimerRef.current = null;
       // sakriven prozor: resync pri povratku vidljivosti; noću: nema pollanja (namjerno gašenje)
-      if (!mountedRef.current || document.hidden || isNightHours()) return;
+      if (!mountedRef.current || (document.hidden && !pollWhileHidden()) || isNightHours()) return;
       fetchSnapshotRef.current();
     }, delay);
   }, []);
@@ -355,6 +361,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
       .then((data: AssignmentsResponse) => {
         if (!mountedRef.current) return;
         noteServerBuild(data.build);
+        noteServerCommands((data as { cmds?: unknown }).cmds);
         // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
         // lib/assignments-service.ts i AssignmentsResponse iznad):
         // `ok === false` znači server NIJE uspio pouzdano pročitati
@@ -613,7 +620,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
       if (cancelled) return;
       // Skriven prozor (Electron "swap": stari prozor ostaje živ iza novog) ne treba polling — pri povratku u
       // fokus stranica sama radi resync (vidi CheckInPageClient). Prvi snapshot (mount) i retry do prvog sync-a nisu zahvaćeni.
-      if (!document.hidden) fetchSnapshot();
+      if (!document.hidden || pollWhileHidden()) fetchSnapshot();
       delay = Math.min(delay * 2, FALLBACK_POLL_MAX_MS);
       timeoutId = setTimeout(tick, delay);
     };
@@ -634,8 +641,17 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     // Noću (isNightHours) ekrani prikazuju samo sat/prazno i Ably je zatvoren — periodični
     // reconcile je tada čist trošak (pozivi + CPU). Ujutro se stanje povlači na Ably 'connected'
     // (v4 fix) i na kraju noći (gate/check-in), pa preskakanje noću ne ostavlja zastarjele podatke.
-    const id = setInterval(() => { if (!isNightHours() && !document.hidden) fetchSnapshot(); }, RECONCILE_INTERVAL_MS);
-    return () => clearInterval(id);
+    // Svaki ciklus ima nasumično odstupanje (±60 s, prosjek ostaje 5 min → isti broj poziva, NULA dodatnog troška).
+    // Razlog: kad se više kioska pokrene u istoj sekundi (npr. dnevni restart u 04:00), njihovi fiksni 5-min tajmeri ostanu
+    // u koraku, pa CDN keš (s-maxage=2) svaki put isti kiosk(e) opsluži iz keša i funkcija nikad ne vidi njihov beacon
+    // → health ih vodi kao "ne javlja se", iako stranica radi. Jitter razbija taj korak.
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (!isNightHours() && (!document.hidden || pollWhileHidden())) fetchSnapshot();
+      timer = setTimeout(tick, RECONCILE_INTERVAL_MS + Math.round((Math.random() * 2 - 1) * 60_000));
+    };
+    timer = setTimeout(tick, RECONCILE_INTERVAL_MS + Math.round((Math.random() * 2 - 1) * 60_000));
+    return () => clearTimeout(timer);
   }, [fetchSnapshot]);
 
   // NOVO — vidi komentar uz lastSyncAtRef iznad. Vraćamo REF (ne state)

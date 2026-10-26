@@ -496,7 +496,7 @@ export default function AdminHealthPage() {
                           <tr key={k.id} className={`border-t ${t.row}`}>
                             <td className="py-1.5 pr-3 font-mono font-semibold">{k.id}</td>
                             <td className={`pr-3 font-semibold ${color}`}>{label}</td>
-                            <td className="pr-3">{k.view === 'open' ? (k.flight || 'otvoren') : k.view}{k.expected ? <span className="text-amber-500"> (treba {k.expected})</span> : null}</td>
+                            <td className="pr-3">{k.view === 'open' ? (k.flight || 'otvoren') : k.view}{k.expected ? <span className="text-amber-500"> (treba {k.expected}; klijent {k.entry === 'open' ? 'IMA dodjelu, ali je ne prikazuje' : k.entry === 'none' ? 'NIJE primio dodjelu' : k.entry === 'closed' ? 'ima zatvorenu dodjelu' : 'nepoznato'})</span> : null}</td>
                             <td className="pr-3 tabular-nums">prije {ago}</td>
                             <td className={`pr-3 tabular-nums ${k.status === 'stale' ? 'text-amber-500' : ''}`}>{k.dataAgeMin === null ? '—' : k.dataAgeMin < 1 ? '<1 min' : `${k.dataAgeMin} min`}</td>
                             <td className="pr-3">{k.client === 'electron' ? 'Electron' : 'Chrome'}</td>
