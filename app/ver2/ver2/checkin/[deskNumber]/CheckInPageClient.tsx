@@ -28,6 +28,7 @@ import Image from 'next/image';
 import { useAdImages } from '@/hooks/useAdImages';
 import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 import { useKioskSupervisor } from '@/hooks/useKioskSupervisor';
+import { setKioskInfo } from '@/lib/kiosk-beacon';
 // FIX (portovano iz glavnog/polling sistema — potrebno za praznične
 // kampanje ispod, koje su datum-zasnovane, ne noćni-режим-zasnovane):
 // getPodgoricaDateString je jedino što nam treba odavde — isNightHours
@@ -1412,6 +1413,27 @@ useEffect(() => {
   });
 
   const myEntry = deskEntries[deskNumberParam];
+  // dijagnostika za health stranicu: da li je OVAJ klijent uopšte primio dodjelu (odvaja "nije stiglo" od "stiglo, ali se ne prikazuje")
+  useEffect(() => { setKioskInfo({ entry: myEntry?.status === 'open' ? 'open' : myEntry?.status === 'closed' ? 'closed' : 'none' }); }, [myEntry?.status]);
+
+  // SAMOLIJEČENJE (bez ičijeg učešća): klijent JE primio otvorenu dodjelu za ovaj šalter, a ekran i dalje pokazuje idle
+  // (nema leta). Najčešće: podaci o letu nisu stigli/stari su. Korak 1 (90 s): ponovo povuci dodjele i letove.
+  // Korak 2 (180 s): reload stranice — najviše jednom u 15 min po monitoru (nema petlje ni dodatnog troška u normalnom radu).
+  const entryOpenNoFlight = myEntry?.status === 'open' && !hasFlight && isSynced && !loading;
+  useEffect(() => {
+    if (!entryOpenNoFlight) return;
+    const t1 = setTimeout(() => { refetchAssignments(); refetchFlights(); }, 90_000);
+    const t2 = setTimeout(() => {
+      try {
+        const K = 'checkin_open_idle_reload_at';
+        const last = parseInt(localStorage.getItem(K) || '0', 10) || 0;
+        if (Date.now() - last < 15 * 60_000) return;
+        localStorage.setItem(K, String(Date.now()));
+      } catch { /* ignore */ }
+      reloadWithReason('open-but-idle');
+    }, 180_000);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [entryOpenNoFlight, refetchAssignments, refetchFlights]);
   const mySig = `${myEntry?.status ?? 'x'}:${myEntry?.flightNumber ?? ''}:${myEntry?.seq ?? 0}`;
   useEffect(() => {
     if (!deskNumberParam) return;

@@ -3,6 +3,7 @@ import { NextResponse, after } from 'next/server';
 import { getRawAssignments, buildSimpleMaps } from '@/lib/assignments-service';
 import { BUILD_ID } from '@/lib/build-id';
 import { recordKioskBeacon } from '@/lib/kiosk-beacon-server';
+import { readKioskCmds } from '@/lib/kiosk-cmd-server';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +22,8 @@ export async function GET(request: Request) {
   try {
     const raw = await getRawAssignments();
     const simple = buildSimpleMaps(raw);
+    const cmds = await readKioskCmds();
+    const cmdPart = Object.keys(cmds).length ? { cmds } : {};
 
     // NOVO (KRITIČNO — vidi opširan komentar uz `ok` polje u
     // lib/assignments-service.ts, RawAssignments): ako Redis čitanje
@@ -54,6 +57,7 @@ export async function GET(request: Request) {
       readAt: raw.readAt,
       ok: true,
       build: BUILD_ID,
+      ...cmdPart,
     }, {
       headers: {
         // FIX (KRITIČNO — pravi uzrok prijavljenog "i nakon reload-a let

@@ -116,7 +116,8 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
     };
     window.addEventListener('error', function (ev) {
       var tg = ev && ev.target;
-      if (tg && tg !== window && (tg.src || tg.href) && tg.tagName !== 'IMG') {
+      if (tg && tg !== window && (tg.src || tg.href) && tg.tagName === 'IMG') return; // slika koja se ne učita nije kvar aplikacije
+      if (tg && tg !== window && (tg.src || tg.href)) {
         add('LOAD FAIL: ' + (tg.src || tg.href));
         // Stranica učitana prije deploy-a traži JS dio (chunk) koji više ne postoji. Jedan reload (najviše na 5 min)
         // povlači svježi HTML sa novim imenima fajlova. Bez ovoga stara stranica ostaje polu-funkcionalna do sljedećeg swapa.
@@ -133,7 +134,7 @@ const CHECKIN_HYDRATION_WATCHDOG_SCRIPT = `
           }
         } catch (e2) {}
       }
-      else add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
+      else if (ev && ev.message) add('ERR: ' + (ev && ev.message) + ' @' + (ev && ev.filename ? String(ev.filename).split('/').pop() : '') + ':' + (ev && ev.lineno));
     }, true);
     window.addEventListener('unhandledrejection', function (ev) {
       add('REJECT: ' + (ev && ev.reason && (ev.reason.message || ev.reason)));
