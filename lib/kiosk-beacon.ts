@@ -14,13 +14,6 @@ export const KIOSK_HASH_KEY = 'fids:kiosks';
  */
 export const KIOSK_CMD_CHANNEL = 'flights:combined';
 export const KIOSK_CMD_EVENT = 'kiosk-cmd';
-/**
- * REZERVNI put komande preko običnog HTTP-a (kad Ably klijentu ne isporučuje): admin ruta upiše komandu u ovaj Redis hash,
- * a /api/test/assignments je (samo kad postoji) priloži odgovoru kao `cmds`. Kiosk je pročita uz reconcile koji ionako radi
- * (nema ni jednog dodatnog zahtjeva), pa komanda stiže najkasnije za ~5 min čak i kad Ably ne radi.
- */
-export const KIOSK_CMD_HASH_KEY = 'fids:kiosk-cmds';
-export const KIOSK_CMD_TTL_SEC = 600;
 
 export interface KioskCommand {
   /** Id ciljanog monitora (npr. 'checkin-4'). */
@@ -54,8 +47,6 @@ export interface KioskReport {
   err: string;
   /** Sekundi od zadnjeg uspješnog učitavanja podataka o letovima; -1 = stranica to ne mjeri. */
   dataAgeSec: number;
-  /** Šta KLIJENT zna o svom šalteru: 'open' = primio otvorenu dodjelu, 'closed', 'none' = nema dodjele; '' = stranica to ne javlja. */
-  entry?: 'open' | 'closed' | 'none' | '';
   /** true = klijent zna da se restartuje cijela aplikacija (Electron sa novim main.js/preload.js); inače se samo reloaduje stranica. */
   canRestart: boolean;
 }
@@ -87,29 +78,18 @@ export function parseBeacon(sp: URLSearchParams): KioskReport | null {
     pageAgeSec: Number.isFinite(age) && age >= 0 ? Math.min(Math.round(age), 30 * 86_400) : 0,
     err: clean(sp.get('e'), 80),
     dataAgeSec: Number.isFinite(Number(sp.get('d'))) && sp.get('d') !== null && sp.get('d') !== '' ? Math.max(-1, Math.min(Math.round(Number(sp.get('d'))), 30 * 86_400)) : -1,
-    entry: ((v) => (v === 'o' ? 'open' : v === 'c' ? 'closed' : v === 'n' ? 'none' : ''))(sp.get('g')),
     canRestart: sp.get('r') === '1',
   };
 }
 
 // ───────────────────────── klijent ─────────────────────────
 
-let info: { id: string; view: KioskView; flight: string; entry: 'open' | 'closed' | 'none' | '' } = { id: '', view: 'loading', flight: '', entry: '' };
+let info: { id: string; view: KioskView; flight: string } = { id: '', view: 'loading', flight: '' };
 let serverBuild = '';
 
 export function setKioskInfo(p: Partial<typeof info>): void {
   info = { ...info, ...p };
   info.flight = info.flight.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8);
-}
-
-/**
- * true = provjere (reconcile/poll) smiju ići i kad preglednik javi document.hidden.
- * Samo za kiosk u običnom Chrome-u: tamo je jedini prozor, pa "hidden" znači da ga je nešto prekrilo/minimiziralo (Chrome
- * tada usporava tajmere), a monitor ipak mora ostati sinhronizovan. U Electronu NE: tamo je skriven prozor rezervna
- * stranica (standby) iza aktivne — ona ne smije dupliti zahtjeve (trošak na Vercelu), a aktivni prozor nikad nije hidden.
- */
-export function pollWhileHidden(): boolean {
-  try { return !!info.id && !/Electron\//i.test(navigator.userAgent); } catch { return false; }
 }
 
 export function getClientBuild(): string {
@@ -122,13 +102,9 @@ function lastClientError(): string {
     const raw = sessionStorage.getItem('__checkin_diag__');
     if (!raw) return '';
     const arr = JSON.parse(raw) as Array<{ t?: number; s?: string }>;
-    // stare lažne linije (resursni događaji bez poruke, npr. slika) se ne prijavljuju
-    const real = Array.isArray(arr) ? arr.filter((l) => !/ERR: undefined/.test(String(l?.s ?? ''))) : [];
-    const last = real.length ? real[real.length - 1] : null;
+    const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
     if (!last || typeof last.t !== 'number' || Date.now() - last.t > 30 * 60_000) return '';
-    // starost greške na kraju ('[3m]'), da se vidi je li stara (sessionStorage preživi reload) ili se ponavlja
-    const ageMin = Math.max(0, Math.round((Date.now() - last.t) / 60_000));
-    return (String(last.s ?? '').replace(/^\d{2}:\d{2}:\d{2}\s+/, '').slice(0, 72) + ' [' + ageMin + 'm]').slice(0, 80);
+    return String(last.s ?? '').replace(/^\d{2}:\d{2}:\d{2}\s+/, '').slice(0, 80);
   } catch { return ''; }
 }
 
@@ -139,7 +115,6 @@ export function beaconQuery(): string {
     const q = new URLSearchParams();
     q.set('k', info.id);
     q.set('s', info.view);
-    if (info.entry) q.set('g', info.entry === 'open' ? 'o' : info.entry === 'closed' ? 'c' : 'n');
     if (info.flight) q.set('f', info.flight);
     q.set('b', getClientBuild());
     q.set('u', /Electron\//i.test(navigator.userAgent) ? 'e' : 'c');
@@ -151,23 +126,6 @@ export function beaconQuery(): string {
     if (e) q.set('e', e);
     return q.toString();
   } catch { return ''; }
-}
-
-type CmdListener = (c: { ts: number; nonce: string }) => void;
-const cmdListeners = new Set<CmdListener>();
-/** Supervisor se prijavljuje da dobije komandu iz HTTP odgovora (vidi KIOSK_CMD_HASH_KEY). Vraća funkciju za odjavu. */
-export function onServerCommand(cb: CmdListener): () => void {
-  cmdListeners.add(cb);
-  return () => { cmdListeners.delete(cb); };
-}
-/** Poziva useRealtimeAssignments sa `data.cmds` iz svakog uspješnog snapshota. */
-export function noteServerCommands(cmds: unknown): void {
-  try {
-    if (!cmds || typeof cmds !== 'object' || !info.id) return;
-    const mine = (cmds as Record<string, unknown>)[info.id] as { ts?: unknown; nonce?: unknown } | undefined;
-    if (!mine || typeof mine.ts !== 'number' || typeof mine.nonce !== 'string') return;
-    cmdListeners.forEach((f) => f({ ts: mine.ts as number, nonce: mine.nonce as string }));
-  } catch { /* komanda nikad ne smije srušiti stranicu */ }
 }
 
 export function noteServerBuild(b: unknown): void {

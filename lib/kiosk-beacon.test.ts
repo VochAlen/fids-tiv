@@ -12,7 +12,7 @@ const q = (s: string) => new URLSearchParams(s);
 describe('parseBeacon', () => {
   it('prihvata valjan izvještaj i normalizuje polja', () => {
     const r = parseBeacon(q('k=checkin-4&s=open&f=ju681&b=dpl_abc&u=e&a=125.6&e=console.error%3A%20boom'));
-    expect(r).toEqual({ id: 'checkin-4', view: 'open', flight: 'JU681', build: 'dpl_abc', client: 'electron', pageAgeSec: 126, err: 'console.error: boom', dataAgeSec: -1, entry: '', canRestart: false });
+    expect(r).toEqual({ id: 'checkin-4', view: 'open', flight: 'JU681', build: 'dpl_abc', client: 'electron', pageAgeSec: 126, err: 'console.error: boom', dataAgeSec: -1, canRestart: false });
     expect(parseBeacon(q('k=checkin-4&r=1'))!.canRestart).toBe(true);
   });
   it('odbija nepoznat id (zaštita prostora ključeva)', () => {

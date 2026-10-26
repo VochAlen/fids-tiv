@@ -71,27 +71,7 @@ export interface AirportIdleScreenProps {
   diagnostics?: ReactNode;
 }
 
-/**
- * LITE način (dijagnostika/slabi računari): ?lite=1 u URL-u (pamti se u localStorage; ?lite=0 ga gasi). U lite načinu idle ekran
- * nema beskonačnu animaciju talasa i ne učitava eksterni Google Fonts CSS — manje posla za grafiku/mrežu na slabom računaru.
- * Služi i za provjeru da li je upravo idle ekran uzrok zamrzavanja: uključi samo na jednom monitoru i uporedi.
- */
-function useLiteMode(): boolean {
-  const [lite, setLite] = useState(false);
-  useEffect(() => {
-    try {
-      const q = new URLSearchParams(window.location.search).get('lite');
-      if (q === '1') localStorage.setItem('fids_lite', '1');
-      else if (q === '0') localStorage.removeItem('fids_lite');
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLite(q === '1' || (q !== '0' && localStorage.getItem('fids_lite') === '1'));
-    } catch { /* ignore */ }
-  }, []);
-  return lite;
-}
-
 export default function AirportIdleScreen(p: AirportIdleScreenProps) {
-  const lite = useLiteMode();
   const accent = p.closed ? C.orange : C.sky;
   return (
     <div style={{
@@ -100,8 +80,8 @@ export default function AirportIdleScreen(p: AirportIdleScreenProps) {
       background: `radial-gradient(120% 90% at 20% 10%, ${C.navy2} 0%, ${C.navy} 45%, ${C.black} 100%)`,
     }}>
       {/* more: dva sloja valova pri dnu (samo transform animacija) */}
-      <div className={lite ? 'ai-wave ai-wave-a ai-static' : 'ai-wave ai-wave-a'} />
-      <div className={lite ? 'ai-wave ai-wave-b ai-static' : 'ai-wave ai-wave-b'} />
+      <div className="ai-wave ai-wave-a" />
+      <div className="ai-wave ai-wave-b" />
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '30%', background: `linear-gradient(180deg, transparent 0%, ${C.black} 100%)`, pointerEvents: 'none' }} />
 
       {/* GORNJA TRAKA */}
@@ -162,13 +142,12 @@ export default function AirportIdleScreen(p: AirportIdleScreenProps) {
       <DevCredit />
 
       <style>{`
-        ${lite ? '' : "@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@500;600;700&display=swap');"}
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@500;600;700&display=swap');
         html,body,#__next { width:100vw; height:100vh; overflow:hidden; background:${C.black}; }
         .ai-wave { position:absolute; left:0; bottom:0; width:200%; height:34%; pointer-events:none; opacity:.9;
           background-repeat:repeat-x; background-size:50% 100%; will-change:transform; }
         .ai-wave-a { background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 200' preserveAspectRatio='none'><path d='M0 100 C150 40 300 40 450 100 S750 160 900 100 S1050 40 1200 100 V200 H0Z' fill='%2338bdf8' fill-opacity='0.22'/></svg>"); animation: aiWave 22s linear infinite; }
         .ai-wave-b { height:26%; background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 200' preserveAspectRatio='none'><path d='M0 110 C200 150 400 150 600 110 S1000 70 1200 110 V200 H0Z' fill='%23ff8a1f' fill-opacity='0.16'/></svg>"); animation: aiWave 34s linear infinite reverse; }
-        .ai-static { animation:none !important; will-change:auto !important; }
         @keyframes aiWave { from { transform: translateX(0); } to { transform: translateX(-50%); } }
       `}</style>
     </div>

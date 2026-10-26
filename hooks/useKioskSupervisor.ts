@@ -2,10 +2,10 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { setKioskInfo, isBuildStale, onServerCommand, KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, type KioskView, type KioskCommand } from '@/lib/kiosk-beacon';
+import { setKioskInfo, isBuildStale, KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, type KioskView, type KioskCommand } from '@/lib/kiosk-beacon';
 import { getSharedAbly, type AblyClientRole } from '@/lib/ably-client';
 import { nowMs } from '@/lib/server-clock';
-import { getPodgoricaDateString, getPodgoricaMinutesOfDay, isNightHours } from '@/lib/night-hours';
+import { getPodgoricaDateString, getPodgoricaMinutesOfDay } from '@/lib/night-hours';
 
 // Nadzornik kioska — isti u Chromeu i u Electron klijentu (čisto web, bez ikakve izmjene exe-a).
 //  1) prijavljuje serveru ko je ovaj monitor i šta prikazuje (uz postojeći reconcile fetch, vidi lib/kiosk-beacon.ts);
@@ -51,66 +51,16 @@ export function useKioskSupervisor(opts: { id: string; role: AblyClientRole; vie
   setKioskInfo({ id });
   useEffect(() => { setKioskInfo({ id, view, flight }); }, [id, view, flight]);
 
-  // -1) "Otkucaj" za spoljne čuvare (bez ikakvih zahtjeva): naslov prozora nosi zadnju sinhronizaciju, pa čuvar na računaru
-  // (chrome-kiosk.ps1 čita naslov prozora) vidi da je stranica živa i da se podaci osvježavaju — i ako nisu, restartuje Chrome.
-  // Format: FIDS|<id>|<zadnja sinhronizacija, epoch s>|<zadnji put kad je bila noć, epoch s>. Noć se računa kao izuzetak
-  // (noću se sinhronizacija namjerno pauzira).
-  useEffect(() => {
-    const w = window as unknown as { __fidsLastDataAt?: number; __fidsLastSyncAt?: number; __fidsNightAt?: number };
-    const beat = () => {
-      try {
-        const now = Date.now();
-        if (isNightHours()) w.__fidsNightAt = now;
-        const last = Math.max(w.__fidsLastDataAt || 0, w.__fidsLastSyncAt || 0);
-        document.title = `FIDS|${id}|${Math.round(last / 1000)}|${Math.round((w.__fidsNightAt || 0) / 1000)}`;
-      } catch { /* ignore */ }
-    };
-    beat();
-    const t = setInterval(beat, 15_000);
-    return () => clearInterval(t);
-  }, [id]);
-
-  // 0) Screen Wake Lock: traži od preglednika/Windowsa da NE gasi ekran i ne uspava stranicu dok kiosk radi.
-  // Besplatno (nema mrežnih zahtjeva). Preglednik oslobodi lock kad stranica postane skrivena, pa se traži ponovo čim
-  // postane vidljiva i svake minute ako ga nemamo. Nije podržano svuda: bez podrške se ništa ne dešava (tiho).
-  useEffect(() => {
-    type Lock = { released: boolean; release: () => Promise<void>; addEventListener: (t: string, f: () => void) => void };
-    const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<Lock> } }).wakeLock;
-    if (!wl) return;
-    let lock: Lock | null = null;
-    let stopped = false;
-    const acquire = () => {
-      if (stopped || document.visibilityState !== 'visible') return;
-      if (lock && !lock.released) return;
-      wl.request('screen').then((l) => {
-        if (stopped) { l.release().catch(() => {}); return; }
-        lock = l;
-        l.addEventListener('release', () => { if (lock === l) lock = null; });
-      }).catch(() => { /* odbijeno (npr. nema baterije/dozvole) — probaćemo ponovo */ });
-    };
-    acquire();
-    const onVis = () => acquire();
-    document.addEventListener('visibilitychange', onVis);
-    const id = setInterval(acquire, 60_000);
-    return () => {
-      stopped = true;
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', onVis);
-      lock?.release().catch(() => {});
-    };
-  }, []);
-
   // 4) daljinske komande (nema ni periodičnih zahtjeva ni novih kanala: samo slušanje poruke na kanalu koji kiosk već ima)
   useEffect(() => {
     let ch: ReturnType<ReturnType<typeof getSharedAbly>['channels']['get']> | null = null;
-    const execute = (nonce: string) => {
+    const handler = (msg: { data?: unknown }) => {
       try {
-        // jedna komanda se izvršava samo jednom: nonce se pamti i u sessionStorage (reload) i u localStorage (restart aplikacije)
-        try {
-          if (sessionStorage.getItem(CMD_NONCE_KEY) === nonce || localStorage.getItem(CMD_NONCE_KEY) === nonce) return;
-          sessionStorage.setItem(CMD_NONCE_KEY, nonce);
-          localStorage.setItem(CMD_NONCE_KEY, nonce);
-        } catch { /* bez storage-a: ostaje zaštita preko vremena */ }
+        const d = msg.data as Partial<KioskCommand> | null;
+        if (!d || d.id !== id || d.cmd !== 'restart' || typeof d.ts !== 'number' || typeof d.nonce !== 'string') return;
+        if (Math.abs(nowMs() - d.ts) > 120_000) return; // stara komanda
+        if (sessionStorage.getItem(CMD_NONCE_KEY) === d.nonce) return; // već izvršena
+        sessionStorage.setItem(CMD_NONCE_KEY, d.nonce);
         const api = (window as unknown as { electronAPI?: { restartApp?: () => void } }).electronAPI;
         if (typeof api?.restartApp === 'function') {
           api.restartApp();
@@ -121,26 +71,12 @@ export function useKioskSupervisor(opts: { id: string; role: AblyClientRole; vie
         }
       } catch { /* komanda nikad ne smije srušiti stranicu */ }
     };
-    const handler = (msg: { data?: unknown }) => {
-      try {
-        const d = msg.data as Partial<KioskCommand> | null;
-        if (!d || d.id !== id || d.cmd !== 'restart' || typeof d.ts !== 'number' || typeof d.nonce !== 'string') return;
-        if (Math.abs(nowMs() - d.ts) > 120_000) return; // stara komanda
-        execute(d.nonce);
-      } catch { /* ignore */ }
-    };
-    // rezervni put: komanda iz običnog HTTP odgovora (Ably ne radi). Vrijedi samo ako je izdata POSLIJE učitavanja ove stranice
-    // (inače bi se poslije restarta izvršavala iznova dok ne istekne na serveru).
-    const offHttp = onServerCommand((c) => {
-      if (c.ts > performance.timeOrigin) execute(c.nonce);
-    });
     try {
       ch = getSharedAbly(role).channels.get(KIOSK_CMD_CHANNEL);
       ch.subscribe(KIOSK_CMD_EVENT, handler)?.catch(() => {});
     } catch { /* bez Ably-ja nema daljinskih komandi, ostalo radi */ }
     return () => {
       try { ch?.unsubscribe(KIOSK_CMD_EVENT, handler); } catch { /* ignore */ }
-      offHttp();
     };
   }, [id, role]);
 

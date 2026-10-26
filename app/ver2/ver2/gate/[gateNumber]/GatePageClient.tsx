@@ -23,7 +23,6 @@ import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 import AirportIdleScreen, { DevCredit } from '@/components/AirportIdleScreen';
 import { useKioskSupervisor } from '@/hooks/useKioskSupervisor';
-import { setKioskInfo } from '@/lib/kiosk-beacon';
 
 // ------------------------------------------------------------
 // Konstante
@@ -743,25 +742,6 @@ const effectiveStatus = useMemo(() => {
     flight: display.flight?.FlightNumber || '',
     reload: () => window.location.reload(),
   });
-  // dijagnostika za health stranicu + SAMOLIJEČENJE (isto kao na check-inu): klijent ima otvorenu dodjelu za ovaj gate, a ekran
-  // je idle duže od 90 s -> ponovo povuci dodjele i letove; poslije 180 s reload (najviše jednom u 15 min po monitoru).
-  const gateEntryStatus = myGateEntry?.status;
-  useEffect(() => { setKioskInfo({ entry: gateEntryStatus === 'open' ? 'open' : gateEntryStatus === 'closed' ? 'closed' : 'none' }); }, [gateEntryStatus]);
-  const gateOpenNoFlight = gateEntryStatus === 'open' && !display.flight && isSynced && !loading;
-  useEffect(() => {
-    if (!gateOpenNoFlight) return;
-    const t1 = setTimeout(() => { refetchAssignments(); refetchFlights(); }, 90_000);
-    const t2 = setTimeout(() => {
-      try {
-        const K = 'gate_open_idle_reload_at';
-        const last = parseInt(localStorage.getItem(K) || '0', 10) || 0;
-        if (Date.now() - last < 15 * 60_000) return;
-        localStorage.setItem(K, String(Date.now()));
-      } catch { /* ignore */ }
-      window.location.reload();
-    }, 180_000);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, [gateOpenNoFlight, refetchAssignments, refetchFlights]);
   // ------------------------------------------------------------
   // Weather
   // ------------------------------------------------------------
