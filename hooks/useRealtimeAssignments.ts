@@ -390,8 +390,10 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
             let n = 0;
             for (const k of Object.keys(inc)) {
               const a = inc[k]; const b = loc[k];
-              if (a && b && a.status === 'open' && b.status !== 'open' && (b.seq ?? 0) > (a.seq ?? 0)) {
-                diag(`snapshot odbijen: ${type} ${k} server open #${a.seq ?? 0} < lokalno ${b.status ?? 'null'} #${b.seq ?? 0}`);
+              // Svaka razlika u sadržaju uz manji serverski seq (ne samo "server open"): i zaostalo OTVORENO lokalno stanje
+              // (server zatvoren/prazan sa manjim seq-om) bi inače ostalo zauvijek, jer ga mergeNewer odbija.
+              if (a && b && (b.seq ?? 0) > (a.seq ?? 0) && (a.status !== b.status || (a.flightNumber ?? '') !== (b.flightNumber ?? ''))) {
+                diag(`snapshot odbijen: ${type} ${k} server ${a.status ?? 'null'} #${a.seq ?? 0} < lokalno ${b.status ?? 'null'} #${b.seq ?? 0}`);
                 verifyKeyRef.current(type, k);
                 if (++n >= 3) break;
               }
