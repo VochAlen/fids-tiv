@@ -8,7 +8,8 @@ import { requireAdmin } from '@/lib/admin-auth';
 import { publishToChannel } from '@/lib/ably-server';
 import { writeKioskCmd } from '@/lib/kiosk-cmd-server';
 import { pushKioskEvents } from '@/lib/kiosk-events-server';
-import { KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, isValidKioskId, type KioskCommand } from '@/lib/kiosk-beacon';
+import { KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, KIOSK_HASH_KEY, isValidKioskId, type KioskCommand } from '@/lib/kiosk-beacon';
+import { getRedisClient } from '@/lib/redis';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,4 +42,26 @@ export async function POST(request: Request) {
   }
   await pushKioskEvents([{ t: command.ts, k: 'cmd', id, e: 'cmd', m: 'restart/reload poslan sa admin stranice' }]);   // zapisnik (samo pri kliku)
   return NextResponse.json({ ok: true, id, sentAt: command.ts, via: { ably, backup } }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+/** Ukloni monitor sa liste (npr. probna stranica ili monitor koji nije u upotrebi). Ako se ponovo javi, opet će se pojaviti. */
+export async function DELETE(request: Request) {
+  const { error: authError } = await requireAdmin(request);
+  if (authError) return authError;
+
+  let body: { id?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Neispravan JSON' }, { status: 400 });
+  }
+  const id = typeof body.id === 'string' ? body.id.toLowerCase() : '';
+  if (!isValidKioskId(id)) return NextResponse.json({ error: 'Neispravan id monitora' }, { status: 400 });
+  try {
+    await getRedisClient().hdel(KIOSK_HASH_KEY, id);
+  } catch (err) {
+    console.error('[admin/kiosk-command] brisanje monitora:', err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: 'Redis nedostupan' }, { status: 502 });
+  }
+  return NextResponse.json({ ok: true, id }, { headers: { 'Cache-Control': 'no-store' } });
 }

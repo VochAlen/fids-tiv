@@ -364,6 +364,18 @@ export default function AdminHealthPage() {
     }
   }, []);
 
+  // Ukloni monitor sa liste (probna stranica / monitor koji se ne koristi). Ako se ponovo javi, vratit će se sam.
+  const forgetKiosk = useCallback(async (k: KioskInfo) => {
+    if (!window.confirm(`Ukloniti ${k.id} sa liste monitora?\n\nAko se ponovo javi, pojavit će se opet.`)) return;
+    try {
+      const res = await fetch('/api/admin/kiosk-command', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: k.id }) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      fetchHealthRef.current();
+    } catch (e) {
+      window.alert(`Nije uklonjeno: ${e instanceof Error ? e.message : 'greška'}`);
+    }
+  }, []);
+
   // Jedan klik za sve monitore koji su zaglavljeni (razlika prema bazi ili zastarjeli podaci). Trošak: jedna Ably poruka po monitoru.
   const sendRestartMany = useCallback(async (targets: KioskInfo[]) => {
     if (!targets.length) return;
@@ -647,6 +659,12 @@ export default function AdminHealthPage() {
                                       className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 disabled:opacity-50 ${t.btn}`}>
                                       {cmd?.status === 'sending' ? 'šalje…' : k.canRestart ? 'Restart' : 'Reload'}
                                     </button>
+                                    {k.status === 'silent' && (
+                                      <button type="button" onClick={() => forgetKiosk(k)}
+                                        className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 ${t.btn}`}>
+                                        Ukloni
+                                      </button>
+                                    )}
                                     {confirmed && <span className="text-emerald-500">✓ ponovo pokrenut</span>}
                                     {waiting && !noReply && <span className={t.sub}>poslano…</span>}
                                     {noReply && <span className="text-amber-500">bez odgovora</span>}
