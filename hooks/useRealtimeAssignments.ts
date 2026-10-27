@@ -169,6 +169,10 @@ const RECONCILE_INTERVAL_MS = 5 * 60_000;
 // tako da se zaglavljen pokušaj stigne prekinuti i osloboditi
 // `inFlightRef` PRIJE nego što sledeći redovni ciklus (checkin
 // watchdog na 12-15s) i onako pokuša ponovo.
+// Najduži razmak između dva GARANTOVANA beacona (reconcile je svakih 5 min ±60 s, pa ide svaki DRUGI reconcile = razmak 8–12 min,
+// ispod praga "ne javlja se" od 17 min; ostali reconcile-i nose beacon preko zajedničkog keša i uglavnom stižu). Pola troška
+// nego kad bi se forsirao svaki reconcile.
+const BEACON_FORCE_MS = 9 * 60_000;
 const FETCH_SNAPSHOT_TIMEOUT_MS = 10_000;
 
 // ── TOPLI START (2026-10-21) ─────────────────────────────────────────────────────────────────────────
@@ -250,6 +254,8 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   const failRetryDelayRef = useRef(FAIL_RETRY_START_MS);
   const fetchSnapshotRef = useRef<() => void>(() => {});
   const verifyKeyRef = useRef<(type: 'desk' | 'gate', key: string) => void>(() => {});
+  // Kad je zadnji put beacon STVARNO stigao do servera (zahtjev koji nije opslužen iz CDN keša). Vidi fetchSnapshot.
+  const lastBeaconAtRef = useRef(0);
   const [channelDegraded, setChannelDegraded] = useState(false);
 
   // NOVO (2026-10-12): kad je zadnji put ključ dirnut Ably porukom (ms). fetchSnapshot() ovo koristi da
@@ -349,13 +355,24 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
     // Beacon (ko sam i šta prikazujem) putuje uz ISTI zahtjev koji ionako postoji, kao HEADER (ne u URL-u): URL ostaje
     // identičan za sve kioske, pa Vercel CDN i dalje dijeli odgovor (s-maxage=2) — nema dodatnih poziva ni funkcija.
     const bq = beaconQuery();
-    fetch('/api/test/assignments', { cache: 'no-store', signal: controller.signal, ...(bq ? { headers: { 'x-kiosk': bq } } : {}) })
+    // GARANTOVAN beacon: CDN (s-maxage=2 + stale-while-revalidate=3 = prozor od ~5 s) povremeno odgovori iz keša, pa funkcija
+    // ne vidi header i monitor se na health stranici vodi kao "ne javlja se" iako radi. Zato, ako beacon nije stigao u zadnjih
+    // BEACON_FORCE_MS, ovaj zahtjev ide na URL sa id-em monitora (?k=...): to je poseban ključ keša, koji dijele samo zahtjevi
+    // istog monitora, pa ga CDN ne može opslužiti tuđim odgovorom. Ostali zahtjevi ostaju na zajedničkom URL-u (zajednički keš).
+    let url = '/api/test/assignments';
+    let forced = false;
+    if (bq && Date.now() - lastBeaconAtRef.current >= BEACON_FORCE_MS) {
+      const kid = new URLSearchParams(bq).get('k');
+      if (kid) { url += `?k=${encodeURIComponent(kid)}`; forced = true; }
+    }
+    fetch(url, { cache: 'no-store', signal: controller.signal, ...(bq ? { headers: { 'x-kiosk': bq } } : {}) })
       .then(res => {
         // NOVO (po predlogu): eksplicitna provjera HTTP statusa —
         // ranije se `res.json()` pozivao bezuslovno, pa bi npr. 500
         // odgovor sa praznim/neočekivanim tijelom mogao tiho "proći"
         // umjesto da završi u catch-u ispod.
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (forced) lastBeaconAtRef.current = Date.now();
         noteServerDate(res.headers.get('date'), sentAt, Date.now());
         return res.json() as Promise<AssignmentsResponse>;
       })

@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
   // 2026-10-23: kiosk u HEADER-u x-kiosk šalje kratki "beacon" (k=id&s=stanje&...) — upisuje se u Redis POSLIJE odgovora
-  // (after), pa ne utiče na brzinu ni pouzdanost ove rute. Namjerno header, a ne query: URL ostaje isti za sve, pa CDN
+  // (after), pa ne utiče na brzinu ni pouzdanost ove rute. Header, a ne query (osim forsiranog beacona, vidi hooks/useRealtimeAssignments.ts): URL je uglavnom isti za sve, pa CDN
   // keš (s-maxage=2) i dalje služi više kioska jednim pozivom funkcije (nema dodatnog troška na Vercelu). Zahtjev koji
   // CDN odgovori iz keša ne izvršava funkciju, pa tada ni beacon — zato je prag "ne javlja se" 17 min, ne 12.
   try {
