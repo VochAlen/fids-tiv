@@ -35,7 +35,7 @@ export type KioskClient = 'electron' | 'chrome';
 
 const VIEWS: readonly KioskView[] = ['loading', 'idle', 'open', 'closed', 'other'];
 // Dozvoljeni prefiksi i oblik id-a: ograničava prostor ključeva (endpoint je javan, neautentifikovan).
-const ID_RE = /^(checkin|gate|board|combined|departures|split)(-[a-z0-9]{1,6})?$/;
+const ID_RE = /^(checkin|gate|board|combined|departures|split|security)(-[a-z0-9]{1,6})?$/;
 const FLIGHT_RE = /^[A-Z0-9]{0,8}$/;
 
 export function isValidKioskId(id: string): boolean {

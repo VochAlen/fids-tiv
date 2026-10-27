@@ -20,8 +20,8 @@ import { LEARN_HASH_KEY, summarizeAccuracy, recentWeekKeys, type LearnKind } fro
 import { EXAMPLES_HASH_KEY } from '@/lib/assignment-model';
 import { decideGate } from '@/lib/learning-gate';
 import { BUILD_ID } from '@/lib/build-id';
-import { KIOSK_HASH_KEY } from '@/lib/kiosk-beacon';
-import { classifyKiosks, parseStoredKiosks, KIOSK_FORGET_AFTER_DAYS, type KioskInfo } from '@/lib/kiosk-health';
+import type { KioskInfo } from '@/lib/kiosk-health';
+import { loadKiosks } from '@/lib/kiosk-status-server';
 import type {
   HealthIssue, HealthResponse, OpenAssignment, LearningKindSummary, RedisCheck, AblyCheck,
 } from '@/lib/health-types';
@@ -155,30 +155,10 @@ async function checkAssignments(): Promise<HealthResponse['checks']['assignments
   return a;
 }
 
-/** Minuta od kraja noćnog režima (null = noć je). Traži unazad u koracima od 5 min (max 12 h). */
-function minutesSinceDayStart(now: number): number | null {
-  if (isNightHours(new Date(now))) return null;
-  for (let m = 5; m <= 12 * 60; m += 5) {
-    if (isNightHours(new Date(now - m * 60_000))) return m;
-  }
-  return 12 * 60;
-}
-
 async function checkKiosks(redisOk: boolean, open: OpenAssignment[]): Promise<KioskInfo[]> {
   if (!redisOk) return [];
   try {
-    const client = getRedisClient();
-    const hash = await client.hgetall(KIOSK_HASH_KEY);
-    const stored = parseStoredKiosks(hash);
-    const now = Date.now();
-    // zaboravi monitore koji se nisu javili 14 dana (ugašeni/preimenovani) — da lista ne raste
-    const old = stored.filter((k) => now - k.seen > KIOSK_FORGET_AFTER_DAYS * 86_400_000).map((k) => k.id);
-    if (old.length) client.hdel(KIOSK_HASH_KEY, ...old).catch(() => {});
-    return classifyKiosks(
-      stored.filter((k) => !old.includes(k.id)),
-      open,
-      { now, night: isNightHours(), minutesSinceDayStart: minutesSinceDayStart(now), currentBuild: BUILD_ID },
-    );
+    return await loadKiosks(open);   // zajednički kod (lib/kiosk-status-server.ts): isti rezultat kao pregled i obavještenja
   } catch (err) {
     console.error('[admin/health] Kiosks check failed:', err);
     return [];

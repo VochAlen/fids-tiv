@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/admin-auth';
 import { publishToChannel } from '@/lib/ably-server';
 import { writeKioskCmd } from '@/lib/kiosk-cmd-server';
+import { pushKioskEvents } from '@/lib/kiosk-events-server';
 import { KIOSK_CMD_CHANNEL, KIOSK_CMD_EVENT, isValidKioskId, type KioskCommand } from '@/lib/kiosk-beacon';
 
 export const dynamic = 'force-dynamic';
@@ -38,5 +39,6 @@ export async function POST(request: Request) {
   if (!ably && !backup) {
     return NextResponse.json({ error: 'Komanda nije poslana (Ably i Redis nedostupni)' }, { status: 502 });
   }
+  await pushKioskEvents([{ t: command.ts, k: 'cmd', id, e: 'cmd', m: 'restart/reload poslan sa admin stranice' }]);   // zapisnik (samo pri kliku)
   return NextResponse.json({ ok: true, id, sentAt: command.ts, via: { ably, backup } }, { headers: { 'Cache-Control': 'no-store' } });
 }

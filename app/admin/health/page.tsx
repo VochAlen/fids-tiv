@@ -11,9 +11,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowLeft, Brain, Check, CheckCircle2, Clock, Copy, Database, Info,
-  ListChecks, Monitor, Moon, Plane, RefreshCw, Server, Sun, XCircle,
+  History, ListChecks, Monitor, Moon, Plane, RefreshCw, Send, Server, Sun, XCircle,
 } from 'lucide-react';
 import type { HealthResponse, HealthIssue, LearningKindSummary, KioskInfo } from '@/lib/health-types';
+import type { KioskEvent, EventSummary } from '@/lib/kiosk-events';
 
 const HISTORY_MAX = 30;
 const REFRESH_OPTIONS: Array<{ label: string; ms: number }> = [
@@ -184,6 +185,137 @@ function LearningBlock({ t, title, k }: { t: Theme; title: string; k: LearningKi
 }
 
 // ─── Glavna komponenta ───────────────────────────────────────────────
+
+// ─── Istorija događaja (problemi monitora, ručne komande) ───────────
+interface EventsResponse { events: KioskEvent[]; summary: EventSummary[]; telegram: { configured: boolean } }
+
+const fmtEvTime = (t: number) => {
+  try { return new Date(t).toLocaleString('sr-Latn-ME', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch { return String(t); }
+};
+
+function eventText(ev: KioskEvent): { text: string; tone: 'bad' | 'ok' | 'info' } {
+  const who = ev.id === 'flights' ? 'Podaci o letovima' : ev.id;
+  if (ev.e === 'cmd') return { text: `${who}: ${ev.m || 'komanda poslana'}`, tone: 'info' };
+  if (ev.k === 'silent') return ev.e === 'start' ? { text: `${who} se ne javlja`, tone: 'bad' } : { text: `${who} se vratio (bio ${fmtMinutes(ev.d ?? 0)} bez veze)`, tone: 'ok' };
+  if (ev.k === 'stale') return ev.e === 'start' ? { text: `${who}: zastarjeli podaci${ev.m ? ` (${ev.m})` : ''}`, tone: 'bad' } : { text: `${who}: podaci ponovo svježi (trajalo ${fmtMinutes(ev.d ?? 0)})`, tone: 'ok' };
+  return ev.e === 'start' ? { text: `${who} su zastarjeli${ev.m ? ` (${ev.m})` : ''}`, tone: 'bad' } : { text: `${who} ponovo svježi (trajalo ${fmtMinutes(ev.d ?? 0)})`, tone: 'ok' };
+}
+
+function HistoryPanel({ t, refreshKey }: { t: Theme; refreshKey: number }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<EventsResponse | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;   // ništa se ne učitava dok je sekcija zatvorena (nema troška)
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/events', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = (await res.json()) as EventsResponse;
+        if (!cancelled) { setData(j); setErr(null); }
+      } catch (e) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : 'greška');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, refreshKey]);
+
+  const sendTest = async () => {
+    setTesting(true); setTestMsg(null);
+    try {
+      const res = await fetch('/api/admin/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'test' }) });
+      const j = (await res.json()) as { ok?: boolean; error?: string };
+      setTestMsg(j.ok ? 'Poruka poslana — provjeri Telegram.' : (j.error || 'Nije poslano.'));
+    } catch { setTestMsg('Nije poslano (mreža).'); }
+    finally { setTesting(false); }
+  };
+
+  const monitors = (data?.summary ?? []).filter(s => s.id !== 'flights');
+  return (
+    <Panel t={t} title="Istorija i obavještenja" icon={<History size={16} />}
+      right={
+        <button type="button" onClick={() => setOpen(o => !o)}
+          className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 ${t.btn}`}>
+          {open ? 'Sakrij' : 'Prikaži'}
+        </button>
+      }>
+      {!open ? (
+        <p className={`text-sm ${t.sub}`}>Zapisnik problema monitora, dostupnost za zadnjih 7 dana i Telegram obavještenja. Učitava se tek kad otvoriš sekciju.</p>
+      ) : err ? (
+        <p className="text-sm text-red-500">Istorija nije učitana: {err}</p>
+      ) : !data ? (
+        <p className={`text-sm ${t.sub}`}>Učitavam…</p>
+      ) : (
+        <div className="space-y-4">
+          <div className={`flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2 text-xs ${t.cardBorder}`}>
+            <Send size={14} className={data.telegram.configured ? 'text-emerald-500' : 'text-amber-500'} />
+            <span className={t.sub}>
+              Telegram: {data.telegram.configured
+                ? <b className="text-emerald-500">podešen</b>
+                : <b className="text-amber-500">nije podešen</b>}
+              {!data.telegram.configured && ' — postavi TELEGRAM_BOT_TOKEN i TELEGRAM_CHAT_ID u Vercel okruženju'}
+            </span>
+            <button type="button" onClick={sendTest} disabled={testing || !data.telegram.configured}
+              className={`ml-auto rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition active:scale-95 disabled:opacity-50 ${t.btn}`}>
+              {testing ? 'šalje…' : 'Pošalji probnu poruku'}
+            </button>
+            {testMsg && <span className={`w-full ${t.sub}`}>{testMsg}</span>}
+          </div>
+
+          <div>
+            <div className={`mb-1 text-[11px] font-semibold uppercase tracking-wider ${t.faint}`}>Monitori — zadnjih 7 dana</div>
+            {monitors.length === 0 ? (
+              <p className={`text-sm ${t.sub}`}>Nema zabilježenih problema. 🎉</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className={t.faint}><tr><th className="py-1 pr-3 font-medium">Monitor</th><th className="pr-3 font-medium">Problema</th><th className="pr-3 font-medium">Bez veze</th><th className="pr-3 font-medium">Zastarjeli podaci</th><th className="font-medium">Zadnji put</th></tr></thead>
+                  <tbody>
+                    {monitors.map(m => (
+                      <tr key={m.id} className={`border-t ${t.row}`}>
+                        <td className="py-1.5 pr-3 font-mono font-semibold">{m.id}</td>
+                        <td className="pr-3 tabular-nums">{m.incidents}</td>
+                        <td className={`pr-3 tabular-nums ${m.downMin >= 60 ? 'text-red-500' : ''}`}>{m.downMin > 0 ? fmtMinutes(m.downMin) : '—'}</td>
+                        <td className={`pr-3 tabular-nums ${m.staleMin >= 60 ? 'text-amber-500' : ''}`}>{m.staleMin > 0 ? fmtMinutes(m.staleMin) : '—'}</td>
+                        <td className={`tabular-nums ${t.sub}`}>{fmtEvTime(m.lastAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className={`mb-1 text-[11px] font-semibold uppercase tracking-wider ${t.faint}`}>Zadnji događaji</div>
+            {data.events.length === 0 ? (
+              <p className={`text-sm ${t.sub}`}>Još nema događaja.</p>
+            ) : (
+              <ul className="max-h-72 overflow-y-auto">
+                {data.events.map((ev, i) => {
+                  const x = eventText(ev);
+                  const dot = x.tone === 'bad' ? 'bg-red-500' : x.tone === 'ok' ? 'bg-emerald-500' : 'bg-sky-400';
+                  return (
+                    <li key={`${ev.t}-${ev.id}-${ev.e}-${i}`} className={`flex items-start gap-2.5 border-b py-1.5 text-xs last:border-0 ${t.row}`}>
+                      <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${dot}`} />
+                      <span className={`w-24 shrink-0 tabular-nums ${t.sub}`}>{fmtEvTime(ev.t)}</span>
+                      <span className="min-w-0 flex-1">{x.text}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export default function AdminHealthPage() {
   const [data, setData] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -532,6 +664,8 @@ export default function AdminHealthPage() {
               )}
             </Panel>
 
+            <HistoryPanel t={t} refreshKey={lastFetchedAt ? Math.floor(lastFetchedAt.getTime() / 300_000) : 0} />
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {/* Učenje */}
               <Panel t={t} title="AI sugestija i učenje" icon={<Brain size={16} />}>
@@ -566,6 +700,7 @@ export default function AdminHealthPage() {
             <div className="flex flex-wrap gap-2">
               {[
                 { href: '/admin/assign-checkin', label: 'Dodjele šaltera i gate-ova' },
+                { href: '/admin/overview', label: 'Pregled šaltera i gate-ova' },
                 { href: '/admin', label: 'Admin početna' },
                 { href: '/admin/pa', label: 'PA obavještenja' },
               ].map(l => (

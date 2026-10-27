@@ -12,6 +12,8 @@ import { requireCronSecret } from '@/lib/admin-auth';
 // lib/override-utils.ts. Poziva se ovdje (svaka 3 min, nezavisno od
 // bilo koje admin akcije) umjesto da se cekaju sledeca 4h ciscenja.
 import { autoCloseDepartedDesks, autoCloseDepartedGates } from '@/lib/override-utils';
+// Obavještenja (Telegram) + zapisnik događaja — na ISTOM cron-u, bez novih poziva funkcija (vidi lib/alerts-server.ts).
+import { runAlerts } from '@/lib/alerts-server';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -57,6 +59,13 @@ export async function GET(request: Request) {
       }
     } catch (err) {
       console.error('[cron/flight-sync] auto-close greška:', err instanceof Error ? err.message : err);
+    }
+
+    // Obavještenja o problemima (monitori, podaci o letovima). Odvojen try/catch — nikad ne smije omesti publish ispod.
+    try {
+      await runAlerts({ isOfflineMode: data.isOfflineMode, lastUpdated: data.lastUpdated });
+    } catch (err) {
+      console.error('[cron/flight-sync] alerts greška:', err instanceof Error ? err.message : err);
     }
 
     const client = getRedisClient();
