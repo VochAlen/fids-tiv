@@ -9,6 +9,13 @@ const TTL_RULES: Record<string, number> = {
   'desk-class:':   21_600,
 };
 
+// Ključevi koji MORAJU ostati trajni (bez TTL-a) — cleanup im nikad ne smije dodijeliti rok:
+//  • 'ably-fids:seq:' — INCR brojači (desk/gate). Kad im istekne TTL (ranije fallback 3600 s), brojač se vrati na 1,
+//    pa kiosci koji imaju viši lokalni seq (npr. 46) odbijaju nove dodjele sa nižim seq (npr. 4) → "idle, a treba let".
+//  • 'fids:kiosks' — hash sa prijavama monitora (health stranica); istek je brisao SVE monitore jednom na sat.
+export const PERSISTENT_KEY_PREFIXES = ['ably-fids:seq:', 'fids:kiosks'];
+export const isPersistentKey = (key: string): boolean => PERSISTENT_KEY_PREFIXES.some(p => key.startsWith(p));
+
 export interface RedisCleanupResult {
   scanned: number;
   fixed: number;
@@ -25,6 +32,7 @@ export async function cleanupRedisTTLs(timeoutMs = 5_000): Promise<RedisCleanupR
     (async (): Promise<RedisCleanupResult> => {
       const client = getRedisClient();
       const keysToFix: string[] = [];
+      const keysToPersist: string[] = [];   // trajni ključevi koji su (ranijim cleanup-om) dobili TTL → skini ga (PERSIST)
       let cursor = '0';
       let scanned = 0;
 
@@ -38,7 +46,9 @@ export async function cleanupRedisTTLs(timeoutMs = 5_000): Promise<RedisCleanupR
           keys.forEach(key => pipeline.ttl(key));
           const results = await pipeline.exec();
           results?.forEach((result, i) => {
-            if (!result[0] && result[1] === -1) keysToFix.push(keys[i]);
+            if (result[0]) return;
+            if (isPersistentKey(keys[i])) { if (typeof result[1] === 'number' && result[1] >= 0) keysToPersist.push(keys[i]); }
+            else if (result[1] === -1) keysToFix.push(keys[i]);
           });
         }
 
@@ -53,6 +63,13 @@ export async function cleanupRedisTTLs(timeoutMs = 5_000): Promise<RedisCleanupR
         });
         await fixPipeline.exec();
         console.log(`🧹 Redis cleanup: ${keysToFix.length} keys fixed`);
+      }
+
+      if (keysToPersist.length > 0) {
+        const pp = client.pipeline();
+        keysToPersist.forEach(key => pp.persist(key));
+        await pp.exec();
+        console.log(`🧹 Redis cleanup: TTL skinut sa ${keysToPersist.length} trajnih ključeva (${keysToPersist.join(', ')})`);
       }
 
       return { scanned, fixed: keysToFix.length, timedOut: false };

@@ -249,6 +249,7 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
   const failRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const failRetryDelayRef = useRef(FAIL_RETRY_START_MS);
   const fetchSnapshotRef = useRef<() => void>(() => {});
+  const verifyKeyRef = useRef<(type: 'desk' | 'gate', key: string) => void>(() => {});
   const [channelDegraded, setChannelDegraded] = useState(false);
 
   // NOVO (2026-10-12): kad je zadnji put ključ dirnut Ably porukom (ms). fetchSnapshot() ovo koristi da
@@ -381,18 +382,23 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
         // Ključevi dirnuti Ably porukom NAKON što je ovaj zahtjev krenuo: snapshot je stariji od njih.
         const protectedDesks = protectedKeysSince(touchedDeskRef.current, startedAt);
         const protectedGates = protectedKeysSince(touchedGateRef.current, startedAt);
-        // DIJAGNOSTIKA (bez mrežnog troška): snapshot nosi OTVOREN unos sa MANJIM seq od lokalnog (mergeNewer ga tiho odbija)
-        // → zapiši u dijagnostiku (health "Greška"), da se zaglavljeno stanje "idle, a treba let" može prepoznati.
+        // SAMOLIJEČENJE + DIJAGNOSTIKA: snapshot nosi OTVOREN unos sa MANJIM seq od lokalnog (mergeNewer ga tiho odbija —
+        // tipično kad se serverski seq brojač vratio na mali broj). Zapiši u dijagnostiku (health "Greška") i traži
+        // NEKEŠIRANU istinu iz baze za taj ključ (verifyKey → applyTruth ignoriše seq). Rijetko i samo za pogođene ključeve.
         try {
-          const loc = latestRef.current.desk;
-          const inc = data.deskEntries ?? {};
-          for (const k of Object.keys(inc)) {
-            const a = inc[k]; const b = loc[k];
-            if (a && b && a.status === 'open' && b.status !== 'open' && (b.seq ?? 0) > (a.seq ?? 0)) {
-              diag(`snapshot odbijen: desk ${k} server open #${a.seq ?? 0} < lokalno ${b.status ?? 'null'} #${b.seq ?? 0}`);
-              break;
+          const check = (type: 'desk' | 'gate', loc: Record<string, AssignmentEntry>, inc: Record<string, AssignmentEntry>) => {
+            let n = 0;
+            for (const k of Object.keys(inc)) {
+              const a = inc[k]; const b = loc[k];
+              if (a && b && a.status === 'open' && b.status !== 'open' && (b.seq ?? 0) > (a.seq ?? 0)) {
+                diag(`snapshot odbijen: ${type} ${k} server open #${a.seq ?? 0} < lokalno ${b.status ?? 'null'} #${b.seq ?? 0}`);
+                verifyKeyRef.current(type, k);
+                if (++n >= 3) break;
+              }
             }
-          }
+          };
+          check('desk', latestRef.current.desk, data.deskEntries ?? {});
+          check('gate', latestRef.current.gate, data.gateEntries ?? {});
         } catch { /* dijagnostika nikad ne smije srušiti sync */ }
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks, data.readAt));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates, data.readAt));
@@ -443,6 +449,8 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
         verifyInFlightRef.current.delete(id);
       });
   }, []);
+
+  useEffect(() => { verifyKeyRef.current = verifyKey; }, [verifyKey]);
 
   useEffect(() => {
     mountedRef.current = true;
