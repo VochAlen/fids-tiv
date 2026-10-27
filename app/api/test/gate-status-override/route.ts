@@ -30,6 +30,8 @@ import { applyResourceAction, computeCleanup, type ResourceEntry, type ResourceA
 import { recordAssignmentLearning } from '@/lib/assignment-learning-server';
 import { sanitizeLearningContext } from '@/lib/assignment-learning';
 import { requireAdmin } from '@/lib/admin-auth';
+import { logAssignmentEvents } from '@/lib/assign-log-server';
+import type { AssignEvent } from '@/lib/assign-log';
 
 export const dynamic = 'force-dynamic';
 
@@ -309,7 +311,9 @@ interface GateStatusRequestBody {
 }
 
 export async function POST(request: Request) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  const adminAuth = await requireAdmin();
+  if (adminAuth.error) return adminAuth.error;
+  const adminUser = adminAuth.session?.username;
   let body: GateStatusRequestBody;
   try {
     body = await request.json();
@@ -416,6 +420,19 @@ export async function POST(request: Request) {
         busyIds,
         context: learnCtx,
       }));
+    }
+
+    // Istorija dodjela (izvještaj /admin/history): jedan zapis po promjeni + automatski istekli unosi. Poslije odgovora (after),
+    // jedna Redis pipeline; greška se guta i ne utiče na dodjelu.
+    {
+      const logNow = Date.now();
+      const logEvents: AssignEvent[] = [];
+      if (result.publishedEntry && action !== 'setClass') {
+        const e = result.publishedEntry.entry;
+        logEvents.push({ t: logNow, y: 'g', id: String(gateNumber), a: e.status === 'open' ? 'open' : e.status === 'closed' ? 'close' : 'clear', f: String(e.flightNumber || flightNumber || ''), ...(adminUser ? { u: adminUser } : {}) });
+      }
+      for (const c of result.cleanedEntries ?? []) logEvents.push({ t: logNow, y: 'g', id: String(c.gateNumber), a: 'auto', f: '' });
+      if (logEvents.length) after(() => logAssignmentEvents(logEvents));
     }
 
     if (result.publishedEntry) {

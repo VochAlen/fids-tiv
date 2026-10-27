@@ -16,7 +16,11 @@ const GUARDED: Record<string, string[]> = {
   'admin/init/route.ts': ['POST'],
   'admin/stats/route.ts': ['GET'],
   'admin/health/route.ts': ['GET'],
-  'admin/kiosk-command/route.ts': ['POST'],
+  'admin/kiosk-command/route.ts': ['POST', 'DELETE'],
+  'admin/history/route.ts': ['GET'],
+  'admin/history/pdf/route.ts': ['GET'],
+  'admin/overview/route.ts': ['GET'],
+  'admin/events/route.ts': ['GET', 'POST'],
 };
 
 describe('admin/assignment rute traže admin sesiju (statička provjera)', () => {
