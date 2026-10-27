@@ -720,7 +720,7 @@ const FlightRow = memo(
             (TableHeaders: p-2), da kolone u redu i u zaglavlju dobiju
             IDENTIČNU raspodjelu širina. Sve ćelije su rigidCell() —
             vidi komentar uz getFitCityStyle. */}
-        <div className={`hidden sm:flex gap-2 px-2 py-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: `${ROW_MIN_HEIGHT_PX}px`, contain: 'layout style paint', contentVisibility: 'auto', containIntrinsicSize: `${ROW_MIN_HEIGHT_PX}px` }}>
+        <div className={`hidden sm:flex gap-2 px-2 py-1 border-b border-white/10 ${rowBg}`} style={{ minHeight: `${ROW_MIN_HEIGHT_PX}px`, contain: 'layout style paint' }}>
           <div className="flex items-center justify-center" style={rigidCell(180)}>
             <div className="font-black text-white drop-shadow-lg whitespace-nowrap" style={{ fontSize: 'min(2.5rem, 22.2cqw)' }}>
               {formatTimeString(flight.ScheduledDepartureTime) || <span className="text-white/40">--:--</span>}
@@ -1458,11 +1458,12 @@ const handleClose = useCallback(() => {
     return Infinity
   }, [])
 
-  const allSortedFlights = useMemo(() => {
-    const base = showArrivals ? arrivals : departures
+  // Obje liste (arrivals i departures) se sortiraju i režu NEZAVISNO od toga koja je trenutno vidljiva, pa su
+  // OBA prikaza stalno renderovana (vidi render ispod) — prebacivanje je samo CSS (bez unmount/mount redova).
+  // Redoslijed ne zavisi od "sada" (aDiff - bDiff = aTime - bTime), pa nema potrebe za ponovnim sortiranjem pri prebacivanju.
+  const sortFlights = useCallback((base: Flight[]) => {
     const now = new Date()
     const nowMinutes = now.getHours() * 60 + now.getMinutes()
-
     return [...base].sort((a, b) => {
       const aTime = getTimeOfDayMinutes(a.EstimatedDepartureTime || a.ScheduledDepartureTime)
       const bTime = getTimeOfDayMinutes(b.EstimatedDepartureTime || b.ScheduledDepartureTime)
@@ -1470,16 +1471,22 @@ const handleClose = useCallback(() => {
       const bDiff = bTime === Infinity ? Infinity : bTime - nowMinutes
       return aDiff - bDiff
     })
-  }, [showArrivals, arrivals, departures, getTimeOfDayMinutes])
+  }, [getTimeOfDayMinutes])
 
+  const pageOf = useCallback((sorted: Flight[]) => {
+    if (sorted.length === 0) return []
+    const pages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
+    const start = (pageIndex % pages) * PAGE_SIZE
+    return sorted.slice(start, start + PAGE_SIZE)
+  }, [pageIndex])
+
+  const arrivalsSorted   = useMemo(() => sortFlights(arrivals),   [arrivals, sortFlights])
+  const departuresSorted = useMemo(() => sortFlights(departures), [departures, sortFlights])
+  const arrivalsRows     = useMemo(() => pageOf(arrivalsSorted),   [arrivalsSorted, pageOf])
+  const departuresRows   = useMemo(() => pageOf(departuresSorted), [departuresSorted, pageOf])
+
+  const allSortedFlights = showArrivals ? arrivalsSorted : departuresSorted
   const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE))
-
-  const sortedFlights = useMemo(() => {
-    if (allSortedFlights.length === 0) return []
-    const currentPage = pageIndex % totalPages
-    const start = currentPage * PAGE_SIZE
-    return allSortedFlights.slice(start, start + PAGE_SIZE)
-  }, [allSortedFlights, pageIndex, totalPages])
 
   // ── Render — NEPROMIJENJEN ─────────────────────────────────
   if (nightMode) {
@@ -1601,24 +1608,39 @@ const handleClose = useCallback(() => {
         <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
           <TableHeaders headers={tableHeaders} headerBg={colors.header} />
           <div className="flex-1 overflow-y-auto">
-            {loading && sortedFlights.length === 0 ? (
+            {loading && arrivalsRows.length === 0 && departuresRows.length === 0 ? (
               <div className="h-full" />
-            ) : sortedFlights.length === 0 ? (
-              <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
-                <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
-                <div className="text-xl sm:text-2xl font-semibold">No {title.toLowerCase()} scheduled</div>
-              </div>
             ) : (
-              sortedFlights.map((flight, index) => (
-                <FlightRow
-                  key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
-                  flight={flight}
-                  index={index}
-                  showArrivals={showArrivals}
-                  colorTitle={colors.title}
-                  autoStatusTick={autoStatusTick}
-                />
-              ))
+              <>
+                {/* OBA prikaza su stalno u DOM-u (8+8 redova); prebacivanje arrivals↔departures je samo CSS.
+                    Ranije su se svi redovi na svakih 20 s gasili i ponovo pravili (+ slike, vremenska ćelija sa
+                    spinnerom), pa je na sporijim PC-ovima kratko ostajala "prazna plava" tabela. */}
+                {([true, false] as const).map(isArr => {
+                  const rows = isArr ? arrivalsRows : departuresRows
+                  const visible = isArr === showArrivals
+                  return (
+                    <div key={isArr ? 'arr' : 'dep'} className={visible ? 'contents' : 'hidden'} aria-hidden={!visible}>
+                      {rows.length === 0 ? (
+                        <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
+                          <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
+                          <div className="text-xl sm:text-2xl font-semibold">No {(isArr ? lang.arrivals : lang.departures).toLowerCase()} scheduled</div>
+                        </div>
+                      ) : (
+                        rows.map((flight, index) => (
+                          <FlightRow
+                            key={`${flight.FlightNumber}-${flight.ScheduledDepartureTime}`}
+                            flight={flight}
+                            index={index}
+                            showArrivals={isArr}
+                            colorTitle={isArr ? COLOR_CONFIG.arrivals.title : COLOR_CONFIG.departures.title}
+                            autoStatusTick={autoStatusTick}
+                          />
+                        ))
+                      )}
+                    </div>
+                  )
+                })}
+              </>
             )}
           </div>
         </div>

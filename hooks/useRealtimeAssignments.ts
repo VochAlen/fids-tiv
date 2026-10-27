@@ -381,6 +381,19 @@ export function useRealtimeAssignments(role: AblyClientRole, opts?: { warmStart?
         // Ključevi dirnuti Ably porukom NAKON što je ovaj zahtjev krenuo: snapshot je stariji od njih.
         const protectedDesks = protectedKeysSince(touchedDeskRef.current, startedAt);
         const protectedGates = protectedKeysSince(touchedGateRef.current, startedAt);
+        // DIJAGNOSTIKA (bez mrežnog troška): snapshot nosi OTVOREN unos sa MANJIM seq od lokalnog (mergeNewer ga tiho odbija)
+        // → zapiši u dijagnostiku (health "Greška"), da se zaglavljeno stanje "idle, a treba let" može prepoznati.
+        try {
+          const loc = latestRef.current.desk;
+          const inc = data.deskEntries ?? {};
+          for (const k of Object.keys(inc)) {
+            const a = inc[k]; const b = loc[k];
+            if (a && b && a.status === 'open' && b.status !== 'open' && (b.seq ?? 0) > (a.seq ?? 0)) {
+              diag(`snapshot odbijen: desk ${k} server open #${a.seq ?? 0} < lokalno ${b.status ?? 'null'} #${b.seq ?? 0}`);
+              break;
+            }
+          }
+        } catch { /* dijagnostika nikad ne smije srušiti sync */ }
         setDeskEntries(prev => mergeNewer(prev, data.deskEntries ?? {}, protectedDesks, data.readAt));
         setGateEntries(prev => mergeNewer(prev, data.gateEntries ?? {}, protectedGates, data.readAt));
         setIsSynced(true);
