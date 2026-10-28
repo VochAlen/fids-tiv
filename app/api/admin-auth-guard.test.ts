@@ -22,6 +22,7 @@ const GUARDED: Record<string, string[]> = {
   'admin/history/pdf/route.ts': ['GET'],
   'admin/overview/route.ts': ['GET'],
   'admin/events/route.ts': ['GET', 'POST'],
+  'admin/radar/route.ts': ['GET'],
 };
 
 describe('admin/assignment rute traže admin sesiju (statička provjera)', () => {

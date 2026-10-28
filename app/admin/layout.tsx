@@ -2,7 +2,7 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useIdleLogout } from '@/hooks/useIdleLogout';
 import { logoutAndRedirect } from '@/lib/admin-logout';
 
@@ -36,7 +36,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     logoutAndRedirect();
   }, []);
 
-  useIdleLogout(handleIdleLogout, IDLE_LOGOUT_MS, !isLoginPage);
+  // Kiosk prikaz radara (/admin/radar?kiosk=1): ekran na zidu bez miša i tastature ne smije se odjavljivati nakon 5 min.
+  // Izuzeta je SAMO ta jedna putanja; JWT sesija (24 h) i middleware važe kao i uvijek — po isteku se traži nova prijava.
+  const [radarKiosk, setRadarKiosk] = useState(false);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRadarKiosk(pathname === '/admin/radar' && new URLSearchParams(window.location.search).get('kiosk') === '1');
+  }, [pathname]);
+
+  useIdleLogout(handleIdleLogout, IDLE_LOGOUT_MS, !isLoginPage && !radarKiosk);
 
   // Istorija pristupa: jedan zapis (IP, država, OS, pregledač) kad se admin stranica prvi put otvori u ovoj kartici preglednika.
   // sessionStorage = jednom po kartici, pa osvježavanja i navigacija ne prave dodatne pozive.
