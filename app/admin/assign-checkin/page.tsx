@@ -402,7 +402,9 @@ const FlightRow: React.FC<{
   isDark: boolean;
   urgent: boolean;
   closeCheckin?: boolean;
-}> = ({ flight, assigned, selected, onSelect, isDark, urgent, closeCheckin }) => {
+  /** Prijedlog iz panela „AI sugestija” (samo prikaz; primjena ostaje u panelu). */
+  hint?: { text: string; waiting: boolean } | null;
+}> = ({ flight, assigned, selected, onSelect, isDark, urgent, closeCheckin, hint }) => {
   let cc = 'cursor-pointer rounded-2xl border transition-all duration-150 select-none relative overflow-hidden min-h-[96px] ';
   let fc = '', tc = '', dc = '', ac = '';
 
@@ -475,6 +477,18 @@ const FlightRow: React.FC<{
             </span>
           )}
         </div>
+        {hint && !assigned && (
+          <div
+            className={`mt-2 pt-1.5 border-t text-xs font-semibold flex items-center gap-1.5 ${
+              isDark ? 'border-white/10' : 'border-gray-200'
+            } ${hint.waiting
+              ? (isDark ? 'text-amber-300/90' : 'text-amber-700')
+              : (isDark ? 'text-violet-300' : 'text-violet-700')}`}
+          >
+            <span aria-hidden>✨</span>
+            <span className="truncate">{hint.text}</span>
+          </div>
+        )}
       </div>
     </TouchFeedback>
   );
@@ -832,6 +846,27 @@ const router = useRouter();
       setRemovalErrorNotices(prev => prev.filter(n => n.id !== id));
     }, 5_000);
   }, []);
+
+  // „Poništi" posljednje uklanjanje (jedan korak, 8 s). Traka se pojavi tek kad je server potvrdio 'clear';
+  // vraćanje ide kroz isti assignFlightToResource (isti red čekanja po resursu) sa source 'restore' — server iz toga ne uči.
+  // Nestaje čim je resurs ponovo zauzet (npr. neko drugi dodijeli), da ne prepiše tuđu dodjelu.
+  const UNDO_WINDOW_MS = 8_000;
+  const [undoItem, setUndoItem] = useState<{ type: 'desk' | 'gate'; resourceId: string; flightNumber: string; deadline: number } | null>(null);
+  const [undoNow, setUndoNow] = useState(() => Date.now());
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const offerUndo = useCallback((type: 'desk' | 'gate', resourceId: string, flightNumber: string) => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const now = Date.now();
+    setUndoNow(now);
+    setUndoItem({ type, resourceId, flightNumber, deadline: now + UNDO_WINDOW_MS });
+    undoTimerRef.current = setTimeout(() => setUndoItem(null), UNDO_WINDOW_MS);
+  }, []);
+  useEffect(() => () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current); }, []);
+  useEffect(() => {
+    if (!undoItem) return;
+    const id = setInterval(() => setUndoNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [undoItem]);
   const [pendingOverride,        setPendingOverride]        = useState<PendingOverride | null>(null);
   const [isDark,                 setIsDark]                 = useState(false);
   const [showStats,              setShowStats]              = useState(false);
@@ -1117,7 +1152,7 @@ const assignFlightToResource = useCallback(async (
   flight: Flight, resourceId: string, resourceType: 'desk' | 'gate',
   // NOVO (2026-10-08): 'suggestion' = primijenjeno iz AI sugestije — server
   // NE uči iz takve dodjele (da sistem ne uči iz vlastitih prijedloga).
-  source?: 'suggestion',
+  source?: 'suggestion' | 'restore',
 ): Promise<boolean> => {
   const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
   const snap = suggestionSnapshotRef.current.get(`${resourceType}:${flight.FlightNumber}`);
@@ -1518,7 +1553,7 @@ const handleConfirmOverride = useCallback(async () => {
     }, TOUCH_TIMEOUT_MS);
   }, [setSelectedFlight]);
 
-const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
+const handleRemoveCheckin = useCallback(async (deskNumber: string, withUndo = true) => {
   // Blokiraj duplirani klik dok je operacija u toku
   if (removingResources.has(`desk:${deskNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`desk:${deskNumber}`));
@@ -1573,6 +1608,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       ),
     ]);
     if (!deskRes.ok) throw new Error(`HTTP ${deskRes.status}`);
+    if (withUndo && removed) offerUndo('desk', deskNumber, removed.flightNumber);
    // isDirty = true;
     // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
   } catch (err) {
@@ -1591,9 +1627,9 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string) => {
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo]);
 
-const handleRemoveGate = useCallback(async (gateNumber: string) => {
+const handleRemoveGate = useCallback(async (gateNumber: string, withUndo = true) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
   setRemovingResources(prev => new Set(prev).add(`gate:${gateNumber}`));
 
@@ -1613,6 +1649,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       ),
     ]);
     if (!gateRes.ok) throw new Error(`HTTP ${gateRes.status}`);
+    if (withUndo && removed) offerUndo('gate', gateNumber, removed.flightNumber);
  //   isDirty = true;
   } catch (err) {
     console.error('Greška pri brisanju gate-a', gateNumber, err);
@@ -1629,7 +1666,30 @@ const handleRemoveGate = useCallback(async (gateNumber: string) => {
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo]);
+
+  const handleUndo = useCallback(async () => {
+    const u = undoItem;
+    if (!u) return;
+    setUndoItem(null);
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const norm = (x: string) => x.replace(/\s+/g, '').toUpperCase();
+    const flight = flightsRef.current.find(f => norm(f.FlightNumber) === norm(u.flightNumber));
+    if (!flight) {
+      pushRemovalErrorNotice(`Let ${u.flightNumber} više nije u rasporedu — dodijeli ručno`);
+      return;
+    }
+    const ok = await assignFlightToResource(flight, u.resourceId, u.type, 'restore');
+    if (ok) buzz();
+    else pushRemovalErrorNotice(`${u.type === 'desk' ? 'Šalter' : 'Gate'} ${u.resourceId} nije vraćen — dodijeli ručno`);
+  }, [undoItem, assignFlightToResource, pushRemovalErrorNotice]);
+
+  // Resurs je u međuvremenu ponovo zauzet (poništavanje, tuđa dodjela, auto-zatvaranje…) → traka više nije smislena.
+  useEffect(() => {
+    if (!undoItem) return;
+    const list = undoItem.type === 'desk' ? checkinAssignments : gateAssignments;
+    if (list.some(a => a.resourceId === undoItem.resourceId)) setUndoItem(null);
+  }, [undoItem, checkinAssignments, gateAssignments]);
 
 // FIX (po zahtjevu — hitno, za brzo čišćenje zaostalih/zaglavljenih
 // dodjela iz ranijeg testiranja, npr. duh-klik bug pronađen i
@@ -1690,8 +1750,8 @@ const handleClearAll = useCallback(async () => {
     // kontenišu jedno drugo) — ALI unutar svake grupe, u malim
     // batch-evima (vidi komentar iznad uz BULK_CLEAR_BATCH_SIZE).
     await Promise.all([
-      runInBatches(deskIds, BULK_CLEAR_BATCH_SIZE, handleRemoveCheckin),
-      runInBatches(gateIds, BULK_CLEAR_BATCH_SIZE, handleRemoveGate),
+      runInBatches(deskIds, BULK_CLEAR_BATCH_SIZE, (id) => handleRemoveCheckin(id, false)),
+      runInBatches(gateIds, BULK_CLEAR_BATCH_SIZE, (id) => handleRemoveGate(id, false)),
     ]);
   } finally {
     setClearingAll(false);
@@ -1799,6 +1859,17 @@ const handleClearAll = useCallback(async () => {
     );
   }
 
+  const hintFor = (flight: Flight, tab: TabType): { text: string; waiting: boolean } | null => {
+    const list = tab === 'checkin' ? suggestions.desks : suggestions.gates;
+    const sg = list.find(x => x.flightNumber === flight.FlightNumber);
+    if (!sg || sg.resources.length === 0) return null;
+    const label = tab === 'checkin' ? (sg.resources.length > 1 ? 'šalteri' : 'šalter') : (sg.resources.length > 1 ? 'gate-ovi' : 'gate');
+    const ids = sg.resources.join(' i ');
+    const waiting = sg.state === 'WAITING_FOR_RESOURCE';
+    const after = waiting && sg.waitingUntil !== undefined ? ` · poslije ${formatClockMinutes(sg.waitingUntil)}` : '';
+    return { text: `Prijedlog: ${label} ${ids}${after}`, waiting };
+  };
+
   const flightList = (tab: TabType) => (
     <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-1 scrollbar-thin">
       {flights.length === 0 && (
@@ -1818,6 +1889,7 @@ const handleClearAll = useCallback(async () => {
             onSelect={() => handleFlightTouchSelect(flight)}
             isDark={isDark}
             urgent={isUrgentFlight(flight, assigned)}
+            hint={assigned ? null : hintFor(flight, tab)}
             closeCheckin={shouldCloseCheckin(
               minutesToDeparture(flight.ScheduledDepartureTime, flight.EstimatedDepartureTime, getPodgoricaMinutesOfDay()),
               checkinAssignments.some(a => a.flightNumber === flight.FlightNumber),
@@ -1875,6 +1947,23 @@ const handleClearAll = useCallback(async () => {
               ⚠️ {n.message}
             </div>
           ))}
+        </div>
+      )}
+      {undoItem && (
+        <div className="fixed left-1/2 z-[60] w-[min(92vw,520px)] -translate-x-1/2" style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + ${selectedFlightForTouch ? 120 : 20}px)` }}>
+          <div className="flex items-center gap-3 rounded-2xl bg-gray-900 px-4 py-2.5 text-white shadow-2xl ring-1 ring-white/20">
+            <div className="min-w-0 flex-1 text-sm">
+              <b>{undoItem.type === 'desk' ? 'Šalter' : 'Gate'} {undoItem.resourceId}</b> uklonjen
+              <span className="text-gray-300"> · {undoItem.flightNumber}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleUndo()}
+              className="min-h-[48px] rounded-xl bg-amber-400 px-4 text-sm font-extrabold text-gray-900 active:scale-95"
+            >
+              ↩ Poništi ({Math.max(0, Math.ceil((undoItem.deadline - undoNow) / 1000))} s)
+            </button>
+          </div>
         </div>
       )}
       {pendingOverride && (

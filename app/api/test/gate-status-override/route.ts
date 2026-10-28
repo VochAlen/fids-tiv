@@ -303,7 +303,7 @@ interface GateStatusRequestBody {
   flightNumber?: string;
   classType?: string | null;
   /** 'suggestion' = primijenjeno iz AI sugestije → NE uči se iz toga. */
-  source?: 'suggestion';
+  source?: 'suggestion' | 'restore';
   /** Kontekst ručne dodjele (učenje zamjene + tačnost) — vidi sanitizeLearningContext. */
   preferredPool?: string[];
   suggested?: string[];
@@ -410,7 +410,7 @@ export async function POST(request: Request) {
     // (after() ne blokira response). Ako publish ipak padne (Ably
     // outage), kiosci će dobiti promjenu preko fallback polling-a na
     // 20s (vidi useRealtimeAssignments hook).
-    if (learnEligible && flightNumber) {
+    if (learnEligible && flightNumber && body.source !== 'restore') {
       after(() => recordAssignmentLearning({
         kind: 'gate',
         resourceId: gateNumber,

@@ -361,7 +361,7 @@ interface DeskStatusRequestBody {
   flightNumber?: string;
   classType?: string | null;
   /** 'suggestion' = primijenjeno iz AI sugestije → NE uči se iz toga. */
-  source?: 'suggestion';
+  source?: 'suggestion' | 'restore';
   /** Kontekst ručne dodjele (učenje zamjene + tačnost) — vidi sanitizeLearningContext. */
   preferredPool?: string[];
   suggested?: string[];
@@ -480,7 +480,7 @@ export async function POST(request: Request) {
     // (after() — vidi objašnjenje u gate-status-override/route.ts).
     // Response se vraća odmah. Ako publish ipak padne, kiosci će
     // dobiti promjenu preko fallback polling-a.
-    if (learnEligible && flightNumber) {
+    if (learnEligible && flightNumber && body.source !== 'restore') {
       after(() => recordAssignmentLearning({
         kind: 'desk',
         resourceId: deskNumber,

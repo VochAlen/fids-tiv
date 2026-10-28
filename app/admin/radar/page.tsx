@@ -172,7 +172,7 @@ export default function RadarPage() {
       });
       setErr(null);
       setTickT(j.now);
-      waitMs = (j.intervalSec ?? 900) * 1000;
+      waitMs = (j.intervalSec ?? 1800) * 1000;
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'greška');
     }
@@ -306,8 +306,8 @@ export default function RadarPage() {
   const groundMap = groundLive ?? data?.ground;
 
   // Lagano osvježavanje samo dodjela (gate/šalter) — jedno Redis čitanje, bez poziva ka izvoru aviona.
-  // Brzo (60 s) kad je let blizu, sporo (3 min) između letova, nikako noću ili dok je tab skriven.
-  const groundEvery = data?.mode === 'fast' ? 60_000 : data?.mode === 'slow' ? 180_000 : 0;
+  // Brzo (60 s) kad je let blizu, sporo (5 min) između letova, nikako noću ili dok je tab skriven.
+  const groundEvery = data?.mode === 'fast' ? 60_000 : data?.mode === 'slow' ? 300_000 : 0;
   useEffect(() => {
     if (!groundEvery) return;
     const id = setInterval(async () => {
@@ -654,7 +654,7 @@ export default function RadarPage() {
 
         <p className="mt-3 text-[11px] leading-relaxed text-sky-200/50">
           Izvor: adsb.lol (ADS-B, zajednica). Uparivanje preko oznake leta (callsign) sa našim rasporedom — avioni sa drugačijim callsign-om ili bez ADS-B signala se ne prikazuju.
-          Pokrivenost na maloj visini oko Tivta može biti slaba. ETA je procjena (udaljenost ÷ brzina uz korekciju prilaza).
+          Pokrivenost na maloj visini oko Tivata može biti slaba. ETA je procjena (udaljenost ÷ brzina uz korekciju prilaza).
         </p>
         </>}
       </div>
