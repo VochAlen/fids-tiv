@@ -13,7 +13,10 @@ const TTL_RULES: Record<string, number> = {
 //  • 'ably-fids:seq:' — INCR brojači (desk/gate). Kad im istekne TTL (ranije fallback 3600 s), brojač se vrati na 1,
 //    pa kiosci koji imaju viši lokalni seq (npr. 46) odbijaju nove dodjele sa nižim seq (npr. 4) → "idle, a treba let".
 //  • 'fids:kiosks' — hash sa prijavama monitora (health stranica); istek je brisao SVE monitore jednom na sat.
-export const PERSISTENT_KEY_PREFIXES = ['ably-fids:seq:', 'fids:kiosks', 'fids:events'];   // 'fids:events' = zapisnik događaja (lista, ograničena sa LTRIM)
+//  • 'ably-fids:learn:v1' / ':ex:v1' / ':since:' — naučeni brojači, primjeri za model i datum početka učenja. Ranije su (kao hash-evi bez TTL-a)
+//    dobijali fallback 3600 s, pa je sve naučeno nestajalo svaki sat i model je UVIJEK pisao "dan 1 od 7".
+//    (Model-stanje 'ably-fids:learn:model:v1' ima vlastiti TTL od 30 dana i namjerno NIJE ovdje.)
+export const PERSISTENT_KEY_PREFIXES = ['ably-fids:seq:', 'fids:kiosks', 'fids:events', 'ably-fids:learn:v1', 'ably-fids:learn:ex:v1', 'ably-fids:learn:since:'];   // 'fids:events' = zapisnik događaja (lista, ograničena sa LTRIM)
 export const isPersistentKey = (key: string): boolean => PERSISTENT_KEY_PREFIXES.some(p => key.startsWith(p));
 
 export interface RedisCleanupResult {

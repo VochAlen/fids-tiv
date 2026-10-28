@@ -74,3 +74,45 @@ describe('nejasne fraze se ne pogađaju (idu u unparsed)', () => {
     expect(r.unparsed.length).toBeGreaterThan(0);
   });
 });
+
+describe('unapređenja parsera', () => {
+  it('miješani tipovi: "šalter 5 i gate 3 ne rade"', () => {
+    const b = parseSuggestionNote('šalter 5 i gate 3 ne rade', FL).constraints.blocked;
+    expect(b).toEqual(expect.arrayContaining([{ type: 'desk', id: '5' }, { type: 'gate', id: '3' }]));
+    expect(b).toHaveLength(2);
+  });
+  it('miješani tipovi razdvojeni zarezom + vrijeme', () => {
+    const b = parseSuggestionNote('šalter 5, gate 3 ne rade do 14:00', FL).constraints.blocked;
+    expect(b).toEqual(expect.arrayContaining([{ type: 'desk', id: '5', toMin: 840 }, { type: 'gate', id: '3', toMin: 840 }]));
+    expect(b).toHaveLength(2);
+  });
+  it('različita vremena za različite šaltere u jednoj rečenici', () => {
+    const b = parseSuggestionNote('šalter 5 ne radi do 14:00, 6 ne radi od 15:00', FL).constraints.blocked;
+    expect(b).toEqual([{ type: 'desk', id: '5', toMin: 840 }, { type: 'desk', id: '6', fromMin: 900 }]);
+  });
+  it('trajanje od sada: "ne radi još 30 min" / "2 sata" / "pola sata"', () => {
+    expect(parseSuggestionNote('šalter 5 ne radi još 30 min', FL, 600).constraints.blocked).toEqual([{ type: 'desk', id: '5', toMin: 630 }]);
+    expect(parseSuggestionNote('gate 3 kvar 2 sata', FL, 600).constraints.blocked).toEqual([{ type: 'gate', id: '3', toMin: 720 }]);
+    expect(parseSuggestionNote('šalter 5 ne radi pola sata', FL, 600).constraints.blocked).toEqual([{ type: 'desk', id: '5', toMin: 630 }]);
+  });
+  it('trajanje bez poznatog sata ide u unparsed (ne pogađa)', () => {
+    const r = parseSuggestionNote('šalter 5 ne radi još 30 min', FL);
+    expect(r.constraints.blocked).toEqual([]);
+    expect(r.unparsed.length).toBe(1);
+  });
+  it('nerazumljivo vrijeme ("u 14:00", "14h") se ne pretvara u trajnu blokadu', () => {
+    for (const t of ['šalter 5 ne radi u 14:00', 'šalter 5 ne radi 14h']) {
+      const r = parseSuggestionNote(t, FL);
+      expect(r.constraints.blocked).toEqual([]);
+      expect(r.unparsed.length).toBe(1);
+    }
+  });
+  it('slovne greške u ključnim riječima', () => {
+    expect(parseSuggestionNote('slater 5 ne radi', FL).constraints.blocked).toEqual([{ type: 'desk', id: '5' }]);
+    expect(parseSuggestionNote('šalter 5 zatvroen', FL).constraints.blocked).toEqual([{ type: 'desk', id: '5' }]);
+    expect(parseSuggestionNote('terminl 1 ne radi').constraints.blocked.length).toBe(17);
+  });
+  it('broj leta u frazi ne ometa vrijeme-provjeru', () => {
+    expect(parseSuggestionNote('LY1234 na 10 i 11', FL).constraints.pins).toHaveLength(1);
+  });
+});

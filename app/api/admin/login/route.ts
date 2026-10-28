@@ -1,8 +1,10 @@
 // app/api/admin/login/route.ts
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import { createSessionToken, SESSION_COOKIE_NAME, SESSION_DURATION_SECONDS } from '@/lib/auth-session';
 import { getClientIp } from '@/lib/get-client-ip';
 import { getRedisClient, isCircuitOpen } from '@/lib/redis';
+import { buildAccessEvent } from '@/lib/access-log';
+import { logAccessEvent } from '@/lib/access-log-server';
 
 // NOVO (po zahtjevu — prijavljen bezbjednosni gap: /api/admin/login
 // NIJE imao rate limiting, iako je admin panel NAMJERNO dostupan sa
@@ -95,6 +97,7 @@ export async function POST(request: Request) {
     const rateLimit = await checkRateLimit(ip);
     if (!rateLimit.allowed) {
       console.warn(`[admin/login] Rate limit dostignut za IP: ${ip}`);
+      { const ev = buildAccessEvent(request.headers, 'login_blocked'); after(() => logAccessEvent(ev)); }
       return NextResponse.json(
         { success: false, message: 'Previše neuspjelih pokušaja — pokušaj ponovo kasnije', retryAfterSec: rateLimit.retryAfterSec },
         { status: 429, headers: rateLimit.retryAfterSec ? { 'Retry-After': String(rateLimit.retryAfterSec) } : {} }
@@ -123,6 +126,8 @@ export async function POST(request: Request) {
       // korisno za security audit, bez curenja credentials.
       console.warn(`[admin/login] Neuspjela prijava za username: ${username || '(prazan)'}`);
       await recordFailedAttempt(ip);
+      // istorija pristupa: bez upisanog korisničkog imena (moglo bi biti pogrešno ukucana lozinka) — samo da li je ime poznato
+      { const ev = buildAccessEvent(request.headers, 'login_fail', users.some(u => u.username === username) ? { u: String(username) } : {}); after(() => logAccessEvent(ev)); }
       return NextResponse.json(
         { success: false, message: 'Pogrešno korisničko ime ili lozinka' },
         { status: 401 }
@@ -150,6 +155,7 @@ export async function POST(request: Request) {
       maxAge: SESSION_DURATION_SECONDS,
     });
 
+    { const ev = buildAccessEvent(request.headers, 'login_ok', { u: match.username }); after(() => logAccessEvent(ev)); }
     console.log(`[admin/login] Uspešna prijava za username: ${match.username}`);
     return response;
   } catch (error) {

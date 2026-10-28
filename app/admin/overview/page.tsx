@@ -6,7 +6,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Moon, RefreshCw, Sun } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Clock, Moon, RefreshCw, Sun, Trash2 } from 'lucide-react';
 import type { OverviewResponse, OverviewResource } from '@/lib/overview-types';
 import type { KioskInfo } from '@/lib/kiosk-health';
 
@@ -21,20 +21,49 @@ const KIOSK_LABEL: Record<KioskInfo['status'], string> = {
   ok: 'monitor OK', silent: 'monitor se ne javlja', mismatch: 'monitor prikazuje drugo', stale: 'zastarjeli podaci', night: 'noć',
 };
 
-function Card({ label, res, kiosk, dark }: { label: string; res?: OverviewResource; kiosk?: KioskInfo; dark: boolean }) {
+type Busy = 'sending' | 'sent' | 'error';
+
+interface CardProps {
+  label: string;
+  res?: OverviewResource;
+  kiosk?: KioskInfo;
+  dark: boolean;
+  reload: Busy | undefined;
+  removing: boolean;
+  onReload: () => void;
+  onRemove: () => void;
+}
+
+function Card({ label, res, kiosk, dark, reload, removing, onReload, onRemove }: CardProps) {
   const isOpen = res?.status === 'open';
   const bad = kiosk && (kiosk.status === 'silent' || kiosk.status === 'mismatch' || kiosk.status === 'stale');
-  const border = bad ? 'border-red-500/70' : isOpen ? 'border-emerald-500/60' : dark ? 'border-white/10' : 'border-slate-200';
-  const bg = isOpen ? (dark ? 'bg-emerald-500/10' : 'bg-emerald-50') : dark ? 'bg-white/[0.04]' : 'bg-white';
+  const stale = isOpen ? res?.stale : undefined;
+  const border = bad ? 'border-red-500/70' : stale ? 'border-amber-400' : isOpen ? 'border-emerald-500/60' : dark ? 'border-white/10' : 'border-slate-200';
+  const bg = stale ? (dark ? 'bg-amber-400/15' : 'bg-amber-100') : isOpen ? (dark ? 'bg-emerald-500/10' : 'bg-emerald-50') : dark ? 'bg-white/[0.04]' : 'bg-white';
   const sub = dark ? 'text-white/55' : 'text-slate-500';
   return (
-    <div className={`rounded-xl border-2 p-3 ${border} ${bg}`}>
-      <div className="flex items-center justify-between">
+    <div className={`flex flex-col rounded-xl border-2 p-3 ${border} ${bg}`}>
+      <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-semibold">{label}</span>
-        <span className={`text-[11px] font-medium ${isOpen ? 'text-emerald-500' : sub}`}>{isOpen ? 'OTVOREN' : 'zatvoren'}</span>
+        <span className="flex items-center gap-2">
+          <span className={`text-[11px] font-medium ${isOpen ? 'text-emerald-500' : sub}`}>{isOpen ? 'OTVOREN' : 'zatvoren'}</span>
+          {/* Ukloni let: mala ikonica u uglu, namjerno daleko od dugmeta Reload i uvijek sa potvrdom */}
+          {isOpen && (
+            <button type="button" onClick={onRemove} disabled={removing} title={`Ukloni let ${res?.flight ?? ''} sa ovog resursa`} aria-label="Ukloni let"
+              className="rounded-md border border-red-500/40 p-1 text-red-500 transition hover:bg-red-500/15 disabled:opacity-40">
+              <Trash2 size={14} className={removing ? 'animate-pulse' : ''} />
+            </button>
+          )}
+        </span>
       </div>
       <div className="mt-1 text-lg font-bold tabular-nums">{isOpen ? res?.flight || '—' : '—'}</div>
       <div className={`text-xs ${sub}`}>{isOpen && res ? `od ${fmtSince(res.sinceMin)}` : ' '}</div>
+      {stale && (
+        <div className={`mt-1 flex items-start gap-1 rounded-md bg-amber-400/25 px-1.5 py-1 text-[11px] font-semibold leading-snug ${dark ? 'text-amber-300' : 'text-amber-700'}`}>
+          <Clock size={12} className="mt-0.5 shrink-0" />
+          <span>{stale === 'departed' ? 'Let je poletio — ukloni dodjelu?' : `Otvoreno već ${fmtSince(res?.sinceMin ?? 0)} — zaboravljeno?`}</span>
+        </div>
+      )}
       <div className={`mt-1 text-xs ${bad ? 'font-semibold text-red-500' : sub}`}>
         {kiosk ? (
           <>
@@ -44,6 +73,20 @@ function Card({ label, res, kiosk, dark }: { label: string; res?: OverviewResour
           </>
         ) : 'bez izvještaja'}
       </div>
+      {kiosk?.err && (
+        <div className="mt-1 flex items-start gap-1 text-[11px] leading-snug text-red-500" title={kiosk.err}>
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          <span className="line-clamp-2 break-words">Greška: {kiosk.err}</span>
+        </div>
+      )}
+      {/* Reload: jasno istaknuto plavo dugme preko cijele širine kartice */}
+      <button type="button" onClick={onReload} disabled={reload === 'sending'}
+        className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-blue-500 active:scale-95 disabled:opacity-60">
+        <RefreshCw size={16} className={reload === 'sending' ? 'animate-spin' : ''} />
+        {reload === 'sending' ? 'Šalje…' : kiosk?.canRestart ? 'RESTART monitora' : 'RELOAD monitora'}
+      </button>
+      {reload === 'sent' && <div className="mt-1 text-center text-[11px] text-emerald-500">✓ komanda poslana</div>}
+      {reload === 'error' && <div className="mt-1 text-center text-[11px] text-red-500">komanda nije poslana</div>}
     </div>
   );
 }
@@ -54,6 +97,8 @@ export default function OverviewPage() {
   const [loading, setLoading] = useState(false);
   const [dark, setDark] = useState(false);
   const inFlight = useRef(false);
+  const [reloads, setReloads] = useState<Record<string, Busy>>({});
+  const [removing, setRemoving] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     try { setDark(localStorage.getItem('theme') === 'dark'); } catch { /* ignoriši */ }
@@ -85,11 +130,45 @@ export default function OverviewPage() {
     return () => { document.removeEventListener('visibilitychange', onVis); clearInterval(id); };
   }, [load]);
 
+  const sendReload = async (kioskId: string, label: string, canRestart: boolean) => {
+    if (!window.confirm(`${canRestart ? 'Restartovati aplikaciju' : 'Ponovo učitati stranicu'} na monitoru: ${label}?`)) return;
+    setReloads((p) => ({ ...p, [kioskId]: 'sending' }));
+    try {
+      const res = await fetch('/api/admin/kiosk-command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: kioskId, cmd: 'restart' }) });
+      if (res.status === 401) { window.location.assign('/admin/login'); return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setReloads((p) => ({ ...p, [kioskId]: 'sent' }));
+      setTimeout(() => load(), 30_000);
+    } catch {
+      setReloads((p) => ({ ...p, [kioskId]: 'error' }));
+    }
+  };
+
+  const removeFlight = async (type: 'desk' | 'gate', id: string, label: string, flight: string) => {
+    if (!window.confirm(`Da li ste sigurni da želite ukloniti let ${flight || '(nepoznat)'} sa: ${label}?\n\nMonitor će prestati da prikazuje taj let.`)) return;
+    const key = `${type}-${id}`;
+    setRemoving((p) => ({ ...p, [key]: true }));
+    try {
+      const res = await fetch(`/api/test/${type}-status-override`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(type === 'desk' ? { deskNumber: id, action: 'clear' } : { gateNumber: id, action: 'clear' }),
+      });
+      if (res.status === 401) { window.location.assign('/admin/login'); return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await load();
+    } catch (e) {
+      window.alert(`Let nije uklonjen: ${e instanceof Error ? e.message : 'greška'}`);
+    } finally {
+      setRemoving((p) => ({ ...p, [key]: false }));
+    }
+  };
+
   const kioskMap = new Map((data?.kiosks ?? []).map((k) => [k.id, k]));
   const deskIds = [...new Set([...DESK_IDS, ...Object.keys(data?.desks ?? {})])].sort(byNum);
   const gateIds = [...new Set([...GATE_IDS, ...Object.keys(data?.gates ?? {})])].sort(byNum);
   const openDesks = Object.values(data?.desks ?? {}).filter((r) => r.status === 'open').length;
   const openGates = Object.values(data?.gates ?? {}).filter((r) => r.status === 'open').length;
+  const staleCount = [...Object.values(data?.desks ?? {}), ...Object.values(data?.gates ?? {})].filter((r) => r.status === 'open' && r.stale).length;
   const problems = (data?.kiosks ?? []).filter((k) => k.status === 'silent' || k.status === 'mismatch' || k.status === 'stale').length;
 
   return (
@@ -115,17 +194,26 @@ export default function OverviewPage() {
         <div className="mb-6 flex flex-wrap gap-3 text-sm">
           <span className="rounded-full bg-emerald-500/15 px-3 py-1">Šalteri otvoreni: <b>{openDesks}</b></span>
           <span className="rounded-full bg-emerald-500/15 px-3 py-1">Gate-ovi otvoreni: <b>{openGates}</b></span>
+          <span className={`rounded-full px-3 py-1 ${staleCount ? 'bg-amber-400/25 text-amber-700' : 'bg-slate-500/15'}`}>Moguće zaboravljene dodjele: <b>{staleCount}</b></span>
           <span className={`rounded-full px-3 py-1 ${problems ? 'bg-red-500/15 text-red-500' : 'bg-slate-500/15'}`}>Problemi na monitorima: <b>{problems}</b></span>
         </div>
 
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide opacity-60">Check-in šalteri</h2>
         <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {deskIds.map((id) => <Card key={id} label={`Check-in ${id}`} res={data?.desks[id]} kiosk={kioskMap.get(`checkin-${id}`)} dark={dark} />)}
+          {deskIds.map((id) => {
+            const k = kioskMap.get(`checkin-${id}`); const r = data?.desks[id]; const label = `Check-in ${id}`;
+            return <Card key={id} label={label} res={r} kiosk={k} dark={dark} reload={reloads[`checkin-${id}`]} removing={!!removing[`desk-${id}`]}
+              onReload={() => sendReload(`checkin-${id}`, label, !!k?.canRestart)} onRemove={() => removeFlight('desk', id, label, r?.flight ?? '')} />;
+          })}
         </div>
 
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide opacity-60">Gate-ovi</h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {gateIds.map((id) => <Card key={id} label={`Gate ${id}`} res={data?.gates[id]} kiosk={kioskMap.get(`gate-${id}`)} dark={dark} />)}
+          {gateIds.map((id) => {
+            const k = kioskMap.get(`gate-${id}`); const r = data?.gates[id]; const label = `Gate ${id}`;
+            return <Card key={id} label={label} res={r} kiosk={k} dark={dark} reload={reloads[`gate-${id}`]} removing={!!removing[`gate-${id}`]}
+              onReload={() => sendReload(`gate-${id}`, label, !!k?.canRestart)} onRemove={() => removeFlight('gate', id, label, r?.flight ?? '')} />;
+          })}
         </div>
       </div>
     </div>

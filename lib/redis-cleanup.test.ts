@@ -13,3 +13,12 @@ describe('redis-cleanup: trajni ključevi', () => {
     expect(isPersistentKey('override:JU681')).toBe(false);
   });
 });
+
+describe('redis-cleanup: učenje mora biti trajno', () => {
+  it('brojači, primjeri i since nemaju fallback TTL; model-stanje ima svoj TTL', () => {
+    expect(isPersistentKey('ably-fids:learn:v1')).toBe(true);
+    expect(isPersistentKey('ably-fids:learn:ex:v1')).toBe(true);
+    expect(isPersistentKey('ably-fids:learn:since:desk')).toBe(true);
+    expect(isPersistentKey('ably-fids:learn:model:v1')).toBe(false);
+  });
+});

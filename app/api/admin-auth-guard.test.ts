@@ -18,6 +18,7 @@ const GUARDED: Record<string, string[]> = {
   'admin/health/route.ts': ['GET'],
   'admin/kiosk-command/route.ts': ['POST', 'DELETE'],
   'admin/history/route.ts': ['GET'],
+  'admin/access-log/route.ts': ['GET', 'POST'],
   'admin/history/pdf/route.ts': ['GET'],
   'admin/overview/route.ts': ['GET'],
   'admin/events/route.ts': ['GET', 'POST'],

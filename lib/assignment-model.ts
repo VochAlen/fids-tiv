@@ -26,6 +26,10 @@ import { DESKS, GATES } from '@/lib/assignment-suggestions';
 import { airlineKeyFromFlightNumber, type LearnKind, type Season } from '@/lib/assignment-learning';
 
 export const EXAMPLES_HASH_KEY = 'ably-fids:learn:ex:v1';
+/** Trajni zapis "kad je počelo učenje" po vrsti (SET NX pri prvoj ručnoj dodjeli). Odvojen od primjera jer se oni
+ *  skraćuju na MAX_EXAMPLES (≈3–4 dana rada) — bez ovoga bi "dan od 7" nikad stigao do 7. */
+export const SINCE_KEY_PREFIX = 'ably-fids:learn:since:';
+export const sinceKey = (kind: LearnKind) => `${SINCE_KEY_PREFIX}${kind}`;
 export const MAX_EXAMPLES = 400;
 export const TRAIN_DAYS = 7;
 export const MIN_EXAMPLES = 40;
@@ -294,10 +298,12 @@ export interface ModelState {
 }
 
 /** Treniranje (gradijentno spuštanje) — čista funkcija; poziva je SERVER (vidi assignment-model-server.ts). */
-export function trainModelState(all: Example[], kind: LearnKind, todayISO: string): ModelState {
+export function trainModelState(all: Example[], kind: LearnKind, todayISO: string, sinceTs?: number | null): ModelState {
   const ex = all.filter(e => e.kind === kind);
   const n = ex.length;
-  const day = n ? daysSince(ex[0].ts, todayISO) : 0;
+  // Početak učenja = raniji od (najstariji sačuvani primjer, trajni zapis "since").
+  const firstTs = n ? Math.min(ex[0].ts, sinceTs && Number.isFinite(sinceTs) && sinceTs > 0 ? sinceTs : Infinity) : 0;
+  const day = n ? daysSince(firstTs, todayISO) : 0;
   const learning = (text: string): ModelState => ({
     info: { phase: 'learning', examples: n, day, modelRate: null, baselineRate: null, tested: 0, text },
     weights: null,
@@ -371,8 +377,8 @@ export function predictorFromState(state: ModelState, all: Example[], kind: Lear
 }
 
 /** Zadržano radi kompatibilnosti: trenira i odmah pravi predictor (koristi se u testovima / kao rezervni put). */
-export function trainModel(all: Example[], kind: LearnKind, todayISO: string): TrainedModel {
-  return predictorFromState(trainModelState(all, kind, todayISO), all, kind);
+export function trainModel(all: Example[], kind: LearnKind, todayISO: string, sinceTs?: number | null): TrainedModel {
+  return predictorFromState(trainModelState(all, kind, todayISO, sinceTs), all, kind);
 }
 
 /** Otisak skupa primjera — mijenja se kad stigne novi primjer ili se skrate stari. */

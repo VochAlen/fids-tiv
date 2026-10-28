@@ -28,6 +28,7 @@ import { parseExamples, trainModel, predictorFromState, type ModelState } from '
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { gateLearnedRaw } from '@/lib/learning-gate';
 import { SuggestionsCard } from './SuggestionsCard';
+import { minutesToDeparture, shouldCloseCheckin, freeResources } from '@/lib/assign-hints';
 // ─────────────────────────────────────────────
 // Konstante
 // ─────────────────────────────────────────────
@@ -54,6 +55,11 @@ const GATES = ['2','3','4','5','6','21','22','23','24','25','26','27','28','29',
 // selekcija istekne, umjesto tihog, zbunjujućeg "ništa se ne desi".
 const TOUCH_TIMEOUT_MS    = 25_000;
 const TAP_MOVE_THRESHOLD  = 10;
+
+// Kratka vibracija telefona pri uspješnoj dodjeli (tiho ignoriše uređaje/browsere bez podrške).
+function buzz() {
+  try { if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(60); } catch { /* ignore */ }
+}
 type ClassType = 'ECONOMY' | 'BUSINESS' | 'PREMIUM' | 'PRIORITY' | 'EASYJET_PLUS' | null;
 
 const CLASS_BADGE_STYLES: Record<string, { bg: string; text: string; border: string }> = {
@@ -326,7 +332,7 @@ const ResourceCell: React.FC<{
   let textColor      = '';
   let subTextColor   = '';
 
-  const base = 'relative rounded-2xl border text-center cursor-pointer transition-all duration-200 touch-manipulation select-none min-h-[72px] flex flex-col items-center justify-center';
+  const base = 'relative rounded-2xl border text-center cursor-pointer transition-all duration-200 touch-manipulation select-none min-h-[84px] flex flex-col items-center justify-center';
 
   if (isDark) {
     if (occupied) {
@@ -372,7 +378,7 @@ const ResourceCell: React.FC<{
             type === 'desk' ? 'bg-sky-400' : 'bg-emerald-400'
           }`} style={{ animationDuration: '1.5s' }} />
         )}
-        <div className={`relative text-xl font-black leading-none ${textColor}`}>{id}</div>
+        <div className={`relative text-2xl font-black leading-none ${textColor}`}>{id}</div>
         <div className={`relative text-xs mt-1.5 font-mono truncate max-w-full px-1 ${subTextColor}`}>
           {occupied ? occupied.flightNumber : flightReady ? '📱 TAPNI' : '⚫'}
         </div>
@@ -395,8 +401,9 @@ const FlightRow: React.FC<{
   onSelect: () => void;
   isDark: boolean;
   urgent: boolean;
-}> = ({ flight, assigned, selected, onSelect, isDark, urgent }) => {
-  let cc = 'cursor-pointer rounded-2xl border transition-all duration-150 select-none relative overflow-hidden min-h-[85px] ';
+  closeCheckin?: boolean;
+}> = ({ flight, assigned, selected, onSelect, isDark, urgent, closeCheckin }) => {
+  let cc = 'cursor-pointer rounded-2xl border transition-all duration-150 select-none relative overflow-hidden min-h-[96px] ';
   let fc = '', tc = '', dc = '', ac = '';
 
   if (isDark) {
@@ -447,6 +454,11 @@ const FlightRow: React.FC<{
         <div className={`text-sm truncate mt-1 font-medium ${dc}`}>
           {flight.DestinationCityName || flight.DestinationAirportCode}
         </div>
+        {closeCheckin && (
+          <div className="mt-1.5 inline-flex items-center gap-1 text-xs font-bold text-white bg-orange-500 px-2.5 py-1 rounded-full shadow-sm">
+            ⏰ Zatvori check-in
+          </div>
+        )}
         <div className="flex items-center justify-between mt-1.5 gap-2">
           <span className={`text-xs truncate ${ac}`}>{flight.AirlineName}</span>
           {selected ? (
@@ -790,6 +802,9 @@ const router = useRouter();
   // selekcije je bio potpuno nevidljiv — tap na gate/šalter tad ne bi
   // radio ništa, bez objašnjenja zašto.
   const [selectionExpiredNotice, setSelectionExpiredNotice] = useState(false);
+  // Odbrojavanje do isteka selekcije (prikazuje se u donjoj traci). Tik 1 s radi SAMO dok je let izabran.
+  const [selectionDeadline, setSelectionDeadline] = useState<number | null>(null);
+  const [selectionNow, setSelectionNow] = useState(() => Date.now());
   // NOVO (po zahtjevu — vidljivo obavještenje kad server-side uklanjanje
   // šaltera/gate-a NE uspije, npr. lock conflict, vidi opširan
   // komentar uz handleRemoveCheckin/handleRemoveGate): bez ovoga bi
@@ -1377,7 +1392,7 @@ const assignFlightToResource = useCallback(async (
   // (lib/suggestion-note-parser.ts) — bez mreže, bez AI poziva, bez troška.
   const handleSubmitNote = useCallback((text: string) => {
     setNoteError(null);
-    const { constraints: parsed, unparsed } = parseSuggestionNote(text, flightsRef.current.map(f => f.FlightNumber));
+    const { constraints: parsed, unparsed } = parseSuggestionNote(text, flightsRef.current.map(f => f.FlightNumber), getPodgoricaMinutesOfDay());
     setConstraints(prev => mergeConstraints(prev, parsed));
     setNoteUnparsed(unparsed);
     if (isEmptyConstraints(parsed)) {
@@ -1452,8 +1467,10 @@ const assignFlightToResource = useCallback(async (
       setPendingOverride({ flight, resourceId, resourceType, existingFlight: existing.flightNumber });
       return;
     }
-    await assignFlightToResource(flight, resourceId, resourceType);
+    const ok = await assignFlightToResource(flight, resourceId, resourceType);
+    if (ok) buzz();
     setSelectedFlight(null);
+    setSelectionDeadline(null);
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
   }, [assignFlightToResource, setSelectedFlight]);
 
@@ -1467,18 +1484,35 @@ const handleConfirmOverride = useCallback(async () => {
   const trackEndPromise = trackEnd(p.resourceType, p.resourceId);
   const assignPromise = assignFlightToResource(p.flight, p.resourceId, p.resourceType);
 
-  await Promise.all([trackEndPromise, assignPromise]);
+  const [, okAssign] = await Promise.all([trackEndPromise, assignPromise]);
+  if (okAssign) buzz();
 
   setSelectedFlight(null);
+  setSelectionDeadline(null);
   if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
 }, [pendingOverride, assignFlightToResource, setSelectedFlight]);
+
+  const handleCancelSelection = useCallback(() => {
+    if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
+    setSelectionDeadline(null);
+    setSelectedFlight(null);
+  }, [setSelectedFlight]);
+
+  useEffect(() => {
+    if (selectionDeadline === null) return;
+    const id = setInterval(() => setSelectionNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [selectionDeadline]);
 
   const handleFlightTouchSelect = useCallback((flight: Flight) => {
     setSelectedFlight(flight);
     setSelectionExpiredNotice(false);
+    setSelectionNow(Date.now());
+    setSelectionDeadline(Date.now() + TOUCH_TIMEOUT_MS);
     if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
     touchTimeoutRef.current = setTimeout(() => {
       setSelectedFlight(null);
+      setSelectionDeadline(null);
       setSelectionExpiredNotice(true);
       setTimeout(() => setSelectionExpiredNotice(false), 4_000);
     }, TOUCH_TIMEOUT_MS);
@@ -1784,6 +1818,10 @@ const handleClearAll = useCallback(async () => {
             onSelect={() => handleFlightTouchSelect(flight)}
             isDark={isDark}
             urgent={isUrgentFlight(flight, assigned)}
+            closeCheckin={shouldCloseCheckin(
+              minutesToDeparture(flight.ScheduledDepartureTime, flight.EstimatedDepartureTime, getPodgoricaMinutesOfDay()),
+              checkinAssignments.some(a => a.flightNumber === flight.FlightNumber),
+            )}
           />
         );
       })}
@@ -1791,7 +1829,7 @@ const handleClearAll = useCallback(async () => {
   );
 
   const resourceGrid = (type: 'desk' | 'gate', items: string[], occupied: Assignment[]) => (
-    <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-3">
+    <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2.5 sm:gap-3">
       {items.map(id => {
         const match = occupied.find(a => a.resourceId === id);
         return (
@@ -1809,7 +1847,8 @@ const handleClearAll = useCallback(async () => {
   );
 
   return (
-    <div className={`min-h-screen p-3 sm:p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-gray-900'}`}>
+    <div className={`min-h-screen p-3 sm:p-4 overflow-y-auto ${isDark ? 'bg-slate-950 text-white' : 'bg-slate-50 text-gray-900'}`}
+      style={selectedFlightForTouch ? { paddingBottom: 110 } : undefined}>
       {/* FIX (po zahtjevu — vidljiva poruka kad selekcija leta istekne,
           vidi opširan komentar uz TOUCH_TIMEOUT_MS i
           selectionExpiredNotice): lagan, ne-blokirajući banner —
@@ -1878,9 +1917,12 @@ const handleClearAll = useCallback(async () => {
                   flex-wrap je i dalje tu kao sigurnosna mreža SAMO za
                   ekstremno uske ekrane gdje bi inače tekst iscurio van
                   ekrana, ne kao namjerno ponašanje. */}
-              <span className={`text-xs font-medium ${isDark ? 'text-white/25' : 'text-gray-400'}`}>
+              <span className="text-xs font-bold text-orange-500">
                 Developed by Alen
               </span>
+              <a href="mailto:alen.vocanec@apm.co.me" className="text-xs text-orange-500/80 hover:text-orange-400 underline-offset-2 hover:underline">
+                alen.vocanec@apm.co.me
+              </a>
             </div>
             <div className="flex flex-wrap items-center gap-2.5 text-xs">
               <span className={isDark ? 'text-white/30' : 'text-gray-500'}>✈️ Letovi: {flights.length}</span>
@@ -2069,26 +2111,61 @@ const handleClearAll = useCallback(async () => {
           onExportPlan={handleExportPlan}
         />
 
-        {/* Selected Flight Banner */}
-        {selectedFlightForTouch && (
-          <div className="mb-5 p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-400/50 shadow-lg shadow-amber-500/20">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse" />
-                <span className={`font-mono font-bold text-lg ${isDark ? 'text-amber-200' : 'text-amber-900'}`}>
-                  {selectedFlightForTouch.FlightNumber}
-                </span>
-                <span className={`text-base ${isDark ? 'text-amber-400/80' : 'text-amber-800'}`}>
-                  → {selectedFlightForTouch.DestinationCityName || selectedFlightForTouch.DestinationAirportCode}
-                </span>
-              </div>
-              <button onClick={() => setSelectedFlight(null)}
-                className="flex items-center gap-1.5 text-sm text-amber-400/70 hover:text-amber-300 px-3 py-1.5 rounded-lg hover:bg-amber-500/10 transition-colors">
-                <X size={14} /> Odustani
-              </button>
+        {/* Slobodni resursi — samo prikaz, iz podataka koje stranica već ima */}
+        {(() => {
+          const isDesk = activeTab === 'checkin';
+          const free = freeResources(isDesk ? DESKS : GATES, (isDesk ? checkinAssignments : gateAssignments).map(a => a.resourceId));
+          return (
+            <div className={`mb-4 flex flex-wrap items-center gap-1.5 text-xs ${isDark ? 'text-white/60' : 'text-gray-600'}`}>
+              <span className="font-semibold mr-1">{isDesk ? 'Slobodni šalteri' : 'Slobodni gate-ovi'} ({free.length}):</span>
+              {free.length === 0
+                ? <span className="font-bold text-red-500">nema slobodnih</span>
+                : free.map(id => (
+                    <span key={id} className={`px-2 py-0.5 rounded-full font-mono font-bold border ${
+                      isDesk
+                        ? isDark ? 'bg-sky-500/15 border-sky-400/40 text-sky-300' : 'bg-sky-100 border-sky-300 text-sky-800'
+                        : isDark ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300' : 'bg-emerald-100 border-emerald-300 text-emerald-800'
+                    }`}>{id}</span>
+                  ))}
             </div>
-          </div>
-        )}
+          );
+        })()}
+
+        {/* Sticky traka izabranog leta (pri dnu ekrana) */}
+        {selectedFlightForTouch && (() => {
+          const secLeft = selectionDeadline === null ? 0 : Math.max(0, Math.ceil((selectionDeadline - selectionNow) / 1000));
+          return (
+            <>
+              <div
+                className="fixed inset-x-0 bottom-0 z-40 border-t-2 border-amber-400 bg-amber-500 text-white shadow-[0_-8px_24px_rgba(0,0,0,0.35)]"
+                style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+              >
+                <div className="mx-auto max-w-5xl flex items-center gap-3 px-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm sm:text-base font-bold leading-tight truncate">
+                      Izabran: <span className="font-mono">{selectedFlightForTouch.FlightNumber}</span>
+                      {' '}→ dodirni {activeTab === 'checkin' ? 'šalter' : 'gate'}
+                    </div>
+                    <div className="text-xs text-white/90 truncate">
+                      {selectedFlightForTouch.DestinationCityName || selectedFlightForTouch.DestinationAirportCode}
+                      {' · '}ističe za <span className="font-mono font-bold">{secLeft}s</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleCancelSelection}
+                    className="flex items-center gap-1.5 min-h-[48px] px-4 rounded-xl bg-white text-amber-700 font-bold text-sm shadow touch-manipulation active:scale-95"
+                  >
+                    <X size={16} /> Odustani
+                  </button>
+                </div>
+                <div className="h-1 bg-amber-700/40">
+                  <div className="h-full bg-white transition-[width] duration-1000 ease-linear"
+                    style={{ width: `${Math.min(100, (secLeft / (TOUCH_TIMEOUT_MS / 1000)) * 100)}%` }} />
+                </div>
+              </div>
+            </>
+          );
+        })()}
 
         {/* CHECK-IN TAB */}
         {activeTab === 'checkin' && (

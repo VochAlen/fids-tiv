@@ -12,9 +12,9 @@
 //   • trening + 1 SET SAMO kad je stanje zastarjelo (stigao novi primjer ili je počeo novi dan) —
 //     u praksi desetak puta dnevno, ~desetak ms CPU unutar već pokrenute funkcije.
 // SIGURNOST: bilo koja greška vraća null → admin stranica trenira lokalno kao i prije (rezervni put).
-import { safeRedisGet, safeRedisSet } from '@/lib/redis';
+import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import {
-  parseExamples, trainModelState, examplesSignature, type ModelState,
+  parseExamples, trainModelState, examplesSignature, sinceKey, type ModelState,
 } from '@/lib/assignment-model';
 
 export const MODEL_STATE_KEY = 'ably-fids:learn:model:v1';
@@ -38,14 +38,16 @@ export function isFresh(stored: StoredModelStates | null, examplesRaw: Record<st
 }
 
 /** Čista funkcija (testabilna): trenira oba modela iz sirovih primjera. */
-export function buildStates(examplesRaw: Record<string, string> | null | undefined, todayISO: string): StoredModelStates {
+export interface LearnSince { desk: number | null; gate: number | null }
+
+export function buildStates(examplesRaw: Record<string, string> | null | undefined, todayISO: string, since?: LearnSince): StoredModelStates {
   const ex = parseExamples(examplesRaw ?? {});
   return {
     v: STATE_VERSION,
     sig: stateSig(examplesRaw, todayISO),
     day: todayISO,
-    desk: trainModelState(ex, 'desk', todayISO),
-    gate: trainModelState(ex, 'gate', todayISO),
+    desk: trainModelState(ex, 'desk', todayISO, since?.desk),
+    gate: trainModelState(ex, 'gate', todayISO, since?.gate),
   };
 }
 
@@ -53,9 +55,33 @@ export function buildStates(examplesRaw: Record<string, string> | null | undefin
  * Vrati svježe stanje modela: iz Redis-a ako je aktuelno, inače istreniraj i sačuvaj.
  * `examplesRaw` je isti HGETALL koji ruta ionako čita. null = nešto nije u redu (klijent trenira lokalno).
  */
+/**
+ * Trajni "since" po vrsti: jedan MGET (+ SET NX samo kad zapisa još nema, iz najstarijeg sačuvanog primjera).
+ * Greška → null (dan se onda računa iz najstarijeg primjera, kao prije).
+ */
+export async function readLearnSince(examplesRaw: Record<string, string> | null | undefined): Promise<LearnSince | undefined> {
+  try {
+    const client = getRedisClient();
+    const [d, g] = await client.mget(sinceKey('desk'), sinceKey('gate'));
+    const out: LearnSince = { desk: d ? Number(d) || null : null, gate: g ? Number(g) || null : null };
+    if (examplesRaw && (out.desk === null || out.gate === null)) {
+      const ex = parseExamples(examplesRaw);
+      for (const kind of ['desk', 'gate'] as const) {
+        if (out[kind] !== null) continue;
+        const first = ex.find(e => e.kind === kind);
+        if (!first) continue;
+        out[kind] = first.ts;
+        await client.set(sinceKey(kind), String(first.ts), 'NX').catch(() => null);
+      }
+    }
+    return out;
+  } catch { return undefined; }
+}
+
 export async function getOrTrainModelStates(
   examplesRaw: Record<string, string> | null | undefined,
   todayISO: string,
+  since?: LearnSince,
 ): Promise<StoredModelStates | null> {
   try {
     if (examplesRaw == null) return null; // Redis nije pročitan pouzdano — ne diramo sačuvano stanje
@@ -66,7 +92,7 @@ export async function getOrTrainModelStates(
     } catch { stored = null; }
     if (isFresh(stored, examplesRaw, todayISO)) return stored;
 
-    const fresh = buildStates(examplesRaw, todayISO);
+    const fresh = buildStates(examplesRaw, todayISO, since);
     await safeRedisSet(MODEL_STATE_KEY, JSON.stringify(fresh), MODEL_STATE_TTL_SECONDS).catch(() => false);
     return fresh;
   } catch (err) {

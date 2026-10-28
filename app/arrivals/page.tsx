@@ -12,6 +12,7 @@ import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useWeather } from '@/hooks/use-weather';
+import { reuseFlights } from '@/lib/flight-reuse';
 import WeatherIcon from '@/components/weather-icon';
 
 // ── v4.2: Per-flight weather cell for arrivals (origin city) ──
@@ -403,7 +404,8 @@ function ArrivalsBoard(): JSX.Element {
   // ── v4.2: Ably real-time hook ───────────────────────────
   // Kao i departures, arrivals koristi useRealtimeFlightData()
   // za live podatke. Nema polling-a — flight data dolazi push-om.
-  const { data: liveFlightData } = useRealtimeFlightData('arrivals');
+  // warmStart: zadnje potvrđeni letovi (≤10 min) se prikazuju odmah dok ne stigne živi podatak (bez "Loading" ekrana poslije reload-a/swap-a).
+  const { data: liveFlightData } = useRealtimeFlightData('arrivals', { warmStart: true });
 
   useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
@@ -470,12 +472,18 @@ function ArrivalsBoard(): JSX.Element {
   // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
   // (svake 2s), a fallback polling pada. Kad se mreža vrati,
   // radimo full reload da sinhronizujemo React state sa serverom.
+  // 2026-10-28: kratki treptaj mreže (<30 s) ne radi puni reload — Ably se sam vrati, a hook povuče snapshot na 'connected'.
   useEffect(() => {
+    let offlineSince = 0;
     const handleOnline = () => {
+      const down = offlineSince ? Date.now() - offlineSince : 0;
+      offlineSince = 0;
+      if (down < 30_000) { console.warn('Network blip — bez reload-a'); return; }
       console.warn('Network restored — reloading to resync state');
       window.location.reload();
     };
     const handleOffline = () => {
+      offlineSince = Date.now();
       console.warn('Network lost — Ably will retry, showing cached data');
     };
     window.addEventListener('online', handleOnline);
@@ -564,7 +572,7 @@ function ArrivalsBoard(): JSX.Element {
     setNightMode(false);
 
     const arrivals = filterRecentArrivals(liveFlightData.arrivals || []);
-    setFlights(arrivals);
+    setFlights(prev => reuseFlights(prev, arrivals));
     setLastUpdate(new Date().toLocaleTimeString('en-GB'));
     setErrorMessage(null);
     setLoading(false);
@@ -581,12 +589,12 @@ function ArrivalsBoard(): JSX.Element {
 
   const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE));
 
-  const sortedFlights = useMemo(() => {
-    if (allSortedFlights.length === 0) return [];
-    const currentPage = pageIndex % totalPages;
-    const start = currentPage * PAGE_SIZE;
-    return allSortedFlights.slice(start, start + PAGE_SIZE);
-  }, [allSortedFlights, pageIndex, totalPages]);
+  // Sve stranice su stalno u DOM-u (aktivna 'contents', ostale 'hidden'): rotacija je samo CSS, bez ponovnog pravljenja redova.
+  const pages = useMemo(
+    () => Array.from({ length: totalPages }, (_, p) => allSortedFlights.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE)),
+    [allSortedFlights, totalPages],
+  );
+  const currentPage = pageIndex % totalPages;
 
   const ArrivalIcon = useCallback(({ className = 'w-5 h-5' }: { className?: string }) =>
     <Plane className={`${className} text-cyan-400 rotate-90`} />, []);
@@ -657,24 +665,22 @@ function ArrivalsBoard(): JSX.Element {
 
       {/* Tablica */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {isInitialLoad.current && loading && sortedFlights.length === 0 ? (
-          <div className="text-center p-8 h-full flex items-center justify-center">
-            <div className="inline-flex items-center gap-4">
-              <div className={`w-8 h-8 border-4 ${COLOR_CONFIG.border} border-t-transparent rounded-full animate-spin`} />
-              <span className="text-xl sm:text-2xl text-white font-semibold">Loading arrival information...</span>
-            </div>
-          </div>
-        ) : (
+        {/* Učitavanje je NEVIDLJIVO: okvir tabele se crta odmah, samo je tijelo prazno (bez spinnera/teksta) do prvih podataka. */}
+        {(
           <div className={`${COLOR_CONFIG.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
             {isDesktopLayout && <TableHeaders headers={tableHeaders} />}
             <div className="flex-1 overflow-y-auto">
-              {sortedFlights.length === 0 ? (
+              {allSortedFlights.length === 0 && loading ? (
+                <div className="h-full" />
+              ) : allSortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
                   <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
                   <div className="text-xl sm:text-2xl font-semibold">No arrivals scheduled</div>
                 </div>
               ) : (
-                sortedFlights.map((flight, index) => (
+                pages.map((rows, p) => (
+                  <div key={p} className={p === currentPage ? 'contents' : 'hidden'} aria-hidden={p !== currentPage}>
+                    {rows.map((flight, index) => (
                   <FlightRow
                     // ── FIX (Chrome dugotrajan rad): vidi identičan komentar
                     // u app/departures/page.tsx — key bez '-${index}'.
@@ -683,6 +689,8 @@ function ArrivalsBoard(): JSX.Element {
                     index={index}
                     autoStatusTick={autoStatusTick}
                   />
+                    ))}
+                  </div>
                 ))
               )}
             </div>

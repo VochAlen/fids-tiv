@@ -4,6 +4,7 @@ import type React from "react"
 import {
   type JSX,
   useEffect,
+  useLayoutEffect,
   useState,
   useCallback,
   useMemo,
@@ -20,6 +21,9 @@ import { Info, Plane, Clock, MapPin, Users, DoorOpen, Wind, Building2 } from "lu
 import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NOVO (Faza 1)
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { isArrivalsPhase, msToNextPhase } from '@/lib/board-phase';
+import { reuseFlights } from '@/lib/flight-reuse';
+import { nowMs } from '@/lib/server-clock';
 import { sortNumericStrings } from '@/lib/sort-utils';
 import { parseFlightTimeToDate, computeDisruptionIndex, disruptionLevel } from '@/lib/disruption-index';
 import { isNightHours } from '@/lib/night-hours';
@@ -990,11 +994,23 @@ function FlightBoard(): JSX.Element {
   // Vraćeno: combined ekran alternira arrivals ↔ departures svakih 20s.
   // Page rotation (svakih 6s) je i dalje UKLONJENA — prikazuju se
   // samo trenutni letovi (prvih PAGE_SIZE), bez vrtenja kroz stranice.
+  // 2026-10-28: faza se računa iz SATA (lib/board-phase.ts), ne iz brojača — nova stranica (Electron swap ~svake 3 min,
+  // reload) odmah pokazuje istu fazu kao stara, umjesto da uvijek krene od plavih "dolazaka" sa praznim tijelom.
+  // Layout efekat = ispravna faza već u prvom iscrtavanju poslije hidratacije (SSR HTML ne može znati sat).
+  useLayoutEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShowArrivals(isArrivalsPhase(nowMs()))
+  }, [])
   useEffect(() => {
-    const id = setInterval(() => {
-      setShowArrivals(p => !p)
-    }, 20_000)
-    return () => clearInterval(id)
+    let id: ReturnType<typeof setTimeout>
+    const schedule = () => {
+      id = setTimeout(() => {
+        setShowArrivals(isArrivalsPhase(nowMs()))
+        schedule()
+      }, msToNextPhase(nowMs()) + 5)
+    }
+    schedule()
+    return () => clearTimeout(id)
   }, [])
 
 
@@ -1026,12 +1042,19 @@ function FlightBoard(): JSX.Element {
   // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
   // (svake 2s), a fallback polling pada. Kad se mreža vrati,
   // radimo full reload da sinhronizujemo React state sa serverom.
+  // 2026-10-28: kratki "treptaji" mreže (online događaj nakon par sekundi) više ne rade puni reload — Ably se sam
+  // vrati, a hook ponovo povuče snapshot na 'connected'. Reload samo ako je veza bila prekinuta ≥ 30 s.
   useEffect(() => {
+    let offlineSince = 0;
     const handleOnline = () => {
+      const down = offlineSince ? Date.now() - offlineSince : 0;
+      offlineSince = 0;
+      if (down < 30_000) { console.warn('Network blip — bez reload-a'); return; }
       console.warn('Network restored — reloading to resync state');
       window.location.reload();
     };
     const handleOffline = () => {
+      offlineSince = Date.now();
       console.warn('Network lost — Ably will retry, showing cached data');
     };
     window.addEventListener('online', handleOnline);
@@ -1175,7 +1198,8 @@ function FlightBoard(): JSX.Element {
   // ══════════════════════════════════════════════════════════
   // NOVO (Faza 1): Realtime flight data preko Ably umjesto pollinga
   // ══════════════════════════════════════════════════════════
-  const { data: liveFlightData, connectionState } = useRealtimeFlightData('board');
+  // warmStart: zadnje potvrđeni letovi (≤10 min) se prikažu odmah dok ne stigne živi snapshot — bez praznog tijela poslije reload-a/swap-a.
+  const { data: liveFlightData, connectionState } = useRealtimeFlightData('board', { warmStart: true });
   // ── Vremenska prognoza za TIV (aerodrom) ──────────────────
 const tivWeather = useWeather({ airportCode: 'TIV' }, 0)
 
@@ -1281,7 +1305,7 @@ useEffect(() => {
 
 
 // ── Zamjena za stari poll blok ──────────────────────────────
-const { deskEntries, gateEntries } = useRealtimeAssignments('board');
+const { deskEntries, gateEntries } = useRealtimeAssignments('board', { warmStart: true });
 
 // Transformiši AssignmentEntry mape u { desks, gates } oblik
 // koji prepareData / applyAssignmentsOnly očekuju (Record<string,string>)
@@ -1342,8 +1366,9 @@ const assignments = useMemo(() => {
     }
 
     const { filteredArrivals, departuresWithMeta } = prepareData(liveFlightData, assignments);
-    setArrivals(filteredArrivals);
-    setDepartures(departuresWithMeta);
+    // strukturno dijeljenje: nepromijenjeni letovi zadržavaju isti objekat → memo(FlightRow) preskače re-render
+    setArrivals(prev => reuseFlights(prev, filteredArrivals));
+    setDepartures(prev => reuseFlights(prev, departuresWithMeta));
     // FIX (KRITIČNO — prijavljeno "ekran povremeno postane crn na oko
     // 5 min"): RANIJE se ovdje direktno primjenjivao sirov
     // liveFlightData.isNightMode flag — jedan prolazan/zastarjeli
@@ -1378,7 +1403,7 @@ const assignments = useMemo(() => {
     prevAssignmentsKeyRef.current = key;
     if (!liveFlightData) return; // prva primjena ionako pokrivena blokom iznad
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDepartures(prev => applyAssignmentsOnly(prev, assignments));
+    setDepartures(prev => reuseFlights(prev, applyAssignmentsOnly(prev, assignments)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignments]);
 

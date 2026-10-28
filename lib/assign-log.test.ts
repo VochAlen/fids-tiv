@@ -44,3 +44,18 @@ describe('ostalo', () => {
     expect(s).toContain('/Count 1');
   });
 });
+
+import { openState } from './assign-log';
+describe('openState — interval bez kraja', () => {
+  const at = (iso: string) => Date.parse(iso);
+  it('zatvoren interval', () => { expect(openState({ start: 1, end: 2 }, 3)).toBe('closed'); });
+  it('isti dan i < 12 h → još otvoreno', () => {
+    expect(openState({ start: at('2026-10-28T06:00:00Z'), end: null }, at('2026-10-28T10:00:00Z'))).toBe('open');
+  });
+  it('jučerašnji dan → kraj nije zabilježen (ne "još otvoreno")', () => {
+    expect(openState({ start: at('2026-10-27T18:00:00Z'), end: null }, at('2026-10-28T07:00:00Z'))).toBe('unknown');
+  });
+  it('duže od 12 h → nepoznato', () => {
+    expect(openState({ start: at('2026-10-28T00:30:00Z'), end: null }, at('2026-10-28T13:00:00Z'))).toBe('unknown');
+  });
+});

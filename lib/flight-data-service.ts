@@ -185,6 +185,11 @@ async function getFlightDataFromCache(): Promise<FlightData | null> {
   return null;
 }
 
+/** Samo čitanje keša (memorija → Redis), NIKAD ne pokreće novi fetch ka izvoru letova. Za admin preglede. */
+export async function peekCachedFlightData(): Promise<FlightData | null> {
+  return getFlightDataFromCache();
+}
+
 async function saveFlightDataAndMetadata(
   slimmed: FlightData,
   source: string,

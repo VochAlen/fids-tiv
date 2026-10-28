@@ -2,7 +2,7 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useIdleLogout } from '@/hooks/useIdleLogout';
 import { logoutAndRedirect } from '@/lib/admin-logout';
 
@@ -37,6 +37,17 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }, []);
 
   useIdleLogout(handleIdleLogout, IDLE_LOGOUT_MS, !isLoginPage);
+
+  // Istorija pristupa: jedan zapis (IP, država, OS, pregledač) kad se admin stranica prvi put otvori u ovoj kartici preglednika.
+  // sessionStorage = jednom po kartici, pa osvježavanja i navigacija ne prave dodatne pozive.
+  useEffect(() => {
+    if (isLoginPage) return;
+    try {
+      if (sessionStorage.getItem('admin-access-logged')) return;
+      sessionStorage.setItem('admin-access-logged', '1');
+    } catch { /* bez sessionStorage-a: preskoči (bolje nego zapis pri svakom otvaranju) */ return; }
+    fetch('/api/admin/access-log', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: window.location.pathname }) }).catch(() => {});
+  }, [isLoginPage]);
 
   return <>{children}</>;
 }

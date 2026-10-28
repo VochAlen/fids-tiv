@@ -13,6 +13,7 @@ import { getInitialAirlineLogoSrc, isKnownLocalLogo } from '@/lib/airline-logo';
 import { isNightHours } from '@/lib/night-hours';
 import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData';
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
+import { reuseFlights } from '@/lib/flight-reuse';
 import { sortNumericStrings } from '@/lib/sort-utils';
 import { useWeather } from '@/hooks/use-weather';
 import WeatherIcon from '@/components/weather-icon';
@@ -201,8 +202,6 @@ function rigidCell(widthPx: number): React.CSSProperties {
 // KONSTANTE
 // ============================================================
 
-const HEARTBEAT_TIMEOUT_MS        = 120_000;
-const HEARTBEAT_CHECK_INTERVAL_MS = 30_000;
 const MEMORY_CLEANUP_INTERVAL_MS  = 30 * 60 * 1_000;
 const MAX_FLIGHTS_DISPLAY         = 9;
 const MAX_FLIGHTS_MEMORY          = 60;
@@ -815,11 +814,10 @@ function DeparturesBoard(): JSX.Element {
   const isMountedRef  = useRef(true);
   const prevGatesRef  = useRef<Record<string, string>>({});
   const isInitialLoad = useRef(true);
-  // eslint-disable-next-line react-hooks/purity
-  const lastHeartbeat = useRef(Date.now());
   // ── Dodaj na vrh komponente, zajedno sa ostalim ref-ovima ──
-const { data: liveFlightData } = useRealtimeFlightData('board');
-const { deskEntries, gateEntries } = useRealtimeAssignments('board');
+// warmStart: zadnje potvrđeno stanje (≤10 min) se prikazuje odmah dok ne stigne živi podatak — bez praznog/"Loading" ekrana poslije reload-a/swap-a.
+const { data: liveFlightData } = useRealtimeFlightData('board', { warmStart: true });
+const { deskEntries, gateEntries } = useRealtimeAssignments('board', { warmStart: true });
 
 const assignments = useMemo(() => {
   const desks: Record<string, string> = {};
@@ -882,12 +880,18 @@ const assignments = useMemo(() => {
   // Kad aerodromski WiFi/Ethernet padne, Ably pokušava reconnect
   // (svake 2s), a fallback polling pada. Kad se mreža vrati,
   // radimo full reload da sinhronizujemo React state sa serverom.
+  // 2026-10-28: kratki treptaj mreže (<30 s) ne radi puni reload — Ably se sam vrati, a hook povuče snapshot na 'connected'.
   useEffect(() => {
+    let offlineSince = 0;
     const handleOnline = () => {
+      const down = offlineSince ? Date.now() - offlineSince : 0;
+      offlineSince = 0;
+      if (down < 30_000) { console.warn('Network blip — bez reload-a'); return; }
       console.warn('Network restored — reloading to resync state');
       window.location.reload();
     };
     const handleOffline = () => {
+      offlineSince = Date.now();
       console.warn('Network lost — Ably will retry, showing cached data');
     };
     window.addEventListener('online', handleOnline);
@@ -935,22 +939,7 @@ useEffect(() => {
     return () => clearTimeout(id);
   }, []);
 
-  // Heartbeat
-  useEffect(() => {
-    const upd = () => { lastHeartbeat.current = Date.now(); };
-    const chk = setInterval(() => {
-      if (Date.now() - lastHeartbeat.current > HEARTBEAT_TIMEOUT_MS) window.location.reload();
-    }, HEARTBEAT_CHECK_INTERVAL_MS);
-    window.addEventListener('mousemove',  upd, { passive: true });
-    window.addEventListener('keypress',   upd, { passive: true });
-    window.addEventListener('touchstart', upd, { passive: true });
-    return () => {
-      clearInterval(chk);
-      window.removeEventListener('mousemove', upd);
-      window.removeEventListener('keypress', upd);
-      window.removeEventListener('touchstart', upd);
-    };
-  }, []);
+  // Heartbeat (reload bez miša/tastature/dodira) UKLONJEN: monitori nemaju ulazne uređaje, pa bi se stranica stalno reloadovala.
 
   // Global errors
   useEffect(() => {
@@ -1077,7 +1066,7 @@ useEffect(() => {
   });
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  setFlights(departuresWithMeta);
+  setFlights(prev => reuseFlights(prev, departuresWithMeta));
   // eslint-disable-next-line react-hooks/set-state-in-effect
   setLastUpdate(new Date().toLocaleTimeString('en-GB'));
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -1095,7 +1084,7 @@ useEffect(() => {
   prevAssignmentsRef.current = assignments;
   if (!liveFlightData) return;
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  setFlights(prev => applyAssignmentsOnly(prev, assignments));
+  setFlights(prev => reuseFlights(prev, applyAssignmentsOnly(prev, assignments)));
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [assignments]);
 
@@ -1108,12 +1097,13 @@ const allSortedFlights = useMemo(
 
 const totalPages = Math.max(1, Math.ceil(allSortedFlights.length / PAGE_SIZE));
 
-const sortedFlights = useMemo(() => {
-  if (allSortedFlights.length === 0) return [];
-  const currentPage = pageIndex % totalPages;
-  const start = currentPage * PAGE_SIZE;
-  return allSortedFlights.slice(start, start + PAGE_SIZE);
-}, [allSortedFlights, pageIndex, totalPages]);
+// Sve stranice su stalno u DOM-u (aktivna 'contents', ostale 'hidden'): rotacija svakih 20 s je samo CSS, bez
+// uništavanja i ponovnog pravljenja redova (slike, vremenska ćelija) — vidi isti pristup u /combined.
+const pages = useMemo(
+  () => Array.from({ length: totalPages }, (_, p) => allSortedFlights.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE)),
+  [allSortedFlights, totalPages],
+);
+const currentPage = pageIndex % totalPages;
 
   const DepartureIcon = useCallback(({ className = 'w-5 h-5' }: { className?: string }) =>
     <Plane className={`${className} text-orange-500`} />, []);
@@ -1185,24 +1175,22 @@ const sortedFlights = useMemo(() => {
 
       {/* ── Tabla s letovima ── */}
       <div className="w-full mx-auto flex-1 min-h-0">
-        {isInitialLoad.current && loading && sortedFlights.length === 0 ? (
-          <div className="text-center p-8 h-full flex items-center justify-center">
-            <div className="inline-flex items-center gap-4">
-              <div className={`w-8 h-8 border-4 ${COLOR_CONFIG.border} border-t-transparent rounded-full animate-spin`} />
-              <span className="text-xl sm:text-2xl text-white font-semibold">Loading departure information...</span>
-            </div>
-          </div>
-        ) : (
+        {/* Učitavanje je NEVIDLJIVO: okvir tabele se crta odmah, samo je tijelo prazno (bez spinnera/teksta) do prvih podataka. */}
+        {(
           <div className={`${COLOR_CONFIG.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
             <TableHeaders headers={tableHeaders} />
             <div className="flex-1 overflow-y-auto">
-              {sortedFlights.length === 0 ? (
+              {allSortedFlights.length === 0 && loading ? (
+                <div className="h-full" />
+              ) : allSortedFlights.length === 0 ? (
                 <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
                   <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
                   <div className="text-xl sm:text-2xl font-semibold">No departures scheduled</div>
                 </div>
               ) : (
-                sortedFlights.map((flight, index) => (
+                pages.map((rows, p) => (
+                  <div key={p} className={p === currentPage ? 'contents' : 'hidden'} aria-hidden={p !== currentPage}>
+                    {rows.map((flight, index) => (
                   <FlightRow
                     // ── FIX (Chrome dugotrajan rad): key BEZ '-${index}'.
                     // Let (FlightNumber+ScheduledDepartureTime) je stabilan
@@ -1221,6 +1209,8 @@ const sortedFlights = useMemo(() => {
                     index={index}
                     autoStatusTick={autoStatusTick}
                   />
+                    ))}
+                  </div>
                 ))
               )}
             </div>

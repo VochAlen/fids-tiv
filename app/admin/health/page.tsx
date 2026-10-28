@@ -720,6 +720,7 @@ export default function AdminHealthPage() {
                 { href: '/admin/assign-checkin', label: 'Dodjele šaltera i gate-ova' },
                 { href: '/admin/overview', label: 'Pregled šaltera i gate-ova' },
       { href: '/admin/history', label: 'Istorija dodjela (PDF)' },
+      { href: '/admin/access-log', label: 'Istorija pristupa (IP, OS)' },
                 { href: '/admin', label: 'Admin početna' },
                 { href: '/admin/pa', label: 'PA obavještenja' },
               ].map(l => (

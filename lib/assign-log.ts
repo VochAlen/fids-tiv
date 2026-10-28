@@ -68,6 +68,19 @@ export function buildIntervals(events: readonly AssignEvent[]): AssignInterval[]
   return all.sort((a, b) => a.y.localeCompare(b.y) || idNum(a.id) - idNum(b.id) || a.start - b.start);
 }
 
+const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Podgorica', year: 'numeric', month: '2-digit', day: '2-digit' });
+const OPEN_MAX_MS = 12 * 3600_000; // isto kao ASSIGNMENT_TTL_SECONDS: duže od ovoga unos u Redisu više ne može biti otvoren
+
+/**
+ * Stanje intervala bez kraja: 'open' = realno još otvoreno (isti dan po aerodromskom satu i < 12 h), 'unknown' = kraj nije
+ * zabilježen (stari zapis, ili je dodjela istekla/uklonjena mimo evidencije) — ne smije se prikazivati kao "još otvoreno".
+ */
+export function openState(i: Pick<AssignInterval, 'start' | 'end'>, now: number): 'closed' | 'open' | 'unknown' {
+  if (i.end !== null) return 'closed';
+  if (now - i.start >= OPEN_MAX_MS || dayFmt.format(new Date(i.start)) !== dayFmt.format(new Date(now))) return 'unknown';
+  return 'open';
+}
+
 const tf = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Podgorica', hour: '2-digit', minute: '2-digit', hour12: false });
 export const fmtClock = (ms: number | null): string => (ms === null ? '—' : tf.format(new Date(ms)));
 
@@ -78,7 +91,7 @@ export function fmtDuration(min: number): string {
 }
 
 export const END_REASON_LABEL: Record<NonNullable<AssignInterval['endReason']>, string> = {
-  closed: 'zatvoreno', cleared: 'uklonjeno', auto: 'automatski istekao', replaced: 'zamijenjen drugim letom',
+  closed: 'zatvoreno', cleared: 'uklonjeno', auto: 'automatski (let poletio)', replaced: 'zamijenjen drugim letom',
 };
 
 export interface AssignSummary { desks: number; gates: number; flights: number; events: number }

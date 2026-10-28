@@ -9,7 +9,7 @@ import { requireAdmin } from '@/lib/admin-auth';
 import { safeRedisHGetAll } from '@/lib/redis';
 import { LEARN_HASH_KEY } from '@/lib/assignment-learning';
 import { EXAMPLES_HASH_KEY } from '@/lib/assignment-model';
-import { getOrTrainModelStates } from '@/lib/assignment-model-server';
+import { getOrTrainModelStates, readLearnSince } from '@/lib/assignment-model-server';
 import { getPodgoricaDateString } from '@/lib/night-hours';
 
 export const dynamic = 'force-dynamic';
@@ -25,6 +25,7 @@ export async function GET(request: Request) {
   ]);
   // Centralno stanje modela (težine + status) — jedno za sve admine, po SERVERSKOM satu (ne po satu računara).
   // null → klijent trenira lokalno (rezervni put).
-  const model = await getOrTrainModelStates(examples, getPodgoricaDateString());
+  const since = await readLearnSince(examples); // trajni početak učenja (1 MGET) — dan od 7 više ne zavisi od skraćivanja primjera
+  const model = await getOrTrainModelStates(examples, getPodgoricaDateString(), since);
   return NextResponse.json({ data: raw ?? {}, examples: examples ?? {}, model }, { headers: { 'Cache-Control': 'private, no-store' } });
 }

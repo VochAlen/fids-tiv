@@ -128,3 +128,14 @@ describe('v4: doba dana, pristrasnost po šalteru, objašnjenje', () => {
     expect(typeof t.predictor!.explain!({ flight: 'XX100', dow: 1, chosenSoFar: ['5'] }, ['4'])).toBe('string');
   });
 });
+
+describe('dan od 7 — trajni "since"', () => {
+  it('računa se od ranijeg od (najstariji primjer, since), pa dan stiže do 7 i kad se primjeri skraćuju', async () => {
+    const { trainModelState } = await import('./assignment-model');
+    const DAY = 86_400_000;
+    const t0 = Date.UTC(2026, 9, 20, 10);
+    const ex = [{ ts: t0 + 5 * DAY, kind: 'desk' as const, flight: 'LY1', dow: 1, minute: 600, chosen: '5', busy: [], season: 'W' as const }];
+    expect(trainModelState(ex, 'desk', '2026-10-26').info.day).toBe(2);              // bez since: samo od najstarijeg primjera
+    expect(trainModelState(ex, 'desk', '2026-10-26', t0).info.day).toBe(7);          // sa since: pravi dan
+  });
+});

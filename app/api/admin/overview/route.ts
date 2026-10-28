@@ -7,6 +7,8 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/admin-auth';
 import { getRawAssignments } from '@/lib/assignments-service';
 import { loadKiosks } from '@/lib/kiosk-status-server';
+import { peekCachedFlightData } from '@/lib/flight-data-service';
+import { departedFlightSet, staleReason } from '@/lib/stale-assignments';
 import { isNightHours } from '@/lib/night-hours';
 import type { OpenTruth } from '@/lib/kiosk-health';
 import type { OverviewResource, OverviewResponse } from '@/lib/overview-types';
@@ -26,6 +28,10 @@ export async function GET(request: Request) {
   const open: OpenTruth[] = [];
   let ok = true;
 
+  // Poletjeli letovi iz keša letova (samo čitanje keša — nikad novi poziv ka izvoru); bez keša se provjerava samo trajanje.
+  let departed: Set<string> = new Set();
+  try { departed = departedFlightSet((await peekCachedFlightData())?.departures); } catch { /* bez keša: samo trajanje */ }
+
   try {
     const raw = await getRawAssignments();
     ok = raw.ok !== false;
@@ -33,7 +39,8 @@ export async function GET(request: Request) {
       for (const [id, e] of Object.entries(entries ?? {})) {
         if (e?.status !== 'open' && e?.status !== 'closed') continue;
         const sinceMin = e.setAt ? Math.max(0, Math.round((now - e.setAt) / 60_000)) : 0;
-        out[id] = { status: e.status, flight: e.flightNumber || '', sinceMin };
+        const stale = e.status === 'open' ? staleReason(type, sinceMin, e.flightNumber || '', departed) : null;
+        out[id] = { status: e.status, flight: e.flightNumber || '', sinceMin, ...(stale ? { stale } : {}) };
         if (e.status === 'open') open.push({ type, resourceId: id, flightNumber: e.flightNumber || '', openSinceMinutesAgo: sinceMin });
       }
     };

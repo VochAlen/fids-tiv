@@ -19,7 +19,7 @@ import {
   seasonFromDate, dowFromDate, isoWeekKey, accuracyIncrement, accuracyOutcomeFor,
   type LearnKind, type LearnIncrement, type LearningContext,
 } from '@/lib/assignment-learning';
-import { EXAMPLES_HASH_KEY, MAX_EXAMPLES, encodeExample, exampleField } from '@/lib/assignment-model';
+import { EXAMPLES_HASH_KEY, MAX_EXAMPLES, encodeExample, exampleField, sinceKey } from '@/lib/assignment-model';
 
 export async function recordAssignmentLearning(args: {
   kind: LearnKind;
@@ -90,6 +90,8 @@ export async function recordAssignmentLearning(args: {
           season,
         }),
       );
+      // Trajni početak učenja (NX = upiše se samo prvi put) — u istom pipeline-u, bez dodatnog zahtjeva.
+      pipe.set(sinceKey(args.kind), String(now), 'NX');
     }
     const res = await pipe.exec();
     if (!res) return;

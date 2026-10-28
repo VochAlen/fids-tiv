@@ -11,6 +11,9 @@
 //   "LY1234 2 šaltera"             "JU681 jedan šalter"
 //   "T1 ne radi" / "radovi u T1" (blokira sve šaltere i gate-ove terminala; i "do 14:00")
 //   "T2 radi" / "koristi T2" (ukida zimsko pravilo "prvenstveno T1")
+//   "šalter 5 ne radi još 30 min" / "gate 3 kvar 2 sata" / "pola sata" (trajanje od SADA — traži nowMin)
+//   "šalter 5 i gate 3 ne rade" (miješani tipovi), "šalter 5 ne radi do 14, 6 ne radi od 15" (različita vremena)
+//   Sitne slovne greške u ključnim riječima ("slater", "zatvroen") se ispravljaju (razmak ≤1 slovo).
 // Ključne riječi za blokadu: ne radi/ne rade, kvar/u kvaru, pokvaren, zatvoren,
 // van funkcije, nedostupan, ne koristi.
 
@@ -37,7 +40,88 @@ function clock(h: string, m?: string): string | null {
   return hh <= 23 && mm <= 59 ? `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` : null;
 }
 
-export function parseSuggestionNote(text: string, knownFlights: string[] = []): NoteParseResult {
+// Ključne riječi za ispravku slovnih grešaka (razmak 1: zamjena/umetanje/brisanje/zamjena susjednih slova).
+const VOCAB = ['salter', 'salteri', 'salteru', 'pokvaren', 'zatvoren', 'nedostupan', 'terminal', 'terminalu', 'radovi', 'funkcije', 'koristi', 'blokiran'];
+function near1(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) {
+    let diff = -1, n = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { if (++n > 2) return false; if (diff < 0) diff = i; }
+    if (n === 1) return true;
+    // zamjena susjednih slova ("slater" → "salter")
+    return n === 2 && a[diff] === b[diff + 1] && a[diff + 1] === b[diff];
+  }
+  const [lo, sh] = a.length > b.length ? [a, b] : [b, a];
+  for (let i = 0; i < lo.length; i++) if (lo.slice(0, i) + lo.slice(i + 1) === sh) return true;
+  return false;
+}
+function fixTypos(c: string): string {
+  return c.replace(/[a-z]{5,}/g, w => (VOCAB.includes(w) ? w : VOCAB.find(v => near1(w, v)) ?? w));
+}
+
+const TYPE_WORD = String.raw`(?:salter\w*|desk\w*|gate\w*|gejt\w*|kapij\w*|izlaz\w*)`;
+const TYPE_SPLIT_RE = new RegExp(String.raw`(?=\b${TYPE_WORD}\b)`);
+const hasTypeWord = (c: string) => new RegExp(String.raw`\b${TYPE_WORD}\b`).test(c);
+const isGateWord = (c: string) => /\b(gate\w*|gejt\w*|kapij\w*|izlaz\w*)\b/.test(c);
+const isDeskWord = (c: string) => /\b(salter\w*|desk\w*)\b/.test(c);
+
+/**
+ * Priprema fraze: (1) "šalter 5, gate 3 ne rade" → spaja fraze koje dijele isto "ne rade",
+ * (2) miješani tipovi "šalter 5 i gate 3 ne rade" → posebna fraza za svaki tip,
+ * (3) više "ne radi" u jednoj frazi sa različitim vremenima → posebne fraze.
+ */
+function expandClauses(clauses: string[]): Array<{ original: string; c: string }> {
+  const merged: string[] = [];
+  for (let i = 0; i < clauses.length; i++) {
+    const cur = clauses[i], next = clauses[i + 1];
+    if (next !== undefined && !BLOCK_RE.test(fold(cur)) && hasTypeWord(fold(cur)) && BLOCK_RE.test(fold(next)) && hasTypeWord(fold(next))) {
+      merged.push(`${cur} i ${next}`); i++;
+    } else merged.push(cur);
+  }
+  const out: Array<{ original: string; c: string }> = [];
+  for (const original of merged) {
+    const c = fold(original);
+    const bm = c.match(BLOCK_RE);
+    // (2) miješani tipovi + blokada
+    if (bm && isGateWord(c) && isDeskWord(c)) {
+      const segs = c.split(TYPE_SPLIT_RE).map(x => x.replace(/\s+i\s*$/, '').trim()).filter(Boolean);
+      const last = segs[segs.length - 1];
+      const tail = last.slice(last.search(BLOCK_RE) >= 0 ? last.search(BLOCK_RE) : last.length);
+      if (segs.length >= 2 && tail) {
+        for (const sg of segs) out.push({ original, c: BLOCK_RE.test(sg) ? sg : `${sg} ${tail}` });
+        continue;
+      }
+    }
+    // (3) više blokada sa zarezom: "5 ne radi do 14, 6 ne radi od 15"
+    if (bm && (c.match(new RegExp(BLOCK_RE.source, 'g')) ?? []).length > 1 && c.includes(',')) {
+      const parts = c.split(/,\s*/);
+      const groups: string[] = [];
+      for (const part of parts) {
+        const prev = groups[groups.length - 1];
+        if (prev !== undefined && BLOCK_RE.test(prev) && /\d/.test(part)) groups.push(part);
+        else groups[groups.length ? groups.length - 1 : 0] = prev === undefined ? part : `${prev}, ${part}`;
+      }
+      if (groups.length >= 2) {
+        // naslijedi vrstu ("šalter"/"gate") iz prethodne grupe ako je nova nema
+        let inherited = '';
+        for (const g of groups) {
+          const w = g.match(new RegExp(TYPE_WORD))?.[0];
+          if (w) inherited = w;
+          out.push({ original, c: hasTypeWord(g) || !inherited ? g : `${inherited} ${g}` });
+        }
+        continue;
+      }
+    }
+    out.push({ original, c });
+  }
+  return out;
+}
+
+const LEFTOVER_CLOCK_RE = /\d{1,2}\s*[:.]\s*\d{2}|\b\d{1,2}\s?(?:h|sati|sata|sat)\b|\bu\s+\d{1,2}\b/;
+
+/** `nowMin` (minute od ponoći) omogućava trajanja ("još 30 min", "2 sata", "pola sata"); bez njega takve fraze idu u unparsed. */
+export function parseSuggestionNote(text: string, knownFlights: string[] = [], nowMin?: number): NoteParseResult {
   const known = new Set(knownFlights.map(f => f.toUpperCase().replace(/\s+/g, '')));
   const raw = { blocked: [] as unknown[], pins: [] as unknown[], counts: [] as unknown[], t2: false };
   const unparsed: string[] = [];
@@ -48,8 +132,8 @@ export function parseSuggestionNote(text: string, knownFlights: string[] = []): 
     .filter(Boolean)
     .slice(0, 12);
 
-  for (const original of clauses) {
-    let c = fold(original);
+  for (const { original, c: folded } of expandClauses(clauses).slice(0, 20)) {
+    let c = fixTypos(folded);
 
     // 0) nejasne fraze (negacija, "prije/poslije", više letova u jednoj frazi) se ne pogađaju
     const flightsInClause = [...c.matchAll(/\b([a-z0-9]{2})\s?(\d{1,4}[a-z]?)\b/g)]
@@ -63,6 +147,19 @@ export function parseSuggestionNote(text: string, knownFlights: string[] = []): 
     let from: string | null = null, to: string | null = null;
     c = c.replace(/\bod\s+(\d{1,2})(?:[:.h](\d{2}))?(?!\d)/, (_m, h, m) => { from = clock(h, m); return ' '; });
     c = c.replace(/\bdo\s+(\d{1,2})(?:[:.h](\d{2}))?(?!\d)/, (_m, h, m) => { to = clock(h, m); return ' '; });
+
+    // 1a) trajanje od sada (samo uz blokadu): "još 30 min", "2 sata", "pola sata"
+    let durationMin: number | null = null;
+    if (BLOCK_RE.test(c) && to === null) {
+      c = c.replace(/\b(?:jos\s+|narednih\s+|sljedecih\s+|slijedecih\s+)?(?:(pola\s+sata)|(\d{1,3})\s*(min\w*)|(\d{1,2})\s*(h|sat\w*))(?=\s|$)/, (_m, half, mn, _u, hr) => {
+        durationMin = half ? 30 : mn ? +mn : +hr * 60; return ' ';
+      });
+      if (durationMin !== null) {
+        if (nowMin === undefined || durationMin < 1 || durationMin > 720) { unparsed.push(original.slice(0, 120)); continue; }
+        const end = (nowMin + durationMin) % 1440;
+        to = clock(String(Math.floor(end / 60)), String(end % 60));
+      }
+    }
 
     // 1b) terminal: "T1 ne radi", "radovi u terminalu 1", "T2 radi"
     const tm = c.match(/\b(?:terminal\w*|term|t)\s?([12])\b/);
@@ -79,6 +176,12 @@ export function parseSuggestionNote(text: string, knownFlights: string[] = []): 
       }
     }
 
+    // 1c) ostalo vrijeme koje nismo razumjeli ("ne radi u 14:00", "14h") → ne pogađaj, pusti osoblju da provjeri
+    if (LEFTOVER_CLOCK_RE.test(c.replace(/\b([a-z0-9]{2})\s?(\d{1,4}[a-z]?)\b/g, m => (known.has(m.replace(/\s+/g, '').toUpperCase()) ? ' ' : m)))) {
+      unparsed.push(original.slice(0, 120));
+      continue;
+    }
+
     // 2) broj leta (samo poznati letovi sa rasporeda)
     let flight: string | null = null;
     c = c.replace(/\b([a-z0-9]{2})\s?(\d{1,4}[a-z]?)\b/g, (m, code: string, num: string) => {
@@ -87,7 +190,7 @@ export function parseSuggestionNote(text: string, knownFlights: string[] = []): 
       return m;
     });
 
-    const type: 'desk' | 'gate' = /\b(gate|gejt|kapij\w*|izlaz\w*)\b/.test(c) ? 'gate' : 'desk';
+    const type: 'desk' | 'gate' = isGateWord(c) ? 'gate' : 'desk';
 
     // 3) broj šaltera ("2 šaltera", "jedan šalter") — samo uz let
     let count: number | null = null;

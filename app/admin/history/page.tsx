@@ -6,13 +6,13 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Download, Moon, RefreshCw, Sun } from 'lucide-react';
-import { END_REASON_LABEL, fmtClock, fmtDuration, type AssignInterval, type AssignSummary } from '@/lib/assign-log';
+import { END_REASON_LABEL, fmtClock, fmtDuration, openState, type AssignInterval, type AssignSummary } from '@/lib/assign-log';
 
 interface HistoryResponse { date: string; dates: string[]; intervals: AssignInterval[]; summary: AssignSummary; now: number }
 
 const fmtDate = (d: string) => { const [y, m, day] = d.split('-'); return `${day}.${m}.${y}.`; };
 
-function Table({ title, rows, label, dark }: { title: string; rows: AssignInterval[]; label: string; dark: boolean }) {
+function Table({ title, rows, label, dark, now }: { title: string; rows: AssignInterval[]; label: string; dark: boolean; now: number }) {
   const sub = dark ? 'text-white/55' : 'text-slate-500';
   return (
     <section className="mb-8">
@@ -29,9 +29,9 @@ function Table({ title, rows, label, dark }: { title: string; rows: AssignInterv
                 <td className="p-2 font-semibold tabular-nums">{i.id}</td>
                 <td className="p-2 tabular-nums">{i.flight || '—'}</td>
                 <td className="p-2 tabular-nums">{fmtClock(i.start)}</td>
-                <td className="p-2 tabular-nums">{i.end === null ? <span className="text-emerald-500">još otvoreno</span> : fmtClock(i.end)}</td>
+                <td className="p-2 tabular-nums">{i.end !== null ? fmtClock(i.end) : openState(i, now) === 'open' ? <span className="text-emerald-500">još otvoreno</span> : <span className="text-amber-500">nije zabilježeno</span>}</td>
                 <td className="p-2 tabular-nums">{i.end === null ? '—' : fmtDuration(Math.max(0, (i.end - i.start) / 60_000))}</td>
-                <td className={`p-2 ${sub}`}>{i.endReason ? END_REASON_LABEL[i.endReason] : '—'}</td>
+                <td className={`p-2 ${sub}`}>{i.endReason ? END_REASON_LABEL[i.endReason] : i.end === null && openState(i, now) === 'unknown' ? 'kraj nije zabilježen' : '—'}</td>
                 <td className={`p-2 ${sub}`}>{i.openedBy ?? ''}</td>
               </tr>
             ))}
@@ -112,8 +112,8 @@ export default function HistoryPage() {
           </div>
         )}
 
-        <Table title="Check-in šalteri" rows={desks} label="Šalter" dark={dark} />
-        <Table title="Gate-ovi" rows={gates} label="Gate" dark={dark} />
+        <Table title="Check-in šalteri" rows={desks} label="Šalter" dark={dark} now={data?.now ?? 0} />
+        <Table title="Gate-ovi" rows={gates} label="Gate" dark={dark} now={data?.now ?? 0} />
         <p className="text-xs opacity-50">Vrijeme je po aerodromskom satu. Istorija se čuva 7 dana. Dodjele otvorene prije pokretanja bilježenja ne vide se.</p>
       </div>
     </div>

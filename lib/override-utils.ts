@@ -3,6 +3,7 @@ import { ASSIGNMENT_TTL_SECONDS } from '@/lib/assignment-limits';
 import { getRedisClient, safeRedisGetStrict, safeRedisSet } from '@/lib/redis';
 import { publishToChannel } from '@/lib/ably-server';
 import { invalidateAssignmentsCache } from '@/lib/assignments-service';
+import { logAssignmentEvents } from '@/lib/assign-log-server';
 
 // NOVO (po zahtjevu — isti razlog kao cleanup u
 // app/api/test/desk-status-override/route.ts, ISTA seq brojač kolona
@@ -516,6 +517,7 @@ async function autoCloseTerminatedInBlob(
     }
 
     const closed: string[] = [];
+    const closedFlights: Record<string, string> = {};
     for (const [resourceNumber, entry] of Object.entries(all)) {
       if (!entry?.flightNumber) continue;
       // NOVO (2026-10-16): isti broj leta može biti u rasporedu više puta (npr. dolazak i odlazak, ili
@@ -527,6 +529,7 @@ async function autoCloseTerminatedInBlob(
       // raspored (keš) može biti stariji od nje. Sljedeći ciklus (3 min) će ga svakako obraditi.
       if (entry.setAt && Date.now() - entry.setAt < AUTO_CLOSE_GRACE_MS) continue;
       if (matches.every(f => isTerminatedStatus(f.StatusEN || ''))) {
+        closedFlights[resourceNumber] = entry.flightNumber;
         delete all[resourceNumber];
         closed.push(resourceNumber);
       }
@@ -545,6 +548,12 @@ async function autoCloseTerminatedInBlob(
         entry: { status: null, flightNumber: '', classType: null, setAt: Date.now(), seq },
       }).catch(err => console.error(`[auto-close-departed] Ably publish (${ablyChannel}) failed:`, err));
     }
+
+    // Istorija dodjela (/admin/history): automatsko zatvaranje se ranije NIJE upisivalo, pa je interval ostajao "otvoren".
+    // Jedna pipeline (RPUSH+EXPIRE) unutar postojećeg cron ciklusa; greška nikad ne ometa zatvaranje.
+    await logAssignmentEvents(closed.map(id => ({
+      t: Date.now(), y: numberField === 'deskNumber' ? 'd' as const : 'g' as const, id, a: 'auto' as const, f: closedFlights[id] ?? '',
+    }))).catch(() => {});
 
     console.log(`[auto-close-departed] ${blobKey}: automatski zatvoreno ${closed.length} (let poletio/otkazan/preusmjeren)`);
     return closed;

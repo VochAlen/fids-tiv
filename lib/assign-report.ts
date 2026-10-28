@@ -1,6 +1,6 @@
 // lib/assign-report.ts — dnevni izvještaj dodjela kao PDF dokument (čista funkcija, testirana).
 import { buildPdf, type PdfDoc } from '@/lib/simple-pdf';
-import { END_REASON_LABEL, fmtClock, fmtDuration, summarize, type AssignEvent, type AssignInterval } from '@/lib/assign-log';
+import { END_REASON_LABEL, fmtClock, fmtDuration, openState, summarize, type AssignEvent, type AssignInterval } from '@/lib/assign-log';
 
 const fmtDate = (d: string) => { const [y, m, day] = d.split('-'); return `${day}.${m}.${y}.`; };
 
@@ -10,9 +10,9 @@ export function buildAssignReportDoc(date: string, intervals: readonly AssignInt
     i.id,
     i.flight || '-',
     fmtClock(i.start),
-    i.end === null ? 'jos otvoreno' : fmtClock(i.end),
+    i.end !== null ? fmtClock(i.end) : openState(i, now) === 'open' ? 'jos otvoreno' : 'nije zabiljezeno',
     i.end === null ? '-' : fmtDuration(Math.max(0, (i.end - i.start) / 60_000)),
-    i.endReason ? END_REASON_LABEL[i.endReason] : '-',
+    i.endReason ? END_REASON_LABEL[i.endReason] : i.end === null && openState(i, now) === 'unknown' ? 'kraj nije zabiljezen' : '-',
     i.openedBy ?? '',
   ]);
   const columns = (first: string) => [

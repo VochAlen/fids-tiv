@@ -7,7 +7,7 @@
 // 3. Dodani missing European airports (Memmingen, Innsbruck, Bratislava, itd.)
 // 4. Wind speed/direction zadržan (combined page Tivat weather card koristi)
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect } from 'react';
 
 interface WeatherData {
   temperature: number;
@@ -924,6 +924,19 @@ export const useWeather = (destination: {
     loading: true,
   });
 
+  // Keširano vrijeme se primjenjuje PRIJE prvog iscrtavanja (layout efekat): ranije je početno stanje uvijek bilo
+  // `loading: true`, pa je svaki red koji se (re)mountuje (rotacija stranica, prvo učitavanje poslije reload-a/swap-a)
+  // na trenutak pokazao spinner, iako je podatak već bio u kešu. Layout efekat (a ne inicijalno stanje) da nema
+  // neslaganja sa server-renderovanim HTML-om pri hidrataciji.
+  useLayoutEffect(() => {
+    const cached = weatherCache.get(getCacheKey(destination));
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setWeatherData(prev => (prev.loading ? cached.data : prev));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination.cityName, destination.airportCode, destination.airportName]);
+
   useEffect(() => {
     // ── MEMORY LEAK FIX (Chrome dugotrajan rad, 2026-08) ──────────────
     // 'cancelled' i 'timeoutId' su OVDJE, u tijelu efekta — ne unutar
@@ -1037,6 +1050,7 @@ export const useWeather = (destination: {
       // druga linija odbrane pored dep-array fixa iznad, za slučaj da
       // efekat ipak bude okinut bez stvarne promjene (npr. StrictMode
       // dvostruki mount u dev-u). Sprečava nepotrebne re-rendere.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setWeatherData(prev => {
         if (prev.error === 'No destination provided' && !prev.loading) return prev;
         return {
