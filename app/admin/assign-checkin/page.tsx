@@ -24,7 +24,7 @@ import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
-import { parseExamples, trainModel, predictorFromState, predictorWithRules, type ModelState, type KnowledgeState } from '@/lib/assignment-model';
+import { parseExamples, trainModel, predictorFromState, predictorWithRules, describeRule, type ModelState, type KnowledgeState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { gateLearnedRaw } from '@/lib/learning-gate';
 import { SuggestionsCard } from './SuggestionsCard';
@@ -403,7 +403,7 @@ const FlightRow: React.FC<{
   urgent: boolean;
   closeCheckin?: boolean;
   /** Prijedlog iz panela „AI sugestija” (samo prikaz; primjena ostaje u panelu). */
-  hint?: { text: string; waiting: boolean } | null;
+  hint?: { text: string; waiting: boolean; why?: string | null } | null;
 }> = ({ flight, assigned, selected, onSelect, isDark, urgent, closeCheckin, hint }) => {
   let cc = 'cursor-pointer rounded-2xl border transition-all duration-150 select-none relative overflow-hidden min-h-[96px] ';
   let fc = '', tc = '', dc = '', ac = '';
@@ -488,6 +488,9 @@ const FlightRow: React.FC<{
             <span aria-hidden>✨</span>
             <span className="truncate">{hint.text}</span>
           </div>
+        )}
+        {hint && !assigned && hint.why && (
+          <div className={`mt-0.5 text-[11px] leading-snug ${isDark ? 'text-white/40' : 'text-gray-500'}`}>{hint.why}</div>
         )}
       </div>
     </TouchFeedback>
@@ -1869,7 +1872,16 @@ const handleClearAll = useCallback(async () => {
     );
   }
 
-  const hintFor = (flight: Flight, tab: TabType): { text: string; waiting: boolean } | null => {
+  // Razlog prijedloga iz Knowledge pravila (samo objašnjenje; ništa ne mijenja u prijedlogu).
+  const ruleTextFor = (sg: Suggestion): string | null => {
+    const st = sg.type === 'desk' ? knowledge?.desk : knowledge?.gate;
+    if (!st || dow === undefined) return null;
+    return describeRule(st, {
+      flight: sg.flightNumber, dow, chosenSoFar: [], minute: ((sg.openAt % 1440) + 1440) % 1440, season: isSummer ? 'S' : 'W',
+    }, sg.resources);
+  };
+
+  const hintFor = (flight: Flight, tab: TabType): { text: string; waiting: boolean; why: string | null } | null => {
     const list = tab === 'checkin' ? suggestions.desks : suggestions.gates;
     const sg = list.find(x => x.flightNumber === flight.FlightNumber);
     if (!sg || sg.resources.length === 0) return null;
@@ -1880,7 +1892,7 @@ const handleClearAll = useCallback(async () => {
     const ids = sg.resources.join(' i ');
     const waiting = sg.state === 'WAITING_FOR_RESOURCE';
     const after = waiting && sg.waitingUntil !== undefined ? ` · poslije ${formatClockMinutes(sg.waitingUntil)}` : '';
-    return { text: `Prijedlog: ${label} ${ids}${after}`, waiting };
+    return { text: `Prijedlog: ${label} ${ids}${after}`, waiting, why: ruleTextFor(sg) };
   };
 
   const flightList = (tab: TabType) => (
@@ -2205,6 +2217,7 @@ const handleClearAll = useCallback(async () => {
           accuracy={accuracyByKind ? (activeTab === 'checkin' ? accuracyByKind.desk : accuracyByKind.gate) : null}
           learnedNote={(activeTab === 'checkin' ? learnedGate.notes.desk : learnedGate.notes.gate) ?? null}
           modelInfo={models ? (activeTab === 'checkin' ? models.desk.info : models.gate.info) : null}
+          ruleText={ruleTextFor}
           rulesNote={rulesNotes ? (activeTab === 'checkin' ? rulesNotes.desk : rulesNotes.gate) : null}
           chips={constraintChips}
           unparsed={noteUnparsed}

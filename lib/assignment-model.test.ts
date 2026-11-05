@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   encodeExample, exampleField, parseExamples, trainModel, trainWeights,
-  INITIAL_WEIGHTS, TRAIN_DAYS, evaluateKnowledgeBacktest, blendProbs, predictorWithRules, buildKnowledgeState, CORRECTION_WEIGHT, type Example,
+  INITIAL_WEIGHTS, TRAIN_DAYS, evaluateKnowledgeBacktest, blendProbs, predictorWithRules, buildKnowledgeState, CORRECTION_WEIGHT, describeRule, type Example,
 } from './assignment-model';
 
 const DAY = 86_400_000;
@@ -252,5 +252,31 @@ describe('ispravke osoblja kao jači signal', () => {
     for (let i = 0; i < 60; i++) ex.push({ ts: 1_000_000 + i * 60_000, kind: 'desk', flight: i % 2 ? 'JU681' : 'OS123', dow: 2, minute: 600, chosen: i % 2 ? '4' : '9', busy: [], season: 'W', ...(i % 5 === 0 ? { corr: true } : {}) });
     const r = evaluateKnowledgeBacktest(ex, 'desk');
     expect(r.text).toContain('Ispravke osoblja u primjerima: 12');
+  });
+});
+
+describe('razlog prijedloga običnim jezikom', () => {
+  const ex = (i: number, dow: number, chosen: string, flight = 'JU681'): Example => ({
+    ts: 1_000_000 + i * 60_000, kind: 'desk', flight, dow, minute: 480, chosen, busy: [], season: 'W',
+  });
+
+  it('pravilo sa izuzetkom: kompanija → 4, ali srijedom → 7', () => {
+    const list: Example[] = [];
+    let i = 0;
+    for (let k = 0; k < 20; k++) list.push(ex(i++, 1, '4'));           // ponedjeljkom JU → 4
+    for (let k = 0; k < 8; k++) list.push(ex(i++, 3, '7'));            // srijedom JU → 7
+    for (let k = 0; k < 20; k++) list.push(ex(i++, 2, '9', 'OS123'));  // druga kompanija → raznolikost
+    const st = buildKnowledgeState(list, 'desk');
+    const mon = describeRule(st, { flight: 'JU681', dow: 1, chosenSoFar: [], minute: 480, season: 'W' }, ['4']);
+    expect(mon).toContain('najčešće šalter 4');
+    expect(mon).toMatch(/\d+ od \d+ primjera/);
+    const wed = describeRule(st, { flight: 'JU681', dow: 3, chosenSoFar: [], minute: 480, season: 'W' }, ['7']);
+    expect(wed).toContain('šalter 7');
+  });
+
+  it('nema pravila ili ne podržava izabrano → null', () => {
+    expect(describeRule(null, { flight: 'JU681', dow: 1, chosenSoFar: [] }, ['4'])).toBeNull();
+    const st = buildKnowledgeState([], 'desk');
+    expect(describeRule(st, { flight: 'JU681', dow: 1, chosenSoFar: [] }, ['4'])).toBeNull();
   });
 });

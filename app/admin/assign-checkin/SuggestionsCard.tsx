@@ -36,6 +36,8 @@ interface Props {
   modelInfo: ModelInfo | null;
   /** Test unazad za Knowledge pravila (samo informacija; ne utiče na prijedloge). */
   rulesNote?: string | null;
+  /** Razlog prijedloga iz pravila običnim jezikom (ili null). */
+  ruleText?: (s: Suggestion) => string | null;
   /** Pročitana ograničenja iz napomena (čipovi) + dijelovi teksta koji nisu pretvoreni. */
   chips: Array<{ key: string; text: string }>;
   unparsed: string[];
@@ -52,7 +54,7 @@ const SOURCE_LABEL: Record<AccuracySource, string> = {
 
 function SuggestionsCardImpl({
   type, suggestions, nowMin, isDark, applyingKey, onApply, onApplyDue,
-  accuracy, learnedNote, modelInfo, rulesNote, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
+  accuracy, learnedNote, modelInfo, rulesNote, ruleText, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
 }: Props) {
   const [note, setNote] = useState('');
   // Zatvoren po zadanom — korisnik ga otvara klikom (po zahtjevu).
@@ -274,6 +276,10 @@ function SuggestionsCardImpl({
                           {isSoon && <span className="text-xs font-semibold text-violet-400">uskoro</span>}
                         </div>
                         <div className={`text-[11px] mt-1 ${isDark ? 'text-white/30' : 'text-gray-400'}`}>{s.reason}</div>
+                        {(() => {
+                          const why = ruleText?.(s);
+                          return why ? <div className={`text-[11px] mt-1 ${isDark ? 'text-violet-200/70' : 'text-violet-700/80'}`}>Pravilo: {why}</div> : null;
+                        })()}
                         {s.waitNotes.map(n => (
                           <div key={n} className={`flex items-start gap-1 text-[11px] mt-1 ${isDark ? 'text-violet-300' : 'text-violet-700'}`}>
                             <Clock size={12} className="mt-0.5 flex-shrink-0" /> <span>{n}</span>

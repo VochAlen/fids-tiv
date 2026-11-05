@@ -634,6 +634,62 @@ export function explainKnowledge(
   }).join('; ');
 }
 
+const DOW_INSTR = ['nedjeljom', 'ponedjeljkom', 'utorkom', 'srijedom', 'četvrtkom', 'petkom', 'subotom'];
+
+/** Uslovi pravila → ljudski opis ("JU letovi, ponedjeljkom, zimi, 06:00–09:00"). `skip` izostavlja uslove koji su već rečeni. */
+function describeConditions(c: KnowledgeConditions, skip?: KnowledgeConditions): string {
+  const parts: string[] = [];
+  if (c.flight !== undefined && skip?.flight === undefined) parts.push(`let ${c.flight}`);
+  else if (c.airline !== undefined && skip?.airline === undefined) parts.push(`${c.airline} letovi`);
+  if (c.dow !== undefined && skip?.dow === undefined) parts.push(DOW_INSTR[c.dow] ?? `dan ${c.dow}`);
+  if (c.season !== undefined && skip?.season === undefined) parts.push(c.season === 'S' ? 'ljeti' : 'zimi');
+  if (c.timeBucket !== undefined && skip?.timeBucket === undefined) {
+    const from = c.timeBucket * (TIME_BUCKET_MIN / 60);
+    const hh = (h: number) => String(h % 24).padStart(2, '0');
+    parts.push(`${hh(from)}:00–${hh(from + TIME_BUCKET_MIN / 60)}:00`);
+  }
+  return parts.join(', ');
+}
+
+const wins = (r: KnowledgeRule) => Math.round(r.confidence * r.support);
+
+/**
+ * Razlog prijedloga običnim jezikom, iz pravila koje ga podržava — npr.
+ * "JU letovi, ponedjeljkom: najčešće šalter 4 (8 od 9 primjera). Izuzetak: srijedom šalter 7 (5 od 5)."
+ * Samo objašnjava (ne utiče na prijedlog). null = nijedno potvrđeno pravilo ne podržava izabrane resurse.
+ */
+export function describeRule(state: KnowledgeState | null | undefined, ctx: PredictCtx, picked: string[]): string | null {
+  if (!state || !state.rules.length || !picked.length) return null;
+  const ev = evaluateKnowledge(state, ctx);
+  const rule = ev.matchedRules
+    .filter(r => picked.includes(r.prefer))
+    .sort((a, b) => b.lift * Math.log2(b.support + 1) - a.lift * Math.log2(a.support + 1) || b.support - a.support)[0];
+  if (!rule) return null;
+  const what = rule.kind === 'desk' ? 'šalter' : 'gate';
+  const subject = describeConditions(rule.when);
+  const head = `${subject ? `${subject}: ` : ''}najčešće ${what} ${rule.prefer} (${wins(rule)} od ${rule.support} primjera)`;
+  // Izuzeci: iz najšireg potvrđenog pravila (za isti resurs) koje ih ima — da se vidi i kad glavno pravilo
+  // već opisuje usku situaciju (npr. "ponedjeljkom 20 od 20") a opštije pravilo zna da srijedom ide drugačije.
+  const matchedForPick = ev.matchedRules.filter(r => picked.includes(r.prefer));
+  const exOf = (r: KnowledgeRule) => r.exceptions
+    .map(ex => {
+      const er = state.rules.find(x => x.prefer !== r.prefer && conditionKey(x.when) === conditionKey(ex));
+      return er ? { er, from: r } : null;
+    })
+    .filter((x): x is { er: KnowledgeRule; from: KnowledgeRule } => x !== null);
+  const source = [rule, ...matchedForPick].map(r => ({ r, list: exOf(r) })).filter(x => x.list.length)
+    .sort((x, y) => y.r.support - x.r.support)[0];
+  const picks: Array<{ er: KnowledgeRule; from: KnowledgeRule }> = [];
+  for (const cand of [...(source?.list ?? [])].sort((x, y) => specificity(x.er.when) - specificity(y.er.when) || y.er.support - x.er.support)) {
+    const keys = Object.keys(cand.er.when) as Array<keyof KnowledgeConditions>;
+    const subsumed = picks.some(p => (Object.keys(p.er.when) as Array<keyof KnowledgeConditions>).every(k => cand.er.when[k] === p.er.when[k]));
+    if (!subsumed && keys.length) picks.push(cand);
+    if (picks.length >= 2) break;
+  }
+  const exs = picks.map(({ er, from }) => `${describeConditions(er.when, from.when)} ${what} ${er.prefer} (${wins(er)} od ${er.support})`);
+  return exs.length ? `${head}. Izuzetak: ${exs.join('; ')}.` : `${head}.`;
+}
+
 /**
  * Test unazad za Knowledge pravila: pravila se grade SAMO iz starijih ~75% primjera, a mjere na
  * novijih ~25% koje nisu vidjela (isti omjer kao kod modela). Poredi se sa običnim brojačima
