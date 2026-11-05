@@ -864,7 +864,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       // Model (samo ako je aktivan): vjerovatnoće po šalteru za ovaj let, uz već otvorene šaltere tog leta.
       const deskCtx: PredictCtx | null = input.model?.desk && input.dow !== undefined
         ? {
-            flight: p.f.FlightNumber, dow: input.dow,
+            flight: p.f.FlightNumber, dow: input.dow, season,
             chosenSoFar: Object.entries(currentDesks).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
             minute: ((p.deskIv.start % 1440) + 1440) % 1440,
             busyCount: DESKS.filter(id => (bd.get(id) ?? []).some(b => b.start <= p.deskIv.start && p.deskIv.start < b.end)).length,
@@ -987,7 +987,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       const gatePin = pinFor('gate', p.f.FlightNumber);
       const gateCtx: PredictCtx | null = input.model?.gate && input.dow !== undefined
         ? {
-            flight: p.f.FlightNumber, dow: input.dow,
+            flight: p.f.FlightNumber, dow: input.dow, season,
             chosenSoFar: Object.entries(currentGates).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
             minute: ((p.gateIv.start % 1440) + 1440) % 1440,
             busyCount: GATES.filter(id => (bg.get(id) ?? []).some(b => b.start <= p.gateIv.start && p.gateIv.start < b.end)).length,

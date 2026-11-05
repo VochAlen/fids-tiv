@@ -51,14 +51,21 @@ export interface Example {
   /** Resursi zauzeti DRUGIM letovima u trenutku dodjele. */
   busy: string[];
   season: Season;
+  /** true = osoblje je ISPRAVILO prijedlog (ručno izabralo resurs koji nije bio među predloženima). Jači signal za učenje. */
+  corr?: boolean;
 }
+
+/** Koliko puta ispravka osoblja "vrijedi" više od običnog primjera (gradijent i brojači). */
+export const CORRECTION_WEIGHT = 2;
+const weightOf = (e: { corr?: boolean }) => (e.corr ? CORRECTION_WEIGHT : 1);
 
 export function exampleField(ts: number, nonce: string): string {
   return ts.toString(36).padStart(9, '0') + nonce.slice(0, 2).padEnd(2, '0');
 }
 
 export function encodeExample(e: Omit<Example, 'ts'>): string {
-  return [e.kind === 'desk' ? 'd' : 'g', e.flight, e.dow, e.minute, e.chosen, e.busy.join(','), e.season].join('|');
+  // 8. polje 'c' samo za ispravke (2 bajta više; stariji zapisi bez njega važu kao obični primjeri).
+  return [e.kind === 'desk' ? 'd' : 'g', e.flight, e.dow, e.minute, e.chosen, e.busy.join(','), e.season, ...(e.corr ? ['c'] : [])].join('|');
 }
 
 export function parseExamples(raw: Record<string, string> | null | undefined): Example[] {
@@ -74,6 +81,7 @@ export function parseExamples(raw: Record<string, string> | null | undefined): E
       ts, kind, flight: p[1], dow, minute, chosen: p[4],
       busy: p[5] ? p[5].split(',').filter(Boolean) : [],
       season: p[6] === 'S' ? 'S' : 'W',
+      ...(p[7] === 'c' ? { corr: true } : {}),
     });
   }
   return out.sort((a, b) => a.ts - b.ts);
@@ -84,9 +92,9 @@ const universeOf = (k: LearnKind) => (k === 'desk' ? DESKS : GATES);
 const term = (id: string) => (Number(id) >= 20 ? 'T2' : 'T1');
 
 interface Bucket { n: number; c: Record<string, number> }
-const bump = (m: Map<string, Bucket>, key: string, id: string) => {
+const bump = (m: Map<string, Bucket>, key: string, id: string, w = 1) => {
   const b = m.get(key) ?? { n: 0, c: {} };
-  b.n++; b.c[id] = (b.c[id] ?? 0) + 1;
+  b.n += w; b.c[id] = (b.c[id] ?? 0) + w;
   m.set(key, b);
 };
 const share = (m: Map<string, Bucket>, key: string, id: string) => {
@@ -123,14 +131,15 @@ class History {
   timeB = new Map<string, Bucket>();
   lastAir = new Map<string, string[]>();
 
-  add(e: { flight: string; dow: number; chosen: string; minute?: number }) {
+  add(e: { flight: string; dow: number; chosen: string; minute?: number; corr?: boolean }) {
     const a = airlineKeyFromFlightNumber(e.flight) ?? '?';
-    bump(this.air, a, e.chosen);
-    bump(this.flight, e.flight, e.chosen);
-    bump(this.airDow, `${a}:${e.dow}`, e.chosen);
-    bump(this.glob, '*', e.chosen);
-    bump(this.airTerm, a, term(e.chosen));
-    if (e.minute !== undefined) bump(this.timeB, String(Math.floor(e.minute / TIME_BUCKET_MIN)), e.chosen);
+    const w = weightOf(e);
+    bump(this.air, a, e.chosen, w);
+    bump(this.flight, e.flight, e.chosen, w);
+    bump(this.airDow, `${a}:${e.dow}`, e.chosen, w);
+    bump(this.glob, '*', e.chosen, w);
+    bump(this.airTerm, a, term(e.chosen), w);
+    if (e.minute !== undefined) bump(this.timeB, String(Math.floor(e.minute / TIME_BUCKET_MIN)), e.chosen, w);
     const last = this.lastAir.get(a) ?? [];
     this.lastAir.set(a, [e.chosen, ...last.filter(x => x !== e.chosen)].slice(0, RECENT_PER_AIRLINE));
   }
@@ -173,7 +182,7 @@ class History {
 }
 
 // ── Redovi za treniranje ────────────────────────────────────────────────
-export interface Row { feats: number[][]; chosen: number; mask: boolean[] }
+export interface Row { feats: number[][]; chosen: number; mask: boolean[]; /** težina primjera (ispravka osoblja = CORRECTION_WEIGHT) */ w?: number }
 
 function buildRows(examples: Example[], kind: LearnKind): { rows: Row[]; history: History } {
   const ids = universeOf(kind);
@@ -187,7 +196,7 @@ function buildRows(examples: Example[], kind: LearnKind): { rows: Row[]; history
     const feats = hist.features({ flight: e.flight, dow: e.dow, chosenSoFar: sofar, minute: e.minute, busyCount: e.busy.length }, ids);
     const mask = ids.map(id => e.busy.includes(id) || sofar.includes(id));
     mask[chosen] = false;
-    rows.push({ feats, chosen, mask });
+    rows.push({ feats, chosen, mask, w: weightOf(e) });
     hist.add(e);
     const list = recent.get(e.flight) ?? [];
     list.push({ ts: e.ts, chosen: e.chosen });
@@ -224,7 +233,8 @@ export function trainWeights(rows: Row[], w0: number[] = INITIAL_WEIGHTS, epochs
         const err = p[c] - (c === row.chosen ? 1 : 0); // greška izlaza
         if (err !== 0) for (let k = 0; k < w.length; k++) grad[k] += err * f[k]; // propagacija unazad do težina
       });
-      for (let k = 0; k < w.length; k++) w[k] -= LEARNING_RATE * (grad[k] + L2 * w[k]);
+      const rw = row.w ?? 1; // ispravka osoblja povlači jače
+      for (let k = 0; k < w.length; k++) w[k] -= LEARNING_RATE * (rw * grad[k] + L2 * w[k]);
     }
   }
   return w;
@@ -399,7 +409,30 @@ export interface KnowledgeBacktest {
   baselineHitsCovered: number;
   /** Pogodci brojača na svim testiranim dodjelama. */
   baselineHits: number;
+  /** Pogodci modela (istreniranog samo na starijim primjerima) na svim testiranim dodjelama. */
+  modelHits?: number;
+  /** Pogodci modela uz pravila (blend) na svim testiranim dodjelama. */
+  blendHits?: number;
+  /** true = blend je na testu dokazano bolji od samog modela, pa se pravila miješaju u prijedloge. */
+  useRules?: boolean;
+  /** Kalibracija modela: koliko često pogađa kad je (ne)siguran. */
+  calibration?: CalibrationBucket[];
   text: string;
+}
+
+export interface CalibrationBucket { from: number; to: number; n: number; hits: number }
+
+/** Težina pravila u blendu (dodaje se normalizovanom bodu pravila na vjerovatnoću modela). */
+export const RULE_BLEND = 0.5;
+const CAL_EDGES = [0, 0.4, 0.6, 0.8, 1.0001];
+
+/** Miješa vjerovatnoće modela sa bodovima pravila; zbir ostaje 1. Bez bodova pravila vraća ulaz. */
+export function blendProbs(probs: number[], ruleScores: number[], lambda: number = RULE_BLEND): number[] {
+  const max = ruleScores.reduce((m, x) => (x > m ? x : m), 0);
+  if (max <= 0) return probs;
+  const mixed = probs.map((p, i) => p + lambda * (ruleScores[i] / max));
+  const sum = mixed.reduce((a, b) => a + b, 0) || 1;
+  return mixed.map(x => x / sum);
 }
 
 export interface KnowledgeEvaluation {
@@ -619,9 +652,14 @@ export function evaluateKnowledgeBacktest(all: Example[], kind: LearnKind): Know
 
   const state = buildKnowledgeState(valid.slice(0, split), kind);
   const rows = buildRows(valid, kind).rows; // jedan red po primjeru (svi su u `ids`)
-  let covered = 0, ruleHits = 0, baselineHitsCovered = 0;
+  // Model se trenira SAMO na starijim primjerima (isto kao pravila) — pošteno poređenje na novijim.
+  const wTrain = trainWeights(rows.slice(0, split));
+  const argmax = (v: number[]) => v.reduce((bi, x, i) => (x > v[bi] ? i : bi), 0);
+  let covered = 0, ruleHits = 0, baselineHitsCovered = 0, modelHits = 0, blendHits = 0;
+  const calibration: CalibrationBucket[] = CAL_EDGES.slice(0, -1).map((from, i) => ({ from, to: CAL_EDGES[i + 1], n: 0, hits: 0 }));
   for (let i = split; i < n; i++) {
     const e = valid[i];
+    const row = rows[i];
     const ev = evaluateKnowledge(state, {
       flight: e.flight, dow: e.dow, chosenSoFar: [], minute: e.minute, busyCount: e.busy.length, season: e.season,
     }, ids);
@@ -631,16 +669,54 @@ export function evaluateKnowledgeBacktest(all: Example[], kind: LearnKind): Know
       if (e.busy.includes(id)) continue;
       if (ev.scores[id] > best) { best = ev.scores[id]; top = id; }
     }
+    // Model i blend (zauzeti resursi imaju vjerovatnoću 0, kao i u pravom prijedlogu).
+    const probs = softmax(row.feats.map(f => dot(wTrain, f)), row.mask);
+    const mi = argmax(probs);
+    const hit = mi === row.chosen;
+    if (hit) modelHits++;
+    const bucket = calibration.find(b => probs[mi] >= b.from && probs[mi] < b.to);
+    if (bucket) { bucket.n++; if (hit) bucket.hits++; }
+    const rs = ids.map((id, k) => (row.mask[k] ? 0 : (ev.scores[id] ?? 0)));
+    if (argmax(blendProbs(probs, rs)) === row.chosen) blendHits++;
     if (!top) continue;
     covered++;
     if (top === e.chosen) ruleHits++;
-    if (hits([rows[i]], BASELINE_WEIGHTS) === 1) baselineHitsCovered++;
+    if (hits([row], BASELINE_WEIGHTS) === 1) baselineHitsCovered++;
   }
   const baselineHits = hits(rows.slice(split), BASELINE_WEIGHTS);
-  const text = covered === 0
+  // Pravila ulaze u prijedloge SAMO ako blend na testu pogađa bolje od samog modela (i ima dovoljno pokrivenih dodjela).
+  const useRules = covered >= 10 && blendHits >= modelHits + Math.max(1, Math.ceil(MARGIN * testN));
+  const corrN = valid.filter(e => e.corr).length;
+  const hi = calibration.filter(b => b.from >= 0.6);
+  const hiN = hi.reduce((a, b) => a + b.n, 0), hiH = hi.reduce((a, b) => a + b.hits, 0);
+  const text = (covered === 0
     ? `Pravila (test na ${testN} novijih dodjela): nijedno pravilo nije pokrilo te dodjele.`
-    : `Pravila (test na ${testN} novijih dodjela): pokrivaju ${covered}, pogađaju ${ruleHits}/${covered} (${pct(ruleHits / covered)}) naspram brojača ${baselineHitsCovered}/${covered} (${pct(baselineHitsCovered / covered)}) na istim dodjelama.${covered < 10 ? ' Premalo pokrivenih dodjela za zaključak.' : ''}`;
-  return { tested: testN, covered, ruleHits, baselineHitsCovered, baselineHits, text };
+    : `Pravila (test na ${testN} novijih dodjela): pokrivaju ${covered}, pogađaju ${ruleHits}/${covered} (${pct(ruleHits / covered)}) naspram brojača ${baselineHitsCovered}/${covered} (${pct(baselineHitsCovered / covered)}) na istim dodjelama.${covered < 10 ? ' Premalo pokrivenih dodjela za zaključak.' : ''}`)
+    + ` Model: ${modelHits}/${testN}, model uz pravila: ${blendHits}/${testN} — ${useRules ? 'pravila se miješaju u prijedloge.' : 'pravila se ne koriste (korist nije dokazana).'}`
+    + (hiN >= 5 ? ` Kad je model ≥60% siguran, pogađa ${hiH}/${hiN} (${pct(hiH / hiN)}).` : '')
+    + (corrN > 0 ? ` Ispravke osoblja u primjerima: ${corrN} (učenje ih računa dvostruko).` : '');
+  return { tested: testN, covered, ruleHits, baselineHitsCovered, baselineHits, modelHits, blendHits, useRules, calibration, text };
+}
+
+/**
+ * Predictor koji uz model koristi i Knowledge pravila — ali SAMO kad je test unazad pokazao da blend
+ * pogađa bolje od samog modela (`backtest.useRules`). Inače vraća isti predictor (bez ikakve promjene).
+ */
+export function predictorWithRules(predictor: Predictor | null, state: KnowledgeState | null | undefined): Predictor | null {
+  if (!predictor || !state?.backtest?.useRules || !state.rules.length) return predictor;
+  const ids = universeOf(state.kind);
+  const f = (ctx: PredictCtx) => {
+    const p = predictor(ctx);
+    const ev = evaluateKnowledge(state, ctx, ids);
+    const b = blendProbs(ids.map(id => p[id] ?? 0), ids.map(id => ev.scores[id] ?? 0));
+    return Object.fromEntries(ids.map((id, i) => [id, b[i]])) as Record<string, number>;
+  };
+  const explain = (ctx: PredictCtx, picked: string[]): string => {
+    const m = predictor.explain?.(ctx, picked) ?? '';
+    const k = explainKnowledge(state, ctx, picked);
+    return k.startsWith('Nema dovoljno') ? m : [m, `pravilo: ${k}`].filter(Boolean).join(' · ');
+  };
+  return Object.assign(f, { explain });
 }
 
 /** Predictor iz gotovih težina — BEZ treniranja (samo rekonstrukcija istorije iz primjera). */

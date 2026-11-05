@@ -24,7 +24,7 @@ import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
-import { parseExamples, trainModel, predictorFromState, type ModelState } from '@/lib/assignment-model';
+import { parseExamples, trainModel, predictorFromState, predictorWithRules, type ModelState, type KnowledgeState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { gateLearnedRaw } from '@/lib/learning-gate';
 import { SuggestionsCard } from './SuggestionsCard';
@@ -1309,6 +1309,7 @@ const assignFlightToResource = useCallback(async (
   const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
   const [examplesRaw, setExamplesRaw] = useState<Record<string, string> | null>(null);
   const [modelStates, setModelStates] = useState<{ desk: ModelState; gate: ModelState } | null>(null);
+  const [knowledge, setKnowledge] = useState<{ desk: KnowledgeState | null; gate: KnowledgeState | null } | null>(null);
   const [rulesNotes, setRulesNotes] = useState<{ desk: string | null; gate: string | null } | null>(null);
   const [todayISO, setTodayISO] = useState<string | null>(null);
   // NOVO (2026-10-20): samoprovjera — ako su naučeni šabloni zadnje 4 sedmice jasno gori od ručnog profila,
@@ -1356,6 +1357,7 @@ const assignFlightToResource = useCallback(async (
         setLearnedRaw(j.data as Record<string, string>);
         setExamplesRaw((j.examples ?? {}) as Record<string, string>);
         setModelStates(j.model && j.model.desk && j.model.gate ? { desk: j.model.desk as ModelState, gate: j.model.gate as ModelState } : null);
+        setKnowledge({ desk: (j.model?.knowledgeDesk as KnowledgeState | undefined) ?? null, gate: (j.model?.knowledgeGate as KnowledgeState | undefined) ?? null });
         setRulesNotes({
           desk: typeof j.model?.knowledgeDesk?.backtest?.text === 'string' ? j.model.knowledgeDesk.backtest.text : null,
           gate: typeof j.model?.knowledgeGate?.backtest?.text === 'string' ? j.model.knowledgeGate.backtest.text : null,
@@ -1373,11 +1375,14 @@ const assignFlightToResource = useCallback(async (
     if (!examplesRaw) return null;
     const ex = parseExamples(examplesRaw);
     if (modelStates) {
-      return { desk: predictorFromState(modelStates.desk, ex, 'desk'), gate: predictorFromState(modelStates.gate, ex, 'gate') };
+      const d = predictorFromState(modelStates.desk, ex, 'desk');
+      const g = predictorFromState(modelStates.gate, ex, 'gate');
+      // Pravila se miješaju u model samo kad je test unazad to dokazao (backtest.useRules); inače ništa ne mijenja.
+      return { desk: { ...d, predictor: predictorWithRules(d.predictor, knowledge?.desk) }, gate: { ...g, predictor: predictorWithRules(g.predictor, knowledge?.gate) } };
     }
     if (!todayISO) return null;
     return { desk: trainModel(ex, 'desk', todayISO), gate: trainModel(ex, 'gate', todayISO) };
-  }, [examplesRaw, todayISO, modelStates]);
+  }, [examplesRaw, todayISO, modelStates, knowledge]);
 
   const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
 

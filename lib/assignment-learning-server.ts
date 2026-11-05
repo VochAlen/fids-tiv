@@ -41,6 +41,8 @@ export async function recordAssignmentLearning(args: {
     const weekKey = isoWeekKey(today);
     const ctx = args.context ?? {};
 
+    // Ispravka = ručna dodjela uz postojeći prijedlog koji NIJE sadržao izabrani resurs → jači primjer za model.
+    const correction = !args.fromSuggestion && accuracyOutcomeFor(args.resourceId, ctx.suggested) === 'miss';
     const learnIncs: LearnIncrement[] = [];
     const accIncs: LearnIncrement[] = [];
 
@@ -88,6 +90,7 @@ export async function recordAssignmentLearning(args: {
           chosen: args.resourceId,
           busy: (args.busyIds ?? []).filter(id => /^\d{1,2}$/.test(id)).slice(0, 30),
           season,
+          ...(correction ? { corr: true } : {}),
         }),
       );
       // Trajni početak učenja (NX = upiše se samo prvi put) — u istom pipeline-u, bez dodatnog zahtjeva.

@@ -93,6 +93,16 @@ function knowledgeFor(examples: ReturnType<typeof parseExamples>, kind: 'desk' |
   return { ...compactKnowledgeState(buildKnowledgeState(examples, kind)), backtest: evaluateKnowledgeBacktest(examples, kind) };
 }
 
+/** Memo u memoriji procesa (ne u Redis-u): pravila + test se računaju jednom po otisku primjera/dana, ne na svaki zahtjev. */
+let kCache: { sig: string; desk: KnowledgeState; gate: KnowledgeState } | null = null;
+function knowledgePair(examplesRaw: Record<string, string>, todayISO: string) {
+  const sig = stateSig(examplesRaw, todayISO);
+  if (kCache?.sig === sig) return kCache;
+  const examples = parseExamples(examplesRaw);
+  kCache = { sig, desk: knowledgeFor(examples, 'desk'), gate: knowledgeFor(examples, 'gate') };
+  return kCache;
+}
+
 /** Cista funkcija (testabilna): gradi model i KnowledgeState bez Redis zavisnosti. */
 export interface LearnSince { desk: number | null; gate: number | null }
 
@@ -171,12 +181,8 @@ export async function getOrTrainModelStates(
     }
 
     if (isFresh(stored, examplesRaw, todayISO)) {
-      const examples = parseExamples(examplesRaw);
-      return {
-        ...(stored as PersistedModelStates),
-        knowledgeDesk: knowledgeFor(examples, 'desk'),
-        knowledgeGate: knowledgeFor(examples, 'gate'),
-      };
+      const k = knowledgePair(examplesRaw, todayISO);
+      return { ...(stored as PersistedModelStates), knowledgeDesk: k.desk, knowledgeGate: k.gate };
     }
 
     const fresh = buildStates(examplesRaw, todayISO, since);

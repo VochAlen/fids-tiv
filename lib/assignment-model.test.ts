@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   encodeExample, exampleField, parseExamples, trainModel, trainWeights,
-  INITIAL_WEIGHTS, TRAIN_DAYS, evaluateKnowledgeBacktest, type Example,
+  INITIAL_WEIGHTS, TRAIN_DAYS, evaluateKnowledgeBacktest, blendProbs, predictorWithRules, buildKnowledgeState, CORRECTION_WEIGHT, type Example,
 } from './assignment-model';
 
 const DAY = 86_400_000;
@@ -179,5 +179,78 @@ describe('Knowledge test unazad', () => {
     const r = evaluateKnowledgeBacktest(ex, 'desk');
     expect(r.covered).toBe(0);
     expect(r.text).toContain('nijedno pravilo');
+  });
+});
+
+describe('blend modela i pravila', () => {
+  const mk = (i: number, flight: string, chosen: string): Example => ({
+    ts: 1_000_000 + i * 60_000, kind: 'desk', flight, dow: 2, minute: 600, chosen, busy: [], season: 'W',
+  });
+
+  it('blendProbs: zbir 1, bez bodova pravila vraća ulaz, pravilo podiže svoj resurs', () => {
+    expect(blendProbs([0.5, 0.5], [0, 0])).toEqual([0.5, 0.5]);
+    const b = blendProbs([0.5, 0.5], [0, 2]);
+    expect(b[0] + b[1]).toBeCloseTo(1, 10);
+    expect(b[1]).toBeGreaterThan(b[0]);
+  });
+
+  it('backtest vraća model/blend/kalibraciju i odluku useRules', () => {
+    const ex: Example[] = [];
+    for (let i = 0; i < 80; i++) ex.push(mk(i, i % 2 ? 'JU681' : 'OS123', i % 2 ? '4' : '9'));
+    const r = evaluateKnowledgeBacktest(ex, 'desk');
+    expect(r.modelHits).toBeDefined();
+    expect(r.blendHits).toBeDefined();
+    expect(typeof r.useRules).toBe('boolean');
+    expect(r.calibration!.reduce((a, b) => a + b.n, 0)).toBe(r.tested);
+    expect(r.text).toContain('Model:');
+    // useRules mora biti u skladu sa pravilom odluke
+    if (r.useRules) expect(r.blendHits!).toBeGreaterThan(r.modelHits!);
+  });
+
+  it('predictorWithRules: bez dokaza (useRules=false) vraća ISTI predictor', () => {
+    const pred = Object.assign(() => ({ '1': 1 }), {});
+    const st = { ...buildKnowledgeState([], 'desk'), backtest: { tested: 20, covered: 12, ruleHits: 5, baselineHitsCovered: 5, baselineHits: 5, useRules: false, text: '' } };
+    expect(predictorWithRules(pred, st)).toBe(pred);
+    expect(predictorWithRules(null, st)).toBeNull();
+  });
+
+  it('predictorWithRules: kad je dokazano, pravilo pomjera prijedlog', () => {
+    const ex: Example[] = [];
+    for (let i = 0; i < 40; i++) ex.push(mk(i, 'JU681', '4'), mk(100 + i, 'OS123', '9'));
+    const base = buildKnowledgeState(ex, 'desk');
+    const st = { ...base, backtest: { tested: 20, covered: 12, ruleHits: 12, baselineHitsCovered: 5, baselineHits: 5, useRules: true, text: '' } };
+    const flat = () => Object.fromEntries(['1', '4', '9'].map(id => [id, 1 / 3]));
+    const w = predictorWithRules(flat as never, st)!;
+    const out = w({ flight: 'JU681', dow: 2, chosenSoFar: [], minute: 600, season: 'W' });
+    expect(out['4']).toBeGreaterThan(out['9']);
+  });
+});
+
+describe('ispravke osoblja kao jači signal', () => {
+  const base = { kind: 'desk' as const, flight: 'JU681', dow: 2, minute: 600, chosen: '7', busy: ['1'], season: 'W' as const };
+
+  it('zapis: ispravka nosi oznaku, običan primjer ostaje isti kao prije, stari zapisi se čitaju', () => {
+    const plain = encodeExample(base);
+    const corr = encodeExample({ ...base, corr: true });
+    expect(plain.split('|')).toHaveLength(7);
+    expect(corr).toBe(plain + '|c');
+    const parsed = parseExamples({ [exampleField(1000, 'aa')]: plain, [exampleField(2000, 'bb')]: corr });
+    expect(parsed[0].corr).toBeUndefined();
+    expect(parsed[1].corr).toBe(true);
+  });
+
+  it('ispravka povlači težine jače od običnog primjera (isti podaci)', () => {
+    const row = (w: number) => ({ feats: [[1], [0]], chosen: 0, mask: [false, false], w });
+    const w1 = trainWeights([row(1)], [0], 1)[0];
+    const w2 = trainWeights([row(CORRECTION_WEIGHT)], [0], 1)[0];
+    expect(CORRECTION_WEIGHT).toBeGreaterThan(1);
+    expect(w2).toBeGreaterThan(w1);
+  });
+
+  it('backtest javlja broj ispravki', () => {
+    const ex: Example[] = [];
+    for (let i = 0; i < 60; i++) ex.push({ ts: 1_000_000 + i * 60_000, kind: 'desk', flight: i % 2 ? 'JU681' : 'OS123', dow: 2, minute: 600, chosen: i % 2 ? '4' : '9', busy: [], season: 'W', ...(i % 5 === 0 ? { corr: true } : {}) });
+    const r = evaluateKnowledgeBacktest(ex, 'desk');
+    expect(r.text).toContain('Ispravke osoblja u primjerima: 12');
   });
 });
