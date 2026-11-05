@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   encodeExample, exampleField, parseExamples, trainModel, trainWeights,
-  INITIAL_WEIGHTS, TRAIN_DAYS, type Example,
+  INITIAL_WEIGHTS, TRAIN_DAYS, evaluateKnowledgeBacktest, type Example,
 } from './assignment-model';
 
 const DAY = 86_400_000;
@@ -137,5 +137,47 @@ describe('dan od 7 — trajni "since"', () => {
     const ex = [{ ts: t0 + 5 * DAY, kind: 'desk' as const, flight: 'LY1', dow: 1, minute: 600, chosen: '5', busy: [], season: 'W' as const }];
     expect(trainModelState(ex, 'desk', '2026-10-26').info.day).toBe(2);              // bez since: samo od najstarijeg primjera
     expect(trainModelState(ex, 'desk', '2026-10-26', t0).info.day).toBe(7);          // sa since: pravi dan
+  });
+});
+
+describe('Knowledge test unazad', () => {
+  const mk = (i: number, flight: string, chosen: string): Example => ({
+    ts: 1_000_000 + i * 60_000, kind: 'desk', flight, dow: 2, minute: 600, chosen, busy: [], season: 'W',
+  });
+
+  it('premalo primjera → bez testa', () => {
+    const r = evaluateKnowledgeBacktest(Array.from({ length: 10 }, (_, i) => mk(i, 'JU681', '4')), 'desk');
+    expect(r.tested).toBe(0);
+    expect(r.text).toContain('nema dovoljno');
+  });
+
+  it('stabilan obrazac → pravila pokrivaju i pogađaju na novijim primjerima', () => {
+    const ex: Example[] = [];
+    for (let i = 0; i < 60; i++) ex.push(mk(i, i % 2 ? 'JU681' : 'OS123', i % 2 ? '4' : '9'));
+    const r = evaluateKnowledgeBacktest(ex, 'desk');
+    expect(r.tested).toBeGreaterThanOrEqual(15);
+    expect(r.covered).toBe(r.tested);
+    expect(r.ruleHits).toBe(r.covered);
+  });
+
+  it('obrazac se promijeni u testu → pravila za JU promaše', () => {
+    const ex: Example[] = [];
+    // OS123 uvijek 9 (daje raznolikost, da lift prema globalnoj učestalosti postoji); JU681: 4, pa u novijem dijelu 7
+    for (let i = 0; i < 80; i++) {
+      const ju = i % 2 === 0;
+      ex.push(mk(i, ju ? 'JU681' : 'OS123', ju ? (i < 60 ? '4' : '7') : '9'));
+    }
+    const r = evaluateKnowledgeBacktest(ex, 'desk');
+    expect(r.covered).toBeGreaterThan(0);
+    // OS123 (stabilan) pogađa, JU681 (promijenio naviku) ne → ukupno manje od 100%
+    expect(r.ruleHits).toBeLessThan(r.covered);
+    expect(r.ruleHits).toBeGreaterThan(0);
+  });
+
+  it('jedan resurs svima → nema lifta, pa nema ni pravila (ne tvrdi se ništa)', () => {
+    const ex: Example[] = Array.from({ length: 60 }, (_, i) => mk(i, 'JU681', '4'));
+    const r = evaluateKnowledgeBacktest(ex, 'desk');
+    expect(r.covered).toBe(0);
+    expect(r.text).toContain('nijedno pravilo');
   });
 });

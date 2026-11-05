@@ -5,6 +5,11 @@ import { getClientIp } from '@/lib/get-client-ip';
 import { getRedisClient, isCircuitOpen } from '@/lib/redis';
 import { buildAccessEvent } from '@/lib/access-log';
 import { logAccessEvent } from '@/lib/access-log-server';
+import { createHash, timingSafeEqual } from 'crypto';
+import { verifyPassword, dummyHash } from '@/lib/password';
+import { getUser, listUsers, saveUser } from '@/lib/users';
+import { normalizeUsername } from '@/lib/user-rules';
+import type { Role } from '@/lib/roles';
 
 // NOVO (po zahtjevu — prijavljen bezbjednosni gap: /api/admin/login
 // NIJE imao rate limiting, iako je admin panel NAMJERNO dostupan sa
@@ -63,6 +68,11 @@ async function clearFailedAttempts(ip: string): Promise<void> {
   }
 }
 
+// ── Rezerva: ADMIN_USERS iz env varijable ───────────────────────────────
+// Glavni izvor korisnika je Redis (lib/users.ts, stranica /admin/users). Env lista važi
+// SAMO kad (a) Redis ne odgovara ili (b) u Redis-u nema nijednog aktivnog admina
+// (prvo pokretanje / hitni pristup). Čim postoji aktivan admin u Redis-u, env lozinke
+// se ignorišu — pa ih poslije uvoza treba ukloniti iz Vercel Environment Variables.
 type AdminUser = { username: string; password: string };
 
 function getAdminUsers(): AdminUser[] {
@@ -80,17 +90,53 @@ function getAdminUsers(): AdminUser[] {
   }
 }
 
+const digest = (x: string) => createHash('sha256').update(x).digest();
+function safeEqual(a: string, b: string): boolean {
+  return timingSafeEqual(digest(a), digest(b));
+}
+
+type LoginResult =
+  | { ok: true; username: string; role: Role; ver: number; mustChange: boolean; source: 'redis' | 'env' }
+  | { ok: false; knownUser: boolean };
+
+async function authenticate(username: unknown, password: unknown, envUsers: AdminUser[]): Promise<LoginResult> {
+  const uname = normalizeUsername(username);
+  const pw = typeof password === 'string' ? password : '';
+
+  // 1) Redis
+  const found = uname ? await getUser(uname) : ({ ok: true, user: null } as const);
+  if (found.ok && found.user) {
+    const good = await verifyPassword(pw, found.user.hash);
+    if (good && found.user.active) {
+      // zadnja prijava: najviše jedan HSET, ne smije blokirati prijavu
+      await saveUser({ ...found.user, lastLogin: Date.now() });
+      return { ok: true, username: found.user.username, role: found.user.role, ver: found.user.ver, mustChange: found.user.mustChange, source: 'redis' };
+    }
+    return { ok: false, knownUser: true };
+  }
+
+  // nepoznat korisnik: potroši isto vrijeme kao provjera pravog (nema razlike po vremenu)
+  if (found.ok) await verifyPassword(pw, await dummyHash());
+
+  // 2) env rezerva
+  const envMatch = envUsers.find((u) => u.username === (typeof username === 'string' ? username : '') && safeEqual(u.password, pw));
+  const knownUser = envUsers.some((u) => u.username === username);
+  if (!envMatch) return { ok: false, knownUser };
+
+  if (found.ok) {
+    // Redis radi: env važi samo dok nema nijednog aktivnog admina u njemu.
+    const all = await listUsers();
+    if (all && all.some((u) => u.role === 'admin' && u.active)) {
+      console.warn('[admin/login] ADMIN_USERS korisnik odbijen: u Redis-u već postoji aktivan admin (ukloni ADMIN_USERS iz env-a)');
+      return { ok: false, knownUser: true };
+    }
+  }
+  return { ok: true, username: envMatch.username, role: 'admin', ver: 0, mustChange: false, source: 'env' };
+}
+
 export async function POST(request: Request) {
   try {
     const users = getAdminUsers();
-
-    if (users.length === 0) {
-      console.error('[admin/login] ADMIN_USERS nije postavljen ili je prazan');
-      return NextResponse.json(
-        { success: false, message: 'Server nije konfigurisan' },
-        { status: 500 }
-      );
-    }
 
     // NOVO — provjera rate limita PRIJE bilo kakve obrade lozinke.
     const ip = getClientIp(request.headers) ?? 'unknown';
@@ -119,20 +165,21 @@ export async function POST(request: Request) {
 
     const { username, password } = parsed;
 
-    const match = users.find(u => u.username === username && u.password === password);
+    const result = await authenticate(username, password, users);
 
-    if (!match) {
-      // Logujemo samo neuspjeli pokušaj sa username (ne i password) —
-      // korisno za security audit, bez curenja credentials.
-      console.warn(`[admin/login] Neuspjela prijava za username: ${username || '(prazan)'}`);
+    if (!result.ok) {
+      // Logujemo samo neuspjeli pokušaj bez lozinke i bez ukucanog imena (moglo bi biti pogrešno
+      // ukucana lozinka u polju za ime) — korisno za audit, bez curenja credentials.
+      console.warn('[admin/login] Neuspjela prijava');
       await recordFailedAttempt(ip);
-      // istorija pristupa: bez upisanog korisničkog imena (moglo bi biti pogrešno ukucana lozinka) — samo da li je ime poznato
-      { const ev = buildAccessEvent(request.headers, 'login_fail', users.some(u => u.username === username) ? { u: String(username) } : {}); after(() => logAccessEvent(ev)); }
+      // istorija pristupa: bez upisanog korisničkog imena — samo da li je ime poznato
+      { const ev = buildAccessEvent(request.headers, 'login_fail', result.knownUser && typeof username === 'string' ? { u: normalizeUsername(username) } : {}); after(() => logAccessEvent(ev)); }
       return NextResponse.json(
         { success: false, message: 'Pogrešno korisničko ime ili lozinka' },
         { status: 401 }
       );
     }
+    const match = result;
 
     // NOVO — uspješna prijava odmah briše brojač za ovaj IP (ne čeka
     // istek prozora), da legitimno osoblje ne ostane privremeno
@@ -140,10 +187,10 @@ export async function POST(request: Request) {
     // tačne lozinke.
     await clearFailedAttempts(ip);
 
-    const token = await createSessionToken(match.username);
+    const token = await createSessionToken(match.username, match.role, match.ver);
 
     const response = NextResponse.json(
-      { success: true, message: 'Uspešna prijava' },
+      { success: true, message: 'Uspešna prijava', role: match.role, mustChange: match.mustChange },
       { headers: { 'Cache-Control': 'no-store, max-age=0' } }
     );
 

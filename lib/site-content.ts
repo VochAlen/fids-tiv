@@ -25,10 +25,10 @@ export const SITE_URL = (process.env.NEXT_PUBLIC_SITE_URL || 'https://fids-tiv.v
 // sitemap-u i llms.txt (vidljiv datum ažuriranja je jedan od signala
 // svježine koje AI pretraga uzima u obzir). Ažuriraj pri većim
 // izmjenama landing stranice.
-export const SITE_LAST_UPDATED = '2026-10-05';
+export const SITE_LAST_UPDATED = '2026-10-28';
 
 export const SITE_DESCRIPTION_EN =
-  'TIV FIDS is a cloud-based Flight Information Display System (FIDS) for small and regional airports: live departures and arrivals boards, gate and check-in desk displays, baggage displays, a staff admin panel for gate and desk assignment, and automated terminal announcements. In daily production use at Tivat Airport (TIV), Montenegro.';
+  'TIV FIDS is a cloud-based Flight Information Display System (FIDS) for small and regional airports: live departures and arrivals boards, gate and check-in desk displays, baggage displays, a staff admin panel for gate and desk assignment with suggestions, an aircraft radar linked to the flight schedule, and automated terminal announcements. In daily production use at Tivat Airport (TIV), Montenegro.';
 
 export const PRICING_TIERS = [
   { name: 'Starter', screens: 'up to 15 screens', priceEur: 249, period: 'month' },
@@ -75,6 +75,10 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
       a: 'Yes. The admin panel proposes desks and gates for every flight: it respects each airline’s check-in opening time, avoids overlaps (with a short turnover pause), keeps a flight’s desks consecutive and in one terminal, and prefers Terminal 1 in winter. It learns from staff’s manual assignments, and staff can steer it with plain-text notes such as “desk 3 is out of order” or “T1 is closed”. Every plan is independently checked for conflicts before it is shown, and can be exported as a printable A4 PDF plan. It runs on the airport’s own data and needs no paid AI service.',
     },
     {
+      q: 'Does it include an aircraft radar?',
+      a: 'Yes. The admin panel has a radar of aircraft around the airport, based on public ADS-B data, with 50, 100 and 200 NM ranges. Aircraft are matched to the airport’s flight schedule by callsign, by airline fleet (HEX code and registration) or by estimated arrival (marked as an estimate), and each inbound flight shows its assigned desks, gate and baggage belt. It has a big-screen kiosk view and an optional alert when a flight enters 50 NM. It uses a single shared data request for all users and refreshes less often when no flights are due. Coverage depends on nearby ADS-B receivers, and the radar is protected by the admin login.',
+    },
+    {
       q: 'Which languages are supported?',
       a: 'Displays and announcements work in English and the local language. Additional languages are available on request.',
     },
@@ -111,6 +115,10 @@ export const FAQ: { en: FaqItem[]; me: FaqItem[] } = {
     {
       q: 'Može li sistem predložiti koje check-in šaltere i gate-ove otvoriti?',
       a: 'Da. Admin panel predlaže šaltere i gate-ove za svaki let: poštuje vrijeme otvaranja check-ina svake kompanije, izbjegava preklapanja (uz kratku pauzu između letova), drži šaltere jednog leta uzastopno i u istom terminalu, a zimi daje prednost Terminalu 1. Uči iz ručnih dodjela osoblja, a osoblje ga može usmjeravati običnim tekstom, npr. „šalter 3 ne radi“ ili „T1 ne radi“. Svaki plan se prije prikaza nezavisno provjerava na konflikte i može se izvesti kao štampani A4 PDF plan. Radi na podacima samog aerodroma i ne treba plaćenu AI uslugu.',
+    },
+    {
+      q: 'Da li postoji radar aviona?',
+      a: 'Da. Admin panel ima radar aviona oko aerodroma, zasnovan na javnim ADS-B podacima, sa dometima 50, 100 i 200 NM. Avioni se povezuju sa rasporedom letova aerodroma po pozivnom znaku, po floti kompanije (HEX kod i registracija) ili po procijenjenom dolasku (označeno kao procjena), a uz svaki dolazeći let vide se dodijeljeni šalteri, gate i traka za prtljag. Ima prikaz za veliki ekran (kiosk) i opcioni zvučni signal kad let uđe u 50 NM. Koristi jedan zajednički upit za sve korisnike i rjeđe se osvježava kad nema letova na redu. Pokrivenost zavisi od ADS-B prijemnika u blizini, a radar je zaštićen admin prijavom.',
     },
     {
       q: 'Koji jezici su podržani?',
@@ -153,7 +161,8 @@ export function buildJsonLd() {
           'Live departures and arrivals boards',
           'Gate and check-in desk displays',
           'Baggage displays and split-board view',
-          'Staff admin panel for gate and check-in desk assignment',
+          'Staff admin panel for gate and check-in desk assignment, with suggested desks and gates on each flight card and a one-step undo',
+          'Aircraft radar (ADS-B) matched to the flight schedule, with big-screen kiosk view',
           'Automated terminal announcements (PA)',
           'Custom connector for the airport’s own flight data source (REST, XML, CSV, AODB)',
           'Automatic night mode following airport operating hours',
@@ -216,6 +225,7 @@ Last updated: ${SITE_LAST_UPDATED}
 
 - [Home](${SITE_URL}/): overview, live screen examples from Tivat Airport, pricing, FAQ.
 - [Pricing](${SITE_URL}/#pricing): plans and implementation fee.
+- [Aircraft radar](${SITE_URL}/#radar): ADS-B radar linked to the flight schedule (admin feature).
 - [Live screen examples](${SITE_URL}/#showcase): real departures, arrivals and split-board screens.
 - [FAQ](${SITE_URL}/#faq): answers to common questions.
 

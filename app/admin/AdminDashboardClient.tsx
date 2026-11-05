@@ -24,6 +24,9 @@ import {
   HeartPulse,
   AlertTriangle,
   CheckCircle2,
+  Radar as RadarIcon,
+  UserCog,
+  KeyRound,
 } from 'lucide-react';
 
 // Helper funkcije za obradu datuma
@@ -106,6 +109,16 @@ export default function AdminDashboardClient() {
   const [systemStatus, setSystemStatus] = useState<'online' | 'offline'>('online');
   const [recentFlights, setRecentFlights] = useState<Flight[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Uloga prijavljenog korisnika (operator vidi samo dnevni rad smjene — vidi lib/roles.ts).
+  const [role, setRole] = useState<'admin' | 'operator'>('operator');
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/admin/me', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { role?: string } | null) => { if (alive && d?.role === 'admin') setRole('admin'); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
 
   const loadFlightStats = useCallback(async (showLoading: boolean = true) => {
     try {
@@ -412,6 +425,7 @@ const handleLogout = useCallback(() => {
 
         {/* Main Navigation */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+          {role === 'admin' && (
           <Link
             href="/admin/business-class"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
@@ -428,7 +442,9 @@ const handleLogout = useCallback(() => {
               </div>
             </div>
           </Link>
+          )}
 
+          {role === 'admin' && (
           <Link
             href="/admin/pa"
             className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
@@ -448,6 +464,7 @@ const handleLogout = useCallback(() => {
               </div>
             </div>
           </Link>
+          )}
 
           <Link
             href="/admin/assign-checkin"
@@ -461,6 +478,59 @@ const handleLogout = useCallback(() => {
                 <h3 className="font-bold text-lg text-white mb-1">TIV CheckIn & Gate</h3>
                 <p className="text-white/70 text-sm">
                   Ručna dodjela check-in šaltera i izlaza (gate-ova)
+                </p>
+              </div>
+            </div>
+          </Link>
+
+          <Link
+            href="/admin/radar"
+            className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
+          >
+            <div className="flex items-start gap-4">
+              <div className="p-3 bg-cyan-600/20 rounded-lg text-cyan-400 group-hover:bg-cyan-600/30 transition-colors">
+                <RadarIcon className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg text-white mb-1">Radar aviona</h3>
+                <p className="text-white/70 text-sm">
+                  Avioni oko aerodroma, povezani sa rasporedom
+                </p>
+              </div>
+            </div>
+          </Link>
+
+          {role === 'admin' && (
+          <Link
+            href="/admin/users"
+            className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
+          >
+            <div className="flex items-start gap-4">
+              <div className="p-3 bg-emerald-600/20 rounded-lg text-emerald-400 group-hover:bg-emerald-600/30 transition-colors">
+                <UserCog className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg text-white mb-1">Korisnici</h3>
+                <p className="text-white/70 text-sm">
+                  Dodavanje i izmjena korisnika, uloge i reset lozinke
+                </p>
+              </div>
+            </div>
+          </Link>
+          )}
+
+          <Link
+            href="/admin/account"
+            className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all duration-200 group"
+          >
+            <div className="flex items-start gap-4">
+              <div className="p-3 bg-slate-600/30 rounded-lg text-slate-300 group-hover:bg-slate-600/40 transition-colors">
+                <KeyRound className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg text-white mb-1">Moj račun</h3>
+                <p className="text-white/70 text-sm">
+                  Promjena sopstvene lozinke
                 </p>
               </div>
             </div>

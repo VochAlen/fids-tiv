@@ -84,7 +84,7 @@ function parseDateSimple(dateValue: unknown): Date | null {
 
 // GET svi letovi
 export async function GET(request: NextRequest) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     console.log('=== GET ALL FLIGHTS API ===');
     
@@ -127,7 +127,7 @@ export async function GET(request: NextRequest) {
 
 // CREATE novi let
 export async function POST(request: NextRequest) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     console.log('=== CREATE FLIGHT API ===');
     
@@ -226,7 +226,7 @@ export async function POST(request: NextRequest) {
 
 // UPDATE let
 export async function PUT(request: NextRequest) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     console.log('=== UPDATE FLIGHT API ===');
     
@@ -315,7 +315,7 @@ export async function PUT(request: NextRequest) {
 
 // DELETE let
 export async function DELETE(request: NextRequest) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     console.log('=== DELETE FLIGHT API ===');
     

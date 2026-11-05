@@ -23,7 +23,8 @@ import { useRealtimeFlightData } from '@/hooks/useRealtimeFlightData'; // ← NO
 import { useRealtimeAssignments } from '@/hooks/useRealtimeAssignments';
 import { isArrivalsPhase, msToNextPhase } from '@/lib/board-phase';
 import { reuseFlights } from '@/lib/flight-reuse';
-import { nowMs } from '@/lib/server-clock';
+import { nowMs } from '@/lib/server-clock'
+import { formatClockHHMM, msToNextMinute } from '@/lib/clock-format';
 import { sortNumericStrings } from '@/lib/sort-utils';
 import { parseFlightTimeToDate, computeDisruptionIndex, disruptionLevel } from '@/lib/disruption-index';
 import { isNightHours } from '@/lib/night-hours';
@@ -514,8 +515,14 @@ function computeStatusPill(flight: Flight, isArrival: boolean, fmtTime: (t: stri
 const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: string }) {
   const [time, setTime] = useState("")
   useEffect(() => {
-    const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
+    // Server-ispravljen sat, poravnat na početak minuta (svi monitori mijenjaju hh:mm u istom trenutku).
+    let id: ReturnType<typeof setTimeout>
+    const tick = () => {
+      const t = nowMs()
+      setTime(formatClockHHMM(t))
+      id = setTimeout(tick, msToNextMinute(t) + 20)
+    }
+    tick(); return () => clearTimeout(id)
   }, [])
   // NOVO (po zahtjevu — na mobilnom sat preveliki, "DEPARTURES"/"ARRIVALS"
   // se ne vidi u cijelosti): fiksnih 3rem (48px) za sat na uskom telefonu
@@ -531,8 +538,14 @@ const ClockDisplay = memo(function ClockDisplay({ colorClass }: { colorClass: st
 const NightClock = memo(function NightClock() {
   const [time, setTime] = useState("")
   useEffect(() => {
-    const tick = () => setTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))
-    tick(); const id = setInterval(tick, 1_000); return () => clearInterval(id)
+    // Server-ispravljen sat, poravnat na početak minuta (svi monitori mijenjaju hh:mm u istom trenutku).
+    let id: ReturnType<typeof setTimeout>
+    const tick = () => {
+      const t = nowMs()
+      setTime(formatClockHHMM(t))
+      id = setTimeout(tick, msToNextMinute(t) + 20)
+    }
+    tick(); return () => clearTimeout(id)
   }, [])
   return (
     <div className="h-screen w-full flex items-center justify-center bg-black select-none">
@@ -654,7 +667,7 @@ const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
 }: { headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]; headerBg: string }) {
   return (
-    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
+    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl transition-colors duration-500`}>
       {headers.map(h => {
         const Icon = h.icon
         return (
@@ -1528,10 +1541,14 @@ const handleClose = useCallback(() => {
 
   return (
     <div
-      className={`h-screen ${colors.background} text-white p-2 sm:p-4 transition-colors duration-700 flex flex-col select-none`}
+      className="relative isolate h-screen bg-[#0b1233] text-white p-2 sm:p-4 flex flex-col select-none"
       onDragOver={e => e.preventDefault()}
       onDrop={e => e.preventDefault()}
     >
+      {/* Pozadine su dva stalna sloja koja se preklapaju (crossfade opacity-jem, radi kompozitor) — ranije se
+          mijenjala klasa gradijenta na korijenu, što je na slabim PC-ovima izazivalo potpuno ponovno crtanje. */}
+      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none transition-opacity duration-500 ${COLOR_CONFIG.arrivals.background} ${showArrivals ? 'opacity-100' : 'opacity-0'}`} />
+      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none transition-opacity duration-500 ${COLOR_CONFIG.departures.background} ${showArrivals ? 'opacity-0' : 'opacity-100'}`} />
       {errorMessage && (
         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
           ⚠️ {errorMessage}
@@ -1640,11 +1657,16 @@ const handleClose = useCallback(() => {
                 {/* OBA prikaza su stalno u DOM-u (8+8 redova); prebacivanje arrivals↔departures je samo CSS.
                     Ranije su se svi redovi na svakih 20 s gasili i ponovo pravili (+ slike, vremenska ćelija sa
                     spinnerom), pa je na sporijim PC-ovima kratko ostajala "prazna plava" tabela. */}
+                <div className="grid min-h-full">
                 {([true, false] as const).map(isArr => {
                   const rows = isArr ? arrivalsRows : departuresRows
                   const visible = isArr === showArrivals
                   return (
-                    <div key={isArr ? 'arr' : 'dep'} className={visible ? 'contents' : 'hidden'} aria-hidden={!visible}>
+                    <div
+                      key={isArr ? 'arr' : 'dep'}
+                      className={`col-start-1 row-start-1 flex flex-col min-h-0 transition-opacity duration-300 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none [&_*]:[animation-play-state:paused]'}`}
+                      aria-hidden={!visible}
+                    >
                       {rows.length === 0 ? (
                         <div className="p-8 text-center text-white/60 h-full flex flex-col items-center justify-center">
                           <Plane className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-4 opacity-50" />
@@ -1665,6 +1687,7 @@ const handleClose = useCallback(() => {
                     </div>
                   )
                 })}
+                </div>
               </>
             )}
           </div>
@@ -1689,7 +1712,7 @@ const handleClose = useCallback(() => {
       )}
 
       <style jsx global>{`
-        #__next,body,html{height:100vh}*{-webkit-font-smoothing:antialiased}
+        #__next,body,html{height:100vh;background:#0b1233}*{-webkit-font-smoothing:antialiased}
         @keyframes ledBlinkA{0%{opacity:.2}100%{opacity:1}}
         @keyframes ledBlinkB{0%{opacity:1}100%{opacity:.2}}
         @keyframes pill-blink{0%,50%{opacity:1}51%,100%{opacity:.75}}

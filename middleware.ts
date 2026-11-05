@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { verifySessionToken } from '@/lib/auth-session';
 import { getClientIp } from '@/lib/get-client-ip';
+import { pageAllowedForRole } from '@/lib/roles';
 
 // const BLOCKED_USER_AGENT_PATTERNS = [
 //   /GPTBot/i,
@@ -182,6 +183,12 @@ if (request.nextUrl.pathname.startsWith('/api/')) {
 
   if (isAdminRoute && !isLoginPage && !isAuthenticated) {
     return NextResponse.redirect(new URL('/admin/login', request.url));
+  }
+
+  // Uloga "operator" vidi samo dnevni rad smjene (vidi lib/roles.ts); ostalo ga vraća na dodjelu šaltera.
+  // API rute provjeravaju ulogu same (requireAdmin(request, 'admin')) — ovo je samo zaštita stranica.
+  if (isAdminRoute && !isLoginPage && session && !pageAllowedForRole(session.role, path)) {
+    return NextResponse.redirect(new URL('/admin/assign-checkin', request.url));
   }
 
   // NOVO (po zahtjevu — bezbjednost + kontrola troška, vidi

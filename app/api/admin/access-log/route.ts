@@ -10,7 +10,7 @@ import { logAccessEvent, readAccessEvents } from '@/lib/access-log-server';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
   const cutoff = Date.now() - ACCESS_LOG_TTL_SEC * 1000 + 86_400_000;
   const events = (await readAccessEvents()).filter((e) => e.t >= cutoff);

@@ -52,9 +52,11 @@ import {
   Brain, ShieldAlert, FileText, MessageSquareText, Building, Layers,
   History, Megaphone, Terminal, FileCode2, Cloud, Hourglass, PlaneTakeoff,
   Bus, TrainFront, Ship, Monitor, Copy, Wrench, Anchor,
+  Radar, Link2, Volume2, Tv, Undo2, Hand,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/use-theme';
 import { FAQ, SITE_URL } from '@/lib/site-content';
+import HeroRadar from '@/components/landing/HeroRadar';
 
 const THEME_STORAGE_KEY = 'theme:landing';
 const LANG_STORAGE_KEY = 'lang:landing';
@@ -81,7 +83,7 @@ const T = {
       { value: '6', label: 'tipova ekrana' },
       { value: '2', label: 'jezika razglasa' },
     ],
-    heroSubtitle: 'Isti sistem koji svakodnevno vodi Aerodrom Tivat — uživo raspored letova, upravljanje gate-ovima i check-in šalterima uz pametne prijedloge dodjele, i automatski razglas terminala. Bez cijene i složenosti tradicionalnih FIDS rješenja.',
+    heroSubtitle: 'Isti sistem koji svakodnevno vodi Aerodrom Tivat — uživo raspored letova, pametni prijedlozi šaltera i gate-ova, radar aviona povezan sa rasporedom i automatski razglas terminala. Bez cijene i složenosti tradicionalnih FIDS rješenja.',
     ctaLive: 'Pogledajte cijene',
     ctaDepartures: 'Pogledaj uživo na Aerodromu Tivat',
     login: 'Prijava',
@@ -116,6 +118,26 @@ const T = {
       { title: 'Stabilni prijedlozi i PDF plan', description: 'Prijedlog se ne mijenja zbog sitnih razlika, ali operativne promjene (kašnjenje, kvar šaltera) uvijek pobjeđuju. Cijeli dan se izvozi kao štampani A4 PDF plan šaltera i gate-ova.' },
     ],
     smartFootnote: 'Prijedlog je pomoć dispečeru, ne zamjena: osoblje uvijek odlučuje i može sve promijeniti ručno.',
+    radarBadge: 'Radar aviona',
+    radarTitle: 'Vidite ko dolazi, prije nego što sleti',
+    radarSubtitle: 'Radar oko aerodroma za dispečere i operativu: avioni u dometu se povezuju sa vašim rasporedom, pa uz svaki dolazeći let odmah vidite i šalter, gate i traku za prtljag.',
+    radarItems: [
+      { title: 'Avioni oko aerodroma uživo', description: 'ADS-B podaci javne mreže prijemnika na mapi sa aerodromom u centru. Radijus 50, 100 ili 200 NM, trag leta, oznake sa pozivnim znakom, tipom i visinom.' },
+      { title: 'Povezan sa vašim rasporedom', description: 'Let se prepoznaje po pozivnom znaku, a kad ga nema i po floti (HEX i registracija) ili po procijenjenom dolasku. Procjena je jasno označena sa ≈, da je nikad ne zamijenite za potvrdu.' },
+      { title: 'Zemlja uz svaki let', description: 'Za dolazeći let tabela odmah prikazuje dodijeljene šaltere, gate i traku prtljaga iz admin panela — dispečer ne mora da prelazi na drugi ekran.' },
+      { title: 'Obavještenje na 50 NM', description: 'Opcioni zvučni signal kad naš let uđe u krug od 50 NM, i filteri „Samo Tivat“ i „Samo Air Montenegro“ da se ne gubite među tranzitnim avionima.' },
+      { title: 'Prikaz za veliki ekran', description: 'Poseban kiosk prikaz za zid ili ekran u operativnoj sobi, koji ostaje prijavljen i ne odjavljuje se zbog neaktivnosti.' },
+      { title: 'Štedljiv i zaštićen', description: 'Jedan zajednički upit za sve korisnike, a učestalost osvježavanja se prilagođava: češće oko letova, rjeđe između njih, a noću pauza. Dostupan samo uz admin prijavu.' },
+    ],
+    radarFootnote: 'ADS-B pokrivenost zavisi od prijemnika u blizini; avioni bez odašiljača ili van dometa se ne vide. Radar je operativna pomoć, ne zamjena za službene izvore.',
+    opsBadge: 'Za smjenu na šalteru',
+    opsTitle: 'Brže i bez greške u svakodnevnom radu',
+    opsSubtitle: 'Sitni detalji koji štede vrijeme kad je terminal pun.',
+    opsItems: [
+      { title: 'Prijedlog na kartici leta', description: 'Na dnu kartice leta piše „Prijedlog: šalteri 4 i 5“ — isti prijedlog kao u panelu „AI sugestija“. Kad čeka da se šalter oslobodi, vidi se i od kada.' },
+      { title: 'Poništi za 8 sekundi', description: 'Slučajno uklonjena dodjela? Traka „Šalter 5 uklonjen · Poništi“ vraća isti let na isti šalter jednim dodirom, bez ponovnog biranja.' },
+      { title: 'Radi na dodir', description: 'Odaberite let, pa dodirnite šalter ili gate. Velike mete za prste i trenutni odraz na svim ekranima — i na tabletu.' },
+    ],
     historyBadge: 'Naša priča',
     historyTitle: 'Od VB6 projekta iz {devSince}. do cloud sistema — {liveYears} godina uživo',
     historySubtitle: 'TIV FIDS nije nastao preko noći niti iz prezentacije. Rastao je godinama, uz stvarne letove, stvarno osoblje i stvarne greške iz kojih se učilo.',
@@ -266,6 +288,7 @@ const T = {
     footerRights: 'Sistem informisanja o letovima',
     footerLive: 'Uživo letovi',
     footerPricing: 'Cjenovnik',
+    footerRadar: 'Radar',
     footerSmart: 'Pametni prijedlozi',
     footerHistory: 'Naša priča',
     footerSetup: 'Podešavanje ekrana',
@@ -287,7 +310,7 @@ const T = {
       { value: '6', label: 'screen types' },
       { value: '2', label: 'announcement languages' },
     ],
-    heroSubtitle: 'The same system that runs Tivat Airport every day — live flight schedules, gate and check-in desk management with smart assignment suggestions, and automated terminal announcements. Without the cost and complexity of traditional FIDS solutions.',
+    heroSubtitle: 'The same system that runs Tivat Airport every day — live flight schedules, smart desk and gate suggestions, an aircraft radar linked to the schedule, and automated terminal announcements. Without the cost and complexity of traditional FIDS.',
     ctaLive: 'See pricing',
     ctaDepartures: 'See it live at Tivat Airport',
     login: 'Sign in',
@@ -322,6 +345,26 @@ const T = {
       { title: 'Stable suggestions & PDF plan', description: 'Suggestions do not flip over tiny differences, but operational changes (a delay, a broken desk) always win. The whole day exports as a printable A4 PDF plan of desks and gates.' },
     ],
     smartFootnote: 'Suggestions assist the dispatcher, they do not replace them: staff always decide and can change anything manually.',
+    radarBadge: 'Aircraft radar',
+    radarTitle: 'See who is coming before they land',
+    radarSubtitle: 'A radar around the airport for dispatchers and operations: aircraft in range are matched to your schedule, so every inbound flight shows its desk, gate and baggage belt right away.',
+    radarItems: [
+      { title: 'Aircraft around the airport, live', description: 'ADS-B data from a public receiver network on a map with the airport at the centre. 50, 100 or 200 NM range, flight trails, labels with callsign, type and altitude.' },
+      { title: 'Matched to your schedule', description: 'A flight is recognised by its callsign, and when there is none by fleet (HEX and registration) or by estimated arrival. Estimates are clearly marked with ≈ so they are never mistaken for confirmation.' },
+      { title: 'Ground status next to every flight', description: 'For an inbound flight the table shows the assigned desks, gate and baggage belt straight from the admin panel — no switching to another screen.' },
+      { title: 'Alert at 50 NM', description: 'An optional sound when our flight enters the 50 NM circle, plus “Tivat only” and “Air Montenegro only” filters so you do not get lost among transit aircraft.' },
+      { title: 'Big-screen view', description: 'A dedicated kiosk view for a wall or operations-room display that stays signed in and does not log out on inactivity.' },
+      { title: 'Frugal and protected', description: 'One shared upstream request for all users, and the refresh rate adapts: more often around flights, less often between them, paused at night. Available to signed-in admins only.' },
+    ],
+    radarFootnote: 'ADS-B coverage depends on nearby receivers; aircraft without a transmitter or out of range are not shown. The radar is an operational aid, not a replacement for official sources.',
+    opsBadge: 'For the desk shift',
+    opsTitle: 'Faster, with fewer mistakes, every day',
+    opsSubtitle: 'Small details that save time when the terminal is full.',
+    opsItems: [
+      { title: 'Suggestion on the flight card', description: 'The bottom of each flight card reads “Prijedlog: šalteri 4 i 5” — the same suggestion as in the “AI sugestija” panel. When it waits for a desk to free up, it also shows from when.' },
+      { title: 'Undo within 8 seconds', description: 'Removed an assignment by accident? The “Desk 5 removed · Undo” bar puts the same flight back on the same desk with one tap, no re-selecting.' },
+      { title: 'Built for touch', description: 'Pick a flight, then tap a desk or gate. Large finger targets and an instant update on every screen — tablet included.' },
+    ],
     historyBadge: 'Our story',
     historyTitle: 'From a {devSince} VB6 project to a cloud system — {liveYears} years live',
     historySubtitle: 'TIV FIDS did not appear overnight or from a slide deck. It grew over the years, alongside real flights, real staff, and real mistakes to learn from.',
@@ -472,6 +515,7 @@ const T = {
     footerRights: 'Flight Information Display System',
     footerLive: 'Live flights',
     footerPricing: 'Pricing',
+    footerRadar: 'Radar',
     footerSmart: 'Smart suggestions',
     footerHistory: 'Our story',
     footerSetup: 'Screen setup',
@@ -493,6 +537,8 @@ const FEATURE_ICONS = [Zap, DoorOpen, Radio, MonitorSmartphone, ShieldCheck, Clo
 // NOVO — ikone za nove sekcije (cjenovnik i koraci implementacije),
 // dodato uz postojeći FEATURE_ICONS obrazac. Redoslijed mora pratiti
 // redoslijed stavki u T.me/T.en.pricingTiers / onboardingSteps.
+const RADAR_ICONS = [Radar, Link2, DoorOpen, Volume2, Tv, ShieldCheck];
+const OPS_ICONS = [Sparkles, Undo2, Hand];
 const SMART_ICONS = [Layers, Building, Brain, MessageSquareText, ShieldAlert, FileText];
 // Istorija: unesi samo početne godine — trajanje se računa automatski.
 const DEV_SINCE_YEAR = 2009;   // početak razvoja (VB6)
@@ -716,12 +762,12 @@ export default function HomeClient() {
         </div>
       </header>
 
-      {/* ── Hero (v6, 2026-10-11): tamna "aerodromska" scena (navy + amber
-          tabla), uvijek tamna u obje teme radi kontrasta. Lijevo poruka i
-          CTA, desno ilustrativna tabla odlazaka sa statusima koji se
-          smjenjuju; dolje pista sa pokretnom središnjom linijom i
-          statistika. Sve je CSS/SVG — bez slika, bez mrežnih poziva. ── */}
-      <section className="relative overflow-hidden bg-[#06101F] text-white">
+      {/* ── Hero (v7, 2026-10-28): svijetla tema je podrazumijevana (tamna
+          ostaje dostupna prekidačem). Lijevo poruka i CTA, desno SIMULACIJA
+          RADARA (components/landing/HeroRadar.tsx), ispod FIDS monitor
+          (tamni "uređaj" u obje teme, kao pravi ekran) i statistika. Sve je
+          CSS/SVG — bez slika, bez mrežnih poziva. ── */}
+      <section className={`relative overflow-hidden ${isDark ? 'bg-[#06101F] text-white' : 'bg-gradient-to-b from-[#E8F1FD] via-[#F2F7FD] to-[#F7F9FC] text-[#0B2545]'}`}>
         <style>{`
           @keyframes hero-fly { 0% { transform: translate3d(-20vw, 0, 0); opacity: 0; } 8% { opacity: .9; } 92% { opacity: .9; } 100% { transform: translate3d(120vw, -60px, 0); opacity: 0; } }
           @keyframes hero-flip { 0% { transform: rotateX(90deg); opacity: 0; } 100% { transform: rotateX(0); opacity: 1; } }
@@ -736,84 +782,121 @@ export default function HomeClient() {
 
         {/* pozadina: sjaj + mreža */}
         <div className="absolute inset-0 pointer-events-none" aria-hidden
-          style={{ background: 'radial-gradient(55% 60% at 15% 0%, rgba(56,189,248,.22), transparent), radial-gradient(45% 50% at 90% 30%, rgba(251,191,36,.12), transparent), linear-gradient(180deg, #06101F 0%, #0B1B33 100%)' }} />
-        <div className="absolute inset-0 pointer-events-none opacity-[0.07]" aria-hidden
-          style={{ backgroundImage: 'linear-gradient(rgba(255,255,255,.9) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.9) 1px, transparent 1px)', backgroundSize: '56px 56px', maskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)', WebkitMaskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)' }} />
+          style={{ background: isDark
+            ? 'radial-gradient(55% 60% at 15% 0%, rgba(56,189,248,.22), transparent), radial-gradient(45% 50% at 90% 30%, rgba(251,191,36,.12), transparent), linear-gradient(180deg, #06101F 0%, #0B1B33 100%)'
+            : 'radial-gradient(50% 55% at 12% 0%, rgba(56,189,248,.28), transparent), radial-gradient(45% 50% at 95% 25%, rgba(99,102,241,.14), transparent)' }} />
+        <div className={`absolute inset-0 pointer-events-none ${isDark ? 'opacity-[0.07]' : 'opacity-[0.06]'}`} aria-hidden
+          style={{ backgroundImage: `linear-gradient(${isDark ? 'rgba(255,255,255,.9)' : 'rgba(11,37,69,.9)'} 1px, transparent 1px), linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.9)' : 'rgba(11,37,69,.9)'} 1px, transparent 1px)`, backgroundSize: '56px 56px', maskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)', WebkitMaskImage: 'radial-gradient(70% 70% at 50% 30%, #000, transparent)' }} />
 
         {/* avion koji preleti */}
-        <div className="hero-plane absolute top-14 left-0 pointer-events-none text-sky-200/80" aria-hidden>
+        <div className={`hero-plane hidden sm:block absolute top-14 left-0 pointer-events-none ${isDark ? 'text-sky-200/80' : 'text-[#0B2545]/25'}`} aria-hidden>
           <PlaneTakeoff className="w-8 h-8" />
         </div>
 
-        <div className="relative max-w-6xl mx-auto px-6 pt-16 sm:pt-20 pb-10 grid grid-cols-1 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] gap-12 items-center">
+        <div className="relative max-w-6xl mx-auto px-6 pt-14 sm:pt-20 pb-10 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-12 items-center">
           {/* ── lijevo: poruka ── */}
           <div className="min-w-0">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-6 bg-emerald-400/10 text-emerald-300 border border-emerald-400/25">
-              <span className="hero-dot w-1.5 h-1.5 rounded-full bg-emerald-400" /> {t.heroBadge}
+            <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-6 border ${
+              isDark ? 'bg-emerald-400/10 text-emerald-300 border-emerald-400/25' : 'bg-emerald-500/10 text-emerald-700 border-emerald-600/20'
+            }`}>
+              <span className={`hero-dot w-1.5 h-1.5 rounded-full ${isDark ? 'bg-emerald-400' : 'bg-emerald-500'}`} /> {t.heroBadge}
             </div>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black tracking-tight leading-[1.05] mb-6">
+            <h1 className="text-4xl sm:text-5xl lg:text-[3.4rem] font-black tracking-tight leading-[1.05] mb-6">
               {t.heroTitle1}
               <br />
-              <span className="bg-gradient-to-r from-sky-300 via-sky-400 to-amber-300 bg-clip-text text-transparent">{t.heroTitle2}</span>
+              <span className={`bg-gradient-to-r bg-clip-text text-transparent ${isDark ? 'from-sky-300 via-sky-400 to-amber-300' : 'from-sky-600 via-blue-600 to-indigo-600'}`}>{t.heroTitle2}</span>
             </h1>
-            <p className="text-lg text-slate-300 max-w-xl mb-9 leading-relaxed">{t.heroSubtitle}</p>
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <p className={`text-lg max-w-xl mb-8 leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{t.heroSubtitle}</p>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-8">
               <a
                 href="#pricing"
-                className="group flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white font-bold whitespace-nowrap shadow-lg shadow-sky-500/30 transition-all"
+                className={`group flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl text-white font-bold whitespace-nowrap shadow-lg transition-all ${
+                  isDark ? 'bg-sky-500 hover:bg-sky-400 shadow-sky-500/30' : 'bg-[#0B2545] hover:bg-[#123a6b] shadow-[#0B2545]/25'
+                }`}
               >
                 {t.ctaLive}
                 <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
               </a>
               <a
                 href="#showcase"
-                className="flex items-center justify-center text-center px-6 py-3.5 rounded-xl font-bold border border-white/20 hover:bg-white/10 transition-colors"
+                className={`flex items-center justify-center text-center px-6 py-3.5 rounded-xl font-bold border transition-colors ${
+                  isDark ? 'border-white/20 hover:bg-white/10' : 'border-[#0B2545]/20 bg-white/60 hover:bg-white'
+                }`}
               >
                 {t.ctaDepartures}
               </a>
             </div>
+
+            {/* brze oznake mogućnosti */}
+            <div className="flex flex-wrap gap-2">
+              {[
+                { href: '#radar', label: t.radarBadge, Icon: Radar },
+                { href: '#smart', label: t.smartBadge, Icon: Brain },
+                { href: '#showcase', label: t.showcaseBadge, Icon: Eye },
+              ].map(({ href, label, Icon }) => (
+                <a
+                  key={href}
+                  href={href}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                    isDark ? 'border-white/15 text-slate-200 hover:bg-white/10' : 'border-[#0B2545]/12 bg-white/70 text-[#0B2545] hover:bg-white'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" /> {label}
+                </a>
+              ))}
+            </div>
           </div>
 
-          {/* ── desno: ilustrativna tabla odlazaka ── */}
-          <div className="relative min-w-0">
-            <div className="absolute -inset-4 rounded-[2rem] bg-sky-500/10 blur-2xl pointer-events-none" aria-hidden />
-            <div className="relative rounded-2xl border border-white/10 bg-[#050B16]/90 shadow-2xl shadow-black/40 overflow-hidden backdrop-blur" role="img" aria-label={t.heroBoardNote}>
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/10 bg-white/[0.03]">
-                <div className="flex items-center gap-2.5">
-                  <PlaneTakeoff className="w-4 h-4 text-amber-300" />
-                  <span className="font-black tracking-wide uppercase text-sm text-amber-300">{t.heroBoardTitle}</span>
+          {/* ── desno: simulacija radara ── */}
+          <HeroRadar lang={lang} />
+        </div>
+
+        {/* ── FIDS monitor (ilustracija) ── */}
+        <div className="relative max-w-6xl mx-auto px-6 pb-10">
+          <div className="relative">
+            <div className={`absolute -inset-3 rounded-[2rem] blur-2xl pointer-events-none ${isDark ? 'bg-sky-500/10' : 'bg-sky-600/10'}`} aria-hidden />
+            {/* "okvir" monitora */}
+            <div className={`relative rounded-[1.4rem] p-2 sm:p-2.5 ${isDark ? 'bg-white/[0.07] ring-1 ring-white/10' : 'bg-[#0B2545] shadow-2xl shadow-[#0B2545]/25'}`}>
+              <div className="rounded-2xl bg-[#050B16] overflow-hidden" role="img" aria-label={t.heroBoardNote}>
+                <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/10 bg-white/[0.03]">
+                  <div className="flex items-center gap-2.5">
+                    <PlaneTakeoff className="w-4 h-4 text-amber-300" />
+                    <span className="font-black tracking-wide uppercase text-sm text-amber-300">{t.heroBoardTitle}</span>
+                    <span className="hidden sm:inline text-[10px] uppercase tracking-widest text-slate-500 ml-2">TIV · LYTV</span>
+                  </div>
+                  <span className="font-mono text-sm tabular-nums text-amber-200/90">{clock || '--:--'}</span>
                 </div>
-                <span className="font-mono text-sm tabular-nums text-amber-200/90">{clock || '--:--'}</span>
+                <div className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[4rem_minmax(0,1fr)_5rem_3.5rem_9rem] gap-x-3 px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 border-b border-white/5">
+                  {t.heroBoardCols.map((c, ci) => <span key={c} className={ci === 2 ? 'hidden sm:block' : undefined}>{c}</span>)}
+                </div>
+                <div className="divide-y divide-white/5 font-mono">
+                  {HERO_BOARD.map((row, ri) => {
+                    const st = row.seq[(heroTick + ri) % row.seq.length];
+                    return (
+                      <div key={row.time} className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[4rem_minmax(0,1fr)_5rem_3.5rem_9rem] gap-x-3 items-center px-5 py-3 text-sm sm:text-base">
+                        <span className="text-amber-300 tabular-nums">{row.time}</span>
+                        <span className="text-white font-semibold truncate">{row.dest[lang]}</span>
+                        <span className="hidden sm:block text-slate-300 tabular-nums">{row.desk}</span>
+                        <span className="text-slate-300 tabular-nums">{row.gate}</span>
+                        <span key={st} className={`hero-flip text-xs sm:text-sm font-bold uppercase tracking-wide truncate ${HERO_STATUS_STYLE[st]}`}>{t.heroStatus[st]}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="px-5 py-2.5 text-[11px] text-slate-500 border-t border-white/5 bg-white/[0.02]">{t.heroBoardNote}</div>
               </div>
-              <div className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[3.6rem_minmax(0,1fr)_4rem_2.6rem_7rem] gap-x-2 px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 border-b border-white/5">
-                {t.heroBoardCols.map((c, ci) => <span key={c} className={ci === 2 ? 'hidden sm:block' : undefined}>{c}</span>)}
-              </div>
-              <div className="divide-y divide-white/5 font-mono">
-                {HERO_BOARD.map((row, ri) => {
-                  const st = row.seq[(heroTick + ri) % row.seq.length];
-                  return (
-                    <div key={row.time} className="grid grid-cols-[3.2rem_minmax(0,1fr)_2rem_6.4rem] sm:grid-cols-[3.6rem_minmax(0,1fr)_4rem_2.6rem_7rem] gap-x-2 items-center px-5 py-3 text-sm">
-                      <span className="text-amber-300 tabular-nums">{row.time}</span>
-                      <span className="text-white font-semibold truncate">{row.dest[lang]}</span>
-                      <span className="hidden sm:block text-slate-300 tabular-nums">{row.desk}</span>
-                      <span className="text-slate-300 tabular-nums">{row.gate}</span>
-                      <span key={st} className={`hero-flip text-xs font-bold uppercase tracking-wide truncate ${HERO_STATUS_STYLE[st]}`}>{t.heroStatus[st]}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="px-5 py-2.5 text-[11px] text-slate-500 border-t border-white/5 bg-white/[0.02]">{t.heroBoardNote}</div>
             </div>
           </div>
         </div>
 
         {/* statistika */}
         <div className="relative max-w-6xl mx-auto px-6 pb-12">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-px rounded-2xl overflow-hidden border border-white/10 bg-white/10">
+          <div className={`grid grid-cols-2 md:grid-cols-4 gap-px rounded-2xl overflow-hidden border ${isDark ? 'border-white/10 bg-white/10' : 'border-[#0B2545]/10 bg-[#0B2545]/10 shadow-sm'}`}>
             {t.heroStats.map((st) => (
-              <div key={st.label} className="bg-[#08142A]/95 px-5 py-5 text-center">
-                <div className="text-3xl font-black tracking-tight text-white tabular-nums">{fillHistory(st.value)}</div>
-                <div className="text-xs uppercase tracking-widest text-slate-400 mt-1">{st.label}</div>
+              <div key={st.label} className={`px-5 py-5 text-center ${isDark ? 'bg-[#08142A]/95' : 'bg-white'}`}>
+                <div className={`text-3xl font-black tracking-tight tabular-nums ${isDark ? 'text-white' : 'text-[#0B2545]'}`}>{fillHistory(st.value)}</div>
+                <div className={`text-xs uppercase tracking-widest mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{st.label}</div>
               </div>
             ))}
           </div>
@@ -826,7 +909,7 @@ export default function HomeClient() {
       </section>
 
       {/* ── Showcase ekrana ─────────────────────────────────────── */}
-      <section id="showcase" className="max-w-6xl mx-auto px-6 pb-20 scroll-mt-20">
+      <section id="showcase" className="max-w-6xl mx-auto px-6 pt-16 pb-20 scroll-mt-20">
         <div className="text-center mb-8">
           <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
             isDark ? 'bg-sky-500/10 text-sky-300 border border-sky-500/20' : 'bg-sky-500/10 text-sky-700 border border-sky-500/20'
@@ -893,6 +976,39 @@ export default function HomeClient() {
         </div>
       </section>
 
+      {/* ── Radar aviona — NOVO (2026-10-28): /admin/radar (adsb.lol),
+          povezan sa rasporedom. Opis odgovara onome što kod stvarno radi. ── */}
+      <section id="radar" className={`${bgAlt} border-y ${border} py-20 scroll-mt-20`}>
+        <div className="max-w-6xl mx-auto px-6">
+          <div className="text-center mb-14">
+            <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+              isDark ? 'bg-sky-400/10 text-sky-300 border border-sky-400/20' : 'bg-sky-500/10 text-sky-700 border border-sky-500/20'
+            }`}>
+              <Radar className="w-3.5 h-3.5" /> {t.radarBadge}
+            </div>
+            <h2 className="text-3xl font-black tracking-tight mb-3">{t.radarTitle}</h2>
+            <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.radarSubtitle}</p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            {t.radarItems.map((f, i) => {
+              const Icon = RADAR_ICONS[i];
+              return (
+                <div key={f.title} className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-4 ${
+                    isDark ? 'bg-sky-400/15 text-sky-300' : 'bg-sky-500/10 text-sky-700'
+                  }`}>
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <h3 className="font-bold mb-1.5">{f.title}</h3>
+                  <p className={`text-sm leading-relaxed ${textMuted}`}>{f.description}</p>
+                </div>
+              );
+            })}
+          </div>
+          <p className={`text-xs text-center max-w-xl mx-auto mt-8 ${textMuted}`}>{t.radarFootnote}</p>
+        </div>
+      </section>
+
       {/* ── Pametni prijedlozi dodjele — NOVO (2026-10-11): planer
           šaltera/gate-ova (lib/assignment-suggestions.ts + model +
           validator + stabilnost + PDF). ─────────────────────────── */}
@@ -923,6 +1039,38 @@ export default function HomeClient() {
           })}
         </div>
         <p className={`text-xs text-center max-w-xl mx-auto mt-8 ${textMuted}`}>{t.smartFootnote}</p>
+      </section>
+
+      {/* ── Operativni detalji za smjenu — NOVO (2026-10-28): prijedlog na
+          kartici leta, "Poništi", rad na dodir. ── */}
+      <section id="ops" className={`${bgAlt} border-y ${border} py-20 scroll-mt-20`}>
+        <div className="max-w-6xl mx-auto px-6">
+          <div className="text-center mb-14">
+            <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest mb-4 ${
+              isDark ? 'bg-amber-400/10 text-amber-300 border border-amber-400/20' : 'bg-amber-500/10 text-amber-700 border border-amber-500/25'
+            }`}>
+              <Zap className="w-3.5 h-3.5" /> {t.opsBadge}
+            </div>
+            <h2 className="text-3xl font-black tracking-tight mb-3">{t.opsTitle}</h2>
+            <p className={`max-w-2xl mx-auto ${textMuted}`}>{t.opsSubtitle}</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {t.opsItems.map((f, i) => {
+              const Icon = OPS_ICONS[i];
+              return (
+                <div key={f.title} className={`rounded-2xl border ${border} p-6 ${isDark ? 'bg-white/[0.03]' : 'bg-[#F7F9FC]'}`}>
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center mb-4 ${
+                    isDark ? 'bg-amber-400/15 text-amber-300' : 'bg-amber-500/10 text-amber-700'
+                  }`}>
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <h3 className="font-bold mb-1.5">{f.title}</h3>
+                  <p className={`text-sm leading-relaxed ${textMuted}`}>{f.description}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </section>
 
       {/* ── Pozicioniranje (za koga je ovo) — NOVO (po zahtjevu,
@@ -1340,6 +1488,7 @@ export default function HomeClient() {
           <div className={`text-xs ${textMuted}`}>&copy; {new Date().getFullYear()} {t.tagline} &middot; {t.footerRights}</div>
           <div className={`flex items-center gap-4 text-xs ${textMuted}`}>
             <a href="#showcase" className="hover:underline">{t.footerLive}</a>
+            <a href="#radar" className="hover:underline">{t.footerRadar}</a>
             <a href="#smart" className="hover:underline">{t.footerSmart}</a>
             <a href="#history" className="hover:underline">{t.footerHistory}</a>
             <a href="#setup" className="hover:underline">{t.footerSetup}</a>

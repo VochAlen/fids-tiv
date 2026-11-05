@@ -11,7 +11,7 @@ import { readAssignDay, recentLogDates } from '@/lib/assign-log-server';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
 
   const dates = recentLogDates();

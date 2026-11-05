@@ -26,7 +26,7 @@ export const dynamic = 'force-dynamic';
 const MAX_TEXT_LENGTH = 500; // dovoljno za bilo koju realnu PA najavu
 
 export async function POST(request: Request) {
-  const auth = await requireAdmin(request);
+  const auth = await requireAdmin(request, 'admin');
   if (auth.error) return auth.error;
 
   // v5.9: Razglas eksplicitno NE smije raditi noću, nakon zadnjeg leta.

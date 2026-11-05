@@ -19,7 +19,7 @@ export const revalidate = 0;
 type RawEntry = { status: 'open' | 'closed' | null; flightNumber: string | null; setAt: number | null };
 
 export async function GET(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
 
   const now = Date.now();

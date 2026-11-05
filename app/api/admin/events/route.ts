@@ -11,7 +11,7 @@ import { getTelegramConfig, sendTelegram } from '@/lib/telegram';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
   const events = await readKioskEvents();
   return NextResponse.json(
@@ -21,7 +21,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
   let body: { action?: unknown } = {};
   try { body = await request.json(); } catch { /* prazno tijelo */ }

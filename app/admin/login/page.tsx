@@ -45,7 +45,8 @@ export default function AdminLoginPage() {
         // — realtime hookovi bi tad ostali zaglavljeni na starom stanju
         // dok korisnik ručno ne uradi refresh. Hard navigacija to
         // eliminiše.
-        window.location.href = '/admin/assign-checkin';
+        // Nalog sa privremenom lozinkom (uvoz ili reset) prvo traži novu lozinku.
+        window.location.href = data.mustChange ? '/admin/account?first=1' : '/admin/assign-checkin';
       } else {
         setError(data.message || 'Pogrešno korisničko ime ili lozinka');
         setLoading(false);

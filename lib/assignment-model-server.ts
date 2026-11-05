@@ -1,102 +1,206 @@
 // lib/assignment-model-server.ts
 //
-// NOVO (2026-10-17): CENTRALIZOVANO treniranje modela dodjela.
+// CENTRALIZOVANO treniranje modela dodjela + EvoMind Knowledge sloj.
 //
-// Ranije je svaki admin preglednik sam trenirao model pri otvaranju stranice, po SVOM satu (todayISO) —
-// pa dva računara mogu imati različit status ("uči"/"aktivan"), a pogrešan sat računara pomjera "dan od 7".
-// Sad server drži JEDNO stanje (težine + status) u Redis-u i svi admini dobiju isto.
+// TROSAK REDIS-A:
+// - NEMA novih Redis kljuceva.
+// - NEMA novih GET/MGET/SET komandi u odnosu na prethodnu verziju.
+// - Koristi se isti MODEL_STATE_KEY, postojeci GET i postojeci SET.
+// - Redis zapis ostaje ISTOG oblika i velicine: Knowledge se NE cuva u Redis-u.
+// - Knowledge se gradi u memoriji iz istog examplesRaw koji ruta vec ucitava.
+// - Nema novih Redis kljuceva, komandi, niti dodatnih bajtova u Redis-u.
 //
-// TROŠAK (nula): nema novih ruta, nema cron-a, nema Ably-ja. Poziva se iz POSTOJEĆE rute
-// /api/admin/learned-assignments (koja već čita primjere jednim HGETALL-om):
-//   • +1 Redis GET po otvaranju admin stranice (stanje modela),
-//   • trening + 1 SET SAMO kad je stanje zastarjelo (stigao novi primjer ili je počeo novi dan) —
-//     u praksi desetak puta dnevno, ~desetak ms CPU unutar već pokrenute funkcije.
-// SIGURNOST: bilo koja greška vraća null → admin stranica trenira lokalno kao i prije (rezervni put).
+// Kompatibilnost:
+// - Postojeci desk/gate ModelState ostaju nepromijenjeni.
+// - Knowledge polja postoje samo u povratnoj vrijednosti funkcije, ne u Redis zapisu.
+// - Postojeci Redis zapis i njegov TTL ostaju nepromijenjeni.
+// - Ako Redis ili izgradnja stanja ne uspiju, vraca se null kao i ranije.
+
 import { safeRedisGet, safeRedisSet, getRedisClient } from '@/lib/redis';
 import {
-  parseExamples, trainModelState, examplesSignature, sinceKey, type ModelState,
+  parseExamples,
+  trainModelState,
+  buildKnowledgeState,
+  evaluateKnowledgeBacktest,
+  examplesSignature,
+  sinceKey,
+  type ModelState,
+  type KnowledgeState,
+  type KnowledgeRule,
 } from '@/lib/assignment-model';
 
 export const MODEL_STATE_KEY = 'ably-fids:learn:model:v1';
 const MODEL_STATE_TTL_SECONDS = 30 * 24 * 60 * 60;
 const STATE_VERSION = 1;
 
-export interface StoredModelStates {
+/** Ogranicenja cuvaju povratni Knowledge payload malim i predvidljivim. */
+const MAX_STORED_RULES_PER_KIND = 60;
+const MAX_STORED_EXCEPTIONS_PER_RULE = 8;
+
+export interface PersistedModelStates {
   v: number;
-  /** Otisak primjera + dan na koji je treniran — različit otisak = zastarjelo. */
+  /** Otisak primjera + dan na koji je trenirano — razlicit otisak = zastarjelo. */
   sig: string;
   day: string;
   desk: ModelState;
   gate: ModelState;
 }
 
-export const stateSig = (examplesRaw: Record<string, string> | null | undefined, todayISO: string) =>
-  `${examplesSignature(examplesRaw)}@${todayISO}`;
-
-export function isFresh(stored: StoredModelStates | null, examplesRaw: Record<string, string> | null | undefined, todayISO: string): boolean {
-  return !!stored && stored.v === STATE_VERSION && stored.sig === stateSig(examplesRaw, todayISO);
+export interface StoredModelStates extends PersistedModelStates {
+  /** EvoMind kandidati; racunaju se u memoriji i nikad se ne upisuju u Redis. */
+  knowledgeDesk: KnowledgeState;
+  knowledgeGate: KnowledgeState;
 }
 
-/** Čista funkcija (testabilna): trenira oba modela iz sirovih primjera. */
+export const stateSig = (
+  examplesRaw: Record<string, string> | null | undefined,
+  todayISO: string,
+) => `${examplesSignature(examplesRaw)}@${todayISO}`;
+
+/** Provjerava samo postojeci Redis cache; Knowledge nije dio cache zapisa. */
+export function isFresh(
+  stored: Pick<PersistedModelStates, 'v' | 'sig'> | null,
+  examplesRaw: Record<string, string> | null | undefined,
+  todayISO: string,
+): boolean {
+  return !!stored
+    && stored.v === STATE_VERSION
+    && stored.sig === stateSig(examplesRaw, todayISO);
+}
+
+/**
+ * Ogranicava broj pravila i izuzetaka u povratnom Knowledge payload-u.
+ * Prednost imaju pravila sa jacim lift-om i vecom podrskom.
+ */
+function compactKnowledgeState(state: KnowledgeState): KnowledgeState {
+  const rules: KnowledgeRule[] = [...state.rules]
+    .sort((a, b) => {
+      const scoreA = a.lift * Math.log2(a.support + 1);
+      const scoreB = b.lift * Math.log2(b.support + 1);
+      return scoreB - scoreA || b.support - a.support;
+    })
+    .slice(0, MAX_STORED_RULES_PER_KIND)
+    .map(rule => ({
+      ...rule,
+      exceptions: rule.exceptions.slice(0, MAX_STORED_EXCEPTIONS_PER_RULE),
+    }));
+
+  return { ...state, rules };
+}
+
+/** Pravila + test unazad, sve u memoriji iz vec ucitanih primjera (nista se ne upisuje u Redis). */
+function knowledgeFor(examples: ReturnType<typeof parseExamples>, kind: 'desk' | 'gate'): KnowledgeState {
+  return { ...compactKnowledgeState(buildKnowledgeState(examples, kind)), backtest: evaluateKnowledgeBacktest(examples, kind) };
+}
+
+/** Cista funkcija (testabilna): gradi model i KnowledgeState bez Redis zavisnosti. */
 export interface LearnSince { desk: number | null; gate: number | null }
 
-export function buildStates(examplesRaw: Record<string, string> | null | undefined, todayISO: string, since?: LearnSince): StoredModelStates {
-  const ex = parseExamples(examplesRaw ?? {});
+export function buildStates(
+  examplesRaw: Record<string, string> | null | undefined,
+  todayISO: string,
+  since?: LearnSince,
+): StoredModelStates {
+  const examples = parseExamples(examplesRaw ?? {});
+
   return {
     v: STATE_VERSION,
     sig: stateSig(examplesRaw, todayISO),
     day: todayISO,
-    desk: trainModelState(ex, 'desk', todayISO, since?.desk),
-    gate: trainModelState(ex, 'gate', todayISO, since?.gate),
+    desk: trainModelState(examples, 'desk', todayISO, since?.desk),
+    gate: trainModelState(examples, 'gate', todayISO, since?.gate),
+    knowledgeDesk: knowledgeFor(examples, 'desk'),
+    knowledgeGate: knowledgeFor(examples, 'gate'),
   };
 }
 
 /**
- * Vrati svježe stanje modela: iz Redis-a ako je aktuelno, inače istreniraj i sačuvaj.
- * `examplesRaw` je isti HGETALL koji ruta ionako čita. null = nešto nije u redu (klijent trenira lokalno).
+ * Trajni "since" po vrsti: jedan MGET (+ SET NX samo kad zapisa jos nema,
+ * iz najstarijeg sacuvanog primjera). Greska -> undefined.
+ * Ova funkcija je ostavljena nepromijenjena po pitanju Redis operacija.
  */
-/**
- * Trajni "since" po vrsti: jedan MGET (+ SET NX samo kad zapisa još nema, iz najstarijeg sačuvanog primjera).
- * Greška → null (dan se onda računa iz najstarijeg primjera, kao prije).
- */
-export async function readLearnSince(examplesRaw: Record<string, string> | null | undefined): Promise<LearnSince | undefined> {
+export async function readLearnSince(
+  examplesRaw: Record<string, string> | null | undefined,
+): Promise<LearnSince | undefined> {
   try {
     const client = getRedisClient();
     const [d, g] = await client.mget(sinceKey('desk'), sinceKey('gate'));
-    const out: LearnSince = { desk: d ? Number(d) || null : null, gate: g ? Number(g) || null : null };
+    const out: LearnSince = {
+      desk: d ? Number(d) || null : null,
+      gate: g ? Number(g) || null : null,
+    };
+
     if (examplesRaw && (out.desk === null || out.gate === null)) {
-      const ex = parseExamples(examplesRaw);
+      const examples = parseExamples(examplesRaw);
       for (const kind of ['desk', 'gate'] as const) {
         if (out[kind] !== null) continue;
-        const first = ex.find(e => e.kind === kind);
+        const first = examples.find(example => example.kind === kind);
         if (!first) continue;
         out[kind] = first.ts;
         await client.set(sinceKey(kind), String(first.ts), 'NX').catch(() => null);
       }
     }
     return out;
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
+/**
+ * Vraca svjeze stanje: iz Redis-a ako je aktuelno, inace ga izgradi i sacuva.
+ * `examplesRaw` je isti HGETALL koji ruta vec cita.
+ * null = nesto nije u redu (klijent koristi postojeci rezervni put).
+ *
+ * BITNO: Redis se koristi potpuno kao ranije. Knowledge se racuna u memoriji
+ * iz vec ucitanih primjera i ne ulazi u JSON koji se cuva u Redis-u.
+ */
 export async function getOrTrainModelStates(
   examplesRaw: Record<string, string> | null | undefined,
   todayISO: string,
   since?: LearnSince,
 ): Promise<StoredModelStates | null> {
   try {
-    if (examplesRaw == null) return null; // Redis nije pročitan pouzdano — ne diramo sačuvano stanje
-    let stored: StoredModelStates | null = null;
+    if (examplesRaw == null) return null; // Redis nije pouzdano procitan — ne diramo sacuvano stanje
+
+    let stored: PersistedModelStates | null = null;
     try {
       const raw = await safeRedisGet(MODEL_STATE_KEY);
-      stored = raw ? (JSON.parse(raw) as StoredModelStates) : null;
-    } catch { stored = null; }
-    if (isFresh(stored, examplesRaw, todayISO)) return stored;
+      stored = raw ? JSON.parse(raw) as PersistedModelStates : null;
+    } catch {
+      stored = null;
+    }
+
+    if (isFresh(stored, examplesRaw, todayISO)) {
+      const examples = parseExamples(examplesRaw);
+      return {
+        ...(stored as PersistedModelStates),
+        knowledgeDesk: knowledgeFor(examples, 'desk'),
+        knowledgeGate: knowledgeFor(examples, 'gate'),
+      };
+    }
 
     const fresh = buildStates(examplesRaw, todayISO, since);
-    await safeRedisSet(MODEL_STATE_KEY, JSON.stringify(fresh), MODEL_STATE_TTL_SECONDS).catch(() => false);
+    // Sacuvaj iskljucivo stara polja. Redis payload ostaje kompatibilan i
+    // iste velicine kao prije EvoMind dodatka.
+    const redisState: PersistedModelStates = {
+      v: fresh.v,
+      sig: fresh.sig,
+      day: fresh.day,
+      desk: fresh.desk,
+      gate: fresh.gate,
+    };
+    await safeRedisSet(
+      MODEL_STATE_KEY,
+      JSON.stringify(redisState),
+      MODEL_STATE_TTL_SECONDS,
+    ).catch(() => false);
+
     return fresh;
   } catch (err) {
-    console.error('[assignment-model] centralno treniranje nije uspjelo (klijent trenira lokalno):', err instanceof Error ? err.message : err);
+    console.error(
+      '[assignment-model] centralno treniranje nije uspjelo (klijent trenira lokalno):',
+      err instanceof Error ? err.message : err,
+    );
     return null;
   }
 }

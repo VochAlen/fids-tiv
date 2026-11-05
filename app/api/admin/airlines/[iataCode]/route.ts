@@ -8,7 +8,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     const { iataCode } = await params;
     
@@ -37,7 +37,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     const { iataCode } = await params;
     const body = await request.json();
@@ -84,7 +84,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ iataCode: string }> }
 ) {
-  { const { error: authError } = await requireAdmin(); if (authError) return authError; }
+  { const { error: authError } = await requireAdmin(undefined, 'admin'); if (authError) return authError; }
   try {
     const { iataCode } = await params;
 

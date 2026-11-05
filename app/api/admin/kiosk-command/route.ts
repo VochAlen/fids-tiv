@@ -14,7 +14,7 @@ import { getRedisClient } from '@/lib/redis';
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
 
   let body: { id?: unknown; cmd?: unknown };
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
 
 /** Ukloni monitor sa liste (npr. probna stranica ili monitor koji nije u upotrebi). Ako se ponovo javi, opet će se pojaviti. */
 export async function DELETE(request: Request) {
-  const { error: authError } = await requireAdmin(request);
+  const { error: authError } = await requireAdmin(request, 'admin');
   if (authError) return authError;
 
   let body: { id?: unknown };

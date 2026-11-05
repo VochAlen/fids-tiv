@@ -23,7 +23,44 @@ const GUARDED: Record<string, string[]> = {
   'admin/overview/route.ts': ['GET'],
   'admin/events/route.ts': ['GET', 'POST'],
   'admin/radar/route.ts': ['GET'],
+  'admin/users/route.ts': ['GET', 'POST'],
+  'admin/me/route.ts': ['GET'],
+  'admin/account/route.ts': ['POST'],
 };
+
+// Rute koje smije samo uloga "admin": requireAdmin mora dobiti 'admin' kao drugi argument.
+const ADMIN_ONLY: Record<string, string[]> = {
+  'admin/users/route.ts': ['GET', 'POST'],
+  'admin/airlines/route.ts': ['GET', 'POST'],
+  'admin/airlines/[iataCode]/route.ts': ['GET', 'PUT', 'DELETE'],
+  'admin/destinations/route.ts': ['GET', 'POST'],
+  'admin/destinations/[destinationCode]/[airlineIata]/route.ts': ['GET', 'PUT', 'DELETE'],
+  'admin/specific-flights/route.ts': ['GET', 'POST', 'PUT', 'DELETE'],
+  'admin/specific-flights/[flightNumber]/route.ts': ['GET', 'PUT', 'DELETE'],
+  'admin/init/route.ts': ['POST'],
+  'admin/kiosk-command/route.ts': ['POST', 'DELETE'],
+  'admin/access-log/route.ts': ['GET'],
+  'admin/history/route.ts': ['GET'],
+  'admin/history/pdf/route.ts': ['GET'],
+  'admin/overview/route.ts': ['GET'],
+  'admin/stats/route.ts': ['GET'],
+  'admin/events/route.ts': ['GET', 'POST'],
+  'admin/announcement/route.ts': ['POST'],
+};
+
+describe('admin-only rute traže ulogu admin (statička provjera)', () => {
+  for (const [file, methods] of Object.entries(ADMIN_ONLY)) {
+    for (const m of methods) {
+      it(`${file} ${m}`, () => {
+        const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+        const start = src.search(new RegExp(`export async function ${m}\\s*\\(`));
+        expect(start, 'handler postoji').toBeGreaterThanOrEqual(0);
+        const bodyOpen = src.indexOf('{', src.indexOf(')', start));
+        expect(src.slice(bodyOpen, bodyOpen + 240)).toMatch(/await requireAdmin\([^)]*'admin'\)/);
+      });
+    }
+  }
+});
 
 describe('admin/assignment rute traže admin sesiju (statička provjera)', () => {
   for (const [file, methods] of Object.entries(GUARDED)) {

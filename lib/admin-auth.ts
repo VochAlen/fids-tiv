@@ -15,9 +15,12 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { verifySessionToken, SESSION_COOKIE_NAME } from '@/lib/auth-session';
+import { roleAtLeast, type Role } from '@/lib/roles';
+import { getAuthState } from '@/lib/users';
 
 export interface AdminSession {
   username: string;
+  role: Role;
 }
 
 /**
@@ -30,7 +33,7 @@ export interface AdminSession {
  *   if (auth.error) return auth.error;
  *   // ... nastavi sa admin logikom, auth.session.username dostupan
  */
-export async function requireAdmin(_request?: Request): Promise<{ session: AdminSession | null; error: NextResponse | null }> {
+export async function requireAdmin(_request?: Request, minRole: Role = 'operator'): Promise<{ session: AdminSession | null; error: NextResponse | null }> {
   try {
     const cookieStore = await cookies();
     const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
@@ -56,7 +59,29 @@ export async function requireAdmin(_request?: Request): Promise<{ session: Admin
       };
     }
 
-    return { session: { username: payload.username }, error: null };
+    // Stanje korisnika u Redis-u (keš u memoriji ~60 s): deaktiviran korisnik, reset lozinke ili
+    // promjena uloge djeluju u roku od minute, iako je JWT sam po sebi važio do 24 h.
+    // Nedostupan Redis ili korisnik bez zapisa (env rezerva) → važi uloga iz tokena.
+    let role: Role = payload.role;
+    const st = await getAuthState(payload.username);
+    if (st.kind === 'record') {
+      if (!st.active || st.ver !== payload.ver) {
+        return {
+          session: null,
+          error: NextResponse.json({ error: 'Unauthorized — session revoked' }, { status: 401 }),
+        };
+      }
+      role = st.role;
+    }
+
+    if (!roleAtLeast(role, minRole)) {
+      return {
+        session: null,
+        error: NextResponse.json({ error: 'Forbidden — insufficient role' }, { status: 403 }),
+      };
+    }
+
+    return { session: { username: payload.username, role }, error: null };
   } catch (err) {
     console.error('[admin-auth] requireAdmin error:', err instanceof Error ? err.message : err);
     return {

@@ -102,6 +102,8 @@ export interface PredictCtx {
   minute?: number;
   /** Koliko je resursa u tom trenutku zauzeto DRUGIM letovima (gužva). */
   busyCount?: number;
+  /** Sezona konteksta; omogućava provjeru sezonskih pravila. */
+  season?: Season;
 }
 
 /** Zadnjih nekoliko izbora kompanije — za osobinu "nedavno korišćen". */
@@ -337,6 +339,308 @@ export function trainModelState(all: Example[], kind: LearnKind, todayISO: strin
   };
   if (!better) return { info, weights: null };
   return { info, weights: trainWeights(rows) }; // konačni model: svi primjeri, 10 prolaza
+}
+
+/**
+ * ── EvoMind: Knowledge & Rules layer ─────────────────────────────────────
+ *
+ * Ovaj sloj ne mijenja postojeće neuronske težine niti utiče na Predictor.
+ * Iz istorije ručnih dodjela izvodi provjerljive KANDIDATE rules, sa podrškom,
+ * pouzdanošću, osnovnom učestalošću i izuzecima. Rezultat je namjerno odvojen
+ * od aktivnog prediktora kako bi se prvo mjerio u shadow režimu.
+ */
+export type KnowledgeScope =
+  | 'flight'
+  | 'airline'
+  | 'airline-day'
+  | 'airline-season'
+  | 'airline-day-season'
+  | 'airline-time';
+
+export interface KnowledgeConditions {
+  flight?: string;
+  airline?: string;
+  dow?: number;
+  season?: Season;
+  timeBucket?: number;
+}
+
+export interface KnowledgeRule {
+  id: string;
+  kind: LearnKind;
+  scope: KnowledgeScope;
+  when: KnowledgeConditions;
+  prefer: string;
+  support: number;
+  confidence: number;
+  baseline: number;
+  /** Razlika confidence - baseline, izražena kao apsolutni udio. */
+  lift: number;
+  /** Specifičniji obrasci koji poništavaju ovo opšte pravilo. */
+  exceptions: KnowledgeConditions[];
+}
+
+export interface KnowledgeState {
+  version: 1;
+  kind: LearnKind;
+  examples: number;
+  rules: KnowledgeRule[];
+  /** Test unazad (walk-forward): da li pravila pogađaju bolje od brojača na novijim dodjelama. Samo prikaz, ne utiče na prijedloge. */
+  backtest?: KnowledgeBacktest;
+}
+
+export interface KnowledgeBacktest {
+  /** Broj novijih dodjela na kojima je mjereno. */
+  tested: number;
+  /** Na koliko od njih je bar jedno pravilo (bez izuzetka) davalo prijedlog. */
+  covered: number;
+  ruleHits: number;
+  /** Pogodci brojača (BASELINE_WEIGHTS) na ISTIM dodjelama koje pravila pokrivaju. */
+  baselineHitsCovered: number;
+  /** Pogodci brojača na svim testiranim dodjelama. */
+  baselineHits: number;
+  text: string;
+}
+
+export interface KnowledgeEvaluation {
+  /** Savjetodavni bodovi po resursu; nijesu vjerovatnoće. */
+  scores: Record<string, number>;
+  matchedRules: KnowledgeRule[];
+  suppressedRules: KnowledgeRule[];
+}
+
+const KNOWLEDGE_MIN_SUPPORT = 5;
+const KNOWLEDGE_MIN_CONFIDENCE = 0.65;
+const KNOWLEDGE_MIN_LIFT = 0.10;
+
+const knowledgeScopes: Array<{ scope: KnowledgeScope; fields: Array<keyof KnowledgeConditions> }> = [
+  { scope: 'flight', fields: ['airline', 'flight'] },
+  { scope: 'airline', fields: ['airline'] },
+  { scope: 'airline-day', fields: ['airline', 'dow'] },
+  { scope: 'airline-season', fields: ['airline', 'season'] },
+  { scope: 'airline-day-season', fields: ['airline', 'dow', 'season'] },
+  { scope: 'airline-time', fields: ['airline', 'timeBucket'] },
+];
+
+const conditionsForExample = (e: Example, fields: Array<keyof KnowledgeConditions>): KnowledgeConditions => {
+  const airline = airlineKeyFromFlightNumber(e.flight) ?? '?';
+  const all: KnowledgeConditions = {
+    flight: e.flight,
+    airline,
+    dow: e.dow,
+    season: e.season,
+    timeBucket: Math.floor(e.minute / TIME_BUCKET_MIN),
+  };
+  const out: KnowledgeConditions = {};
+  for (const field of fields) {
+    const value = all[field];
+    if (value !== undefined) Object.assign(out, { [field]: value });
+  }
+  return out;
+};
+
+const conditionKey = (conditions: KnowledgeConditions) => JSON.stringify(conditions);
+const specificity = (conditions: KnowledgeConditions) => Object.keys(conditions).length;
+
+function conditionsMatch(ctx: PredictCtx, conditions: KnowledgeConditions): boolean {
+  if (conditions.flight !== undefined && ctx.flight !== conditions.flight) return false;
+  if (conditions.airline !== undefined && (airlineKeyFromFlightNumber(ctx.flight) ?? '?') !== conditions.airline) return false;
+  if (conditions.dow !== undefined && ctx.dow !== conditions.dow) return false;
+  if (conditions.season !== undefined && ctx.season !== conditions.season) return false;
+  if (conditions.timeBucket !== undefined) {
+    if (ctx.minute === undefined || Math.floor(ctx.minute / TIME_BUCKET_MIN) !== conditions.timeBucket) return false;
+  }
+  return true;
+}
+
+function isMoreSpecificCompatible(broad: KnowledgeConditions, specific: KnowledgeConditions): boolean {
+  const broadEntries = Object.entries(broad) as Array<[keyof KnowledgeConditions, string | number]>;
+  if (specificity(specific) <= broadEntries.length) return false;
+  return broadEntries.every(([key, value]) => specific[key] === value);
+}
+
+/**
+ * Iz primjera izvodi kandidate za pravila. Pravilo se predlaže samo kada ima
+ * dovoljno primjera, pouzdanost i poboljšanje u odnosu na globalnu učestalost.
+ * Nema automatskog pretvaranja pravila u tvrda ograničenja.
+ */
+export function buildKnowledgeState(
+  all: Example[],
+  kind: LearnKind,
+  options: { minSupport?: number; minConfidence?: number; minLift?: number } = {},
+): KnowledgeState {
+  const examples = all.filter(e => e.kind === kind);
+  const minSupport = options.minSupport ?? KNOWLEDGE_MIN_SUPPORT;
+  const minConfidence = options.minConfidence ?? KNOWLEDGE_MIN_CONFIDENCE;
+  const minLift = options.minLift ?? KNOWLEDGE_MIN_LIFT;
+  const globalCounts: Record<string, number> = {};
+  for (const e of examples) globalCounts[e.chosen] = (globalCounts[e.chosen] ?? 0) + 1;
+
+  const groups = new Map<string, {
+    scope: KnowledgeScope;
+    when: KnowledgeConditions;
+    counts: Record<string, number>;
+    support: number;
+  }>();
+
+  for (const e of examples) {
+    for (const definition of knowledgeScopes) {
+      const when = conditionsForExample(e, definition.fields);
+      const key = `${definition.scope}:${conditionKey(when)}`;
+      const group = groups.get(key) ?? {
+        scope: definition.scope,
+        when,
+        counts: {},
+        support: 0,
+      };
+      group.support++;
+      group.counts[e.chosen] = (group.counts[e.chosen] ?? 0) + 1;
+      groups.set(key, group);
+    }
+  }
+
+  const rules: KnowledgeRule[] = [];
+  const total = examples.length || 1;
+  for (const [key, group] of groups) {
+    if (group.support < minSupport) continue;
+    const ranked = Object.entries(group.counts).sort((a, b) => b[1] - a[1]);
+    const [prefer, wins] = ranked[0] ?? ['', 0];
+    if (!prefer) continue;
+    const confidence = wins / group.support;
+    const baseline = (globalCounts[prefer] ?? 0) / total;
+    const lift = confidence - baseline;
+    if (confidence < minConfidence || lift < minLift) continue;
+    rules.push({
+      id: `${kind}:${group.scope}:${key}`,
+      kind,
+      scope: group.scope,
+      when: group.when,
+      prefer,
+      support: group.support,
+      confidence,
+      baseline,
+      lift,
+      exceptions: [],
+    });
+  }
+
+  // Specifičnije pravilo za isti kontekst postaje izuzetak opštijem pravilu
+  // ako preporučuje drugi resurs. Time se čuva kontekst umjesto slijepog pravila.
+  for (const broad of rules) {
+    for (const specific of rules) {
+      if (broad === specific || broad.prefer === specific.prefer) continue;
+      if (isMoreSpecificCompatible(broad.when, specific.when)) {
+        broad.exceptions.push(specific.when);
+      }
+    }
+  }
+
+  rules.sort((a, b) => specificity(b.when) - specificity(a.when) || b.support - a.support);
+  return { version: 1, kind, examples: examples.length, rules };
+}
+
+/**
+ * Dodaje eksplicitni izuzetak bez mijenjanja izvornog stanja. Korisno za
+ * kasniju administratorsku potvrdu/izmjenu pravila.
+ */
+export function addKnowledgeException(
+  state: KnowledgeState,
+  ruleId: string,
+  exception: KnowledgeConditions,
+): KnowledgeState {
+  return {
+    ...state,
+    rules: state.rules.map(rule => rule.id !== ruleId || rule.exceptions.some(x => conditionKey(x) === conditionKey(exception))
+      ? rule
+      : { ...rule, exceptions: [...rule.exceptions, exception] }),
+  };
+}
+
+/** Evaluira pravila za postojeći kontekst. Bodovi su odvojeni od softmax vjerovatnoća. */
+export function evaluateKnowledge(
+  state: KnowledgeState,
+  ctx: PredictCtx,
+  ids: string[] = universeOf(state.kind),
+): KnowledgeEvaluation {
+  const scores: Record<string, number> = Object.fromEntries(ids.map(id => [id, 0]));
+  const matchedRules: KnowledgeRule[] = [];
+  const suppressedRules: KnowledgeRule[] = [];
+
+  for (const rule of state.rules) {
+    if (!conditionsMatch(ctx, rule.when)) continue;
+    if (rule.exceptions.some(exception => conditionsMatch(ctx, exception))) {
+      suppressedRules.push(rule);
+      continue;
+    }
+    if (!(rule.prefer in scores)) continue;
+    const strength = rule.lift * Math.log2(rule.support + 1);
+    scores[rule.prefer] += strength;
+    matchedRules.push(rule);
+  }
+
+  return { scores, matchedRules, suppressedRules };
+}
+
+/** Kratko, ljudski objašnjenje pravila koja podržavaju izabrani resurs. */
+export function explainKnowledge(
+  state: KnowledgeState,
+  ctx: PredictCtx,
+  picked: string[],
+): string {
+  const evaluation = evaluateKnowledge(state, ctx);
+  const selected = evaluation.matchedRules
+    .filter(rule => picked.includes(rule.prefer))
+    .sort((a, b) => b.lift - a.lift || b.support - a.support)
+    .slice(0, 3);
+  if (!selected.length) return 'Nema dovoljno potvrđenih obrazaca za objašnjenje.';
+  return selected.map(rule => {
+    const conditions = Object.entries(rule.when)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(', ');
+    return `${rule.prefer}: ${conditions} · ${Math.round(rule.confidence * 100)}% uspješnosti na ${rule.support} primjera`;
+  }).join('; ');
+}
+
+/**
+ * Test unazad za Knowledge pravila: pravila se grade SAMO iz starijih ~75% primjera, a mjere na
+ * novijih ~25% koje nisu vidjela (isti omjer kao kod modela). Poredi se sa običnim brojačima
+ * na ISTIM dodjelama koje pravila pokrivaju. Brojači nastavljaju da uče kroz test dio, pa je
+ * poređenje blago nepovoljno za pravila (konzervativno). Zauzeti resursi se ne predlažu.
+ */
+export function evaluateKnowledgeBacktest(all: Example[], kind: LearnKind): KnowledgeBacktest {
+  const ids = universeOf(kind);
+  const valid = all.filter(e => e.kind === kind && ids.indexOf(e.chosen) >= 0);
+  const n = valid.length;
+  const empty = (text: string): KnowledgeBacktest => ({ tested: 0, covered: 0, ruleHits: 0, baselineHitsCovered: 0, baselineHits: 0, text });
+  if (n < MIN_EXAMPLES) return empty(`Pravila: još nema dovoljno primjera za test (${n} od ${MIN_EXAMPLES}).`);
+  const testN = Math.max(MIN_TEST, Math.floor(n * 0.25));
+  const split = n - testN;
+  if (split < 20) return empty(`Pravila: još nema dovoljno primjera za test (${n} od ${MIN_EXAMPLES}).`);
+
+  const state = buildKnowledgeState(valid.slice(0, split), kind);
+  const rows = buildRows(valid, kind).rows; // jedan red po primjeru (svi su u `ids`)
+  let covered = 0, ruleHits = 0, baselineHitsCovered = 0;
+  for (let i = split; i < n; i++) {
+    const e = valid[i];
+    const ev = evaluateKnowledge(state, {
+      flight: e.flight, dow: e.dow, chosenSoFar: [], minute: e.minute, busyCount: e.busy.length, season: e.season,
+    }, ids);
+    let top: string | null = null;
+    let best = 0;
+    for (const id of ids) {
+      if (e.busy.includes(id)) continue;
+      if (ev.scores[id] > best) { best = ev.scores[id]; top = id; }
+    }
+    if (!top) continue;
+    covered++;
+    if (top === e.chosen) ruleHits++;
+    if (hits([rows[i]], BASELINE_WEIGHTS) === 1) baselineHitsCovered++;
+  }
+  const baselineHits = hits(rows.slice(split), BASELINE_WEIGHTS);
+  const text = covered === 0
+    ? `Pravila (test na ${testN} novijih dodjela): nijedno pravilo nije pokrilo te dodjele.`
+    : `Pravila (test na ${testN} novijih dodjela): pokrivaju ${covered}, pogađaju ${ruleHits}/${covered} (${pct(ruleHits / covered)}) naspram brojača ${baselineHitsCovered}/${covered} (${pct(baselineHitsCovered / covered)}) na istim dodjelama.${covered < 10 ? ' Premalo pokrivenih dodjela za zaključak.' : ''}`;
+  return { tested: testN, covered, ruleHits, baselineHitsCovered, baselineHits, text };
 }
 
 /** Predictor iz gotovih težina — BEZ treniranja (samo rekonstrukcija istorije iz primjera). */

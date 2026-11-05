@@ -1309,6 +1309,7 @@ const assignFlightToResource = useCallback(async (
   const [learnedRaw, setLearnedRaw] = useState<Record<string, string> | null>(null);
   const [examplesRaw, setExamplesRaw] = useState<Record<string, string> | null>(null);
   const [modelStates, setModelStates] = useState<{ desk: ModelState; gate: ModelState } | null>(null);
+  const [rulesNotes, setRulesNotes] = useState<{ desk: string | null; gate: string | null } | null>(null);
   const [todayISO, setTodayISO] = useState<string | null>(null);
   // NOVO (2026-10-20): samoprovjera — ako su naučeni šabloni zadnje 4 sedmice jasno gori od ručnog profila,
   // privremeno se ne koriste (lib/learning-gate.ts). Bez podataka o tačnosti ništa se ne mijenja.
@@ -1355,6 +1356,10 @@ const assignFlightToResource = useCallback(async (
         setLearnedRaw(j.data as Record<string, string>);
         setExamplesRaw((j.examples ?? {}) as Record<string, string>);
         setModelStates(j.model && j.model.desk && j.model.gate ? { desk: j.model.desk as ModelState, gate: j.model.gate as ModelState } : null);
+        setRulesNotes({
+          desk: typeof j.model?.knowledgeDesk?.backtest?.text === 'string' ? j.model.knowledgeDesk.backtest.text : null,
+          gate: typeof j.model?.knowledgeGate?.backtest?.text === 'string' ? j.model.knowledgeGate.backtest.text : null,
+        });
       })
       .catch(() => { /* bez učenja važe ručni profili */ });
     return () => { cancelled = true; };
@@ -1863,6 +1868,9 @@ const handleClearAll = useCallback(async () => {
     const list = tab === 'checkin' ? suggestions.desks : suggestions.gates;
     const sg = list.find(x => x.flightNumber === flight.FlightNumber);
     if (!sg || sg.resources.length === 0) return null;
+    // Prijedlog iz opšteg rasporeda (nema profila ni naučenog šablona) gotovo uvijek promaši (mjereno: 0–11%),
+    // pa se ne ističe na kartici leta — ostaje samo u panelu „AI sugestija”, sa oznakom „slabije pouzdan”.
+    if (sg.source === 'default') return null;
     const label = tab === 'checkin' ? (sg.resources.length > 1 ? 'šalteri' : 'šalter') : (sg.resources.length > 1 ? 'gate-ovi' : 'gate');
     const ids = sg.resources.join(' i ');
     const waiting = sg.state === 'WAITING_FOR_RESOURCE';
@@ -2192,6 +2200,7 @@ const handleClearAll = useCallback(async () => {
           accuracy={accuracyByKind ? (activeTab === 'checkin' ? accuracyByKind.desk : accuracyByKind.gate) : null}
           learnedNote={(activeTab === 'checkin' ? learnedGate.notes.desk : learnedGate.notes.gate) ?? null}
           modelInfo={models ? (activeTab === 'checkin' ? models.desk.info : models.gate.info) : null}
+          rulesNote={rulesNotes ? (activeTab === 'checkin' ? rulesNotes.desk : rulesNotes.gate) : null}
           chips={constraintChips}
           unparsed={noteUnparsed}
           noteError={noteError}

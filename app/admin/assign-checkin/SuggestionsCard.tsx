@@ -34,6 +34,8 @@ interface Props {
   learnedNote?: string | null;
   /** Stanje modela koji uči iz ručnih dodjela (uči / u sjeni / aktivan) ili null dok se ne učita. */
   modelInfo: ModelInfo | null;
+  /** Test unazad za Knowledge pravila (samo informacija; ne utiče na prijedloge). */
+  rulesNote?: string | null;
   /** Pročitana ograničenja iz napomena (čipovi) + dijelovi teksta koji nisu pretvoreni. */
   chips: Array<{ key: string; text: string }>;
   unparsed: string[];
@@ -50,7 +52,7 @@ const SOURCE_LABEL: Record<AccuracySource, string> = {
 
 function SuggestionsCardImpl({
   type, suggestions, nowMin, isDark, applyingKey, onApply, onApplyDue,
-  accuracy, learnedNote, modelInfo, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
+  accuracy, learnedNote, modelInfo, rulesNote, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
 }: Props) {
   const [note, setNote] = useState('');
   // Zatvoren po zadanom — korisnik ga otvara klikom (po zahtjevu).
@@ -129,6 +131,11 @@ function SuggestionsCardImpl({
                   : isDark ? 'bg-white/5 border-white/10 text-white/60' : 'bg-gray-50 border-gray-200 text-gray-600'
             }`}>
               {modelInfo.text}
+            </div>
+          )}
+          {rulesNote && (
+            <div className={`mb-3 rounded-xl px-3 py-2 text-[11px] border ${isDark ? 'bg-white/5 border-white/10 text-white/50' : 'bg-gray-50 border-gray-200 text-gray-500'}`}>
+              {rulesNote}
             </div>
           )}
 
@@ -253,6 +260,16 @@ function SuggestionsCardImpl({
                           <span className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
                             otvori {formatClockMinutes(s.openAt)} · zatvori {formatClockMinutes(s.closeAt)}
                           </span>
+                          {s.source === 'default' && (
+                            <span
+                              title="Opšti raspored: nema profila ni naučenog šablona za ovaj let. Prijedlog je slabije pouzdan — provjeri prije primjene."
+                              className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+                                isDark ? 'border-amber-400/40 text-amber-300' : 'border-amber-400 text-amber-700 bg-amber-50'
+                              }`}
+                            >
+                              slabije pouzdan
+                            </span>
+                          )}
                           {isDue && <span className="text-xs font-bold text-amber-500">sada</span>}
                           {isSoon && <span className="text-xs font-semibold text-violet-400">uskoro</span>}
                         </div>
