@@ -18,7 +18,7 @@ import { computeAssignmentSuggestions, formatClockMinutes, type Suggestion, type
 import { stabilizePlan, planSignature, type PreviousPlan } from '@/lib/plan-stability';
 import { buildPlanHtml, buildDayFlights, openPlanForPrint } from '@/lib/plan-document';
 import {
-  parseLearned, seasonFromDate, dowFromDate, summarizeAccuracy, recentWeekKeys, type LearnedIndex,
+  parseLearned, seasonFromDate, dowFromDate, summarizeAccuracy, detectDrift, recentWeekKeys, type LearnedIndex,
 } from '@/lib/assignment-learning';
 import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
@@ -1434,6 +1434,12 @@ const assignFlightToResource = useCallback(async (
     return { desk: summarizeAccuracy(learnedRaw, 'desk', weeks), gate: summarizeAccuracy(learnedRaw, 'gate', weeks) };
   }, [learnedRaw, todayISO]);
 
+  // Pomak: tačnost zadnje 2 sedmice naspram prethodne 2 (samo upozorenje u panelu).
+  const driftByKind = useMemo(() => {
+    if (!learnedRaw || !todayISO) return null;
+    return { desk: detectDrift(learnedRaw, 'desk', todayISO).text, gate: detectDrift(learnedRaw, 'gate', todayISO).text };
+  }, [learnedRaw, todayISO]);
+
   const constraintChips = useMemo(() => describeConstraints(constraints), [constraints]);
 
   // Napomena osoblja → ograničenja. Čita se lokalno, običnim pravilima
@@ -2218,6 +2224,7 @@ const handleClearAll = useCallback(async () => {
           learnedNote={(activeTab === 'checkin' ? learnedGate.notes.desk : learnedGate.notes.gate) ?? null}
           modelInfo={models ? (activeTab === 'checkin' ? models.desk.info : models.gate.info) : null}
           ruleText={ruleTextFor}
+          driftNote={driftByKind ? (activeTab === 'checkin' ? driftByKind.desk : driftByKind.gate) : null}
           rulesNote={rulesNotes ? (activeTab === 'checkin' ? rulesNotes.desk : rulesNotes.gate) : null}
           chips={constraintChips}
           unparsed={noteUnparsed}

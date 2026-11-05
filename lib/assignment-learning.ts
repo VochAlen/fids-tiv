@@ -297,6 +297,43 @@ export function summarizeAccuracy(
 
 export const accuracyRate = rate;
 
+// ── Detekcija pomaka (drift) ───────────────────────────────────────────
+/** Najmanje ocijenjenih dodjela (hit + miss) u SVAKOM od dva prozora da bi poređenje imalo smisla. */
+export const DRIFT_MIN_EVALUATED = 15;
+/** Pad tačnosti (u udjelu, 0.15 = 15 procentnih poena) od kojeg se javlja upozorenje. */
+export const DRIFT_MIN_DROP = 0.15;
+
+export interface DriftReport {
+  recent: { rate: number | null; n: number };
+  previous: { rate: number | null; n: number };
+  /** previous − recent (pozitivno = tačnost pala), ili null kad nema dovoljno podataka. */
+  drop: number | null;
+  enough: boolean;
+  drifted: boolean;
+  /** Poruka za panel samo kad je pomak detektovan, inače null. */
+  text: string | null;
+}
+
+/**
+ * Poredi tačnost prijedloga zadnje 2 sedmice (tekuća + prethodna) sa 2 sedmice prije toga.
+ * Samo čita brojače koji se već učitavaju; ništa ne mijenja u prijedlozima. Nedovoljno podataka → bez upozorenja.
+ */
+export function detectDrift(raw: Record<string, string> | null | undefined, kind: LearnKind, todayISO: string): DriftReport {
+  const w = recentWeekKeys(todayISO, 4);
+  const a = summarizeAccuracy(raw, kind, w.slice(0, 2));
+  const b = summarizeAccuracy(raw, kind, w.slice(2, 4));
+  const recent = { rate: a.hitRate, n: a.evaluated };
+  const previous = { rate: b.hitRate, n: b.evaluated };
+  const enough = recent.n >= DRIFT_MIN_EVALUATED && previous.n >= DRIFT_MIN_EVALUATED && recent.rate !== null && previous.rate !== null;
+  const drop = enough ? (previous.rate as number) - (recent.rate as number) : null;
+  const drifted = drop !== null && drop >= DRIFT_MIN_DROP;
+  const pc = (x: number) => `${Math.round(x * 100)}%`;
+  const text = drifted
+    ? `Raspored se promijenio: tačnost prijedloga zadnje 2 sedmice ${pc(recent.rate as number)} (${recent.n} dodjela) naspram ${pc(previous.rate as number)} ranije (${previous.n}). Pravila i naučeni obrasci možda su zastarjeli.`
+    : null;
+  return { recent, previous, drop, enough, drifted, text };
+}
+
 /**
  * Najčešći broj šaltera. Događaji n=1,2,3… bilježe se pri svakoj dodjeli, pa je
  * broj letova sa TAČNO k šaltera = f(k) − f(k+1). Vraća mod te raspodjele.

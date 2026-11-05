@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   seasonFromDate, airlineKeyFromFlightNumber, incrementsForAssignment, parseLearned,
   learnedPool, learnedDeskCount, halve, fieldsOfScope, scopeResource, scopeCount, fieldOf,
-  MIN_FLIGHT_SAMPLES, MIN_AIRLINE_SAMPLES,
+  MIN_FLIGHT_SAMPLES, MIN_AIRLINE_SAMPLES, detectDrift, recentWeekKeys,
 } from './assignment-learning';
 
 describe('sezona', () => {
@@ -101,5 +101,42 @@ describe('slabljenje', () => {
     const scope = scopeResource('desk', 'A', 'JU', 'W');
     const r = { ...raw(scope, { '4': 61, '5': 2 }), ...raw('desk:A:LY:W', { '10': 5 }) };
     expect(fieldsOfScope(r, scope).sort()).toEqual([fieldOf(scope, '4'), fieldOf(scope, '5')].sort());
+  });
+});
+
+describe('detekcija pomaka', () => {
+  const today = '2026-11-05';
+  const [w0, w1, w2, w3] = recentWeekKeys(today, 4);
+  const mkRaw = (cells: Array<[string, number, number]>) => {
+    const raw: Record<string, string> = {};
+    for (const [week, hit, miss] of cells) {
+      raw[`acc:desk:learned:${week}|hit`] = String(hit);
+      raw[`acc:desk:learned:${week}|miss`] = String(miss);
+    }
+    return raw;
+  };
+
+  it('pad tačnosti uz dovoljno podataka → upozorenje', () => {
+    const r = detectDrift(mkRaw([[w0, 4, 8], [w1, 4, 6], [w2, 9, 4], [w3, 8, 4]]), 'desk', today);
+    expect(r.enough).toBe(true);
+    expect(r.drifted).toBe(true);
+    expect(r.text).toContain('Raspored se promijenio');
+  });
+
+  it('stabilna tačnost → bez upozorenja', () => {
+    const r = detectDrift(mkRaw([[w0, 8, 4], [w1, 8, 4], [w2, 9, 4], [w3, 8, 4]]), 'desk', today);
+    expect(r.drifted).toBe(false);
+    expect(r.text).toBeNull();
+  });
+
+  it('premalo podataka → ne tvrdi ništa', () => {
+    const r = detectDrift(mkRaw([[w0, 1, 5], [w2, 9, 1]]), 'desk', today);
+    expect(r.enough).toBe(false);
+    expect(r.text).toBeNull();
+  });
+
+  it('poboljšanje nije pomak', () => {
+    const r = detectDrift(mkRaw([[w0, 12, 2], [w1, 10, 2], [w2, 4, 8], [w3, 3, 7]]), 'desk', today);
+    expect(r.drifted).toBe(false);
   });
 });

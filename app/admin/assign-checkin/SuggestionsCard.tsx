@@ -38,6 +38,8 @@ interface Props {
   rulesNote?: string | null;
   /** Razlog prijedloga iz pravila običnim jezikom (ili null). */
   ruleText?: (s: Suggestion) => string | null;
+  /** Upozorenje o pomaku rasporeda (pad tačnosti zadnje 2 sedmice) ili null. */
+  driftNote?: string | null;
   /** Pročitana ograničenja iz napomena (čipovi) + dijelovi teksta koji nisu pretvoreni. */
   chips: Array<{ key: string; text: string }>;
   unparsed: string[];
@@ -54,7 +56,7 @@ const SOURCE_LABEL: Record<AccuracySource, string> = {
 
 function SuggestionsCardImpl({
   type, suggestions, nowMin, isDark, applyingKey, onApply, onApplyDue,
-  accuracy, learnedNote, modelInfo, rulesNote, ruleText, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
+  accuracy, learnedNote, modelInfo, rulesNote, ruleText, driftNote, chips, unparsed, noteError, onSubmitNote, onClearConstraints, onExportPlan,
 }: Props) {
   const [note, setNote] = useState('');
   // Zatvoren po zadanom — korisnik ga otvara klikom (po zahtjevu).
@@ -124,6 +126,11 @@ function SuggestionsCardImpl({
             primjenjuje samo — potvrđuješ ti. Postojeće dodjele se ne mijenjaju.
           </p>
 
+          {driftNote && (
+            <div className={`mb-3 rounded-xl px-3 py-2 text-xs border ${isDark ? 'bg-amber-500/10 border-amber-400/30 text-amber-200' : 'bg-amber-50 border-amber-300 text-amber-800'}`}>
+              ⚠ {driftNote}
+            </div>
+          )}
           {modelInfo && (
             <div className={`mb-3 rounded-xl px-3 py-2 text-xs border ${
               modelInfo.phase === 'learning'
