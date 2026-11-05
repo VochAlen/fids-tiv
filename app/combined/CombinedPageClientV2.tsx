@@ -1649,7 +1649,7 @@ const handleClose = useCallback(() => {
       <div className="w-full mx-auto flex-1 min-h-0">
         <div className={`${colors.cardBg} rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-white/20 shadow-2xl overflow-hidden h-full flex flex-col`}>
           <TableHeaders headers={tableHeaders} headerBg={colors.header} />
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
             {loading && arrivalsRows.length === 0 && departuresRows.length === 0 ? (
               <div className="h-full" />
             ) : (
@@ -1657,14 +1657,14 @@ const handleClose = useCallback(() => {
                 {/* OBA prikaza su stalno u DOM-u (8+8 redova); prebacivanje arrivals↔departures je samo CSS.
                     Ranije su se svi redovi na svakih 20 s gasili i ponovo pravili (+ slike, vremenska ćelija sa
                     spinnerom), pa je na sporijim PC-ovima kratko ostajala "prazna plava" tabela. */}
-                <div className="grid min-h-full">
+                <div className="grid grid-cols-[minmax(0,1fr)] min-h-full">
                 {([true, false] as const).map(isArr => {
                   const rows = isArr ? arrivalsRows : departuresRows
                   const visible = isArr === showArrivals
                   return (
                     <div
                       key={isArr ? 'arr' : 'dep'}
-                      className={`col-start-1 row-start-1 flex flex-col min-h-0 transition-opacity duration-300 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none [&_*]:[animation-play-state:paused]'}`}
+                      className={`col-start-1 row-start-1 flex flex-col min-h-0 min-w-0 transition-opacity duration-300 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none [&_*]:[animation-play-state:paused]'}`}
                       aria-hidden={!visible}
                     >
                       {rows.length === 0 ? (
