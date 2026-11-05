@@ -283,6 +283,9 @@ function SuggestionsCardImpl({
                           {isSoon && <span className="text-xs font-semibold text-violet-400">uskoro</span>}
                         </div>
                         <div className={`text-[11px] mt-1 ${isDark ? 'text-white/30' : 'text-gray-400'}`}>{s.reason}</div>
+                        {s.delayNote && (
+                          <div className={`text-[11px] mt-1 ${isDark ? 'text-amber-300/90' : 'text-amber-700'}`}>⏱ {s.delayNote}</div>
+                        )}
                         {(() => {
                           const why = ruleText?.(s);
                           return why ? <div className={`text-[11px] mt-1 ${isDark ? 'text-violet-200/70' : 'text-violet-700/80'}`}>Pravilo: {why}</div> : null;

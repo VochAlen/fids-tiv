@@ -280,3 +280,42 @@ describe('razlog prijedloga običnim jezikom', () => {
     expect(describeRule(st, { flight: 'JU681', dow: 1, chosenSoFar: [] }, ['4'])).toBeNull();
   });
 });
+
+describe('hladan start: odredište', () => {
+  it('zapis: odredište se čuva i čita, stari zapisi važe bez njega', () => {
+    const base = { kind: 'desk' as const, flight: 'JU681', dow: 2, minute: 600, chosen: '7', busy: [], season: 'W' as const };
+    expect(encodeExample({ ...base, dest: 'TLV' })).toBe('d|JU681|2|600|7||W||TLV');
+    expect(encodeExample({ ...base, corr: true, dest: 'TLV' })).toBe('d|JU681|2|600|7||W|c|TLV');
+    const parsed = parseExamples({
+      [exampleField(1000, 'aa')]: encodeExample({ ...base, dest: 'TLV' }),
+      [exampleField(2000, 'bb')]: encodeExample({ ...base, corr: true, dest: 'TLV' }),
+      [exampleField(3000, 'cc')]: encodeExample(base),
+    });
+    expect(parsed[0]).toMatchObject({ dest: 'TLV' });
+    expect(parsed[0].corr).toBeUndefined();
+    expect(parsed[1]).toMatchObject({ dest: 'TLV', corr: true });
+    expect(parsed[2].dest).toBeUndefined();
+  });
+
+  it('nova kompanija na poznatoj ruti nasljeđuje obrazac drugih kompanija', () => {
+    const codes = Array.from({ length: 40 }, (_, i) => `${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + ((i * 7) % 26))}`);
+    const ex: Example[] = [];
+    let r = 12345;
+    for (let i = 0; i < 120; i++) {
+      r = (r * 1103515245 + 12345) & 0x7fffffff; // kompanija je nezavisna od odredišta
+      const toTlv = i % 2 === 0;
+      ex.push({
+        ts: 1_000_000 + i * 60_000, kind: 'desk', flight: `${codes[(r >> 8) % codes.length]}${100 + i}`, dow: i % 7, minute: 600,
+        chosen: toTlv ? '22' : '4', busy: [], season: 'S', dest: toTlv ? 'TLV' : 'BEG',
+      });
+    }
+    const t = trainModel(ex, 'desk', '2026-11-20', 1_000_000 - 8 * 86_400_000);
+    expect(t.predictor).not.toBeNull();
+    // Kompanija "ZZ" nikad nije viđena — samo odredište nosi znanje.
+    const tlv = t.predictor!({ flight: 'ZZ900', dow: 3, chosenSoFar: [], minute: 600, season: 'S', dest: 'TLV' });
+    const beg = t.predictor!({ flight: 'ZZ901', dow: 3, chosenSoFar: [], minute: 600, season: 'S', dest: 'BEG' });
+    const top = (p: Record<string, number>) => Object.entries(p).sort((a, b) => b[1] - a[1])[0][0];
+    expect(top(tlv)).toBe('22');
+    expect(top(beg)).toBe('4');
+  });
+});

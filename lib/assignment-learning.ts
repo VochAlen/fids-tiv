@@ -388,6 +388,8 @@ export interface LearningContext {
   /** Šta je prijedlog nudio za ovaj let (za mjerenje tačnosti). */
   suggested?: string[];
   suggestionSource?: AccuracySource;
+  /** IATA/ICAO šifra odredišta leta — za "pozajmljivanje" znanja od drugih kompanija na istoj ruti (hladan start). */
+  destination?: string;
 }
 
 const ACC_SOURCES: AccuracySource[] = ['learned', 'profile', 'default', 'note', 'model', 'none'];
@@ -401,7 +403,8 @@ export function sanitizeLearningContext(raw: unknown): LearningContext {
   if (!raw || typeof raw !== 'object') return {};
   const r = raw as Record<string, unknown>;
   const src = ACC_SOURCES.includes(r.suggestionSource as AccuracySource) ? (r.suggestionSource as AccuracySource) : undefined;
-  return { preferredPool: idList(r.preferredPool), suggested: idList(r.suggested), suggestionSource: src };
+  const dest = typeof r.destination === 'string' && /^[A-Za-z]{3,4}$/.test(r.destination.trim()) ? r.destination.trim().toUpperCase() : undefined;
+  return { preferredPool: idList(r.preferredPool), suggested: idList(r.suggested), suggestionSource: src, ...(dest ? { destination: dest } : {}) };
 }
 
 /** Ishod jedne RUČNE dodjele u odnosu na prijedlog. */

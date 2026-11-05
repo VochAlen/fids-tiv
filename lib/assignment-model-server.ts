@@ -31,7 +31,8 @@ import {
 
 export const MODEL_STATE_KEY = 'ably-fids:learn:model:v1';
 const MODEL_STATE_TTL_SECONDS = 30 * 24 * 60 * 60;
-const STATE_VERSION = 1;
+// 2: nove osobine modela (odredište) → stare sačuvane težine nisu kompatibilne, pa se jednom iznova treniraju.
+const STATE_VERSION = 2;
 
 /** Ogranicenja cuvaju povratni Knowledge payload malim i predvidljivim. */
 const MAX_STORED_RULES_PER_KIND = 60;

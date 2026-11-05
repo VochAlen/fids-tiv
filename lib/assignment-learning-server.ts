@@ -91,6 +91,7 @@ export async function recordAssignmentLearning(args: {
           busy: (args.busyIds ?? []).filter(id => /^\d{1,2}$/.test(id)).slice(0, 30),
           season,
           ...(correction ? { corr: true } : {}),
+          ...(ctx.destination ? { dest: ctx.destination } : {}),
         }),
       );
       // Trajni početak učenja (NX = upiše se samo prvi put) — u istom pipeline-u, bez dodatnog zahtjeva.

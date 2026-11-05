@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   seasonFromDate, airlineKeyFromFlightNumber, incrementsForAssignment, parseLearned,
   learnedPool, learnedDeskCount, halve, fieldsOfScope, scopeResource, scopeCount, fieldOf,
-  MIN_FLIGHT_SAMPLES, MIN_AIRLINE_SAMPLES, detectDrift, recentWeekKeys,
+  MIN_FLIGHT_SAMPLES, MIN_AIRLINE_SAMPLES, detectDrift, recentWeekKeys, sanitizeLearningContext,
 } from './assignment-learning';
 
 describe('sezona', () => {
@@ -138,5 +138,14 @@ describe('detekcija pomaka', () => {
   it('poboljšanje nije pomak', () => {
     const r = detectDrift(mkRaw([[w0, 12, 2], [w1, 10, 2], [w2, 4, 8], [w3, 3, 7]]), 'desk', today);
     expect(r.drifted).toBe(false);
+  });
+});
+
+describe('kontekst učenja: odredište', () => {
+  it('prihvata IATA/ICAO šifru, odbacuje smeće', () => {
+    expect(sanitizeLearningContext({ destination: 'tlv' }).destination).toBe('TLV');
+    expect(sanitizeLearningContext({ destination: 'LLBG' }).destination).toBe('LLBG');
+    expect(sanitizeLearningContext({ destination: 'T<script>' }).destination).toBeUndefined();
+    expect(sanitizeLearningContext({ destination: 5 }).destination).toBeUndefined();
   });
 });

@@ -53,6 +53,8 @@ export interface Example {
   season: Season;
   /** true = osoblje je ISPRAVILO prijedlog (ručno izabralo resurs koji nije bio među predloženima). Jači signal za učenje. */
   corr?: boolean;
+  /** Odredište leta (IATA/ICAO). Služi hladnom startu: nova kompanija na poznatoj ruti nasljeđuje obrazac drugih. */
+  dest?: string;
 }
 
 /** Koliko puta ispravka osoblja "vrijedi" više od običnog primjera (gradijent i brojači). */
@@ -65,7 +67,7 @@ export function exampleField(ts: number, nonce: string): string {
 
 export function encodeExample(e: Omit<Example, 'ts'>): string {
   // 8. polje 'c' samo za ispravke (2 bajta više; stariji zapisi bez njega važu kao obični primjeri).
-  return [e.kind === 'desk' ? 'd' : 'g', e.flight, e.dow, e.minute, e.chosen, e.busy.join(','), e.season, ...(e.corr ? ['c'] : [])].join('|');
+  return [e.kind === 'desk' ? 'd' : 'g', e.flight, e.dow, e.minute, e.chosen, e.busy.join(','), e.season, ...(e.corr || e.dest ? [e.corr ? 'c' : '', ...(e.dest ? [e.dest] : [])] : [])].join('|');
 }
 
 export function parseExamples(raw: Record<string, string> | null | undefined): Example[] {
@@ -82,6 +84,7 @@ export function parseExamples(raw: Record<string, string> | null | undefined): E
       busy: p[5] ? p[5].split(',').filter(Boolean) : [],
       season: p[6] === 'S' ? 'S' : 'W',
       ...(p[7] === 'c' ? { corr: true } : {}),
+      ...(p[8] ? { dest: p[8] } : {}),
     });
   }
   return out.sort((a, b) => a.ts - b.ts);
@@ -112,6 +115,8 @@ export interface PredictCtx {
   busyCount?: number;
   /** Sezona konteksta; omogućava provjeru sezonskih pravila. */
   season?: Season;
+  /** Odredište leta (IATA/ICAO) — osobina za hladan start. */
+  dest?: string;
 }
 
 /** Zadnjih nekoliko izbora kompanije — za osobinu "nedavno korišćen". */
@@ -119,7 +124,7 @@ const RECENT_PER_AIRLINE = 4;
 const TIME_BUCKET_MIN = 180; // 8 doba dana po 3 sata
 
 /** Broj osnovnih osobina; poslije njih slijedi po jedna "pristrasnost" (one-hot) za svaki resurs. */
-export const BASE_FEATURES = 11;
+export const BASE_FEATURES = 13;
 
 /** Historija — brojači iz PRETHODNIH primjera (nikad iz budućih, da nema curenja). */
 class History {
@@ -129,9 +134,11 @@ class History {
   glob = new Map<string, Bucket>();
   airTerm = new Map<string, Bucket>();
   timeB = new Map<string, Bucket>();
+  dest = new Map<string, Bucket>();
+  destTerm = new Map<string, Bucket>();
   lastAir = new Map<string, string[]>();
 
-  add(e: { flight: string; dow: number; chosen: string; minute?: number; corr?: boolean }) {
+  add(e: { flight: string; dow: number; chosen: string; minute?: number; corr?: boolean; dest?: string }) {
     const a = airlineKeyFromFlightNumber(e.flight) ?? '?';
     const w = weightOf(e);
     bump(this.air, a, e.chosen, w);
@@ -139,6 +146,7 @@ class History {
     bump(this.airDow, `${a}:${e.dow}`, e.chosen, w);
     bump(this.glob, '*', e.chosen, w);
     bump(this.airTerm, a, term(e.chosen), w);
+    if (e.dest) { bump(this.dest, e.dest, e.chosen, w); bump(this.destTerm, e.dest, term(e.chosen), w); }
     if (e.minute !== undefined) bump(this.timeB, String(Math.floor(e.minute / TIME_BUCKET_MIN)), e.chosen, w);
     const last = this.lastAir.get(a) ?? [];
     this.lastAir.set(a, [e.chosen, ...last.filter(x => x !== e.chosen)].slice(0, RECENT_PER_AIRLINE));
@@ -150,6 +158,8 @@ class History {
     const tb = this.airTerm.get(a);
     const last = this.lastAir.get(a) ?? [];
     const tBucket = ctx.minute !== undefined ? this.timeB.get(String(Math.floor(ctx.minute / TIME_BUCKET_MIN))) : undefined;
+    const db = ctx.dest ? this.dest.get(ctx.dest) : undefined;
+    const dtb = ctx.dest ? this.destTerm.get(ctx.dest) : undefined;
     const load = Math.min((ctx.busyCount ?? 0) / Math.max(ids.length, 1), 1);
     return ids.map((id, idx) => {
       let adj = 0, same = 0;
@@ -175,6 +185,8 @@ class History {
         tBucket ? (tBucket.c[id] ?? 0) / (tBucket.n + 1) : 0,
         rec >= 0 ? 1 - rec / RECENT_PER_AIRLINE : 0,
         load * low,
+        db ? (db.c[id] ?? 0) / (db.n + 1) : 0,
+        dtb ? (dtb.c[term(id)] ?? 0) / (dtb.n + 1) : 0,
         ...ids.map((_, k) => (k === idx ? 1 : 0)), // pristrasnost po resursu
       ];
     });
@@ -193,7 +205,7 @@ function buildRows(examples: Example[], kind: LearnKind): { rows: Row[]; history
     const chosen = ids.indexOf(e.chosen);
     if (chosen < 0) continue;
     const sofar = (recent.get(e.flight) ?? []).filter(r => e.ts - r.ts < SAME_FLIGHT_WINDOW_MS).map(r => r.chosen);
-    const feats = hist.features({ flight: e.flight, dow: e.dow, chosenSoFar: sofar, minute: e.minute, busyCount: e.busy.length }, ids);
+    const feats = hist.features({ flight: e.flight, dow: e.dow, chosenSoFar: sofar, minute: e.minute, busyCount: e.busy.length, dest: e.dest }, ids);
     const mask = ids.map(id => e.busy.includes(id) || sofar.includes(id));
     mask[chosen] = false;
     rows.push({ feats, chosen, mask, w: weightOf(e) });
@@ -206,7 +218,7 @@ function buildRows(examples: Example[], kind: LearnKind): { rows: Row[]; history
 }
 
 /** Početne težine — razumna pretpostavka (slično brojačima), pa ih gradijent doteruje. */
-export const INITIAL_WEIGHTS = [1.0, 3.0, 1.0, 0.5, 1.0, 0.5, 1.0, 0.0, 0.5, 0.5, 0.0];
+export const INITIAL_WEIGHTS = [1.0, 3.0, 1.0, 0.5, 1.0, 0.5, 1.0, 0.0, 0.5, 0.5, 0.0, 0.5, 0.5];
 /** "Obični brojači" kao fiksne težine — mjerilo s kojim se model poredi. */
 export const BASELINE_WEIGHTS = [2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0];
 
@@ -283,6 +295,8 @@ const FEATURE_TEXT = [
   'često se bira u ovo doba dana',
   'kompanija ga je nedavno koristila',
   'pri većoj gužvi biraju niže brojeve',
+  'druge kompanije na istu rutu koriste ovaj resurs',
+  'terminal koji se koristi za ovo odredište',
   'osoblje ga rado bira',
 ];
 export interface TrainedModel { info: ModelInfo; predictor: Predictor | null }

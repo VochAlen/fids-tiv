@@ -149,6 +149,8 @@ export interface SuggestionInput {
   constraints?: SuggestionConstraints;
   /** Naučeni model (lib/assignment-model.ts) — SAMO kad je aktivan (dokazano bolji od brojača). */
   model?: { desk?: Predictor | null; gate?: Predictor | null };
+  /** Procijenjeno kašnjenje polaska iz kašnjenja dolaska istog aviona (lib/delay-propagation.ts), po broju leta. */
+  predictedDelays?: Record<string, { delayMin: number; note: string }>;
 }
 
 export interface Suggestion {
@@ -181,6 +183,8 @@ export interface Suggestion {
   waitFor: WaitDependency[];
   /** Kratko objašnjenje (zašto baš ti resursi). */
   reason: string;
+  /** Napomena o očekivanom kašnjenju (iz kašnjenja dolaznog leta); plan je već računat sa njim. */
+  delayNote?: string;
   /** Upozorenja za osoblje (npr. nema dovoljno slobodnih šaltera). */
   warnings: string[];
   /** Koliko minuta prijedlog čeka oslobađanje resursa (0 = odmah). Čekanje do WAIT_FREE_MIN se u poređenju planova ne računa. */
@@ -710,6 +714,8 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     profile: AirlineProfile;
     stdAbs: number;
     effAbs: number; // kasnije od STD ako je procijenjeno vrijeme kasnije
+    /** Napomena kad je kašnjenje PROCIJENJENO (ne zvanični ETD). */
+    delayNote?: string;
     deskIv: Interval;
     gateIv: Interval;
     deskCount: number;
@@ -736,7 +742,11 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
     if (stdDay === null) continue;
     const etdDay = parseClockMinutes(f.EstimatedDepartureTime);
     // Procjena prije planiranog se ignoriše; kašnjenje produžava zauzeće (vidi resolveFlightTimes).
-    const { stdAbs, effAbs } = resolveFlightTimes(stdDay, etdDay, nowMin);
+    // Zvanični ETD ima prednost; procjena iz dolaznog leta važi samo kad je veća od zvaničnog kašnjenja.
+    const pd = input.predictedDelays?.[f.FlightNumber];
+    const officialDelay = etdDay === null ? 0 : ((etdDay - stdDay) % 1440 + 1440) % 1440;
+    const usePredicted = !!pd && pd.delayMin > (officialDelay >= 720 ? 0 : officialDelay);
+    const { stdAbs, effAbs } = resolveFlightTimes(stdDay, usePredicted ? (stdDay + pd!.delayMin) % 1440 : etdDay, nowMin);
 
     const profile = getAirlineProfile(f, summer);
     // settings.ini [checkin]: ključ je IATA kod. Prvo kod iz podatka o letu, pa prefiks broja leta
@@ -768,7 +778,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       : 'po kompaniji';
 
     preps.push({
-      f, profile, stdAbs, effAbs,
+      f, profile, stdAbs, effAbs, delayNote: usePredicted ? pd!.note : undefined,
       deskIv: { start: stdAbs - openLead, end: effAbs - CHECKIN_CLOSE_BEFORE_MIN },
       gateIv: { start: effAbs - GATE_OPEN_BEFORE_MIN, end: effAbs },
       deskCount,
@@ -864,7 +874,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       // Model (samo ako je aktivan): vjerovatnoće po šalteru za ovaj let, uz već otvorene šaltere tog leta.
       const deskCtx: PredictCtx | null = input.model?.desk && input.dow !== undefined
         ? {
-            flight: p.f.FlightNumber, dow: input.dow, season,
+            flight: p.f.FlightNumber, dow: input.dow, season, dest: (p.f.DestinationAirportCode || '').toUpperCase() || undefined,
             chosenSoFar: Object.entries(currentDesks).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
             minute: ((p.deskIv.start % 1440) + 1440) % 1440,
             busyCount: DESKS.filter(id => (bd.get(id) ?? []).some(b => b.start <= p.deskIv.start && p.deskIv.start < b.end)).length,
@@ -955,6 +965,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
         reducible: p.reducible,
         state: waitGroups.size ? 'WAITING_FOR_RESOURCE' : 'READY',
         waitFor: [...waitGroups.values()].flatMap(g => g.by.map(holder => ({ flight: holder, resources: [...g.ids], releaseAt: g.until }))),
+        delayNote: p.delayNote,
         reason: (pinned.length ? 'Po napomeni osoblja; ' : deskModel ? modelReason(input.model!.desk!, deskCtx!, picked) : '') + (p.deskPool.length
           ? `${p.deskSource}: uobičajeno ${p.deskPool.join(', ')}; ${plural(want)}`
           : `Opšti raspored: ${plural(want)}`) + (fromFallback ? '; zamjena po naučenom' : ''),
@@ -987,7 +998,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
       const gatePin = pinFor('gate', p.f.FlightNumber);
       const gateCtx: PredictCtx | null = input.model?.gate && input.dow !== undefined
         ? {
-            flight: p.f.FlightNumber, dow: input.dow, season,
+            flight: p.f.FlightNumber, dow: input.dow, season, dest: (p.f.DestinationAirportCode || '').toUpperCase() || undefined,
             chosenSoFar: Object.entries(currentGates).filter(([, fn]) => fn === p.f.FlightNumber).map(([id]) => id),
             minute: ((p.gateIv.start % 1440) + 1440) % 1440,
             busyCount: GATES.filter(id => (bg.get(id) ?? []).some(b => b.start <= p.gateIv.start && p.gateIv.start < b.end)).length,
@@ -1037,6 +1048,7 @@ export function computeAssignmentSuggestionsRaw(input: SuggestionInput): Suggest
         waitFor: [],
         openAt: p.gateIv.start,
         closeAt: p.gateIv.end,
+        delayNote: p.delayNote,
         reason: (pinnedGate ? 'Po napomeni osoblja; ' : gateModel ? modelReason(input.model!.gate!, gateCtx!, picked) : '') + (p.gatePool.length
           ? `${p.gateSource}: uobičajeno gate ${p.gatePool.slice(0, 6).join(', ')}`
           : 'Opšti raspored') + (fromFallback ? '; zamjena po naučenom' : ''),

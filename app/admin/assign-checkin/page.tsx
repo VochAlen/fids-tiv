@@ -24,6 +24,7 @@ import {
   EMPTY_CONSTRAINTS, mergeConstraints, describeConstraints, isEmptyConstraints,
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
+import { predictDepartureDelays } from '@/lib/delay-propagation';
 import { parseExamples, trainModel, predictorFromState, predictorWithRules, describeRule, type ModelState, type KnowledgeState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { gateLearnedRaw } from '@/lib/learning-gate';
@@ -1159,9 +1160,10 @@ const assignFlightToResource = useCallback(async (
 ): Promise<boolean> => {
   const endpoint = `${API_PREFIX}/${resourceType === 'desk' ? 'desk-status-override' : 'gate-status-override'}`;
   const snap = suggestionSnapshotRef.current.get(`${resourceType}:${flight.FlightNumber}`);
-  const learnCtx = snap
-    ? { preferredPool: snap.pool, suggested: snap.resources, suggestionSource: snap.source }
-    : {};
+  const learnCtx = {
+    ...(snap ? { preferredPool: snap.pool, suggested: snap.resources, suggestionSource: snap.source } : {}),
+    ...(flight.DestinationAirportCode ? { destination: flight.DestinationAirportCode } : {}),
+  };
   const payload  = resourceType === 'desk'
     ? { deskNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber, ...(source ? { source } : {}), ...learnCtx }
     : { gateNumber: resourceId, action: 'open', flightNumber: flight.FlightNumber, ...(source ? { source } : {}), ...learnCtx };
@@ -1389,6 +1391,12 @@ const assignFlightToResource = useCallback(async (
 
   const dow = useMemo(() => (todayISO ? dowFromDate(todayISO) : undefined), [todayISO]);
 
+  // Procjena kašnjenja polaska iz kašnjenja dolaznog leta istog aviona (samo računanje u pregledniku, bez mreže).
+  const predictedDelays = useMemo(
+    () => (flightDataRaw ? predictDepartureDelays(flightDataRaw.arrivals ?? [], flightDataRaw.departures ?? []) : undefined),
+    [flightDataRaw],
+  );
+
   const prevPlanRef = useRef<PreviousPlan | null>(null);
   const suggestions = useMemo(() => {
     if (suggestNowMin === null) return { desks: [] as Suggestion[], gates: [] as Suggestion[] };
@@ -1404,6 +1412,7 @@ const assignFlightToResource = useCallback(async (
       learned,
       dow,
       constraints,
+      predictedDelays,
       model: { desk: models?.desk.predictor ?? null, gate: models?.gate.predictor ?? null },
     });
     // Stabilnost: zadrži prethodni prijedlog ako i dalje važi, a novi je samo marginalno bolji.
@@ -1412,7 +1421,7 @@ const assignFlightToResource = useCallback(async (
     // pretvaranje u state bi izazvalo petlju preračunavanja.
     // eslint-disable-next-line react-hooks/refs
     return stabilizePlan(prevPlanRef.current, fresh, signature);
-  }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints, models]);
+  }, [flights, checkinAssignments, gateAssignments, suggestNowMin, openLeadByIata, isSummer, learned, dow, constraints, models, predictedDelays]);
 
   // Zapamti zadnji plan (za stabilnost) — samo u effect-u.
   useEffect(() => {
