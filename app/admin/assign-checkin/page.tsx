@@ -25,6 +25,8 @@ import {
   type SuggestionConstraints,
 } from '@/lib/suggestion-constraints';
 import { predictDepartureDelays } from '@/lib/delay-propagation';
+import { dropRecentlyRemoved } from '@/lib/assignment-merge';
+import { nowMs } from '@/lib/server-clock';
 import { parseExamples, trainModel, predictorFromState, predictorWithRules, describeRule, type ModelState, type KnowledgeState } from '@/lib/assignment-model';
 import { parseSuggestionNote } from '@/lib/suggestion-note-parser';
 import { gateLearnedRaw } from '@/lib/learning-gate';
@@ -982,7 +984,9 @@ const router = useRouter();
 
  // ── NOVO: realtime hookovi ──────────────────────────────
   const { data: flightDataRaw, connectionState: flightsConnState, refetch: refetchFlights } = useRealtimeFlightData('board');
-  const { deskEntries, gateEntries, connectionState: assignConnState } = useRealtimeAssignments('board');
+  const { deskEntries, gateEntries, connectionState: assignConnState, verifyKey } = useRealtimeAssignments('board');
+  // Resursi koje je korisnik upravo uklonio (ključ "desk:7" → vrijeme): lokalna lista se ne smije vratiti iz zastarjelog stanja.
+  const removedAtRef = useRef<Map<string, number>>(new Map());
 
   // ── Izvedeni letovi — JEDINO mjesto gdje se 'flights' definiše ──
 const flights = useMemo(
@@ -1069,12 +1073,17 @@ const flights = useMemo(
   }, []);
 
   // ── Izvedene liste dodjela — rebuilduju se kad god stigne nova Ably poruka ──
+  const removedFor = (type: 'desk' | 'gate') => {
+    const m = new Map<string, number>();
+    for (const [k, at] of removedAtRef.current) if (k.startsWith(`${type}:`)) m.set(k.slice(type.length + 1), at);
+    return m;
+  };
   useEffect(() => {
-    setCheckinAssignments(buildAssignmentList(deskEntries, flights));
+    setCheckinAssignments(buildAssignmentList(dropRecentlyRemoved(deskEntries, removedFor('desk'), nowMs()), flights));
   }, [deskEntries, flights]);
 
   useEffect(() => {
-    setGateAssignments(buildAssignmentList(gateEntries, flights));
+    setGateAssignments(buildAssignmentList(dropRecentlyRemoved(gateEntries, removedFor('gate'), nowMs()), flights));
   }, [gateEntries, flights]);
 
 
@@ -1636,6 +1645,9 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string, withUndo = tr
       ),
     ]);
     if (!deskRes.ok) throw new Error(`HTTP ${deskRes.status}`);
+    // Samoliječenje: zapamti uklanjanje i provjeri istinu u bazi (ako Ably poruka nije stigla, zastarjeli unos bi vratio karticu).
+    removedAtRef.current.set(`desk:${deskNumber}`, nowMs());
+    setTimeout(() => verifyKey('desk', deskNumber), 1_200);
     if (withUndo && removed) offerUndo('desk', deskNumber, removed.flightNumber);
    // isDirty = true;
     // Nema potrebe za dodatnim fetchCheckinAssignments — već smo lokalno uklonili
@@ -1655,7 +1667,7 @@ const handleRemoveCheckin = useCallback(async (deskNumber: string, withUndo = tr
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo, verifyKey]);
 
 const handleRemoveGate = useCallback(async (gateNumber: string, withUndo = true) => {
   if (removingResources.has(`gate:${gateNumber}`)) return;
@@ -1677,6 +1689,8 @@ const handleRemoveGate = useCallback(async (gateNumber: string, withUndo = true)
       ),
     ]);
     if (!gateRes.ok) throw new Error(`HTTP ${gateRes.status}`);
+    removedAtRef.current.set(`gate:${gateNumber}`, nowMs());
+    setTimeout(() => verifyKey('gate', gateNumber), 1_200);
     if (withUndo && removed) offerUndo('gate', gateNumber, removed.flightNumber);
  //   isDirty = true;
   } catch (err) {
@@ -1694,7 +1708,7 @@ const handleRemoveGate = useCallback(async (gateNumber: string, withUndo = true)
       return next;
     });
   }
-}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo]);
+}, [removingResources, pushRemovalErrorNotice, enqueueResourceOp, offerUndo, verifyKey]);
 
   const handleUndo = useCallback(async () => {
     const u = undoItem;

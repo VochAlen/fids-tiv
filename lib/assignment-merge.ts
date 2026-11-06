@@ -291,3 +291,31 @@ export function applyTruth(
     [key]: { ...CLEARED_BY_SNAPSHOT, setAt: Date.now(), seq: Math.max(existing.seq ?? 0, serverEntry?.seq ?? 0) + 1, clearedReadAt: readAt },
   };
 }
+
+/** Koliko dugo (ms) se tek uklonjen resurs ne smije "oživjeti" iz zastarjelog lokalnog stanja. */
+export const RECENT_REMOVAL_WINDOW_MS = 20_000;
+
+/**
+ * Izbacuje unose koje je korisnik upravo uklonio (a lokalno stanje ih još drži jer poruka o uklanjanju nije stigla ili je
+ * zakasnila). Unos se vraća tek ako je NOVIJI od uklanjanja (neko je u međuvremenu ponovo dodijelio resurs).
+ * `removedAt` ključ je resurs (npr. "7"), vrijednost vrijeme uklanjanja (ms, serverski ispravljen sat).
+ */
+export function dropRecentlyRemoved(
+  entries: Record<string, AssignmentEntry>,
+  removedAt: ReadonlyMap<string, number>,
+  now: number,
+  windowMs: number = RECENT_REMOVAL_WINDOW_MS,
+): Record<string, AssignmentEntry> {
+  if (removedAt.size === 0) return entries;
+  let out: Record<string, AssignmentEntry> | null = null;
+  for (const [key, at] of removedAt) {
+    if (now - at > windowMs) continue;
+    const e = entries[key];
+    if (!e || e.status !== 'open') continue;
+    const setAt = Number(e.setAt) || 0;
+    if (setAt > at) continue; // nova dodjela poslije uklanjanja
+    out ??= { ...entries };
+    delete out[key];
+  }
+  return out ?? entries;
+}

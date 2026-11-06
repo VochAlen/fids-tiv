@@ -230,7 +230,7 @@ describe('mergeNewer — oživljavanje lažno očišćenog unosa (sigurnosna mre
   });
 });
 
-import { applyTruth } from './assignment-merge';
+import { applyTruth, dropRecentlyRemoved } from './assignment-merge';
 
 describe('applyTruth — nekeširan odgovor servera', () => {
   const open = (seq: number, fn = 'JU1'): AssignmentEntry => ({ status: 'open', flightNumber: fn, classType: null, setAt: 5_000, seq });
@@ -258,5 +258,21 @@ describe('applyTruth — nekeširan odgovor servera', () => {
   it('server vraća closed sa letom → closed', () => {
     const closed: AssignmentEntry = { status: 'closed', flightNumber: 'JU1', classType: null, setAt: 5_000, seq: 31 };
     expect(applyTruth({ '5': open(30) }, '5', closed, 9_000)['5'].status).toBe('closed');
+  });
+});
+
+describe('dropRecentlyRemoved', () => {
+  const open = (setAt: number) => ({ status: 'open' as const, flightNumber: 'ZZ123', classType: null, setAt, seq: 5 });
+  it('izbacuje tek uklonjen resurs iz zastarjelog stanja', () => {
+    const out = dropRecentlyRemoved({ '7': open(1000), '8': open(1000) }, new Map([['7', 5000]]), 6000);
+    expect(Object.keys(out)).toEqual(['8']);
+  });
+  it('nova dodjela poslije uklanjanja ostaje; istekao prozor se ne primjenjuje', () => {
+    expect(Object.keys(dropRecentlyRemoved({ '7': open(7000) }, new Map([['7', 5000]]), 8000))).toEqual(['7']);
+    expect(Object.keys(dropRecentlyRemoved({ '7': open(1000) }, new Map([['7', 5000]]), 5000 + 21_000))).toEqual(['7']);
+  });
+  it('bez uklanjanja vraća isti objekat', () => {
+    const e = { '7': open(1000) };
+    expect(dropRecentlyRemoved(e, new Map(), 6000)).toBe(e);
   });
 });

@@ -667,7 +667,7 @@ const TableHeaders = memo(function TableHeaders({
   headers, headerBg,
 }: { headers: { label: string; width: string; icon: React.ComponentType<{ className?: string }> }[]; headerBg: string }) {
   return (
-    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl transition-colors duration-500`}>
+    <div className={`hidden sm:flex gap-2 p-2 ${headerBg} border-b-4 border-black/30 font-black text-black text-[1.3rem] uppercase tracking-wider flex-shrink-0 shadow-xl`}>
       {headers.map(h => {
         const Icon = h.icon
         return (
@@ -1545,10 +1545,10 @@ const handleClose = useCallback(() => {
       onDragOver={e => e.preventDefault()}
       onDrop={e => e.preventDefault()}
     >
-      {/* Pozadine su dva stalna sloja koja se preklapaju (crossfade opacity-jem, radi kompozitor) — ranije se
+      {/* Pozadine su dva stalna sloja koja se preklapaju (prebacuju se TRENUTNO preko visibility — bez tranzicija, jer su na slabijim GPU-ovima ostajale zaglavljene u međustanju: žuto zaglavlje u dolascima, prazna ljubičasta pozadina) — ranije se
           mijenjala klasa gradijenta na korijenu, što je na slabim PC-ovima izazivalo potpuno ponovno crtanje. */}
-      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none transition-opacity duration-500 ${COLOR_CONFIG.arrivals.background} ${showArrivals ? 'opacity-100' : 'opacity-0'}`} />
-      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none transition-opacity duration-500 ${COLOR_CONFIG.departures.background} ${showArrivals ? 'opacity-0' : 'opacity-100'}`} />
+      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none ${COLOR_CONFIG.arrivals.background} ${showArrivals ? 'visible' : 'invisible'}`} />
+      <div aria-hidden className={`absolute inset-0 -z-10 pointer-events-none ${COLOR_CONFIG.departures.background} ${showArrivals ? 'invisible' : 'visible'}`} />
       {errorMessage && (
         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 bg-red-500/90 text-white px-4 py-3 rounded-lg text-sm z-50 shadow-lg animate-pulse">
           ⚠️ {errorMessage}
@@ -1664,7 +1664,7 @@ const handleClose = useCallback(() => {
                   return (
                     <div
                       key={isArr ? 'arr' : 'dep'}
-                      className={`col-start-1 row-start-1 flex flex-col min-h-0 min-w-0 transition-opacity duration-300 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none [&_*]:[animation-play-state:paused]'}`}
+                      className={`col-start-1 row-start-1 flex flex-col min-h-0 min-w-0 ${visible ? 'visible' : 'invisible pointer-events-none [&_*]:[animation-play-state:paused]'}`}
                       aria-hidden={!visible}
                     >
                       {rows.length === 0 ? (
